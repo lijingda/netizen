@@ -670,7 +670,9 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         ]}]
         result = await self.call("read_thread", {"threadId": "target"})
         self.assertEqual(result["turns"][0]["items"][0]["id"], "answer")
-        self.assertTrue(result["turns"][0]["items"][0]["text"])
+        self.assertGreater(len(result["turns"][0]["items"][0]["text"]), 6000)
+        self.assertEqual(result["turns"][0]["items"][0]["phase"], "commentary")
+        self.assertEqual(len(result["turns"][0]["items"]), 1)
         self.assertLessEqual(result_bytes(result), 8000)
 
     async def test_oversized_result_preserves_accepted_mutation_receipt(self):
@@ -682,51 +684,159 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["netizen"]["accepted"])
         self.assertTrue(result["truncated"])
 
-    async def test_budget_truncates_identity_arrays_without_shortening_ids(self):
+    async def test_oversized_read_without_answer_retains_active_turn_and_metadata(self):
         sender = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         receiver = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-        self.catalog.items["target"]["turns"] = [{"id": "turn", "status": "completed", "items": [
+        self.catalog.items["target"]["status"] = {"type": "active", "activeFlags": ["waitingOnApproval"]}
+        self.catalog.items["target"]["turns"] = [{"id": "turn", "status": "inProgress", "items": [
             {"id": "call", "type": "collabAgentToolCall", "senderThreadId": sender,
-             "receiverThreadIds": [receiver] * 1500, "tool": "spawn", "status": "completed"},
+             "receiverThreadIds": [receiver] * 1500, "tool": "spawn", "status": "inProgress"},
         ]}]
         result = await self.call("read_thread", {"threadId": "target"})
-        item = result["turns"][0]["items"][0]
-        self.assertEqual(item["senderThreadId"], sender)
-        self.assertEqual(set(item["receiverThreadIds"]), {receiver})
-        self.assertTrue(item["receiverThreadIdsTruncated"])
+        self.assertEqual(result["thread"], {
+            "id": "target", "status": {"type": "active", "activeFlags": ["waitingOnApproval"]},
+        })
+        self.assertEqual(result["turns"], [{
+            "id": "turn", "status": "inProgress", "error": None, "items": [], "truncated": True,
+        }])
+        self.assertEqual(result["netizen"]["bindingId"], self.target.id)
+        self.assertEqual(result["netizen"]["chatId"], "chat-b")
+        self.assertTrue(result["netizen"]["isCurrent"])
         self.assertLessEqual(result_bytes(result), 8000)
 
 
+class ReadResultProjectionTests(unittest.TestCase):
+    @staticmethod
+    def read_result(turns):
+        return {
+            "schemaVersion": 1,
+            "thread": {"id": "thread", "kind": "codex", "title": "Title", "preview": "Question",
+                       "status": {"type": "active", "activeFlags": []}, "cwd": "/project",
+                       "createdAt": 1, "updatedAt": 2},
+            "page": {"order": "newest_first", "limit": len(turns), "hasMore": True,
+                     "nextCursor": "opaque:游标"},
+            "turns": turns,
+            "netizen": {"bindingId": "binding", "chatId": "chat", "topicId": "topic",
+                        "topicUrl": "https://example.invalid/topic", "projectAlias": "project",
+                        "isCurrent": True, "materialized": True},
+        }
+
+    def test_read_at_or_below_budget_keeps_the_entire_projection(self):
+        for size in (7999, 8000):
+            with self.subTest(size=size):
+                value = self.read_result([{
+                    **turn("new", ""), "startedAt": 1, "completedAt": 2, "durationMs": 1,
+                    "error": None, "itemsTruncated": True,
+                }])
+                value["turns"][0]["items"].insert(0, {
+                    "id": "question", "type": "userMessage", "content": [{"type": "text", "text": "Question"}],
+                })
+                value["turns"][0]["items"][-1]["text"] = "x" * (size - result_bytes(value))
+                original = copy.deepcopy(value)
+                self.assertEqual(result_bytes(value), size)
+                self.assertEqual(fit_result(value), original)
+                self.assertEqual(value, original)
+
+    def test_oversized_read_keeps_each_turns_last_message_and_original_page(self):
+        newest = turn("new", "earlier answer", status="inProgress")
+        newest.update(startedAt=10, completedAt=None, durationMs=None, error=None)
+        newest["items"].extend([
+            {"id": "progress", "type": "agentMessage", "text": "Still checking", "phase": "commentary"},
+            {"id": "tool", "type": "mcpToolCall", "arguments": {"data": ""}},
+        ])
+        older = turn("old", "old answer", status="failed")
+        older["error"] = {"message": "Failed", "additionalDetails": "Internal detail"}
+        value = self.read_result([newest, older])
+        newest["items"][-1]["arguments"]["data"] = "x" * (8001 - result_bytes(value))
+        original = copy.deepcopy(value)
+        self.assertEqual(result_bytes(value), 8001)
+        result = fit_result(value)
+        self.assertEqual(result, {
+            "schemaVersion": 1, "thread": {"id": "thread", "status": value["thread"]["status"]},
+            "page": value["page"], "netizen": value["netizen"], "truncated": True,
+            "turns": [
+                {"id": "new", "status": "inProgress", "error": None,
+                 "items": [newest["items"][1]], "truncated": True},
+                {"id": "old", "status": "failed", "error": {"message": "Failed"},
+                 "items": older["items"], "truncated": True},
+            ],
+        })
+        self.assertEqual(value, original)
+        self.assertLessEqual(result_bytes(result), 8000)
+
+    def test_oversized_read_fills_byte_budget_without_damaging_unicode_or_identifiers(self):
+        for text in ("a" * 9000, "中" * 4000, '"\\\n😀' * 3000):
+            with self.subTest(prefix=repr(text[:4])):
+                value = self.read_result([turn("new", text)])
+                original = copy.deepcopy(value)
+                result = fit_result(value)
+                answer = result["turns"][0]["items"][0]
+                retained = answer["text"]
+                self.assertTrue(text.startswith(retained))
+                self.assertGreater(len(retained), 2000)
+                self.assertEqual(answer["id"], "answer-new")
+                self.assertEqual(answer["phase"], "final_answer")
+                self.assertTrue(answer["truncated"])
+                self.assertEqual(result["page"], value["page"])
+                self.assertEqual(result["netizen"], value["netizen"])
+                self.assertLessEqual(result_bytes(result), 8000)
+                # The next full Unicode character would exceed the byte budget.
+                longer = copy.deepcopy(result)
+                longer["turns"][0]["items"][0]["text"] += text[len(retained)]
+                self.assertGreater(result_bytes(longer), 8000)
+                self.assertEqual(value, original)
+
+    def test_oversized_read_metadata_keeps_the_existing_bounded_error(self):
+        value = self.read_result([turn("new", "answer")])
+        value["netizen"]["topicUrl"] += "x" * 9000
+        original = copy.deepcopy(value)
+        result = fit_result(value)
+        self.assertEqual(result["error"]["code"], "response_too_large")
+        self.assertEqual(result["thread"]["id"], "thread")
+        self.assertEqual(result["page"], value["page"])
+        self.assertEqual(result["netizen"]["bindingId"], "binding")
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(result_bytes(result), 8000)
+        self.assertEqual(value, original)
+
+
 class SessionProjectionTests(unittest.TestCase):
-    def test_item_budget_boundary_preserves_unicode_answer_and_only_removes_needed_items(self):
-        for flag in (None, False, True):
-            for excess in (0, 1):
-                with self.subTest(items_truncated=flag, excess=excess):
-                    answer = {"id": "answer", "type": "agentMessage", "text": '中文😀\\\n"'}
-                    trailing = {"id": "trailing", "type": "commandExecution", "command": "pwd"}
-                    expected = {
-                        "thread": {"id": "thread"}, "page": {"nextCursor": "opaque:游标", "hasMore": True},
-                        "turns": [{"id": "turn", "items": [answer, trailing], "itemsTruncated": True}],
-                        "truncated": True,
-                    }
-                    answer["text"] += "x" * (8000 + excess - result_bytes(expected))
-                    original = copy.deepcopy(expected)
-                    original.pop("truncated")
-                    original_turn = original["turns"][0]
-                    if flag is None:
-                        original_turn.pop("itemsTruncated")
-                    else:
-                        original_turn["itemsTruncated"] = flag
-                    original_turn["items"].insert(0, {
-                        "id": "old-tool", "type": "commandExecution", "output": "中" * 100,
-                    })
-                    unchanged = copy.deepcopy(original)
-                    result = fit_result(original)
-                    if excess:
-                        expected["turns"][0]["items"].pop()
-                    self.assertEqual(result, expected)
-                    self.assertLessEqual(result_bytes(result), 8000)
-                    self.assertEqual(original, unchanged)
+    def test_list_retains_existing_entries_cursor_and_text_limits(self):
+        value = {"schemaVersion": 4, "threads": [
+            {"id": "first", "title": "x" * 9000, "summary": "Summary", "status": "idle"},
+            {"id": "second", "title": "Title", "summary": "Summary", "status": "active"},
+        ], "nextCursor": "opaque-next"}
+        expected = copy.deepcopy(value)
+        expected["truncated"] = True
+        expected["threads"][0]["title"] = "x" * 1999 + "…"
+        original = copy.deepcopy(value)
+        result = fit_result(value)
+        self.assertEqual(result, expected)
+        self.assertEqual(value, original)
+        self.assertLessEqual(result_bytes(result), 8000)
+
+    def test_wait_retains_existing_snapshots_and_text_limits(self):
+        value = {"timedOut": False, "wake": {"threadId": "target", "reason": "turnCompleted"},
+                 "polls": [{
+                     "schemaVersion": 1, "thread": {"id": "target", "status": {"type": "idle"}},
+                     "cursor": "wait-cursor", "revision": 10, "changed": True,
+                     "latestTurn": {"id": "turn", "status": "completed", "error": None, "durationMs": 25},
+                     "latestAssistantMessageId": "answer",
+                     "latestAssistantMessage": {"id": "answer", "turnId": "turn",
+                                                "phase": "final_answer", "text": "中" * 9000},
+                     "latestToolMarkerId": "tool",
+                     "latestToolMarker": {"id": "tool", "turnId": "turn", "type": "commandExecution",
+                                          "name": "commandExecution", "status": "completed"},
+                     "netizen": {"bindingId": "binding", "isCurrent": True},
+                 }]}
+        expected = copy.deepcopy(value)
+        expected["truncated"] = True
+        expected["polls"][0]["latestAssistantMessage"]["text"] = "中" * 1999 + "…"
+        original = copy.deepcopy(value)
+        result = fit_result(value)
+        self.assertEqual(result, expected)
+        self.assertEqual(value, original)
+        self.assertLessEqual(result_bytes(result), 8000)
 
     def test_large_history_page_has_bounded_serialization_work(self):
         items = [{
@@ -736,7 +846,8 @@ class SessionProjectionTests(unittest.TestCase):
             "id": "answer", "type": "agentMessage", "text": "答" * 20000, "phase": "final_answer",
         }]
         value = {
-            "thread": {"id": "thread"}, "page": {"nextCursor": "opaque-next", "hasMore": True},
+            "thread": {"id": "thread", "status": {"type": "idle"}},
+            "page": {"nextCursor": "opaque-next", "hasMore": True},
             "turns": [turn_summary({"id": f"turn-{index}", "status": "completed", "items": items}, True, 20000)
                       for index in range(10)],
         }
