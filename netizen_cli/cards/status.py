@@ -89,7 +89,9 @@ def _decode_snapshot(target_kind: str, value: Any) -> dict[str, Any]:
         lines = {"git_branch_lines": 1}
     else:
         strings = {"short_id", "project_alias", "native_thread_id", "state", "context_window_line", "subscription_line"}
-        lines = {"metadata_lines": 2, "git_branch_lines": 1, "context_mode_lines": 4, "model_lines": 4, "progress_lines": 32}
+        # Ordinary status includes cwd, an optional Git header, and a warning
+        # if the directory disappears after the Git probe.
+        lines = {"metadata_lines": 2, "git_branch_lines": 3, "context_mode_lines": 4, "model_lines": 4, "progress_lines": 32}
     if not isinstance(value, Mapping) or set(value) != strings | lines.keys():
         raise CardActionError("状态卡展示快照无效，请重新发送 /status。")
     if any(

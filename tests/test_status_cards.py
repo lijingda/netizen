@@ -20,7 +20,7 @@ def _session_card(**overrides):
         "native_thread_id": "01a0f202-31e1-7f62-81c9-3db3ee56ff04",
         "state": "idle",
         "metadata_lines": ("名称：打招呼", "会话预览：哈喽"),
-        "git_branch_lines": ("Git Branch：main...origin/main [ahead 2]",),
+        "git_branch_lines": ("工作目录：/srv/project", "Git Branch：main...origin/main [ahead 2]"),
         "context_window_line": "上下文窗口：24,500 / 100,000 tokens（24.5% 已用）",
         "context_mode_lines": (),
         "model_lines": ("Model：gpt-6.1-sol", "Effort：low", "Speed：Standard", "配置来源：Netizen 会话配置"),
@@ -114,16 +114,21 @@ class StatusCardTest(unittest.TestCase):
                 self.assertEqual(close.command.arguments, ("close",))
 
     def test_renewal_changes_only_transport_nonces(self):
-        card = _session_card()
-        value = _elements(card, "button")[0]["behaviors"][0]["value"]
-        decoded = decode_status_command(
-            scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
-            message_id="om_status", sender_id="ou_clicker", value=value,
-        )
-        renewed = decoded.card().card
-        for old, new in zip(_elements(card, "button"), _elements(renewed, "button")):
-            self.assertNotEqual(old["behaviors"][0]["value"].pop("nonce"), new["behaviors"][0]["value"].pop("nonce"))
-        self.assertEqual(card, renewed)
+        cwd = "工作目录：/srv/project"
+        branch = "Git Branch：main...origin/main [ahead 2]"
+        unavailable = "工作目录当前不可用；保留原目录，执行结果以 Codex 返回为准。"
+        for lines in ((), (branch,), (cwd, branch), (cwd, unavailable), (cwd, branch, unavailable)):
+            with self.subTest(git_branch_lines=lines):
+                card = json.loads(json.dumps(_session_card(git_branch_lines=lines)))
+                value = _elements(card, "button")[0]["behaviors"][0]["value"]
+                decoded = decode_status_command(
+                    scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                    message_id="om_status", sender_id="ou_clicker", value=value,
+                )
+                renewed = decoded.card().card
+                for old, new in zip(_elements(card, "button"), _elements(renewed, "button")):
+                    self.assertNotEqual(old["behaviors"][0]["value"].pop("nonce"), new["behaviors"][0]["value"].pop("nonce"))
+                self.assertEqual(card, renewed)
 
     def test_lazy_status_preserves_absent_native_identity_across_renewal(self):
         card = _session_card(native_thread_id=None)
@@ -149,6 +154,8 @@ class StatusCardTest(unittest.TestCase):
             {"snapshot": {**value["snapshot"], "metadata_lines": ["missing preview"]}},
             {"snapshot": {**value["snapshot"], "state": {"tag": "button"}}},
             {"snapshot": {**value["snapshot"], "native_thread_id": 123}},
+            {"snapshot": {**value["snapshot"], "git_branch_lines": ["x"] * 4}},
+            {"snapshot": {**value["snapshot"], "git_branch_lines": ["工作目录", {"tag": "button"}]}},
             {"snapshot": {**value["snapshot"], "progress_lines": ["x"] * 33}},
         ]
         for change in invalid:
