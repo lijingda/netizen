@@ -5000,7 +5000,8 @@ class ChannelApplication:
             card = await self._new_binding_picker(
                 scope=intent.scope, initial_project_alias=intent.project_alias,
                 expected_project_revision=intent.expected_revision,
-                allow_context_mode=chat_kind == "group", require_workspace=True,
+                allow_context_mode=chat_kind == "group",
+                settings_draft=intent.new_settings_draft,
             )
             if not await self._safe_update_card(intent.source_id, card):
                 await self._safe_reply_to_card(
@@ -5999,6 +6000,7 @@ class ChannelApplication:
                 sender_id=sender_id,
                 tag=tag,
                 form_value=form_value,
+                value=getattr(action, "value", None),
             )
             if (
                 intent.message_context_mode is MentionContextMode.CATCH_UP
@@ -6058,7 +6060,7 @@ class ChannelApplication:
     async def _new_binding_picker(
         self, *, scope: FeishuScope, initial_project_alias: str | None,
         allow_context_mode: bool, expected_project_revision: int | None = None,
-        require_workspace: bool = False,
+        settings_draft: Mapping[str, str] | None = None,
     ) -> OutboundCard:
         projects = self._projects.list(enabled_only=True)
         catalog = None
@@ -6079,17 +6081,14 @@ class ChannelApplication:
                     expected_project_revision=expected_project_revision,
                 )
             except WorktreeError as error:
-                if require_workspace:
-                    raise CardActionError(str(error)) from None
                 workspace_error = str(error) + " 可直接在项目目录创建会话，或重新加载目录选项。"
-        elif require_workspace:
-            raise CardActionError("受管 worktree 服务不可用；本次未创建会话。")
         return new_binding_card(
             scope=scope, projects=projects, initial_project_alias=initial_project_alias,
             catalog=catalog, catalog_error=catalog_error,
             allow_context_mode=allow_context_mode,
             workspace_options=workspace_options, workspace_error=workspace_error,
             allow_workspace_selection=worktrees is not None,
+            settings_draft=settings_draft,
         )
 
     def _settings_card(

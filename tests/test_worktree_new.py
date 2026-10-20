@@ -8,14 +8,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from lark_channel import OutboundCard
+
 from netizen_cli.cards import ACTION_VERSION, CardActionError, decode_button_action, decode_card_form, new_binding_card
 from netizen_cli.cards.controls import _new_workspace_elements
+from netizen_cli.cards.callbacks import _new_model_reference
 from netizen_cli.domain import CardControlName, FeishuScope, ScopeKind
 from netizen_cli.management import CreatedBinding
 from netizen_cli.projects import Project
 from netizen_cli.worktrees.errors import WorktreeError
 from netizen_cli.worktrees.settings import WorktreeSettingsService
-from tests.support.channel_cards import _elements, direct_card_event, form_controls
+from tests.support.channel_cards import _card_button_value, _elements, direct_card_event, form_controls
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 
@@ -52,13 +55,27 @@ def values(choice: str = "project", **extra) -> dict:
     }
 
 
-def decode(payload):
+def decode(payload, value=None):
     return decode_card_form(scope=SCOPE, message_id="om_card", sender_id="ou_user",
-                            tag="button", form_value=payload)
+                            tag="button", form_value=payload, value=value)
+
+
+def load_value():
+    card = new_binding_card(
+        scope=SCOPE, projects=(Project("test", Path("/project"), True, 1),),
+        allow_workspace_selection=True,
+    )
+    return _card_button_value(card, "加载项目目录选项")
+
+
+def load_event(channel, payload=None):
+    event = direct_card_event(channel, values() if payload is None else payload)
+    event.action.value = load_value()
+    return event
 
 
 def fields(card):
-    form = next(item for item in _elements(card.card, "form")
+    form = next(item for item in _elements(card.card if isinstance(card, OutboundCard) else card, "form")
                 if item["name"] == "new_binding_v6")
     return {item["name"]: item for item in form_controls(form)}
 
@@ -77,6 +94,8 @@ class WorktreeNewCardTest(unittest.TestCase):
                 selected = fields(self.render(data))
                 self.assertNotIn("new_workspace", selected)
                 self.assertNotIn("new_worktree_ref", selected)
+                self.assertIn("new_workspace_load_v1", selected)
+                self.assertNotIn("new_workspace_project", selected)
 
     def test_git_default_is_project_and_new_checkout_defaults_to_detached_head(self):
         selected = fields(self.render(options()))
@@ -108,7 +127,10 @@ class WorktreeNewCardTest(unittest.TestCase):
         for original in form_controls(_new_workspace_elements(data)):
             self.assertEqual({key: value for key, value in selected[original["name"]].items() if key != "width"}, original)
         self.assertEqual([item["name"] for item in _elements(card.card, "form")],
-                         ["new_workspace_project_v1", "new_binding_v6"])
+                         ["new_binding_v6"])
+        self.assertEqual(sum(item.get("name") == "new_project" for item in form_controls(card.card)), 1)
+        self.assertIn("new_workspace_load_v1", {item["name"] for item in form_controls(sections[-1])})
+        self.assertIn("已加载项目", str(sections[-1]))
         self.assertEqual(_elements(form, "form"), [form])
 
     def test_project_default_does_not_apply_new_branch_settings(self):
@@ -155,21 +177,49 @@ class WorktreeNewCardTest(unittest.TestCase):
         self.assertEqual(decode(old).name, CardControlName.CREATE_BINDING)
         self.assertIsNone(decode(values(new_project="project:v1:other:3")).worktree_id)
 
-    def test_load_form_is_read_only_exact_and_nonce_changes_on_redraw(self):
-        refs = []
-        for _ in range(2):
-            form = next(item for item in _elements(self.render().card, "form")
-                        if item["name"] == "new_workspace_project_v1")
-            field = next(item for item in form["elements"] if item.get("name") == "new_workspace_project")
-            refs.append(field["initial_option"])
-        self.assertNotEqual(refs[0], refs[1])
-        for reference in refs:
-            intent = decode({"new_workspace_project": reference})
+    def test_load_uses_same_project_field_and_nonce_changes_on_redraw(self):
+        actions = [load_value(), load_value()]
+        self.assertNotEqual(actions[0]["nonce"], actions[1]["nonce"])
+        for action in actions:
+            intent = decode(values(), action)
             self.assertEqual(intent.name, CardControlName.PREPARE_NEW_WORKSPACE)
             self.assertEqual((intent.project_alias, intent.expected_revision), ("test", 1))
             self.assertIsNone(intent.worktree_create)
+            self.assertEqual(intent.new_settings_draft["new_model"], "new-model:v1:inherit")
+        self.assertEqual(decode(values()).name, CardControlName.CREATE_BINDING)
         with self.assertRaises(CardActionError):
-            decode({"new_workspace_project": refs[0], "new_project": "project:v1:test:1"})
+            decode({"new_workspace_project": "project:v1:test:1"}, actions[0])
+
+    def test_load_ignores_old_workspace_and_incomplete_new_branch_for_new_project(self):
+        payload = values("new", new_project="project:v1:other:3", new_worktree_mode="new")
+        intent = decode(payload, load_value())
+        self.assertEqual((intent.project_alias, intent.expected_revision), ("other", 3))
+        self.assertIsNone(intent.worktree_create)
+        self.assertIsNone(intent.worktree_id)
+        self.assertFalse(any(name.startswith("new_work") for name in intent.new_settings_draft))
+        with self.assertRaises(CardActionError):
+            decode(payload)
+
+    def test_invalid_load_action_never_falls_through_to_creation(self):
+        for action in ("load", {"v": 99, "intent": CardControlName.PREPARE_NEW_WORKSPACE.value},
+                       {**load_value(), "intent": "unknown"}, {**load_value(), "cwd": "/tmp"},
+                       {"intent": CardControlName.PREPARE_NEW_WORKSPACE.value}):
+            with self.subTest(action=action), self.assertRaises(CardActionError):
+                decode(values(), action)
+        with self.assertRaises(CardActionError):
+            decode(values(config_model="x"), load_value())
+        with self.assertRaises(CardActionError):
+            decode({"config_model": "x"}, load_value())
+
+    def test_load_uses_project_from_non_git_form_without_workspace_fields(self):
+        selected = fields(self.render(options(git=False)))
+        payload = {name: field["initial_option"] for name, field in selected.items()
+                   if field["tag"] == "select_static"}
+        payload["new_project"] = "project:v1:gitproject:2"
+        intent = decode(payload, load_value())
+        self.assertEqual(intent.name, CardControlName.PREPARE_NEW_WORKSPACE)
+        self.assertEqual((intent.project_alias, intent.expected_revision), ("gitproject", 2))
+        self.assertIsNone(intent.worktree_create)
 
     def test_load_requires_source_card_form_scope_instead_of_button_envelope(self):
         with self.assertRaisesRegex(CardActionError, "只能通过对应表单"):
@@ -227,7 +277,7 @@ class WorktreeNewChannelTest(unittest.IsolatedAsyncioTestCase):
         async with channel_fixture() as f:
             service = SimpleNamespace(options=AsyncMock(return_value=options()))
             manager = SimpleNamespace(worktrees=service)
-            event = direct_card_event(f.channel, {"new_workspace_project": "project:v1:test:1"})
+            event = load_event(f.channel)
             event.chat_id = "oc_group"
             f.channel.chat_types["oc_group"] = "group"
             f.channel.fetched_messages["om_card"] = {
@@ -284,9 +334,62 @@ class WorktreeNewChannelTest(unittest.IsolatedAsyncioTestCase):
         async with channel_fixture() as f:
             service = SimpleNamespace(options=AsyncMock(side_effect=WorktreeError("stale", "Project 已变化")))
             with patch.object(f.app, "_management", SimpleNamespace(worktrees=service)):
-                await f.app.handle_card_action(direct_card_event(f.channel, {"new_workspace_project": "project:v1:test:1"}))
+                await f.app.handle_card_action(load_event(f.channel, values(new_progress_card="task-feedback:v2:off")))
             self.assertIsNone(f.store.active_binding(SCOPE.key))
             self.assertIn("Project 已变化", str(f.channel.updates[-1][1]))
+            refreshed = fields(f.channel.updates[-1][1])
+            self.assertEqual(refreshed["new_progress_card"]["initial_option"], "task-feedback:v2:off")
+            self.assertNotIn("new_workspace", refreshed)
+
+    async def test_reload_retains_settings_draft_and_resets_workspace_without_creation(self):
+        async with channel_fixture() as f:
+            service = SimpleNamespace(options=AsyncMock(return_value=options()))
+            for model, catalog_error in ((None, None), ("future-model", None),
+                                         ("future-model", RuntimeError("offline")),
+                                         (None, RuntimeError("offline")), ("removed-model", None)):
+                with self.subTest(model=model, offline=catalog_error is not None):
+                    f.runtime.model_catalog_error = catalog_error
+                    draft = values(
+                        "new", new_worktree_mode="new", new_model=_new_model_reference(model),
+                        new_effort="low", new_speed="priority-v2",
+                        new_context_mode="context-mode:v1:catch-up",
+                        new_task_reactions="task-feedback:v2:on",
+                        new_progress_card="task-feedback:v2:off",
+                        new_completion_mention="task-feedback:v2:off",
+                    )
+                    event = load_event(f.channel, draft)
+                    f.channel.chat_types["oc_direct"] = "group"
+                    with patch.object(f.app, "_management", SimpleNamespace(worktrees=service)):
+                        await f.app.handle_card_action(event)
+                    card = f.channel.updates[-1][1]
+                    refreshed = fields(card)
+                    for name in ("new_model", "new_effort", "new_speed", "new_context_mode",
+                                 "new_task_reactions", "new_progress_card", "new_completion_mention"):
+                        self.assertEqual(refreshed[name]["initial_option"], draft[name])
+                    self.assertEqual(refreshed["new_workspace"]["initial_option"], "workspace:v1:test:1:project")
+                    self.assertNotEqual(_card_button_value(OutboundCard(card=card), "加载项目目录选项")["nonce"], event.action.value["nonce"])
+                    self.assertIsNone(f.store.active_binding(SCOPE.key))
+                    self.assertEqual(f.runtime.submit_calls, [])
+
+    async def test_load_then_create_uses_the_retained_configuration(self):
+        async with channel_fixture() as f:
+            service = SimpleNamespace(options=AsyncMock(return_value=options()))
+            draft = values(new_model=_new_model_reference("future-model"), new_effort="low",
+                           new_speed="priority-v2", new_task_reactions="task-feedback:v2:on",
+                           new_progress_card="task-feedback:v2:off", new_completion_mention="task-feedback:v2:off")
+            with patch.object(f.app, "_management", SimpleNamespace(worktrees=service)):
+                await f.app.handle_card_action(load_event(f.channel, draft))
+            refreshed = fields(f.channel.updates[-1][1])
+            submit = {name: item["initial_option"] for name, item in refreshed.items()
+                      if item["tag"] == "select_static"}
+            await f.app.handle_card_action(direct_card_event(f.channel, submit))
+            binding = f.store.active_binding(SCOPE.key)
+            self.assertIsNotNone(binding)
+            self.assertEqual(binding.turn_settings.effort_id, "low")
+            self.assertTrue(binding.task_feedback.reaction_pulse_enabled)
+            self.assertFalse(binding.task_feedback.progress_card_enabled)
+            self.assertFalse(binding.task_feedback.completion_mention_enabled)
+            self.assertIsNone(binding.native_thread_id)
 
 
 if __name__ == "__main__":
