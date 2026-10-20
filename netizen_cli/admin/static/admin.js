@@ -3,6 +3,7 @@
 const state = {
   tab: "projects",
   sessionTab: "ordinary",
+  systemTab: "admins",
   projects: null,
   sessions: null,
   sides: null,
@@ -56,6 +57,12 @@ function expireAdminSession() {
   state.authExpired = true;
   stopUpdatePolling();
   window.NetizenSelect?.close();
+  // Release these modal drawers so the page's login link remains reachable.
+  // Inputs stay in memory, but expired actions can never be submitted again.
+  for (const dialog of document.querySelectorAll("#project-drawer, #worktree-create-drawer, #worktree-settings-drawer")) {
+    if (dialog.open) dialog.close();
+  }
+  document.body.classList.toggle("workspace-drawer-open", false);
   for (const element of document.querySelectorAll?.(".panel, dialog, .tabs") || []) element.inert = true;
   for (const button of document.querySelectorAll?.("button") || []) button.disabled = true;
   const notice = document.querySelector("#auth-expired");
@@ -403,6 +410,163 @@ function actionsCell(row) {
   return wrap;
 }
 
+let projectEditor = null;
+const projectInput = (name) => document.querySelector(`#project-${name}`);
+
+function projectEditorValues() {
+  if (!projectEditor) return null;
+  return { mode: projectEditor.mode, alias: projectInput("alias").value,
+    paths: { ...projectEditor.paths, [projectEditor.mode]: projectInput("path").value } };
+}
+
+function projectEditorHasChanges() {
+  return Boolean(projectEditor && JSON.stringify(projectEditorValues()) !== projectEditor.discardBase);
+}
+
+function renderProjectEditorControls() {
+  const busy = state.authExpired || projectEditor?.saving;
+  projectInput("editor").setAttribute("aria-busy", String(Boolean(projectEditor?.saving || projectEditor?.checking)));
+  projectInput("new").disabled = Boolean(busy
+    || !(state.projects?.actions?.register || state.projects?.actions?.createDirectory));
+  for (const button of document.querySelectorAll("[data-project-add]")) button.disabled = projectInput("new").disabled;
+  for (const field of projectInput("editor").querySelectorAll("input, button")) field.disabled = Boolean(busy);
+  if (!projectEditor) {
+    projectInput("submit").disabled = true;
+    return;
+  }
+  const registering = projectEditor.mode === "register";
+  projectInput("path").required = registering;
+  projectInput("path-label").textContent = registering ? "绝对路径" : "绝对路径（可留空）";
+  projectInput("path-help").textContent = registering
+    ? "登记一个已存在的目录作为 Project。"
+    : "留空时在实例项目根目录下按 Alias 创建空目录；自定义路径也须位于该根目录内。";
+  for (const button of document.querySelectorAll("[data-project-mode]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.projectMode === projectEditor.mode));
+    button.disabled = Boolean(busy || projectEditor.attempted);
+  }
+  projectInput("submit").textContent = projectEditor.saving
+    ? registering ? "正在登记…" : "正在创建…" : registering ? "登记 Project" : "创建并登记";
+  projectInput("submit").disabled = Boolean(busy || projectEditor.attempted || !projectEditor.actions[projectEditor.mode]);
+  projectInput("check").disabled = Boolean(busy || projectEditor.checking);
+}
+
+function openProjectEditor() {
+  if (state.authExpired || projectEditor?.saving
+      || !(state.projects?.actions?.register || state.projects?.actions?.createDirectory)) return;
+  if (projectEditor && !closeProjectEditor()) return;
+  projectEditor = { mode: "register", paths: { register: "", createDirectory: "" },
+    actions: { ...state.projects.actions }, returnFocus: document.activeElement, saving: false, attempted: false };
+  projectInput("alias").value = "";
+  projectInput("path").value = "";
+  projectInput("note").textContent = "";
+  projectInput("note").classList.toggle("error", false);
+  projectInput("check").hidden = true;
+  projectInput("check").textContent = "刷新列表核对";
+  projectEditor.discardBase = JSON.stringify(projectEditorValues());
+  projectInput("editor").hidden = false;
+  renderProjectEditorControls();
+  projectInput("drawer").showModal();
+  document.body.classList.toggle("workspace-drawer-open", true);
+  projectInput("drawer").querySelector(".drawer-body").scrollTop = 0;
+  projectInput("alias").focus();
+}
+
+function closeProjectEditor({ saved = false, confirmed = false } = {}) {
+  if (!projectEditor) return true;
+  if (projectEditor.saving) return false;
+  if (!saved && !confirmed && !confirmDiscardChanges(projectEditorHasChanges())) return false;
+  const returnFocus = projectEditor.returnFocus;
+  projectEditor = null;
+  projectInput("editor").hidden = true;
+  projectInput("drawer").close();
+  document.body.classList.toggle("workspace-drawer-open", false);
+  renderProjectEditorControls();
+  (returnFocus?.isConnected === false ? projectInput("new") : returnFocus)?.focus();
+  return true;
+}
+
+function selectProjectMode(mode) {
+  if (!projectEditor || projectEditor.saving || projectEditor.attempted || state.authExpired) return;
+  projectEditor.paths[projectEditor.mode] = projectInput("path").value;
+  projectEditor.mode = mode;
+  projectInput("path").value = projectEditor.paths[mode];
+  renderProjectEditorControls();
+}
+
+async function checkProjectResult() {
+  const editor = projectEditor;
+  if (!editor || editor.saving || editor.checking || state.authExpired) return;
+  editor.checking = true;
+  renderProjectEditorControls();
+  try {
+    const refreshed = await loadProjects();
+    if (projectEditor !== editor || state.authExpired) return;
+    if (refreshed !== false && editor.attempted && !editor.uncertain) {
+      editor.actions = { ...state.projects.actions };
+      editor.attempted = false;
+      projectInput("check").hidden = true;
+      projectInput("note").classList.toggle("error", false);
+      projectInput("note").textContent = "已刷新，当前输入已保留。可修改后重新提交。";
+    } else {
+      projectInput("note").textContent = refreshed === false
+        ? "列表未更新，请再次刷新核对。"
+        : "已刷新 Projects 列表；请关闭表单核对 Alias 与路径。未重复提交操作。";
+    }
+  } catch (error) {
+    if (projectEditor === editor && !state.authExpired) projectInput("note").textContent = `列表读取失败：${error.message}`;
+  } finally {
+    editor.checking = false;
+    if (projectEditor === editor) renderProjectEditorControls();
+  }
+}
+
+async function saveProject(event) {
+  event.preventDefault();
+  const editor = projectEditor;
+  if (!editor || editor.saving || editor.attempted || state.authExpired || !editor.actions[editor.mode]) return;
+  if (!projectInput("editor").reportValidity()) return;
+  const envelope = editor.actions[editor.mode];
+  editor.actions[editor.mode] = null;
+  if (state.projects?.actions) state.projects.actions[editor.mode] = null;
+  editor.saving = true;
+  editor.attempted = true;
+  projectInput("note").textContent = editor.mode === "register" ? "正在登记 Project…" : "正在创建 Project…";
+  renderProjectEditorControls();
+  let result;
+  try {
+    result = await api(editor.mode === "register" ? "/api/v1/projects/register" : "/api/v1/projects/create-directory", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(envelope, { alias: projectInput("alias").value,
+        path: projectInput("path").value || null })),
+    });
+  } catch (error) {
+    if (state.authExpired) return;
+    editor.uncertain = !error.status || error.status >= 500;
+    projectInput("note").textContent = !editor.uncertain
+      ? `${error.message} 输入已保留，请刷新后修改并重新提交。`
+      : "操作结果未确认，请刷新 Projects 列表核对；不要重复提交。";
+    projectInput("note").classList.toggle("error", true);
+    projectInput("check").hidden = false;
+    projectInput("check").textContent = editor.uncertain ? "刷新列表核对" : "刷新后继续填写";
+    setStatus(projectInput("note").textContent, true);
+    return;
+  } finally {
+    editor.saving = false;
+    renderProjectEditorControls();
+  }
+  const alias = projectInput("alias").value;
+  closeProjectEditor({ saved: true });
+  const message = `Project「${result?.alias || alias}」已${editor.mode === "register" ? "登记" : "创建并登记"}。`
+    + (result?.cwd ? `目录：${result.cwd}` : "");
+  try {
+    const refreshed = await loadProjects();
+    if (!state.authExpired && state.tab === "projects") setStatus(
+      refreshed === false ? `${message} 列表未更新，请手动刷新。` : message);
+  } catch {
+    if (!state.authExpired && state.tab === "projects") setStatus(`${message} 列表刷新失败，请手动刷新查看。`, true);
+  }
+}
+
 function confirmMaterializedDelete(session) {
   const name = session.nativeTitle || "未命名 Session";
   return window.confirm(
@@ -574,6 +738,19 @@ async function loadProjects(cursor = undefined) {
     }
     body.append(row);
   }
+  if (!data.items.length) {
+    const row = document.createElement("tr");
+    const empty = document.createElement("td");
+    empty.colSpan = 6;
+    const message = document.createElement("p");
+    message.textContent = "本页没有 Project。可登记已有目录，或创建空目录。";
+    const add = actionButton("添加 Project", openProjectEditor);
+    add.setAttribute("data-project-add", "");
+    empty.append(message, add);
+    row.append(empty);
+    body.append(row);
+  }
+  renderProjectEditorControls();
   renderCursorPagination("projects", state.projectPage, data.items.length);
   return true;
 }
@@ -2740,7 +2917,7 @@ function confirmDiscardChanges(changed) {
 }
 
 function hasUnsavedEditors() {
-  return sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
+  return projectEditorHasChanges() || sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
     || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty())
     || Boolean(window.NetizenWorktrees?.dirty());
 }
@@ -2748,9 +2925,10 @@ function hasUnsavedEditors() {
 // Navigation asks once before closing any editor. Busy submissions retain the
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
 function confirmDiscardEditors() {
-  if (sessionSettingsEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
+  if (projectEditor?.saving || sessionSettingsEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
       || window.NetizenSessionAccess?.busy() || window.NetizenWorktrees?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
+  closeProjectEditor({ confirmed: true });
   closeSessionSettingsEditor({ confirmed: true });
   closeDefaultEditor({ confirmed: true });
   if (scheduleEditor) closeScheduleEditor({ confirmed: true });
@@ -4089,6 +4267,20 @@ function selectSessionTab(name) {
   return refresh("sessions");
 }
 
+function selectSystemTab(name) {
+  if (state.authExpired || state.systemTab === name) return;
+  window.NetizenSelect?.close();
+  if (state.systemTab === "admins") window.NetizenIdentity?.suspendSelector();
+  else window.NetizenSessionAccess?.closePickers();
+  state.systemTab = name;
+  for (const button of document.querySelectorAll("[data-system-tab]")) {
+    const selected = button.dataset.systemTab === name;
+    button.setAttribute("aria-selected", String(selected));
+    button.setAttribute("tabindex", selected ? "0" : "-1");
+    document.querySelector(`#system-${button.dataset.systemTab}`).hidden = !selected;
+  }
+}
+
 function selectTab(name, sessionTab = state.sessionTab || "ordinary", { preserveEditors = false, replace = false } = {}) {
   if (state.authExpired) return;
   if (!preserveEditors && !confirmDiscardEditors()) return;
@@ -4141,6 +4333,18 @@ for (const tab of document.querySelectorAll("[data-session-tab]")) {
   });
 }
 
+for (const tab of document.querySelectorAll("[data-system-tab]")) {
+  tab.addEventListener("click", () => selectSystemTab(tab.dataset.systemTab));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const name = event.key === "Home" ? "admins" : event.key === "End" ? "access"
+      : tab.dataset.systemTab === "admins" ? "access" : "admins";
+    selectSystemTab(name);
+    document.querySelector(`#system-tab-${name}`).focus();
+  });
+}
+
 for (const button of document.querySelectorAll("[data-refresh]")) {
   button.addEventListener("click", () => refresh(button.dataset.refresh));
 }
@@ -4149,21 +4353,18 @@ for (const button of document.querySelectorAll("[data-session-sort]")) {
   button.addEventListener("click", () => sortSessionPage(button.dataset.sessionSort, button.dataset.sortBy));
 }
 
-document.querySelector("#register-project").addEventListener("submit", async (event) => {
+projectInput("new").addEventListener("click", openProjectEditor);
+projectInput("cancel").addEventListener("click", closeProjectEditor);
+projectInput("close").addEventListener("click", closeProjectEditor);
+projectInput("drawer").addEventListener("cancel", (event) => {
   event.preventDefault();
-  const formElement = event.currentTarget;
-  const form = new FormData(formElement);
-  await mutate("/api/v1/projects/register", state.projects.actions.register, { alias: form.get("alias"), path: form.get("path") });
-  formElement.reset();
+  closeProjectEditor();
 });
-
-document.querySelector("#create-project").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const formElement = event.currentTarget;
-  const form = new FormData(formElement);
-  await mutate("/api/v1/projects/create-directory", state.projects.actions.createDirectory, { alias: form.get("alias"), path: form.get("path") || null });
-  formElement.reset();
-});
+projectInput("editor").addEventListener("submit", saveProject);
+projectInput("check").addEventListener("click", checkProjectResult);
+for (const button of document.querySelectorAll("[data-project-mode]")) {
+  button.addEventListener("click", () => selectProjectMode(button.dataset.projectMode));
+}
 
 document.querySelector("#session-inventory-state").addEventListener("change", updateSessionDateFilters);
 document.querySelector("#session-filter").addEventListener("submit", (event) => {

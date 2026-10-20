@@ -33,8 +33,9 @@ class NavigationUiTest(unittest.TestCase):
         script += (static / "chat-picker.js").read_text(encoding="utf-8")
         script += (static / "identity.js").read_text(encoding="utf-8")
         script += (static / "worktrees.js").read_text(encoding="utf-8")
+        script += (static / "session-access.js").read_text(encoding="utf-8")
         script += (static / "admin.js").read_text(encoding="utf-8") + after
-        for initial_url in (
+        cases = [(url, None) for url in (
             "/projects",
             "/worktrees?cursor=stale&actionToken=secret",
             "/sessions/ordinary",
@@ -50,9 +51,13 @@ class NavigationUiTest(unittest.TestCase):
             "&createdFrom=2026-10-01T00%3A00%3A00Z&createdBefore=2026-10-08T00%3A00%3A00Z&createdRange=last-7-days",
             "/schedules?project=netizen&ended=all&enabled=false",
             "/defaults?kind=group_name",
-        ):
-            with self.subTest(initial_url=initial_url):
-                bootstrap = "const initialSearch = ''; const initialUrl = " + json.dumps(initial_url) + ";\n"
+            "/system",
+        )]
+        cases.extend(("/projects", kind) for kind in ("project", "worktree-create", "worktree-settings"))
+        for initial_url, auth_drawer in cases:
+            with self.subTest(initial_url=initial_url, auth_drawer=auth_drawer):
+                bootstrap = ("const initialSearch = ''; const initialUrl = " + json.dumps(initial_url)
+                             + "; const authDrawer = " + json.dumps(auth_drawer) + ";\n")
                 result = subprocess.run([node], input=bootstrap + script, capture_output=True,
                                         text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

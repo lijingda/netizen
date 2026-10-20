@@ -34,6 +34,7 @@ function change(id, value, event = "change") { element(id).value = value; elemen
   const editor = window.NetizenSessionAccess;
   assert.equal(await editor.load(), true);
   assert.equal(editor.dirty(), false);
+  assert.equal(element("unsaved").hidden, true);
   assert.equal(element("save").disabled, true);
   assert.equal(element("discovery-targets").hidden, true);
   change("discovery-mode", "only");
@@ -44,6 +45,7 @@ function change(id, value, event = "change") { element(id).value = value; elemen
   change("readSend-mode", "exclude");
   change("readSend-chats", "oc_private", "input");
   assert.equal(editor.dirty(), true);
+  assert.equal(element("unsaved").hidden, false);
   assert.equal(element("save").disabled, false);
   acceptDiscard = false;
   const before = calls.length;
@@ -58,6 +60,7 @@ function change(id, value, event = "change") { element(id).value = value; elemen
   assert.deepEqual(payload.readSend, { mode: "exclude", chatIds: ["oc_private"] });
   assert.equal(payload.actionToken, "first");
   assert.equal(editor.dirty(), false);
+  assert.equal(element("unsaved").hidden, true);
   assert.match(status, /已保存/);
 
   change("discovery-mode", "disabled");
@@ -69,6 +72,7 @@ function change(id, value, event = "change") { element(id).value = value; elemen
   assert.deepEqual(JSON.parse(calls.at(-1).options.body).discovery, { mode: "disabled", chatIds: [] });
   assert.equal(element("save").disabled, true, "unknown save consumes the local grant");
   assert.equal(editor.dirty(), true, "failed save preserves draft");
+  assert.equal(element("unsaved").hidden, false);
   element("form").dispatch("submit");
   await flush();
   assert.equal(calls.length, failedCount, "failed save is never automatically replayed");
@@ -94,6 +98,7 @@ function change(id, value, event = "change") { element(id).value = value; elemen
   change("readSend-mode", "disabled");
   editor.discard();
   assert.equal(editor.dirty(), false);
+  assert.equal(element("unsaved").hidden, true);
   assert.equal(element("readSend-mode").value, "exclude");
   editor.expire();
   assert.equal(element("fields").disabled, true);

@@ -29,6 +29,7 @@ const listing = () => ({ revision, currentOpenId: alice.openId, users: members, 
 let config;
 let selectedCallback;
 let unmounts = 0;
+let selectorRenders = 0;
 let candidate;
 let candidateData;
 window.webComponent = {
@@ -37,6 +38,7 @@ window.webComponent = {
     assert.equal(kind, "Selector");
     assert.deepEqual(options.searchEntityTypes, [1]);
     assert.equal(mount.id, "admin-selector");
+    selectorRenders += 1;
     selectedCallback = options.onSelect;
     // The official SDK mounts its dropdown outside the picker container.
     candidate = document.createElement("button");
@@ -45,7 +47,8 @@ window.webComponent = {
       options.onSelect(candidateData);
     });
     document.body.append(candidate);
-    return { unmount() { unmounts += 1; candidate.disabled = true; } };
+    const mountedCandidate = candidate;
+    return { unmount() { unmounts += 1; mountedCandidate.hidden = true; mountedCandidate.disabled = true; } };
   },
   onError() {}, onAuthError() {},
 };
@@ -123,7 +126,43 @@ answer = async (path, options) => {
   assert.match(selected.textContent, /<script>test<\/script>/);
   assert.equal(selected.querySelectorAll("script").length, 0);
   assert.equal(selected.querySelectorAll("img").length, 0);
+
+  // Switching away unmounts the body dropdown without clearing the selected
+  // person or requesting fresh grants; returning can still confirm that choice.
+  const selectedText = selected.textContent;
+  const suspendedSelection = selectedCallback;
+  const suspendedCandidate = candidate;
+  const beforeSuspend = unmounts;
+  const callsBeforeSuspend = calls.length;
+  window.NetizenIdentity.suspendSelector();
+  await settle();
+  assert.equal(unmounts, beforeSuspend + 1);
+  assert.equal(suspendedCandidate.hidden, true);
+  assert.equal(suspendedCandidate.disabled, true);
+  assert.equal(document.querySelector("#admin-user-panel").hidden, false);
+  assert.equal(document.querySelector("#admin-user-add").getAttribute("aria-expanded"), "true");
+  assert.equal(selected.hidden, false);
+  assert.equal(selected.textContent, selectedText);
+  assert.equal(document.querySelector("#admin-user-confirm").disabled, false);
+  assert.equal(document.querySelector("#admin-selector-retry").hidden, false);
+  suspendedSelection({ type: "user", id: "ou_late", entity: { id: "ou_late", name: "Late" } });
+  assert.equal(selected.textContent, selectedText);
+  window.NetizenIdentity.suspendSelector();
+  await settle();
+  assert.equal(calls.length, callsBeforeSuspend);
+  assert.equal(unmounts, beforeSuspend + 1);
+
+  // A separately refreshed listing cannot replace the original selection's
+  // revision or action grant when that preserved selection is confirmed.
+  const beforeListingRefresh = answer;
+  answer = async (path, options) => path === "/api/v1/admin-users"
+    ? response({ ...listing(), revision: 99, addAction: grant("replacement") })
+    : beforeListingRefresh(path, options);
+  await window.NetizenIdentity.loadUsers();
+  answer = beforeListingRefresh;
   document.querySelector("#admin-user-confirm").click();
+  window.NetizenIdentity.suspendSelector();
+  assert.equal(document.querySelector("#admin-user-confirm").disabled, true);
   document.querySelector("#admin-user-confirm").click();
   await settle();
   assert.equal(calls.filter((call) => call.path.endsWith("/add")).length, 1);
@@ -151,6 +190,32 @@ answer = async (path, options) => {
   window.NetizenIdentity.closePanel();
   assert.equal(unmounts, beforeNavigation + 1);
   assert.equal(document.querySelector("#admin-user-panel").hidden, true);
+
+  // Leaving while SDK configuration is pending must not render a dropdown when
+  // it resolves. Only the explicit retry resumes loading the picker.
+  const configureNormally = window.webComponent.config;
+  let finishSuspendedConfig;
+  window.webComponent.config = () => new Promise((resolve) => { finishSuspendedConfig = resolve; });
+  document.querySelector("#admin-user-add").click();
+  await settle();
+  assert.equal(typeof finishSuspendedConfig, "function");
+  const rendersBeforeSuspendedConfig = selectorRenders;
+  const callsBeforeSuspendedConfig = calls.length;
+  window.NetizenIdentity.suspendSelector();
+  finishSuspendedConfig();
+  await settle();
+  assert.equal(selectorRenders, rendersBeforeSuspendedConfig);
+  assert.equal(calls.length, callsBeforeSuspendedConfig);
+  assert.equal(document.querySelector("#admin-user-panel").hidden, false);
+  assert.equal(document.querySelector("#admin-user-selection").hidden, true);
+  assert.equal(document.querySelector("#admin-user-confirm").disabled, true);
+  assert.equal(document.querySelector("#admin-selector-retry").hidden, false);
+  window.webComponent.config = configureNormally;
+  document.querySelector("#admin-selector-retry").click();
+  await settle();
+  assert.equal(selectorRenders, rendersBeforeSuspendedConfig + 1);
+  assert.equal(candidate.hidden, false);
+  window.NetizenIdentity.closePanel();
 
   // SDK config can remain pending after a network failure. Timeout must offer a
   // fresh page, not queue more attempts behind it or revive a late result.

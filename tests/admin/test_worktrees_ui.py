@@ -11,7 +11,7 @@ from tests.admin.test_session_filter_ui import _HtmlTree
 
 
 class WorktreeUiTest(unittest.TestCase):
-    def test_paged_management_branch_modes_and_non_replayed_deletion(self):
+    def test_drawer_drafts_branch_modes_and_non_replayed_mutations(self):
         node = shutil.which("node")
         if node is None:
             reason = "Node.js 22 is required for Admin JavaScript behavior tests"
