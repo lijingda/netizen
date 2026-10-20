@@ -63,6 +63,17 @@ class StatusCommandsTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_ordinary_aliases_have_the_same_replies_as_slash(self):
+        await self.assert_ordinary_aliases_match_slash()
+
+    async def test_git_directory_aliases_have_the_same_replies_as_slash(self):
+        with patch("netizen_cli.channel_app.git_branch_status", return_value="main...origin/main [ahead 2]"):
+            await self.assert_ordinary_aliases_match_slash()
+
+    async def test_missing_directory_aliases_have_the_same_replies_as_slash(self):
+        with patch.object(self.app, "_binding_cwd", return_value=self.fixture.project / "missing"):
+            await self.assert_ordinary_aliases_match_slash()
+
+    async def assert_ordinary_aliases_match_slash(self):
         scope, card = await self.panel()
         for label, text in (("查看状态", "/status"), ("停止", "/stop"),
                             ("会话配置", "/config"), ("会话列表", "/sessions")):
