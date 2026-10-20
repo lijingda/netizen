@@ -30,10 +30,14 @@ window.history = {
 };
 const baseFetch = fetch;
 let failPage = false;
+let expireResponse = false;
 let selectorConfigGate = null;
 let selectorConfigs = 0;
 let selectorRenders = 0;
 let selectorUnmounts = 0;
+let accessSaveGate = null;
+let accessRules = { revision: "access-first", discovery: { mode: "all", chatIds: [] },
+  readSend: { mode: "all", chatIds: [] } };
 document.head = document.querySelector("head");
 const appendScript = document.head.append.bind(document.head);
 document.head.append = (script) => { appendScript(script); queueMicrotask(() => script.onload()); };
@@ -52,14 +56,16 @@ const scheduledPlan = () => ({
 fetch = async (path, options = {}) => {
   const url = new URL(path, "https://admin");
   if (!["/api/v1/projects", "/api/v1/schedules", "/api/v1/defaults", "/logout", "/api/v1/identity",
-    "/api/v1/admin-users", "/api/v1/admin-users/selector-config", "/api/v1/worktrees", "/api/v1/worktrees/settings"].includes(url.pathname)) return baseFetch(path, options);
+    "/api/v1/admin-users", "/api/v1/admin-users/selector-config", "/api/v1/worktrees", "/api/v1/worktrees/settings",
+    "/api/v1/session-tool-access", "/api/v1/session-tool-access/save"].includes(url.pathname)) return baseFetch(path, options);
   requests.push({ path: url.pathname, query: url.searchParams, options });
+  if (expireResponse) return { ok: false, status: 401, json: async () => ({}) };
   if (failPage) throw new Error("本页读取失败");
   const next = url.searchParams.has("cursor");
   let data;
   if (url.pathname === "/api/v1/projects") data = {
     items: [{ alias: next ? "第二页" : "首页", cwd: "/workspace/project", actions: {} }],
-    nextCursor: next ? null : "projects-next",
+    nextCursor: next ? null : "projects-next", actions: { register: adminGrant, createDirectory: adminGrant },
   };
   else if (url.pathname === "/api/v1/schedules") data = {
     plans: [{ ...scheduledPlan(), name: next ? "计划第二页" : "计划首页" }],
@@ -67,7 +73,7 @@ fetch = async (path, options = {}) => {
   };
   else if (url.pathname === "/api/v1/defaults") data = { items: [], has_more: false, actions: {} };
   else if (url.pathname === "/api/v1/worktrees") data = { items: [], nextCursor: null };
-  else if (url.pathname === "/api/v1/worktrees/settings") data = { root: "", effectiveRoot: "/instance/worktrees", editable: false, fetchBeforeCreate: false, actions: {} };
+  else if (url.pathname === "/api/v1/worktrees/settings") data = { root: "", effectiveRoot: "/instance/worktrees", editable: true, fetchBeforeCreate: false, actions: { save: adminGrant } };
   else if (url.pathname === "/api/v1/identity") data = { openId: "fixture-admin", name: "管理员" };
   else if (url.pathname === "/api/v1/admin-users") data = {
     users: [], revision: 1, addAction: adminGrant, selectorAction: adminGrant,
@@ -75,6 +81,14 @@ fetch = async (path, options = {}) => {
   else if (url.pathname === "/api/v1/admin-users/selector-config") {
     if (selectorConfigGate) await selectorConfigGate.promise;
     data = { openId: "fixture-admin", appId: "fixture-app", signature: "fixture-signature" };
+  }
+  else if (url.pathname.startsWith("/api/v1/session-tool-access")) {
+    if (options.method === "POST") {
+      if (accessSaveGate) await accessSaveGate.promise;
+      const body = JSON.parse(options.body);
+      accessRules = { revision: "access-next", discovery: body.discovery, readSend: body.readSend };
+    }
+    data = { ...structuredClone(accessRules), saveAction: adminGrant };
   }
   else data = {};
   return { ok: true, status: 200, json: async () => data };
@@ -87,6 +101,28 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(historyEntries.length, 1, "initial canonicalization replaces, not pushes");
   assert(!window.location.search.includes("cursor="));
   assert(!window.location.search.includes("actionToken="));
+  if (authDrawer) {
+    if (authDrawer === "project") {
+      document.querySelector("#project-new").click();
+      document.querySelector("#project-alias").value = "unsaved";
+    } else {
+      await selectTab("worktrees");
+      document.querySelector(authDrawer === "worktree-create" ? "#worktree-new" : "#worktree-configure").click();
+      await flush();
+    }
+    const drawer = document.querySelector(`#${authDrawer}-drawer`);
+    assert.equal(drawer.open, true);
+    const posts = requests.filter((request) => request.options.method === "POST").length;
+    expireResponse = true;
+    await refresh("projects");
+    assert.equal(state.authExpired, true);
+    assert.equal(drawer.open, false, "expired modal must release the page's login link");
+    assert.equal(document.querySelector("#auth-expired").hidden, false);
+    assert.notEqual(document.querySelector("#auth-expired").inert, true);
+    assert.match(document.querySelector("#status").textContent, /登录已过期/);
+    assert.equal(requests.filter((request) => request.options.method === "POST").length, posts);
+    return;
+  }
   if (initialUrl.startsWith("/worktrees")) {
     assert.equal(state.tab, "worktrees");
     assert.equal(href(), "/worktrees");
@@ -94,6 +130,105 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     assert.match(document.querySelector("#worktrees-body").textContent, /本页没有受管 Worktree/);
     assert.equal(document.querySelector("#worktree-create-submit").disabled, true);
     assert(!lastQuery("/api/v1/worktrees").has("cursor"));
+    return;
+  }
+  if (initialUrl === "/system") {
+    const admins = document.querySelector("#system-tab-admins");
+    const access = document.querySelector("#system-tab-access");
+    const badge = document.querySelector("#session-access-unsaved");
+    const mode = document.querySelector("#session-access-discovery-mode");
+    const chats = document.querySelector("#session-access-discovery-chats");
+    const unload = () => {
+      const event = { prevented: false, preventDefault() { this.prevented = true; } };
+      for (const callback of windowEvents.get("beforeunload") || []) callback(event);
+      return event.prevented;
+    };
+    assert.equal(state.tab, "system");
+    assert.equal(document.querySelector("#system-admins").hidden, false);
+    assert.equal(document.querySelector("#system-access").hidden, true);
+    assert.equal(admins.getAttribute("aria-selected"), "true");
+    assert.equal(badge.hidden, true);
+    const beforeSwitch = requests.length;
+    admins.dispatch("keydown", { key: "End" });
+    assert.equal(document.activeElement, access);
+    assert.equal(access.getAttribute("tabindex"), "0");
+    assert.equal(admins.getAttribute("tabindex"), "-1");
+    assert.equal(document.querySelector("#system-admins").hidden, true);
+    assert.equal(document.querySelector("#system-access").hidden, false);
+    mode.value = "only"; mode.dispatch("change");
+    chats.value = "oc_draft"; chats.dispatch("input");
+    assert.equal(badge.hidden, false);
+    assert.equal(unload(), true);
+    window.confirm = () => { throw new Error("sub-tabs must preserve drafts without a prompt"); };
+    access.dispatch("keydown", { key: "Home" });
+    assert.equal(document.activeElement, admins);
+    assert.equal(document.querySelector("#system-access").hidden, true);
+    assert.equal(badge.hidden, false, "hidden permission edits remain discoverable");
+    admins.dispatch("keydown", { key: "ArrowRight" });
+    assert.equal(document.activeElement, access);
+    access.dispatch("keydown", { key: "ArrowLeft" });
+    access.click();
+    assert.equal(chats.value, "oc_draft");
+    assert.equal(requests.length, beforeSwitch, "switches never load or save");
+    assert.equal(href(), "/system");
+
+    // A picker belonging to the hidden panel must close without discarding input.
+    document.querySelector("#session-access-discovery-picker .chat-picker-trigger").click();
+    await flush();
+    const pickerPanel = document.querySelector("#session-access-discovery-picker .chat-picker-popup");
+    assert.equal(pickerPanel.hidden, false);
+    admins.click();
+    assert.equal(pickerPanel.hidden, true);
+    assert.equal(chats.value, "oc_draft");
+    window.confirm = () => false;
+    const permissionReads = () => requests.filter((request) => request.path === "/api/v1/session-tool-access").length;
+    const reads = permissionReads();
+    assert.equal(await refresh("system"), false);
+    assert.equal(permissionReads(), reads);
+    await selectTab("projects");
+    assert.equal(state.tab, "system", "hidden edits still guard navigation");
+    document.querySelector("#logout").click(); await flush();
+    assert(!requests.some((request) => request.path === "/logout"));
+    assert.equal(chats.value, "oc_draft");
+    access.click();
+    document.querySelector("#session-access-cancel").click();
+    assert.equal(badge.hidden, true);
+    assert.equal(unload(), false);
+
+    mode.value = "disabled"; mode.dispatch("change");
+    accessSaveGate = deferred();
+    document.querySelector("#session-access-form").dispatch("submit");
+    await flush();
+    const beforePendingSwitch = requests.length;
+    admins.click(); access.click();
+    assert.equal(document.querySelector("#session-access-save").disabled, true);
+    assert.equal(requests.length, beforePendingSwitch);
+    accessSaveGate.resolve(); accessSaveGate = null;
+    await flush();
+    assert.equal(badge.hidden, true);
+    assert.equal(unload(), false);
+    const saved = requests.find((request) => request.path.endsWith("/session-tool-access/save"));
+    assert.deepEqual(JSON.parse(saved.options.body).discovery, { mode: "disabled", chatIds: [] });
+    assert.equal(JSON.parse(saved.options.body).actionToken, adminGrant.actionToken);
+
+    admins.click();
+    document.querySelector("#admin-user-add").click(); await flush();
+    const beforeSelectorSwitch = requests.length;
+    access.click(); admins.click();
+    assert.equal(selectorUnmounts, 1, "the body-mounted SDK selector must unmount");
+    assert.equal(selectorRenders, 1);
+    assert.equal(document.querySelector("#admin-user-panel").hidden, false);
+    assert.equal(document.querySelector("#admin-selector-retry").hidden, false);
+    assert.equal(requests.length, beforeSelectorSwitch, "selector reload stays explicit");
+
+    access.click();
+    mode.value = "all"; mode.dispatch("change");
+    admins.click();
+    window.confirm = () => true;
+    await selectTab("projects");
+    assert.equal(state.tab, "projects");
+    assert.equal(badge.hidden, true);
+    assert.equal(unload(), false);
     return;
   }
   if (initialUrl.startsWith("/sessions/ordinary") && !initialUrl.includes("project=")) {
@@ -349,4 +484,40 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(selectorConfigs, beforeLateConfig.configs, "late config must not initialize the hidden module");
   assert.equal(selectorRenders, beforeLateConfig.renders);
   assert.equal(document.querySelector("#admin-user-confirm").disabled, true);
+
+  // Workspace drawers participate in the same navigation, logout and unload guard.
+  const unload = () => {
+    const event = { prevented: false, preventDefault() { this.prevented = true; } };
+    for (const callback of windowEvents.get("beforeunload") || []) callback(event);
+    return event.prevented;
+  };
+  document.querySelector("#project-new").click();
+  document.querySelector("#project-alias").value = "draft";
+  assert.equal(unload(), true);
+  window.confirm = () => false;
+  await selectTab("worktrees");
+  assert.equal(state.tab, "projects");
+  assert.equal(document.querySelector("#project-drawer").open, true);
+  document.querySelector("#logout").click(); await flush();
+  assert(!requests.some((request) => request.path === "/logout"));
+  window.confirm = () => true;
+  await selectTab("worktrees");
+  assert.equal(document.querySelector("#project-drawer").open, false);
+  assert.equal(unload(), false);
+  document.querySelector("#worktree-configure").click(); await flush();
+  document.querySelector("#worktree-root").value = "/draft/worktrees";
+  assert.equal(unload(), true);
+  window.confirm = () => false;
+  const worktreePosition = historyPosition;
+  window.history.go(-1); await flush();
+  assert.equal(historyPosition, worktreePosition);
+  assert.equal(state.tab, "worktrees");
+  assert.equal(document.querySelector("#worktree-settings-drawer").open, true);
+  document.querySelector("#logout").click(); await flush();
+  assert(!requests.some((request) => request.path === "/logout"));
+  document.querySelector("#worktree-root").value = "";
+  assert.equal(unload(), false, "restoring saved Worktree config clears the unload guard");
+  window.history.go(-1); await flush();
+  assert.equal(state.tab, "projects");
+  assert.equal(document.querySelector("#worktree-settings-drawer").open, false);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

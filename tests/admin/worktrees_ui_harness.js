@@ -7,6 +7,7 @@ let safe = true;
 let disconnect = false;
 let creationResult;
 let settingsResult;
+let settingsSave;
 let branchResults = new Map();
 window.confirm = (text) => { confirmations.push(text); return confirmation; };
 const grant = (kind) => ({ csrfToken: `${kind}-csrf`, actionToken: `${kind}-once`, target: { resource: "worktree", targetId: "one" } });
@@ -34,7 +35,7 @@ async function api(path, options = {}) {
   requests.push({ path, options });
   if (path === "/api/v1/worktrees/settings") {
     if (!options.method) return settingsResult ? settingsResult() : structuredClone(settings);
-    return structuredClone(settings);
+    return settingsSave ? settingsSave() : structuredClone(settings);
   }
   if (path.startsWith("/api/v1/worktrees?")) return { items: structuredClone(rows), nextCursor: path.includes("cursor") ? null : "second-page" };
   if (path.startsWith("/api/v1/worktrees/branches?")) {
@@ -65,11 +66,9 @@ async function api(path, options = {}) {
     actionPayload: (envelope, extra = {}) => ({ csrfToken: envelope.csrfToken, actionToken: envelope.actionToken, target: envelope.target, ...extra }),
   });
   await controller.load();
-  assert.equal(input("root").value, "");
-  assert.equal(input("fetch").checked, false);
-  assert.equal(input("mode").value, "detached");
-  assert.match(input("effective-root").textContent, /\/instance\/worktrees/);
-  assert.equal(input("project").children.length, 3);
+  assert.equal(calls("/settings").length, 0, "list refresh does not initialize hidden editors");
+  assert.equal(input("create").hidden, true);
+  assert.equal(input("settings").hidden, true);
   assert.match(document.querySelector("#worktrees-body").textContent, /目录缺失/);
   assert.match(document.querySelector("#worktrees-body").textContent, /状态未取得/);
   assert.match(document.querySelector("#worktrees-body").textContent, /路径身份已改变/);
@@ -82,27 +81,81 @@ async function api(path, options = {}) {
   await trigger("worktrees-previous");
   assert.doesNotMatch(requests.at(-1).path, /cursor=/);
 
+  // Create and settings are separate dialogs. Loading the list preserves drafts.
+  await trigger("worktree-new");
+  assert.equal(input("create-drawer").open, true);
+  assert.equal(input("create").hidden, false);
+  assert.equal(input("settings").hidden, true);
+  assert.equal(document.activeElement, input("project"));
+  assert.equal(input("mode").value, "detached");
+  assert.match(input("create-config").textContent, /\/instance\/worktrees/);
+  assert.match(input("create-config").textContent, /fetch：关闭/);
+  assert.equal(input("project").children.length, 3);
+  assert.equal(controller.dirty(), false);
+  input("ref").value = "main";
+  await trigger("worktree-ref", "input");
+  assert.equal(controller.dirty(), true);
+  const reads = calls("/settings").length;
+  await controller.load();
+  assert.equal(input("ref").value, "main");
+  assert.equal(calls("/settings").length, reads);
+  input("ref").value = "";
+  await trigger("worktree-ref", "input");
+  assert.equal(controller.dirty(), false, "reverting a value removes the discard prompt");
+  const confirms = confirmations.length;
+  await trigger("worktree-create-cancel");
+  assert.equal(confirmations.length, confirms);
+  assert.equal(input("create-drawer").open, false);
+  assert.equal(document.activeElement, input("new"));
+
+  await trigger("worktree-new");
   input("project").value = "demo";
   await trigger("worktree-project", "change");
   assert.equal(input("create-submit").disabled, false);
   assert.equal(input("existing").children.find((item) => item.value === "main").disabled, true);
   assert.equal(input("existing").children.some((item) => item.value === "origin/main"), false);
+  confirmation = false;
+  assert.equal(await trigger("worktree-configure"), false);
+  assert.equal(input("create-drawer").open, true);
+  assert.equal(input("settings").hidden, true);
+  const cancelled = input("create-drawer").dispatch("cancel");
+  assert.equal(cancelled.prevented, true);
+  assert.equal(input("create-drawer").open, true);
+  confirmation = true;
   input("mode").value = "existing";
   await trigger("worktree-mode", "change");
   assert.equal(input("ref-label").hidden, true);
   assert.equal(input("existing-label").hidden, false);
   input("existing").value = "feature";
   await trigger("worktree-existing", "input");
+  let resolveCreate;
+  creationResult = () => new Promise((resolve) => { resolveCreate = resolve; });
+  const creating = trigger("worktree-create", "submit");
+  assert.equal(controller.busy(), true);
+  assert.equal(input("create-close").disabled, true);
+  assert.equal(input("create-cancel").disabled, true);
+  assert.equal(input("create-submit").disabled, true);
+  assert.match(input("create-submit").textContent, /正在创建/);
+  assert.equal(controller.discard(), false, "navigation cannot abandon an in-flight mutation");
+  assert.equal(input("create-drawer").dispatch("cancel").prevented, true);
+  assert.equal(input("create-drawer").open, true);
   await trigger("worktree-create", "submit");
+  assert.equal(calls("/create").length, 1);
+  resolveCreate({ resource: row() });
+  await creating;
   const creation = JSON.parse(calls("/create").at(-1).options.body);
   assert.equal(creation.mode, "existing");
   assert.equal(creation.branch, "feature");
   assert.equal(creation.ref, "refs/heads/feature");
   assert.match(status, /尚未创建会话/);
+  assert.equal(input("create-drawer").open, false);
+  assert.equal(controller.dirty(), false);
+  assert.equal(document.activeElement, input("new"));
   await trigger("worktree-create", "submit");
   assert.equal(calls("/create").length, 1);
 
   // Late branch results cannot create a grant for the old Project.
+  await trigger("worktree-new");
   let resolveOld;
   branchResults.set("demo", () => new Promise((resolve) => { resolveOld = resolve; }));
   input("project").value = "demo";
@@ -119,9 +172,101 @@ async function api(path, options = {}) {
   creationResult = () => { throw new TypeError("lost response"); };
   await trigger("worktree-create", "submit");
   assert.equal(JSON.parse(calls("/create").at(-1).options.body).ref, "HEAD");
-  assert.match(status, /创建结果未确认.*不要重复提交/);
+  assert.match(input("create-status").textContent, /创建结果未确认.*不要重复提交/);
+  assert.equal(input("create-drawer").open, true);
+  assert.equal(input("new-branch").value, "feature-new");
+  assert.equal(input("create-check").hidden, false);
+  await trigger("worktree-create-check");
+  assert.match(input("create-status").textContent, /列表已刷新/);
+  input("project").value = "demo";
+  branchResults.delete("demo");
+  await trigger("worktree-project", "change");
+  assert.equal(input("create-submit").disabled, true, "new branch reads cannot retry an unknown mutation");
   await trigger("worktree-create", "submit");
   assert.equal(calls("/create").length, 2);
+  controller.discard();
+  assert.equal(input("create-drawer").open, false);
+
+  // Settings load independently, honor read-only state and use their own draft.
+  await trigger("worktree-configure");
+  assert.equal(input("settings-drawer").open, true);
+  assert.equal(input("root").value, "");
+  assert.equal(input("fetch").checked, false);
+  assert.match(input("effective-root").textContent, /\/instance\/worktrees/);
+  assert.equal(controller.dirty(), false);
+  input("root").value = "/new/worktrees";
+  input("fetch").checked = true;
+  await trigger("worktree-root", "input");
+  assert.equal(controller.dirty(), true);
+  let resolveSave;
+  settingsSave = () => new Promise((resolve) => { resolveSave = resolve; });
+  const saved = trigger("worktree-settings", "submit");
+  assert.equal(input("settings-close").disabled, true);
+  assert.equal(input("settings-save").disabled, true);
+  assert.equal(controller.busy(), true);
+  const settingWrite = calls("/settings").filter((request) => request.options.method === "POST");
+  assert.equal(settingWrite.length, 1);
+  assert.deepEqual(JSON.parse(settingWrite[0].options.body), {
+    ...grant("settings"), root: "/new/worktrees", fetchBeforeCreate: true,
+  });
+  resolveSave(structuredClone(settings));
+  await saved;
+  assert.equal(input("settings-drawer").open, false);
+  assert.equal(controller.dirty(), false);
+  assert.equal(document.activeElement, input("configure"));
+  assert.match(status, /配置已保存/);
+  assert.equal(input("new-branch").value, "feature-new", "saving settings never resets the other form");
+
+  await trigger("worktree-configure");
+  input("root").value = "/unknown/save";
+  await trigger("worktree-root", "input");
+  settingsSave = () => { throw new TypeError("lost settings result"); };
+  await trigger("worktree-settings", "submit");
+  assert.match(input("settings-status").textContent, /结果未确认.*不要重复提交/);
+  await trigger("worktree-settings-check");
+  assert.match(input("settings-status").textContent, /已读取当前配置.*fetch：关闭/);
+  assert.equal(input("root").value, "/unknown/save");
+  assert.equal(input("settings-save").disabled, true);
+  await trigger("worktree-settings", "submit");
+  assert.equal(calls("/settings").filter((request) => request.options.method === "POST").length, 2);
+  controller.discard();
+
+  settingsResult = () => ({ ...structuredClone(settings), editable: false, actions: {} });
+  await trigger("worktree-configure");
+  assert.equal(input("root").disabled, true);
+  assert.equal(input("fetch").disabled, true);
+  assert.equal(input("settings-save").disabled, true);
+  await trigger("worktree-new");
+  assert.equal(input("settings-drawer").open, false);
+  input("project").value = "demo";
+  await trigger("worktree-project", "change");
+  assert.equal(input("create-submit").disabled, false, "read-only settings still allow creation");
+  creationResult = () => { const error = new Error("分支名称不可用"); error.status = 400; throw error; };
+  await trigger("worktree-create", "submit");
+  assert.match(input("create-status").textContent, /分支名称不可用/);
+  assert.equal(input("project").value, "demo");
+  assert.equal(input("mode").value, "detached");
+  const detached = JSON.parse(calls("/create").at(-1).options.body);
+  assert.equal(detached.branch, null);
+  assert.equal(detached.ref, "HEAD");
+  controller.discard();
+  settingsResult = null;
+
+  // A dismissed dialog's late GET never overwrites a newer draft.
+  let resolveSettings;
+  settingsResult = () => new Promise((resolve) => { resolveSettings = resolve; });
+  const opening = trigger("worktree-configure");
+  assert.equal(input("root").disabled, true);
+  controller.discard();
+  settingsResult = null;
+  await trigger("worktree-configure");
+  input("root").value = "/new/draft";
+  await trigger("worktree-root", "input");
+  resolveSettings({ ...structuredClone(settings), root: "/old/value" });
+  assert.equal(await opening, false);
+  assert.equal(input("root").value, "/new/draft");
+  assert.equal(controller.dirty(), true);
+  controller.discard();
 
   // Unsafe previews and cancelled confirmation never POST delete.
   safe = false;
@@ -148,18 +293,21 @@ async function api(path, options = {}) {
   assert.match(status, /删除结果未确认.*不要重复提交/);
   assert.doesNotMatch(status, /internal transport/);
 
-  // A settings refresh never overwrites a draft typed after the GET started.
-  controller.discard();
-  let resolveSettings;
-  settingsResult = () => new Promise((resolve) => { resolveSettings = resolve; });
-  const refresh = controller.load();
-  input("root").value = "/new/draft";
-  await trigger("worktree-root", "input");
-  resolveSettings(structuredClone(settings));
-  assert.equal(await refresh, false);
-  assert.equal(input("root").value, "/new/draft");
-  assert.equal(controller.dirty(), true);
+  // Empty lists offer the same drawer and expiration revokes every submission.
+  rows = [];
+  await controller.load();
+  await rowAction().listeners.get("click")[0]();
+  assert.equal(input("create-drawer").open, true);
+  input("project").value = "demo";
+  await trigger("worktree-project", "change");
+  branchResults.set("other", () => ({ isGit: false, items: [], actions: {} }));
+  input("project").value = "other";
+  await trigger("worktree-project", "change");
+  assert.match(input("create-note").textContent, /不是 Git 仓库/);
+  assert.equal(input("create-submit").disabled, true);
   expired = true; controller.expire();
   assert.equal(input("settings-save").disabled, true);
   assert.equal(input("create-submit").disabled, true);
+  assert.equal(input("new").disabled, true);
+  assert.equal(input("configure").disabled, true);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -88,14 +88,27 @@ window.NetizenIdentity = (() => {
     });
   }
 
-  function clearSelector() {
+  function clearSelector({ preserveSelection = false } = {}) {
     generation += 1;
-    selected = null;
+    if (!preserveSelection) selected = null;
     try { selector?.unmount?.(); } catch { /* Closing the local picker remains possible. */ }
     selector = null;
     node("admin-selector").replaceChildren();
-    node("admin-user-selection").hidden = true;
-    node("admin-user-confirm").disabled = true;
+    node("admin-user-selection").hidden = !selected;
+    node("admin-user-confirm").disabled = pending || !selected;
+  }
+
+  function suspendSelector() {
+    if (node("admin-user-panel").hidden) return;
+    // The SDK owns a body-mounted popup. Unmount it while preserving the
+    // selection and its original grant; switching tabs must not fetch new ones.
+    clearSelector({ preserveSelection: true });
+    node("admin-selector-status").classList.toggle("error", configStalled);
+    node("admin-selector-status").textContent = configStalled ? reloadMessage : selected
+      ? "已保留选中人员，可确认添加；如需更换，请重新加载选人组件。"
+      : "选人组件已收起，重新加载后可继续选择。";
+    node("admin-selector-retry").hidden = configStalled;
+    node("admin-selector-reload").hidden = !configStalled;
   }
 
   function closePanel() {
@@ -265,7 +278,7 @@ window.NetizenIdentity = (() => {
   node("admin-selector-retry").addEventListener("click", () => { void loadSelector(); });
   node("admin-selector-reload").addEventListener("click", () => { window.location.reload(); });
   return {
-    loadProfile, loadUsers, closePanel,
+    loadProfile, loadUsers, closePanel, suspendSelector,
     expire() { expired = true; closePanel(); renderUsers(); },
   };
 })();

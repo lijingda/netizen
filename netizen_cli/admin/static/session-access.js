@@ -34,6 +34,11 @@ window.NetizenSessionAccess = (() => {
     }
     node("save").disabled = expired || pending || !snapshot?.saveAction || !dirty();
     node("cancel").disabled = expired || pending || !dirty();
+    node("unsaved").hidden = !dirty();
+  }
+
+  function closePickers() {
+    for (const picker of pickers.values()) picker.close();
   }
 
   function discard() {
@@ -121,7 +126,7 @@ window.NetizenSessionAccess = (() => {
   node("form").addEventListener("submit", save);
   node("cancel").addEventListener("click", discard);
   return {
-    load, dirty, discard, busy: () => pending,
+    load, dirty, discard, closePickers, busy: () => pending,
     expire() { expired = true; generation += 1; renderControls(); },
   };
 })();

@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const state = { tab: "updates", updates: null };
 const elements = new Map();
-const document = { querySelector(id) {
+const document = { body: { classList: { toggle() {} } }, querySelectorAll() { return []; }, querySelector(id) {
   if (!elements.has(id)) elements.set(id, { textContent: "", disabled: false });
   return elements.get(id);
 } };

@@ -39,21 +39,7 @@
     <section id="projects" class="panel active" aria-labelledby="projects-heading">
       <div class="section-head">
         <div><p class="eyebrow">WORKSPACES</p><h2 id="projects-heading">Projects</h2></div>
-        <button class="refresh" data-refresh="projects">刷新</button>
-      </div>
-      <div class="forms-grid">
-        <form id="register-project" class="card-form">
-          <h3>登记已有目录</h3>
-          <label>Alias<input name="alias" maxlength="64" required></label>
-          <label>绝对路径<input name="path" maxlength="4096" required></label>
-          <button type="submit">登记</button>
-        </form>
-        <form id="create-project" class="card-form">
-          <h3>创建空目录</h3>
-          <label>Alias<input name="alias" maxlength="64" required></label>
-          <label>绝对路径（可留空）<input name="path" maxlength="4096"></label>
-          <button type="submit">创建</button>
-        </form>
+        <div class="actions"><button id="project-new" class="action" disabled>添加 Project</button><button class="refresh" data-refresh="projects">刷新</button></div>
       </div>
       <section id="project-delete-result" class="project-delete-result" aria-live="polite" aria-atomic="true" hidden>
         <p id="project-delete-message"></p>
@@ -69,33 +55,75 @@
       </nav>
     </section>
 
+    <dialog id="project-drawer" class="editor-drawer" aria-labelledby="project-editor-title">
+      <form id="project-editor" class="card-form drawer-form workspace-form" hidden>
+        <div class="drawer-head"><div><p class="eyebrow">PROJECT</p><h3 id="project-editor-title">添加 Project</h3></div><button id="project-close" class="drawer-close" type="button" aria-label="关闭添加 Project 表单">×</button></div>
+        <div class="drawer-body">
+          <div class="workspace-fields">
+            <div>
+              <p id="project-mode-label" class="workspace-field-label">添加方式</p>
+              <div class="workspace-modes" role="group" aria-labelledby="project-mode-label">
+                <button id="project-mode-register" type="button" data-project-mode="register" aria-pressed="true">登记已有目录</button>
+                <button id="project-mode-create" type="button" data-project-mode="createDirectory" aria-pressed="false">创建空目录</button>
+              </div>
+            </div>
+            <label>Alias<input id="project-alias" name="alias" maxlength="64" required></label>
+            <label><span id="project-path-label">绝对路径</span><input id="project-path" name="path" maxlength="4096" required aria-describedby="project-path-help"></label>
+          </div>
+          <p id="project-path-help" class="hint">登记一个已存在的目录作为 Project。</p>
+          <p id="project-note" class="status" role="status" aria-live="polite"></p>
+          <button id="project-check" class="drawer-cancel" type="button" hidden>刷新列表核对</button>
+        </div>
+        <div class="drawer-footer"><button id="project-cancel" class="drawer-cancel" type="button">取消</button><button id="project-submit" type="submit">登记 Project</button></div>
+      </form>
+    </dialog>
+
     <section id="worktrees" class="panel" aria-labelledby="worktrees-heading" hidden>
-      <div class="section-head"><div><p class="eyebrow">MANAGED CHECKOUTS</p><h2 id="worktrees-heading">Worktrees</h2></div><button class="refresh" data-refresh="worktrees">刷新</button></div>
+      <div class="section-head"><div><p class="eyebrow">MANAGED CHECKOUTS</p><h2 id="worktrees-heading">Worktrees</h2></div><div class="actions"><button id="worktree-new" class="action">新建 Worktree</button><button id="worktree-configure" class="refresh">创建配置</button><button class="refresh" data-refresh="worktrees">刷新</button></div></div>
       <p class="hint">仅管理本实例创建的工作区。多个会话可共享文件和分支；列表按需查询，不扫描未提交内容，也不能证明没有外部客户端使用。</p>
-      <div class="forms-grid">
-        <form id="worktree-settings" class="card-form">
-          <h3>配置</h3>
-          <label>新建根目录（留空使用实例默认目录）<input id="worktree-root" maxlength="4096"></label>
-          <p id="worktree-effective-root" class="hint"></p>
-          <label class="cascade-choice"><input id="worktree-fetch" type="checkbox">创建前 fetch；失败则终止创建</label>
-          <p class="hint">只影响之后创建的位置，已有工作区仍按原路径管理；不修改 Codex App 配置。</p>
-          <button id="worktree-settings-save" type="submit" disabled>保存配置</button>
-        </form>
-        <form id="worktree-create" class="card-form">
-          <h3>新建 Worktree</h3>
-          <label>Project<select id="worktree-project" required><option value="">选择 Project</option></select></label>
-          <label>检出方式<select id="worktree-mode"><option value="detached">Detached（不绑定命名分支）</option><option value="existing">检出已有本地分支</option><option value="new">创建并检出新分支</option></select></label>
-          <label id="worktree-ref-label">起点提交 / 分支<input id="worktree-ref" list="worktree-refs" placeholder="HEAD"><datalist id="worktree-refs"></datalist></label>
-          <label id="worktree-existing-label" hidden>本地分支<select id="worktree-existing"></select></label>
-          <label id="worktree-new-label" hidden>新分支名称<input id="worktree-new-branch" maxlength="1024"></label>
-          <p id="worktree-create-note" class="hint">只检出已提交内容，不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。</p>
-          <button id="worktree-create-submit" type="submit" disabled>创建 Worktree</button>
-        </form>
-      </div>
       <p id="worktree-result" class="status" role="status" aria-live="polite"></p>
       <div class="table-wrap"><table><thead><tr><th>Project / 标识</th><th>工作目录</th><th>当前状态</th><th>分支 / HEAD</th><th>关联会话</th><th>操作</th></tr></thead><tbody id="worktrees-body"></tbody></table></div>
       <nav class="pagination" aria-label="Worktrees 分页"><button id="worktrees-previous" class="next" disabled>上一页</button><span id="worktrees-page" aria-live="polite">第 1 页</span><button id="worktrees-next" class="next" disabled>下一页</button></nav>
     </section>
+
+    <dialog id="worktree-create-drawer" class="editor-drawer" aria-labelledby="worktree-create-title">
+      <form id="worktree-create" class="card-form drawer-form workspace-form" hidden>
+        <div class="drawer-head"><div><p class="eyebrow">WORKTREE</p><h3 id="worktree-create-title">新建 Worktree</h3></div><button id="worktree-create-close" class="drawer-close" type="button" aria-label="关闭新建 Worktree 表单">×</button></div>
+        <div class="drawer-body">
+          <div class="workspace-fields">
+            <label>Project<select id="worktree-project" required><option value="">选择 Project</option></select></label>
+            <label>检出方式<select id="worktree-mode"><option value="detached">Detached（不绑定命名分支）</option><option value="existing">检出已有本地分支</option><option value="new">创建并检出新分支</option></select></label>
+            <label id="worktree-ref-label">起点提交 / 分支<input id="worktree-ref" list="worktree-refs" placeholder="HEAD"><datalist id="worktree-refs"></datalist></label>
+            <label id="worktree-existing-label" hidden>本地分支<select id="worktree-existing"></select></label>
+            <label id="worktree-new-label" hidden>新分支名称<input id="worktree-new-branch" maxlength="1024"></label>
+          </div>
+          <p id="worktree-create-note" class="hint">只检出已提交内容，不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。</p>
+          <h4>当前创建配置</h4>
+          <p id="worktree-create-config" class="target-summary hint"></p>
+          <p class="hint">使用本实例已保存的配置；可在 Worktrees 页的“创建配置”中修改。</p>
+          <p id="worktree-create-status" class="status" role="status" aria-live="polite"></p>
+          <button id="worktree-create-check" class="drawer-cancel" type="button" hidden>刷新列表核对</button>
+        </div>
+        <div class="drawer-footer"><button id="worktree-create-cancel" class="drawer-cancel" type="button">取消</button><button id="worktree-create-submit" type="submit" disabled>创建 Worktree</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="worktree-settings-drawer" class="editor-drawer" aria-labelledby="worktree-settings-title">
+      <form id="worktree-settings" class="card-form drawer-form workspace-form" hidden>
+        <div class="drawer-head"><div><p class="eyebrow">WORKTREE SETTINGS</p><h3 id="worktree-settings-title">Worktree 创建配置</h3></div><button id="worktree-settings-close" class="drawer-close" type="button" aria-label="关闭 Worktree 创建配置">×</button></div>
+        <div class="drawer-body">
+          <p class="hint">用于本实例后续创建，包括 Admin、飞书和 Agent 入口。已有工作区仍按原路径管理；不修改 Codex App 配置。</p>
+          <div class="workspace-fields">
+            <label>新建根目录（留空使用实例默认目录）<input id="worktree-root" maxlength="4096" aria-describedby="worktree-effective-root"></label>
+            <p id="worktree-effective-root" class="hint"></p>
+            <label class="cascade-choice"><input id="worktree-fetch" type="checkbox">创建前 fetch；失败则终止创建</label>
+          </div>
+          <p id="worktree-settings-status" class="status" role="status" aria-live="polite"></p>
+          <button id="worktree-settings-check" class="drawer-cancel" type="button" hidden>读取配置核对</button>
+        </div>
+        <div class="drawer-footer"><button id="worktree-settings-cancel" class="drawer-cancel" type="button">取消</button><button id="worktree-settings-save" type="submit" disabled>保存配置</button></div>
+      </form>
+    </dialog>
 
     <section id="sessions" class="panel" aria-labelledby="sessions-heading" hidden>
       <div class="section-head">
@@ -412,10 +440,13 @@
       </form>
     </dialog>
     <section id="system" class="panel" aria-labelledby="system-heading" hidden>
-      <div class="section-head"><div><p class="eyebrow">SYSTEM</p><h2 id="system-heading">系统管理</h2></div></div>
-      <div class="defaults-tabs system-tabs" role="tablist" aria-label="系统管理"><button id="permissions-tab" class="defaults-tab" role="tab" aria-selected="true" aria-controls="permissions-panel">权限管理</button></div>
-      <div id="permissions-panel" role="tabpanel" aria-labelledby="permissions-tab">
-        <div class="section-head"><h3>管理员</h3><div class="actions"><button id="admin-user-add" class="action" aria-expanded="false" aria-controls="admin-user-panel" disabled>添加管理员</button><button class="refresh" data-refresh="system">刷新</button></div></div>
+      <div class="section-head"><div><p class="eyebrow">SYSTEM</p><h2 id="system-heading">系统管理</h2></div><button class="refresh" data-refresh="system">刷新</button></div>
+      <div class="session-tabs system-tabs" role="tablist" aria-label="系统管理">
+        <button id="system-tab-admins" class="session-tab" role="tab" data-system-tab="admins" aria-selected="true" aria-controls="system-admins" tabindex="0">管理员</button>
+        <button id="system-tab-access" class="session-tab" role="tab" data-system-tab="access" aria-selected="false" aria-controls="system-access" tabindex="-1">跨会话工具权限<span id="session-access-unsaved" class="tab-unsaved" hidden>未保存</span></button>
+      </div>
+      <div id="system-admins" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-admins">
+        <div class="section-head"><h3>管理员</h3><button id="admin-user-add" class="action" aria-expanded="false" aria-controls="admin-user-panel" disabled>添加管理员</button></div>
         <p class="defaults-help">管理员拥有本实例的管理权限。至少保留一位管理员。</p>
         <section id="admin-user-panel" class="identity-panel" aria-labelledby="admin-user-title" hidden>
           <div class="section-head"><h3 id="admin-user-title">添加管理员</h3><button id="admin-user-close" class="refresh" type="button" aria-label="关闭添加管理员">×</button></div>
@@ -426,35 +457,45 @@
           <div class="identity-panel-actions"><button id="admin-selector-retry" class="refresh" hidden>重试加载</button><button id="admin-selector-reload" class="refresh" hidden>重新加载页面</button><button id="admin-user-confirm" class="action" disabled>确认添加</button></div>
         </section>
         <ul id="admin-users" class="admin-users" aria-label="管理员名单"></ul>
-        <section class="session-access" aria-labelledby="session-access-heading">
-          <h3 id="session-access-heading">跨会话工具权限</h3>
-          <p class="defaults-help">仅控制 Agent 对本实例普通会话的跨会话访问。所有来源聊天共用规则，范围按目标聊天匹配，包含其中的主会话与话题。两组权限互不依赖。</p>
-          <form id="session-access-form" class="card-form">
-            <fieldset id="session-access-fields" disabled>
-              <div class="session-access-grid">
-                <section>
-                  <h4>发现</h4><p>允许列出、搜索会话标识及位置；不能单独授权读取消息正文。</p>
-                  <label>目标范围<select id="session-access-discovery-mode"><option value="all">全部</option><option value="only">仅指定聊天</option><option value="exclude">排除指定聊天（黑名单）</option><option value="disabled">关闭</option></select></label>
-                  <div id="session-access-discovery-targets" hidden>
-                    <div id="session-access-discovery-picker"></div>
-                    <label>聊天 ID，每行一个<textarea id="session-access-discovery-chats" rows="5" maxlength="257000" placeholder="oc_…" aria-describedby="session-access-chat-help"></textarea></label>
-                  </div>
-                </section>
-                <section>
-                  <h4>读取与发送</h4><p>允许读取、发送和等待结果；在当前聊天创建话题并启动任务也检查此范围。关闭发现后仍可凭完整 Codex 会话 ID 操作。</p>
-                  <label>目标范围<select id="session-access-readSend-mode"><option value="all">全部</option><option value="only">仅指定聊天</option><option value="exclude">排除指定聊天（黑名单）</option><option value="disabled">关闭</option></select></label>
-                  <div id="session-access-readSend-targets" hidden>
-                    <div id="session-access-readSend-picker"></div>
-                    <label>聊天 ID，每行一个<textarea id="session-access-readSend-chats" rows="5" maxlength="257000" placeholder="oc_…" aria-describedby="session-access-chat-help"></textarea></label>
-                  </div>
-                </section>
-              </div>
-              <p id="session-access-chat-help" class="defaults-field-help">可选择群聊加入名单，或填写聊天 ID（单聊也用聊天 ID，不是用户 ID）。聊天 ID 可在会话列表的“会话标识”中复制。名单为空时，“仅指定聊天”不允许任何目标，“排除指定聊天”允许全部目标。</p>
-            </fieldset>
+      </div>
+      <div id="system-access" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-access" hidden>
+        <h3 id="session-access-heading">跨会话工具权限</h3>
+        <p class="defaults-help">仅控制 Agent 对本实例普通会话的跨会话访问。所有来源聊天共用规则，范围按目标聊天匹配，包含其中的主会话与话题。两组权限互不依赖。</p>
+        <form id="session-access-form" class="card-form session-access-form">
+          <fieldset id="session-access-fields" disabled>
+            <div class="session-access-grid">
+              <section class="session-access-rule" aria-labelledby="session-access-discovery-heading">
+                <h4 id="session-access-discovery-heading">发现</h4>
+                <p class="session-access-description">列出或搜索会话标识及位置。</p>
+                <label>目标范围<select id="session-access-discovery-mode"><option value="all">全部</option><option value="only">仅指定聊天</option><option value="exclude">排除指定聊天（黑名单）</option><option value="disabled">关闭</option></select></label>
+                <div id="session-access-discovery-targets" class="session-access-targets" hidden>
+                  <div id="session-access-discovery-picker"></div>
+                  <label>聊天 ID，每行一个<textarea id="session-access-discovery-chats" rows="5" maxlength="257000" placeholder="oc_…" aria-describedby="session-access-chat-help"></textarea></label>
+                </div>
+                <p class="session-access-rule-note">发现权限不能单独授权读取消息正文。</p>
+              </section>
+              <section class="session-access-rule" aria-labelledby="session-access-readSend-heading">
+                <h4 id="session-access-readSend-heading">读取与发送</h4>
+                <p class="session-access-description">读取、发送消息并等待结果。</p>
+                <label>目标范围<select id="session-access-readSend-mode"><option value="all">全部</option><option value="only">仅指定聊天</option><option value="exclude">排除指定聊天（黑名单）</option><option value="disabled">关闭</option></select></label>
+                <div id="session-access-readSend-targets" class="session-access-targets" hidden>
+                  <div id="session-access-readSend-picker"></div>
+                  <label>聊天 ID，每行一个<textarea id="session-access-readSend-chats" rows="5" maxlength="257000" placeholder="oc_…" aria-describedby="session-access-chat-help"></textarea></label>
+                </div>
+                <p class="session-access-rule-note">在当前聊天创建话题并启动任务，也受此范围限制。关闭发现后仍可凭完整 Codex 会话 ID 操作。</p>
+              </section>
+            </div>
+            <aside id="session-access-chat-help" class="session-access-help" aria-labelledby="session-access-help-heading">
+              <h4 id="session-access-help-heading">聊天名单说明</h4>
+              <p>可选择群聊加入名单，或填写聊天 ID。单聊也用聊天 ID，不是用户 ID；可在会话列表的“会话标识”中复制。</p>
+              <p>名单为空时，“仅指定聊天”不允许任何目标，“排除指定聊天”允许全部目标。</p>
+            </aside>
+          </fieldset>
+          <div class="session-access-footer">
             <p id="session-access-note" class="defaults-field-help" role="status"></p>
             <div class="actions"><button id="session-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="session-access-save" class="action" type="submit" disabled>保存权限</button></div>
-          </form>
-        </section>
+          </div>
+        </form>
       </div>
     </section>
     <section id="updates" class="panel" aria-labelledby="updates-heading" hidden>
