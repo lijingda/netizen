@@ -299,6 +299,7 @@ class CardControlIntent:
     expected_goal_status: str | None = None
     worktree_id: str | None = None
     worktree_create: dict[str, str | None] | None = None
+    new_settings_draft: dict[str, str] | None = None
 
 
 class TurnFileActionName(str, Enum):

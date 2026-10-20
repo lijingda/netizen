@@ -2379,7 +2379,8 @@ SDK safety 层被当成旧投递。Netizen 因此只在可重复动作的公共�
 两类删除确认页导航、exact Turn 重新检查、Goal 暂停/恢复、Side 关闭重试和文件分页均走
 这一出口。`/status` 命令别名按钮也复用同一出口；处理后只重绘 callback 携带的只读展示
 快照以更新 nonce，不重新查询状态或重复命令。新增 Project 的 submit 没有 callback value，因此把同一类 nonce 编入必填的
-Project mode option value；`/new` 只读“加载项目目录选项”同样在 Project option 中携带 nonce。
+Project mode option value；`/new` 只读“加载项目目录选项”在其 submit 按钮的公开 callback value 中携带 nonce，
+不改写 Project option。
 decoder 只移除 transport nonce，不要求它存在，也不校验其格式；
 Project mode 同样先恢复业务 mode，再忽略可选 transport 后缀。因此 nonce 不进入 typed
 intent、SQLite、业务 precondition 或 outbound UUID，缺失或畸形也不改变业务 payload 的
@@ -2396,10 +2397,9 @@ UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改�
 `/new` 创建表单按项目、模型配置、消息上下文、任务反馈、工作区顺序展开分组，
 组标题加粗；模型整行、Effort/Speed 并排，反馈说明与选择并排。该布局调整仅改变展示，
 不改变现有控件的选项值、默认值、提交字段或配置语义，也不调整 `/config`、`/defaults`。
-P2P 的消息上下文和非 Git 项目的工作区继续按既有条件不显示。
+P2P 的消息上下文和非 Git 项目的 worktree/分支选择继续按既有条件不显示。
 
-`/new` 卡片保留一个创建 form，另有不创建会话的“加载项目目录选项”只读 form。创建 form
-包含全部 enabled Projects 的 Project 下拉框，以及
+`/new` 卡片只保留一个 form 和一个 Project 下拉框，包含全部 enabled Projects，以及
 Model、Effort、Speed、Reaction Pulse、Progress Card 和 Completion Mention；群聊和群话题再增加 Mention
 Context Mode。Reaction Pulse 默认关闭，Progress Card 和 Completion Mention 默认开启，三项可独立修改；这项
 进度卡新建默认值取代 ADR 0046 最初的关闭，不修改已有 Binding 的进度卡选择；
@@ -2415,7 +2415,13 @@ inherit 的 minimal form，不要求用户改走命令。提交后创建 lazy Bi
 [ADR 0040](adr/0040-make-new-card-only-and-show-all-projects.md)。
 
 已预选 Project 时按需加载工作区；没有预选或更换 Project 时先显式加载其目录选项，
-不依赖 SDK 未透传的 select change 回调。非 Git 项目不显示工作区/分支控件；Git 项目
+不依赖 SDK 未透传的 select change 回调。“加载项目目录选项”按钮及状态/错误说明放在
+底部工作区分组，使用同一 form 的 Project 选择；通过公开 callback value 区分只读加载
+与创建，不凭按钮 name 路由。加载只替换工作区选项并重置为项目目录，不校验旧工作区的
+创建参数；本次提交的 Model/Effort/Speed、上下文和反馈选择随卡片回填，不写持久状态。
+模型目录变化或暂不可用时保留已选值，由实际创建时的原有校验判断，不静默改成默认模型。
+目录查询失败在工作区内提示并保留配置表单，不创建会话；非 Git 或尚未加载时仍保留加载
+入口，便于换项目后查询。非 Git 项目不显示 worktree/分支控件；Git 项目
 默认“项目目录”，可选当前可用受管 worktree 或新建。新建分支配置只对新建生效，复用
 既有目录不 checkout。选项携带 Project alias/revision 与资源 ID，提交再次校验；跨项目
 旧选项拒绝，不接受任意 cwd。保持旧默认目录表单兼容。读取失败不冒充空目录；创建
