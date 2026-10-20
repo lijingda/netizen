@@ -2962,7 +2962,7 @@ class CardRendererTest(unittest.TestCase):
             if item["name"] == "binding_config_v6"
         )
         self.assertEqual(
-            [item["name"] for item in form["elements"] if "name" in item],
+            [item["name"] for item in form_controls(form)],
             [
                 "config_model",
                 "config_effort",
@@ -2976,8 +2976,7 @@ class CardRendererTest(unittest.TestCase):
         )
         fields = {
             item["name"]: item
-            for item in form["elements"]
-            if "name" in item
+            for item in form_controls(form)
         }
         self.assertEqual(
             fields["config_model"]["options"][0]["value"],
@@ -3010,6 +3009,44 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("不会启动任务", str(outbound.card))
         self.assertNotIn("目标会话", str(outbound.card))
         self.assertIn("继承 Codex", str(outbound.card))
+
+    def test_config_grouped_form_roundtrips_in_group_and_private_chats(self) -> None:
+        for allow_context in (True, False):
+            with self.subTest(allow_context=allow_context):
+                card = config_card(
+                    scope=self.scope,
+                    binding_id="11111111-0000-0000-0000-000000000001",
+                    short_id="11111111", project_alias="test",
+                    settings_revision=7, context_revision=11, feedback_revision=13,
+                    turn_settings=BindingTurnSettings("future-model", "low", "default"),
+                    message_context_mode=MentionContextMode.CATCH_UP,
+                    task_feedback=BindingTaskFeedback(True, False, False),
+                    allow_context_mode=allow_context, catalog=self.catalog,
+                )
+                form = _elements(card.card, "form")[0]
+                groups = [[item["name"] for item in form_controls(section)]
+                          for section in form["elements"][:-1]]
+                expected = [["config_model", "config_effort", "config_speed"]]
+                if allow_context:
+                    expected.append(["config_context_mode"])
+                expected.append(["config_task_reactions", "config_progress_card", "config_completion_mention"])
+                self.assertEqual(groups, expected)
+                fields = form_controls(form)
+                values = {item["name"]: item["initial_option"] for item in fields if item["tag"] == "select_static"}
+                decoded = decode_card_form(
+                    scope=self.scope, message_id="om_config", sender_id="ou_user",
+                    tag="button", form_value=values,
+                )
+                self.assertEqual(decoded.name, CardControlName.CONFIGURE_BINDING)
+                self.assertEqual(decoded.binding_id, "11111111-0000-0000-0000-000000000001")
+                self.assertEqual((decoded.expected_settings_revision, decoded.expected_context_revision,
+                                  decoded.feedback_revision), (7, 11, 13))
+                self.assertEqual((decoded.model_id, decoded.effort_id, decoded.service_tier_id),
+                                 ("future-model", "low", "default"))
+                self.assertEqual(decoded.message_context_mode,
+                                 MentionContextMode.CATCH_UP if allow_context else MentionContextMode.CURRENT_ONLY)
+                self.assertEqual((decoded.reaction_pulse_enabled, decoded.progress_card_enabled,
+                                  decoded.completion_mention_enabled), (True, False, False))
 
     def test_configured_success_card_shows_speed_name_not_protocol_value(self) -> None:
         settings = TurnModelSettings(
@@ -3145,8 +3182,7 @@ class CardRendererTest(unittest.TestCase):
         )
         config_fields = {
             item.get("name")
-            for item in config_form["elements"]
-            if item.get("name")
+            for item in form_controls(config_form)
         }
         self.assertEqual(
             config_fields,

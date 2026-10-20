@@ -764,7 +764,7 @@ class AdminWebApplication:
         allowed = {
             "list": {"mode", "kind", "offset", "limit"},
             "view": {"mode", "chat_id"},
-            "options": {"mode", "chat_id"},
+            "options": {"mode", "chat_id", "project", "expected_project_revision"},
         }
         if mode not in allowed:
             raise AdminWebError(400, "invalid_query", "默认配置查询类型无效。")
@@ -773,9 +773,9 @@ class AdminWebApplication:
         for key in allowed[mode] - {"mode"}:
             value = _optional_text_query(context.query, key)
             if value is not None:
-                if key in {"offset", "limit"}:
+                if key in {"offset", "limit", "expected_project_revision"}:
                     if not value.isascii() or not value.isdigit():
-                        raise AdminWebError(400, "invalid_query", "分页参数无效。")
+                        raise AdminWebError(400, "invalid_query", "分页或 Project 版本参数无效。")
                     request[key] = int(value)
                 else:
                     request[key] = value
@@ -817,7 +817,7 @@ class AdminWebApplication:
         grant = self._redeem_parsed(context, payload, "defaults.save", target, expected_resource=target.resource)
         definition = payload.get("definition")
         if not isinstance(definition, dict) or set(definition) - {
-            "kind", "chat_id", "keyword", "project", "session_settings",
+            "kind", "chat_id", "keyword", "project", "expected_project_revision", "workspace", "session_settings",
         }:
             raise AdminWebError(400, "invalid_input", "默认配置字段无效。")
         request: dict[str, object] = {**definition, "mode": "save", "expected_revision": None}

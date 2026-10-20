@@ -164,6 +164,40 @@ class AdminDefaultsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["context_mode_available"])
         self.assertEqual(result["model_catalog_error"], "暂不可用")
 
+    async def test_workspace_choices_and_project_revisions_reach_shared_service(self) -> None:
+        session = await self.login()
+        status, _, result = await self.json_get(
+            "/api/v1/defaults?mode=options&project=test&expected_project_revision=7", session,
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.defaults.calls[-1], {
+            "mode": "options", "project": "test", "expected_project_revision": 7,
+        })
+        for workspace in (
+            {"mode": "project"},
+            {"mode": "existing", "worktree_id": "managed-one"},
+            {"mode": "new"},
+            {"mode": "new", "ref": "refs/heads/main"},
+        ):
+            page = await self.page(session)
+            definition = {
+                "project": "test", "expected_project_revision": 7, "workspace": workspace,
+            }
+            status, _, result = await self.json_post("/api/v1/defaults/save", session, {
+                **fixture._action_payload(page["items"][0]["actions"]["save"]), "definition": definition,
+            })
+            self.assertEqual(status, 200, result)
+            self.assertEqual(self.defaults.calls[-1], {
+                **definition, "mode": "save", "id": "exact-one", "expected_revision": 3,
+            })
+        for value in ("-1", "1.5", "unknown"):
+            before = len(self.defaults.calls)
+            status, _, result = await self.json_get(
+                f"/api/v1/defaults?mode=options&project=test&expected_project_revision={value}", session,
+            )
+            self.assertEqual(status, 400, result)
+            self.assertEqual(len(self.defaults.calls), before)
+
     async def test_chat_labels_share_management_cache_and_preserve_exact_actions(self) -> None:
         store = BindingStore(self.root / "default-chat-labels.sqlite3")
         self.addAsyncCleanup(store.aclose)

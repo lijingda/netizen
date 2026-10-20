@@ -1549,7 +1549,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         form = _elements(card.card, "form")[0]
         context_field = next(
             item
-            for item in form["elements"]
+            for item in form_controls(form)
             if item.get("name") == "config_context_mode"
         )
         values["config_context_mode"] = next(

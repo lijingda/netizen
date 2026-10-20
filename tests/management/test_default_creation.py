@@ -23,22 +23,23 @@ class ConditionalCurrentCreationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_concurrent_conditional_creation_makes_one_binding(self):
-        reached = asyncio.Event()
+        reached, release = asyncio.Event(), asyncio.Event()
         resolved = 0
 
         async def resolve(function, *args, deadline=None, **kwargs):
             nonlocal resolved
             result = function(*args, **kwargs)
             resolved += 1
-            if resolved == 2:
-                reached.set()
+            reached.set()
+            await release.wait()
             return result
 
         with patch.object(self.management._blocking_io, "submit", resolve):
-            async with self.management._scope_coordinator.hold(self.scope.key):
-                tasks = [asyncio.create_task(self.create()) for _ in range(2)]
-                await asyncio.wait_for(reached.wait(), 1)
+            tasks = [asyncio.create_task(self.create()) for _ in range(2)]
+            await asyncio.wait_for(reached.wait(), 1)
+            release.set()
             first, second = await asyncio.wait_for(asyncio.gather(*tasks), 1)
+        self.assertEqual(resolved, 1)
         self.assertEqual(first.binding.id, second.binding.id)
         self.assertEqual(sorted((first.created, second.created)), [False, True])
         self.assertEqual(len(self.store.list_bindings(self.scope.key)), 1)

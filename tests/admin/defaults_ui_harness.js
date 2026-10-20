@@ -11,7 +11,7 @@ const envelope = (mode, id) => ({ csrfToken: `${id}-${mode}-csrf`, actionToken: 
   target: { resource: "default-rule", targetId: id } });
 const rule = (id, kind = "group_name") => ({ id, kind, chat_id: kind === "chat" ? "oc_exact" : null,
   keyword: kind === "group_name" ? `<b>${id}</b>` : null, project: "missing-project",
-  revision: 3, session_settings: structuredClone(settings),
+  revision: 3, session_settings: structuredClone(settings), workspace: { mode: "project" },
   actions: { save: envelope("save", id), delete: envelope("delete", id) } });
 const rules = [rule("first"), rule("second"), rule("third")];
 const exact = rule("exact", "chat");
@@ -33,6 +33,9 @@ let pendingPost = null;
 let pendingList = null;
 let failList = false;
 let pendingAvatar = null;
+let workspaceOptions = {};
+let workspaceErrors = {};
+let pendingWorkspace = {};
 function pauseRequest(gate, result) {
   return new Promise((resolve, reject) => {
     gate.resolve = () => resolve(result);
@@ -60,7 +63,10 @@ async function api(path, options = {}) {
     const result = { models: [{ id: "available-model", display_name: "Available model", default_effort_id: "medium",
       default_service_tier_id: "default", efforts: [{ id: "medium" }], service_tiers: [{ id: "default", name: "Standard" }] }],
     session_settings: { ...settings, turn_settings: null, message_context_mode: "current-only" },
-    model_catalog_error: null, context_mode_available: contextAvailable };
+    model_catalog_error: null, context_mode_available: contextAvailable,
+    workspace_options: workspaceOptions[query.get("project")] || null,
+    workspace_options_error: workspaceErrors[query.get("project")] || null };
+    if (pendingWorkspace[query.get("project")]) return pauseRequest(pendingWorkspace[query.get("project")], result);
     if (pendingOptions) return pauseRequest(pendingOptions, result);
     return result;
   }
@@ -685,4 +691,118 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   defaultsInput("cancel").click();
   assert.equal(defaultsInput("drawer").open, false);
   assert.equal(defaultsEditor, null);
+
+  // Workspace choices are explicit saved intent. Catalog hydration never
+  // replaces a missing resource with the project directory.
+  workspaceOptions = {
+    available: { projectAlias: "available", projectRevision: 7, isGit: true,
+      items: [{ id: "managed-one", cwd: "/worktrees/one", branch: "main" }],
+      branches: [{ ref: "refs/heads/main", name: "main" }] },
+    nongit: { projectAlias: "nongit", projectRevision: 8, isGit: false, items: [], branches: [] },
+  };
+  const existingRule = { ...rules[0], project: "available",
+    workspace: { mode: "existing", worktree_id: "managed-one" } };
+  openDefaultEditor("group_name", existingRule);
+  await flush();
+  assert.equal(defaultsInput("workspace").value, "existing");
+  assert.equal(defaultsInput("worktree").value, "managed-one");
+  assert.equal(defaultsInput("worktree-field").hidden, false);
+  assert.equal(defaultEditorHasChanges(), false);
+  await saveDefault({ preventDefault() {} });
+  assert.deepEqual(posts.at(-1).body.definition.workspace, existingRule.workspace);
+  assert.equal(posts.at(-1).body.definition.expected_project_revision, 7);
+
+  const unavailableRule = { ...existingRule, workspace: { mode: "existing", worktree_id: "deleted-worktree" } };
+  openDefaultEditor("group_name", unavailableRule);
+  await flush();
+  assert.deepEqual(defaultsEditor.workspace, unavailableRule.workspace);
+  assert.equal(defaultsInput("worktree").value, "deleted-worktree");
+  assert(defaultsInput("workspace-help").textContent.includes("不可用"));
+  assert(defaultsInput("save").disabled);
+  assert.equal(defaultEditorHasChanges(), false);
+  const beforeUnavailableSave = posts.length;
+  await saveDefault({ preventDefault() {} });
+  assert.equal(posts.length, beforeUnavailableSave);
+  defaultsInput("worktree").value = "managed-one";
+  defaultsInput("worktree").dispatch("change");
+  assert.equal(defaultsInput("save").disabled, false);
+  assert.equal(defaultEditorHasChanges(), true);
+  defaultsInput("workspace").value = "project";
+  defaultsInput("workspace").dispatch("change");
+  await saveDefault({ preventDefault() {} });
+  assert.deepEqual(posts.at(-1).body.definition.workspace, { mode: "project" });
+
+  openDefaultEditor("group_name", existingRule);
+  await flush();
+  defaultsInput("workspace").value = "new";
+  defaultsInput("workspace").dispatch("change");
+  assert.equal(defaultsInput("workspace-ref-field").hidden, false);
+  assert.equal(defaultsInput("worktree-field").hidden, true);
+  assert.equal(defaultsInput("workspace-refs").querySelector("option").value, "refs/heads/main");
+  assert.equal(defaultEditorHasChanges(), true);
+  await saveDefault({ preventDefault() {} });
+  assert.deepEqual(posts.at(-1).body.definition.workspace, { mode: "new" });
+  openDefaultEditor("group_name", { ...existingRule, workspace: { mode: "new", ref: "refs/heads/main" } });
+  await flush();
+  assert.equal(defaultsInput("workspace-ref").value, "refs/heads/main");
+  assert.equal(defaultEditorHasChanges(), false);
+  defaultsInput("workspace-ref").value = "  refs/tags/v2  ";
+  defaultsInput("workspace-ref").dispatch("input");
+  await saveDefault({ preventDefault() {} });
+  assert.deepEqual(posts.at(-1).body.definition.workspace, { mode: "new", ref: "refs/tags/v2" });
+
+  openDefaultEditor("group_name", existingRule);
+  await flush();
+  defaultsInput("project").value = "nongit";
+  defaultsInput("project").dispatch("change");
+  await flush();
+  assert.deepEqual(defaultsEditor.workspace, { mode: "project" });
+  assert(defaultsInput("workspace").querySelectorAll("option").filter((item) => item.value !== "project")
+    .every((item) => item.disabled));
+  assert(defaultsInput("workspace-help").textContent.includes("不是 Git 仓库"));
+  assert.equal(defaultsInput("save").disabled, false);
+  assert.equal(defaultEditorHasChanges(), true);
+  closeDefaultEditor();
+
+  // Project changes, chat inheritance and delayed results all use the same
+  // options request identity; old reads cannot restore a previous workspace.
+  openDefaultEditor("group_name", existingRule);
+  await flush();
+  defaultsInput("project").value = "available";
+  const oldWorkspace = pendingWorkspace.available = {};
+  const oldWorkspaceLoad = changeDefaultProject();
+  defaultsInput("project").value = "nongit";
+  const newWorkspace = pendingWorkspace.nongit = {};
+  const newWorkspaceLoad = changeDefaultProject();
+  oldWorkspace.resolve();
+  await oldWorkspaceLoad;
+  assert(defaultsInput("fields").disabled);
+  newWorkspace.resolve();
+  await newWorkspaceLoad;
+  assert.equal(defaultsEditor.workspaceOptions.projectAlias, "nongit");
+  assert.deepEqual(defaultsEditor.workspace, { mode: "project" });
+  pendingWorkspace = {};
+  closeDefaultEditor();
+  viewEffective = existingRule;
+  openDefaultEditor("chat");
+  await flush();
+  defaultsInput("chat").value = "oc_inherits_workspace";
+  await loadDefaultOptions(true);
+  assert.deepEqual(defaultsEditor.workspace, existingRule.workspace);
+  assert.equal(defaultsInput("worktree").value, "managed-one");
+  closeDefaultEditor();
+
+  workspaceErrors.available = "Project 已删除或不可用";
+  delete workspaceOptions.available;
+  openDefaultEditor("group_name", existingRule);
+  await flush();
+  assert.deepEqual(defaultsEditor.workspace, existingRule.workspace);
+  assert(defaultsInput("workspace-help").textContent.includes("Project 已删除"));
+  assert(defaultsInput("save").disabled);
+  closeDefaultEditor();
+
+  groupItems = [existingRule, { ...rules[1], workspace: { mode: "new", ref: "release" } }];
+  await loadDefaults();
+  assert(defaultsInput("rules-body").textContent.includes("指定 Worktree：managed-one"));
+  assert(defaultsInput("rules-body").textContent.includes("每个新会话创建 Worktree · release"));
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -2830,13 +2830,28 @@ class ChannelApplication:
             if settings.message_context_mode is MentionContextMode.CATCH_UP:
                 self._require_catch_up_message_scope(message, prompt.scope)
                 anchor = await self._resolve_context_anchor(prompt.scope, prompt.source_id)
+            workspace = rule.workspace
             created = await self._management.create_current_binding(
                 scope=prompt.scope, creator_id=prompt.sender_id, project_alias=rule.project,
                 turn_settings=settings.turn_settings, task_feedback=settings.task_feedback,
                 message_context_mode=settings.message_context_mode, context_anchor=anchor,
                 only_if_empty=True,
+                worktree_id=workspace.worktree_id,
+                worktree_create=(
+                    {"mode": "detached", "ref": workspace.ref}
+                    if workspace.mode == "new" else None
+                ),
             )
-        except (DefaultConfigurationError, ProjectError, ModelCatalogError, MessageHistoryError) as error:
+        except (DefaultConfigurationError, ProjectError, ModelCatalogError, MessageHistoryError, WorktreeError) as error:
+            if isinstance(error, WorktreeError) and (
+                error.details or error.code in {"outcome_unknown", "creation_interrupted"}
+            ):
+                # A retained resource or uncertain handoff must remain visible,
+                # even when a manual /new has established another current.
+                raise DefaultConfigurationError(
+                    f"{error} 本条任务尚未执行，请核查后重新发送。",
+                    code=error.code,
+                ) from error
             # A concurrent manual creation wins even if the default could not be
             # prepared. Never present an existing Binding as missing, or replay
             # an input after a native operation with uncertain side effects.
@@ -2845,11 +2860,21 @@ class ChannelApplication:
                 return current, None
             await self._reply(message, "默认会话配置不可用：" + str(error))
             return None, None
+        if created.retained_worktree_cwd is not None:
+            try:
+                await self._reply(
+                    message,
+                    f"已有会话先完成创建，将沿用该会话；本次新建的工作区 "
+                    f"{created.retained_worktree_cwd} 已保留，可在 Admin 管理或通过 /new 复用。",
+                )
+            except Exception:
+                logger.warning("default creation retained-worktree notice failed", exc_info=True)
         return created.binding, anchor if created.created else None
 
     async def _defaults_card(
         self, scope: FeishuScope, *, notice: str | None = None,
         notice_is_error: bool = False,
+        draft: Mapping[str, Any] | None = None,
     ) -> OutboundCard:
         service = self._management.defaults
         assert service is not None
@@ -2862,9 +2887,24 @@ class ChannelApplication:
             # Existing defaults must remain inspectable/deletable even when
             # the native model catalog is unavailable.
             pass
+        effective = view["exact"] if view["exact"] is not None else view["effective"]
+        project_alias = draft["project"] if draft is not None else effective["project"] if effective else None
+        workspace_options = None
+        workspace_error = None
+        worktrees = self._management.worktrees
+        if worktrees is not None and project_alias is not None:
+            try:
+                workspace_options = await worktrees.options(
+                    project_alias=project_alias,
+                    expected_project_revision=draft["expected_project_revision"] if draft is not None else None,
+                )
+            except WorktreeError as error:
+                workspace_error = str(error) + " 原工作区策略已保留，请重新加载或选择有效策略。"
         return defaults_card(
             scope, view, self._projects.list(), catalog,
             notice=notice, notice_is_error=notice_is_error,
+            workspace_options=workspace_options, workspace_error=workspace_error,
+            allow_workspace_selection=worktrees is not None, draft=draft,
         )
 
     async def _handle_defaults_card_action(self, event: Any) -> None:
@@ -2874,6 +2914,7 @@ class ChannelApplication:
         scope = None
         notice = None
         failed = False
+        draft = None
         try:
             operator = getattr(getattr(event, "operator", None), "open_id", None)
             if getattr(action, "tag", None) != "button" or not message_id or not chat_id or not operator:
@@ -2891,11 +2932,14 @@ class ChannelApplication:
             )
             service = self._management.defaults
             assert service is not None
-            await service.manage(request)
-            notice = (
-                "已删除当前聊天的精确默认配置；群名规则仍可生效。"
-                if request["mode"] == "delete" else "已保存当前聊天的默认会话配置。"
-            )
+            if request["mode"] == "load_workspace":
+                draft = request
+            else:
+                await service.manage(request)
+                notice = (
+                    "已删除当前聊天的精确默认配置；群名规则仍可生效。"
+                    if request["mode"] == "delete" else "已保存当前聊天的默认会话配置。"
+                )
         except (CardActionError, DefaultConfigurationError, ProjectError, ModelCatalogError) as error:
             notice, failed = str(error), True
         except Exception as error:
@@ -2906,7 +2950,7 @@ class ChannelApplication:
                 await self._safe_update_card(message_id, error_card(notice or "默认会话配置操作失败。"))
             return
         try:
-            card = await self._defaults_card(scope, notice=notice, notice_is_error=failed)
+            card = await self._defaults_card(scope, notice=notice, notice_is_error=failed, draft=draft)
             if await self._safe_update_card(message_id, card):
                 return
         except Exception:

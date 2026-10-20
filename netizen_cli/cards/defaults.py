@@ -16,12 +16,20 @@ from ..model_settings import ModelCatalog
 from ..projects import Project
 from ..session_settings import SessionSettings
 from .callbacks import CardActionError, _builder, _notice, _plain, _plain_text
-from .controls import decode_session_settings_form, session_settings_form_elements
+from .controls import (
+    _form_hint,
+    _form_label,
+    _form_section,
+    _form_submit_button,
+    decode_session_settings_form,
+    session_settings_form_elements,
+)
 
 
 _VERSION = 1
 _FORM_PREFIX = "defaults_project_v1__"
 _SESSION_PREFIX = "defaults_session"
+_WORKSPACE_FIELDS = {"defaults_workspace", "defaults_worktree_ref"}
 _STATE_FIELDS = {"v", "scope", "chat_kind", "id", "expected_revision"}
 _PROJECT_ALIAS = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
@@ -74,6 +82,11 @@ def defaults_card(
     catalog: ModelCatalog | None,
     notice: str | None = None,
     notice_is_error: bool = False,
+    *,
+    workspace_options: Mapping[str, Any] | None = None,
+    workspace_error: str | None = None,
+    allow_workspace_selection: bool = False,
+    draft: Mapping[str, Any] | None = None,
 ) -> OutboundCard:
     """One editable form for the enclosing chat, including from topic scopes."""
     exact = view.get("exact")
@@ -83,6 +96,8 @@ def defaults_card(
         "id": exact["id"] if exact is not None else None,
         "expected_revision": exact["revision"] if exact is not None else None,
     }
+    if draft is not None:
+        state.update(id=draft.get("id"), expected_revision=draft["expected_revision"])
     _validate_state(scope, state)
     if effective is None:
         settings = SessionSettings.new_defaults(catalog)
@@ -91,6 +106,11 @@ def defaults_card(
         raw_settings = effective["session_settings"]
         settings = raw_settings if isinstance(raw_settings, SessionSettings) else SessionSettings.from_dict(raw_settings)
         selected_project = effective["project"]
+    workspace = effective["workspace"] if effective is not None else {"mode": "project"}
+    if draft is not None:
+        settings = SessionSettings.from_dict(draft["session_settings"])
+        selected_project = draft["project"]
+        workspace = draft["workspace"]
 
     builder = _builder("默认会话配置", "当前聊天")
     kind_label = "单聊" if state["chat_kind"] == "p2p" else "群聊"
@@ -130,29 +150,142 @@ def defaults_card(
     # transport state, not a persisted card session or a management revision.
     project_select: dict[str, Any] = {
         "tag": "select_static", "name": _FORM_PREFIX + uuid4().hex,
-        "required": True, "placeholder": _plain_text("选择 Project"),
+        "required": True, "placeholder": _plain_text("选择项目"),
         "options": project_options,
     }
     if selected_value is not None:
         project_select["initial_option"] = selected_value
-    builder.raw({"tag": "form", "name": "defaults_v1", "elements": [
-        _plain("Project"), project_select,
-        *session_settings_form_elements(
-            prefix=_SESSION_PREFIX, settings=settings, catalog=catalog,
-            allow_context_mode=state["chat_kind"] == "group",
-        ),
-        {"tag": "button", "name": "defaults_save", "text": _plain_text("保存默认配置"),
-         "type": "primary_filled", "width": "fill", "form_action_type": "submit"},
+    settings_elements = session_settings_form_elements(
+        prefix=_SESSION_PREFIX, settings=settings, catalog=catalog,
+        allow_context_mode=state["chat_kind"] == "group",
+        grouped=True,
+        settings_draft=draft["settings_draft"] if draft is not None else None,
+    )
+    workspace_elements: list[dict[str, Any]] = []
+    if allow_workspace_selection or workspace["mode"] != "project":
+        workspace_elements = [_form_section("工作区", _workspace_elements(
+            selected_project, None if selected_value is None else _decoded(selected_value)["project_revision"],
+            workspace, options=workspace_options, error=workspace_error,
+        ))]
+    builder.raw({"tag": "form", "name": "defaults_v1", "vertical_spacing": "12px", "elements": [
+        _form_section("项目", [project_select]),
+        *settings_elements, *workspace_elements,
+        _form_submit_button(name="defaults_save", label="保存默认配置"),
     ]})
     if exact is not None:
+        builder.divider()
         builder.raw({
             "tag": "button", "text": _plain_text("删除默认配置"), "type": "danger", "width": "fill",
             "behaviors": [{"type": "callback", "value": {
                 "kind": "netizen_defaults", "action": "delete", "nonce": uuid4().hex, **state,
             }}],
         })
-        builder.raw(_plain("删除后仍可能使用匹配的群名规则；已有会话不受影响。"))
+        builder.raw(_form_hint("删除后仍可能使用匹配的群名规则；已有会话不受影响。"))
     return OutboundCard(card=builder.to_dict())
+
+
+def _workspace_elements(
+    project: str | None, project_revision: int | None, workspace: Mapping[str, Any],
+    *, options: Mapping[str, Any] | None, error: str | None,
+) -> list[dict[str, Any]]:
+    elements = [
+        _form_hint("使用上方项目加载工作区选项；切换项目后请重新加载。保存只记录策略，不会创建工作区。"),
+        {"tag": "button", "name": "defaults_workspace_load", "text": _plain_text("加载项目目录选项"),
+         "type": "default", "width": "fill", "form_action_type": "submit",
+         "behaviors": [{"type": "callback", "value": {
+             "kind": "netizen_defaults", "action": "load_workspace", "v": _VERSION, "nonce": uuid4().hex,
+         }}]},
+    ]
+    if error:
+        elements.append(_notice(error, error=True))
+    if project is None:
+        return elements
+    if options is not None:
+        elements.append(_form_hint(
+            f"已加载项目「{options['projectAlias']}」的工作区。"
+            if options.get("isGit") is True else "该项目不是 Git 仓库，仅支持项目目录。"
+        ))
+    # A saved choice must remain visible even when the live directory query
+    # fails or the selected resource is no longer offered by WorktreeService.
+    identity = {
+        "project": options["projectAlias"] if options is not None else project,
+        "project_revision": options["projectRevision"] if options is not None else project_revision,
+    }
+    choices = [("项目目录", {"mode": "project"})]
+    if options is not None and options.get("isGit") is True:
+        choices.append(("每个新会话新建 Worktree（Detached）", {"mode": "new"}))
+        for item in options.get("items", ()):
+            if item.get("state") == "ready" and item.get("available") is True:
+                choices.append((
+                    f"{item['id']} · {item.get('branch') or 'detached'} · {item['cwd']}",
+                    {"mode": "existing", "worktree_id": item["id"]},
+                ))
+    selection = {key: value for key, value in workspace.items() if key != "ref"}
+    if not any(choice == selection for _, choice in choices):
+        label = (
+            f"{workspace['worktree_id']} · 不可用（保留原配置）"
+            if workspace["mode"] == "existing" else "每个新会话新建 Worktree（保留原配置）"
+        )
+        choices.append((label, selection))
+        elements.append(_notice("原工作区策略暂不可用，已保留；请选择有效策略后保存，或删除默认配置。", error=True))
+    elements.append(_form_label("工作区策略"))
+    elements.append({
+        "tag": "select_static", "name": "defaults_workspace", "required": True,
+        "placeholder": _plain_text("选择工作区策略"),
+        "options": [{"text": _plain_text(label), "value": _encoded({**identity, **choice})}
+                    for label, choice in choices],
+        "initial_option": _encoded({**identity, **selection}),
+    })
+    if any(choice["mode"] == "new" for _, choice in choices):
+        refs = [("创建会话时的 Project HEAD", "HEAD")]
+        if options is not None:
+            refs.extend(
+                (("远端 · " if branch.get("remote") else "本地 · ") + branch["name"], branch["ref"])
+                for branch in options.get("branches", ())
+            )
+        ref = workspace.get("ref") or "HEAD"
+        if not any(value == ref for _, value in refs):
+            refs.append((str(ref) + " · 保留原配置", ref))
+        elements.extend([
+            _form_label("新建起点（仅新建策略生效）"),
+            {"tag": "select_static", "name": "defaults_worktree_ref",
+             "placeholder": _plain_text("选择新建起点"),
+             "options": [{"text": _plain_text(label), "value": value} for label, value in refs],
+             "initial_option": ref},
+            _form_hint("每次创建独立 Detached 工作区；只检出提交内容，不复制未提交改动或初始化环境。"),
+        ])
+    elements.append(_form_hint("指定已有 Worktree 会共享文件；资源失效时自动创建失败，不切回项目目录。已有会话不受默认配置修改影响。"))
+    return elements
+
+
+def _decode_workspace(fields: Mapping[str, Any], project: str, revision: int | None) -> dict[str, str]:
+    if not fields:
+        return {"mode": "project"}
+    if "defaults_workspace" not in fields:
+        raise CardActionError("工作区表单不完整，请重新加载项目目录选项。")
+    selected = _decoded(fields["defaults_workspace"])
+    mode = selected.get("mode")
+    expected_fields = {"project", "project_revision", "mode"}
+    if mode == "existing":
+        expected_fields.add("worktree_id")
+    if not isinstance(mode, str) or mode not in {"project", "existing", "new"} or set(selected) != expected_fields:
+        raise CardActionError("默认工作区选项无效，请重新加载项目目录选项。")
+    if (selected["project"] != project or selected["project_revision"] != revision
+            or (selected["project_revision"] is not None and type(selected["project_revision"]) is not int)):
+        raise CardActionError("工作区选项不属于当前 Project 或版本已变化，请重新加载项目目录选项。")
+    result = {"mode": mode}
+    if mode == "existing":
+        worktree_id = selected["worktree_id"]
+        if not isinstance(worktree_id, str) or _RECORD_ID.fullmatch(worktree_id) is None:
+            raise CardActionError("默认工作区 ID 无效，请重新加载项目目录选项。")
+        result["worktree_id"] = worktree_id
+    elif mode == "new":
+        ref = fields.get("defaults_worktree_ref", "HEAD")
+        if not isinstance(ref, str) or len(ref) > 256 or any(ord(character) < 32 for character in ref):
+            raise CardActionError("新建工作区起点无效，请重新选择。")
+        if ref.strip() and ref != "HEAD":
+            result["ref"] = ref.strip()
+    return result
 
 
 def is_defaults_card_action(value: Any, form: Any = None) -> bool:
@@ -175,7 +308,14 @@ def _request(scope: FeishuScope, state: Mapping[str, Any], mode: str) -> dict[st
 def decode_defaults_action(scope: FeishuScope, value: Any, form: Any = None) -> dict[str, Any]:
     """Decode strict form values; the caller verifies the real card location."""
     if form is not None and form != {}:
-        if value is not None and value != {}:
+        load_workspace = value is not None and value != {}
+        if load_workspace and (
+            not isinstance(value, Mapping)
+            or set(value) != {"kind", "action", "v", "nonce"}
+            or value.get("kind") != "netizen_defaults" or value.get("action") != "load_workspace"
+            or type(value.get("v")) is not int or value["v"] != _VERSION
+            or not isinstance(value.get("nonce"), str) or _NONCE.fullmatch(value["nonce"]) is None
+        ):
             raise CardActionError("默认会话配置表单混入其他操作。")
         if not isinstance(form, Mapping):
             raise CardActionError("默认会话配置表单无效。")
@@ -193,15 +333,27 @@ def decode_defaults_action(scope: FeishuScope, value: Any, form: Any = None) -> 
         if revision is not None and (type(revision) is not int or revision < 1):
             raise CardActionError("默认会话配置 Project 版本无效。")
         fields = {key: item for key, item in form.items() if key != names[0]}
+        workspace_fields = {key: fields.pop(key) for key in _WORKSPACE_FIELDS if key in fields}
         if state["chat_kind"] == "p2p" and f"{_SESSION_PREFIX}_context_mode" in fields:
             raise CardActionError("单聊不支持补充历史上下文。")
         if state["chat_kind"] == "group" and f"{_SESSION_PREFIX}_context_mode" not in fields:
             raise CardActionError("默认会话配置表单缺少上下文设置。")
         settings = decode_session_settings_form(fields, prefix=_SESSION_PREFIX)
-        return {
-            **_request(scope, state, "save"), "project": project,
+        workspace = {"mode": "project"}
+        try:
+            workspace = _decode_workspace(workspace_fields, project, revision)
+        except CardActionError:
+            if not load_workspace:
+                raise
+        request = {
+            **_request(scope, state, "load_workspace" if load_workspace else "save"), "project": project,
             "expected_project_revision": revision, "session_settings": settings.to_dict(),
         }
+        if workspace_fields or load_workspace:
+            request["workspace"] = workspace
+        if load_workspace:
+            request["settings_draft"] = fields
+        return request
     if not isinstance(value, Mapping) or set(value) != _STATE_FIELDS | {"kind", "action", "nonce"}:
         raise CardActionError("默认会话配置动作无效，请重新发送 /defaults。")
     if (value["kind"] != "netizen_defaults" or value["action"] != "delete"

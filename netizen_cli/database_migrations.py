@@ -17,6 +17,7 @@ from typing import TypedDict
 from .bindings import SCHEMA_VERSION
 from .migrations.v14 import validate as validate_v14
 from .migrations.v15 import apply as apply_v15, validate as validate_v15
+from .migrations.v16 import apply as apply_v16, validate as validate_v16
 
 
 MIN_SUPPORTED_SCHEMA_VERSION = 14
@@ -32,7 +33,10 @@ class Migration:
 
 
 # Published adjacent steps and their validators are immutable.
-MIGRATIONS: tuple[Migration, ...] = (Migration(14, 15, apply_v15, validate_v15),)
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration(14, 15, apply_v15, validate_v15),
+    Migration(15, 16, apply_v16, validate_v16),
+)
 
 
 class MigrationStep(TypedDict):

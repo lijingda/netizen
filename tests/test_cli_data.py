@@ -75,7 +75,7 @@ class CliDataTest(unittest.TestCase):
         for _ in range(2):
             with instance_lifetime_lock(self.root) as descriptor:
                 plan = prepare_instance(self.root, lifetime_descriptor=descriptor)
-            self.assertEqual(plan, {"source_version": 15, "target_version": 15, "steps": []})
+            self.assertEqual(plan, {"source_version": 16, "target_version": 16, "steps": []})
         self.assertEqual(self.database.read_bytes(), before)
         self.assertFalse((self.root / "state" / "migration-backups").exists())
 
@@ -135,7 +135,7 @@ class CliDataTest(unittest.TestCase):
             with self.assertRaises(StartupRejected):
                 prepare_instance(self.root, lifetime_descriptor=descriptor)
             initialize_instance_data(self.root, lifetime_descriptor=descriptor)
-        self.assertEqual(self.version(), 15)
+        self.assertEqual(self.version(), 16)
 
     def test_setup_sqlite_failure_is_reported_and_partial_database_is_preserved(self) -> None:
         with instance_lifetime_lock(self.root) as descriptor:
@@ -196,11 +196,13 @@ class CliDataTest(unittest.TestCase):
     def test_supported_old_schema_validates_read_only_then_start_migrates_once(self) -> None:
         self.initialize_v14()
         before = self.database.read_bytes()
-        self.assertEqual(validate_prepared_instance(self.root)["steps"], [{"from_version": 14, "to_version": 15}])
+        self.assertEqual(validate_prepared_instance(self.root)["steps"], [
+            {"from_version": 14, "to_version": 15}, {"from_version": 15, "to_version": 16},
+        ])
         self.assertEqual(self.database.read_bytes(), before)
         with instance_lifetime_lock(self.root) as descriptor:
             prepare_instance(self.root, lifetime_descriptor=descriptor)
-        self.assertEqual(self.version(), 15)
+        self.assertEqual(self.version(), 16)
         backups = list((self.root / "state" / "migration-backups").glob("*/channel.sqlite3"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(self.version(backups[0]), 14)
@@ -235,7 +237,7 @@ class CliDataTest(unittest.TestCase):
             with instance_lifetime_lock(self.root) as descriptor:
                 prepare_instance(self.root, lifetime_descriptor=descriptor)
                 raise RuntimeError("runtime failed")
-        self.assertEqual(self.version(), 15)
+        self.assertEqual(self.version(), 16)
 
     def test_every_mutation_requires_exact_held_lifetime_lock(self) -> None:
         self.initialize()
@@ -337,7 +339,7 @@ class CliDataTest(unittest.TestCase):
         self.config.write_text(f"instance:\n  projectRoot: {self.parent / 'projects'}\n")
         self.config.chmod(0o600)
         self.initialize()
-        self.assertEqual(self.version(), 15)
+        self.assertEqual(self.version(), 16)
 
     def test_purge_rejects_changed_confirmation_inventory(self) -> None:
         self.initialize()

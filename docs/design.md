@@ -118,7 +118,7 @@ Project 不限制工具读取该账号可访问的其他文件，Codex 用户状
 ### 受管 Worktree 与实际目录
 
 [ADR 0085](adr/0085-manage-worktrees-independently-of-sessions.md) 定义独立资源与共享
-语义。Admin、飞书 `/new` 和 Agent 工具共用 `WorktreeService` 与窄 Git 后端，只管理
+语义。Admin、飞书 `/new`、默认会话自动创建和 Agent 工具共用 `WorktreeService` 与窄 Git 后端，只管理
 本实例通过该服务创建并登记的资源；不会收编 shell Git、Codex App/CLI 或其他实例的工作区，
 也不写 Codex 私有索引或宣称生命周期互通。Worktree 不属于某个会话私有，删除或归档
 单个会话不会顺带回收目录。
@@ -313,23 +313,40 @@ handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 inter
 2. 同 App 内按已保存顺序逐条判断的群名规则，首条包含关键词的规则命中即停止。
    关键词不得为空，使用 `casefold()` 忽略大小写，不支持正则或类别兜底；仅群聊适用。
 
-一次采用命中规则的完整配置，不跨规则拼字段。配置保存 Project alias、可选
-Model/Effort/Speed、三个 Task Feedback 开关与 Mention Context Mode；Project 必填，其余
-沿用现有创建默认值及 inherit Codex 语义，P2P 固定 current-only。它不是 effective Codex
-配置，也不含 Prompt 或业务流程。创建时复制到 Binding，后续修改或删除默认值、修改
+一次采用命中规则的完整配置，不跨规则拼字段。配置保存 Project alias、独立工作区策略、
+可选 Model/Effort/Speed、三个 Task Feedback 开关与 Mention Context Mode；Project 必填，
+会话设置沿用现有创建默认值及 inherit Codex 语义，P2P 固定 current-only。它不是 effective Codex
+配置，也不含 Prompt 或业务流程。创建意图应用于新 Binding，后续修改或删除默认值、修改
 规则顺序或群名，都不改变已创建的 Binding，包括尚未物化的 Lazy Binding。
 
+工作区策略独立于 SessionSettings：`project` 使用项目目录，为现有配置的兼容默认；
+`existing` 保存 exact 受管 Worktree ID，实际使用时复用 `WorktreeService.select()` 校验；
+`new` 为每个自动新建 Binding 创建一个 detached 工作区，可选 `ref` 为空时使用创建当时
+Project HEAD。只检出提交内容，不复制未提交文件，不提供固定分支名或命名模板。保存
+默认配置不创建资源；实际创建复用共享 Worktree 服务及其 Project/删除准入。已有 Binding
+不重跑策略；显式 `/new` 不读取默认值，新话题定时计划仍不增加工作区配置。
+
 无匹配则走原有无会话引导。匹配配置不可用（例如 Project 不存在、停用，或模型设置
-失效）时，先明确说明默认配置不可用，再走同一引导；不继续尝试下一条规则。需要群名
+失效，指定 Worktree 已删除、目录缺失/替换或状态无法确认）时，先明确说明默认配置
+不可用，再走同一引导；不继续尝试下一条规则、不切回项目目录、不自动重建指定资源。需要群名
 但查询失败时也明确说明无法判定，不冒充未命中。Project 删除不联动清理或禁用默认值，
-不把它们加入 Project 删除清单，不新增身份墓碑；后续使用仍按现有 Registry 校验。
+Worktree 删除也不清理引用规则；默认规则不参与两者的删除级联。Project 仍按 alias 解析，
+允许同名重新登记后恢复使用；已有 Worktree 必须同时匹配 exact ID 与当前 Project 登记代次，
+不能因同名 Project 或同路径新资源出现而恢复旧引用。`new` 不引用上一次创建的工作区，
+此前资源被删不使策略本身失效。修改或删除默认配置不会回收工作区。
 
 自动创建组装现有创建参数，复用同一个 management service；不伪造 `/new` 消息、卡片
-或回调。在现有 Scope 锁内重读 pointer，仅为空才创建并设为当前，否则返回已有 Binding。
-消息随后固定使用返回的 Binding 并进入普通输入准备和 Runtime admission；不引入串行
-消费或排队。两条并发消息最多自动创建一个 Binding，但仍可能由现有准入拒绝其中一条，
-不保证触发创建者先提交。手动 `/new` 仍可随后创建另一 Binding 并切换；准备期间目标
-已切换的输入按原规则拒绝，不改投新目标。
+或回调。在现有 Scope 锁内重读 pointer，已有时返回对应 Binding；缺失时同 Scope 的
+并发首消息共享一次创建结果。Git 准备在锁外执行，提交 Binding 前回到 Scope 锁内复核
+pointer 和资源准入；不让慢 Git 操作长期占有 Scope 锁，也不覆盖手动 `/new` 已提交的会话。
+消息随后固定使用返回的 Binding 并进入普通输入准备和 Runtime admission；共享创建结果
+不保存 Prompt，不引入串行消费或排队。两条并发消息最多自动创建一个 Binding，`new`
+策略也不重复创建工作区，但仍可能由现有准入拒绝其中一条，不保证触发创建者先提交。
+手动 `/new` 仍可创建另一 Binding 并切换；准备期间目标已切换的输入按原规则拒绝，
+不改投新目标。
+若手动 `/new` 在 Git 创建期间先提交，则自动创建返回该已有 Binding，创建者得到未采用
+工作区的保留提示；等待共享结果的其他消息不重复发送此提示。消息取得目标后才发生的
+切换继续由原准入拒绝。保留提示发送失败不阻断已确认目标的正常输入。
 
 catch-up 自动创建以触发消息的真实 marker 初始化边界，这条消息同时作为首轮请求；
 初始化不等于输入已经接受，不能丢弃或重复提交首条请求。首轮仍准备当前正文、引用和
@@ -337,6 +354,10 @@ catch-up 自动创建以触发消息的真实 marker 初始化边界，这条消
 会话创建成功后的准备、准入或原生执行失败遵循原有失败语义，保留该 Binding，不回退成
 “未创建”或自动重放。状态未知的已有 Binding 不视为缺失；归档或删除明确清空 pointer
 后，下一条普通输入可再次按默认配置创建新 Binding。
+工作区创建与 Binding 创建仍是两步；已创建工作区在 Binding 失败后保留并反馈已知结果，
+可通过 Admin 管理、之后的 `/new` 复用。未知创建结果沿用 Worktree 服务的保守处理，
+不自动重试、不自动删目录。带资源副作用的失败或未知交接不因当前已有另一个会话而
+被吞掉，本条消息先反馈已知结果且不提交任务。
 
 ### 原生压缩
 
@@ -1783,10 +1804,12 @@ MCP 连接；来源只能是可信 `_meta.threadId` 映射的普通 Binding，Pr
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v15 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v16 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
 `schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
 v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
+v16 为 `session_defaults` 增加独立的 `workspace_json`，保存 `project`、带 exact
+`worktree_id` 的 `existing` 或带可选 `ref` 的 `new` 策略；旧规则迁移为 `project`。
 受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
 创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
 不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
@@ -1805,11 +1828,11 @@ ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Projec
 阻止 YAML bootstrap 复活；正常查询隐藏墓碑，显式重新登记继续递增 alias 的 revision。
 `session_defaults` 仅保存 App 隔离的精确聊天／群名匹配条件、创建配置意图和 revision，
 `session_defaults_order` 保存同 App 群名规则的顺序元数据；不保存消息、聊天历史、有效
-Codex 配置或卡片 session，也不与 Project 删除级联。
+Codex 配置或卡片 session，也不与 Project 或 Worktree 删除级联。
 Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
 每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
-数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15；基线仍为 v14，沿用
+数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16；基线仍为 v14，沿用
 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
 历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
 在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
@@ -2306,7 +2329,10 @@ Sessions 列表和配置表单共用完整 `sessionSettings` 投影，不并列�
 按 [ADR 0073](adr/0073-create-sessions-from-chat-defaults.md)，Admin 可逐条管理精确聊天
 默认配置，以及创建、修改、删除和调整群名规则顺序。它与飞书 `/defaults` 共用同一
 management service 和持久数据，修改沿用 revision 及 action/CSRF 检查；不支持精确配置
-批量设置、类别默认值或禁用自动创建的覆盖项。保存默认值只修改配置，不创建 Binding，
+批量设置、类别默认值或禁用自动创建的覆盖项。工作区策略支持项目目录、指定已有受管
+Worktree、每个新会话创建 detached Worktree，后者可选起点 revision，留空使用创建时 HEAD。
+工作区选择复用共享服务，失效的已存选择继续显示其身份及原因，须明确重新选择。
+保存默认值只修改配置，不创建 Binding 或 Worktree，
 也不从 Admin 发送即时 Prompt。群聊 catch-up 默认值在真实消息触发创建时才取得初始边界。
 默认会话配置页以“指定聊天”和“群名匹配”两个二级 Tab 分别展示列表，前者包含单聊与
 群聊精确配置，名称解析复用现有 best-effort 聊天展示，失败时显示 chat ID。两类列表均不
@@ -2406,10 +2432,14 @@ UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改�
 
 ### 新建与配置表单
 
-`/new` 创建表单按项目、模型配置、消息上下文、任务反馈、工作区顺序展开分组，
-组标题加粗；模型整行、Effort/Speed 并排，反馈说明与选择并排。该布局调整仅改变展示，
-不改变现有控件的选项值、默认值、提交字段或配置语义，也不调整 `/config`、`/defaults`。
-P2P 的消息上下文和非 Git 项目的 worktree/分支选择继续按既有条件不显示。
+`/new`、`/defaults`、`/config` 共享分组和列布局：模型配置、消息上下文、任务反馈
+保持相同顺序，组标题加粗；模型整行、Effort/Speed 并排，反馈说明与选择并排。
+`/new` 与 `/defaults` 在公共配置前放项目选择，之后放各自的工作区选项或策略；
+`/config` 在卡头标明当前会话与项目，不提供项目或工作区切换。创建／保存按钮位于表单
+底部，默认配置的删除操作与表单分开。公共布局只负责展示，各入口仍维护自己的选项值、
+默认值、提交字段、身份及 revision 校验；工作区加载的草稿先回填再分组，模型目录失效
+时保留各入口原有行为。P2P 的消息上下文和非 Git 项目的 worktree/分支选择继续按既有
+条件不显示。定时任务表单继续使用共享字段生成器的平铺布局。
 
 `/new` 卡片只保留一个 form 和一个 Project 下拉框，包含全部 enabled Projects，以及
 Model、Effort、Speed、Reaction Pulse、Progress Card 和 Completion Mention；群聊和群话题再增加 Mention
@@ -2444,7 +2474,10 @@ session、无额外原生 Thread 或 Prompt。工作区细则见 ADR 0085。
 Binding，在普通话题中操作也作用于所属聊天。表单明确显示作用范围与配置来源：有精确
 配置时回填它；没有精确配置但命中群名规则时回填该规则，并说明保存会创建本聊天的精确
 配置；均未命中时显示未配置，Project 保持待选，其余取现有创建默认值。字段复用 Project、
-Model/Effort/Speed、Task Feedback 和群聊 Context Mode 的已有选择语义。
+Model/Effort/Speed、Task Feedback 和群聊 Context Mode 的已有选择语义，另有独立的
+工作区策略：项目目录、指定已有受管 Worktree、每个新会话创建 detached Worktree（可选 ref）。
+工作区选项使用所选 Project 的受管资源；加载与保存不创建目录，保存时和实际使用时均
+校验选择。失效资源保持可见，不通过回填悄悄改成项目目录。
 保存只写当前聊天的一份精确配置，不修改匹配到的群名规则；删除只移除精确配置，之后
 重新匹配群名规则。没有精确配置时不提供可删除继承规则的动作。保存、删除后重绘同一
 表单，不新增卡片 session。`/new` 仍按原有表单与预选逻辑工作，`/config` 仍修改已有

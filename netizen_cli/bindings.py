@@ -39,7 +39,7 @@ from .worktrees.models import WorktreeRecord
 from .worktrees.store import WorktreeStore, create_schema as create_worktree_schema
 
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Includes the running query and all submitted queries waiting for the reader.
 _ADMIN_QUERY_CAPACITY = 32
@@ -466,7 +466,7 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
     _require_project_metadata_schema(connection)
     require_schema(connection)
     require_defaults_schema(connection)
-    from .migrations.v15 import validate
+    from .migrations.v16 import validate
     validate(connection)
 
 

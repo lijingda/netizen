@@ -938,8 +938,8 @@ read/resume，Goal 保留既有 readiness read。这是请求次数证据，不�
 ### 数据库迁移与中断恢复验收
 
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移移到每次实际
-启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v15，新增冻结的
-v14 → v15 Worktree 元数据转换；v13 及更早 schema／旧布局不因此自动得到支持。
+启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v16，冻结转换为
+v14 → v15 Worktree 元数据与 v15 → v16 默认工作区策略；v13 及更早 schema／旧布局不因此自动得到支持。
 以下为新 CLI 的验收要求，不是通过记录：
 
 - setup 才创建新库；start、自动重启及恢复启动都校验已有库，缺库不能重新初始化。
@@ -990,15 +990,34 @@ Adapter 边界时仍按[既有触发条件](#代码门禁与按需实时兼容�
 - 在受信内网浏览器验证 Admin 精确配置的逐条管理、群名规则创建／修改／删除／调序，
   与飞书入口共享配置；顺序改变后新会话使用新的首条匹配，已有会话不变。继续核查
   认证、Origin/CSRF 与陈旧页面保护，不提供精确配置批量设置或即时 Prompt 入口。
+- 在 Admin 和 `/defaults` 分别保存项目目录、指定已有受管 Worktree、每个新会话新建
+  Worktree 三种策略。确认保存/修改/删除规则都不创建或删除工作区；新建策略可选 ref，
+  留空时取实际创建时 HEAD，仅检出提交内容且处于 detached 状态。检查更换 Project、
+  旧选项、资源查询失败及已保存资源失效时的展示和提交校验，不能静默改为项目目录。
 - 在明确测试聊天中验证无当前会话时普通消息自动创建并执行，主线与两个话题互不串线；
   群聊仍逐条 @，单聊无需 @，`/new` 保留原有表单和手动另建语义。无匹配或默认配置
   失效应给出原有引导，不执行这条任务；失效规则不改为下一条规则。
 - catch-up 首轮使用真实触发消息作为初始边界，当前正文／引用／图片正常提交且不补读
   更早讨论；随后在群主线与话题分别验证从该消息之后读取。继续满足既有 chat/thread
   history rollout gate；本地“lower 等于 upper”的测试不能替代真实消息及客户端验收。
-- schema v15 新库完整初始化、v14 冻结夹具迁移及当前库重装保留默认配置和规则顺序，
+- 指定资源经 Admin 删除、目录被外部删除/替换或状态无法确认时，保留规则且本次输入不执行，
+  不切目录、不换规则、不自动重建。Project 同名重登记可恢复项目目录策略；已有 Worktree
+  的 exact ID/Project 代次校验拒绝旧孤立资源。“每次新建”不引用上一份已删除工作区。
+- 同 Scope 并发首消息只创建一个工作区和 Binding，后续消息保持 exact Binding/Turn
+  admission，不排队、不保证创建者先执行；Git 操作不得长期持有 Scope 锁。交错提交
+  `/new`、Project/Worktree 删除及 shutdown，检查资源保留、已知部分成功反馈和未知结果
+  不自动重试；已有 Binding 不因修改默认策略而换目录或重新创建。
+- schema v16 新库完整初始化、v14 → v15 → v16 与 v15 → v16 冻结夹具迁移及当前库重装
+  保留默认配置和规则顺序；旧规则使用项目目录，新增策略严格校验持久化形态。
   v13 及更早库只读拒绝。迁移遵循 ADR 0076；启动迁移持续持有 lifetime lock，不提供自动旧库恢复。
-  Project 删除后默认配置保留，使用时按不可用提示降级，不新增联动删除。
+  Project/Worktree 删除后默认配置保留，使用时明确提示不可用，不新增联动删除或资源回收。
+
+2026-10-20 默认工作区策略扩展的上述真实飞书交互、目标平台启动迁移和交错操作仍为
+待验收项。本地 `make check` 已通过：3453 项测试、15 项按既有平台或显式启用条件跳过；
+包括默认工作区的临时 Git、并发/取消/删除竞态、Admin HTTP/JavaScript、飞书卡片、
+v14 → v15 → v16 与 v15 → v16 迁移，以及 wheel/sdist 构建与隔离资源加载。
+编译、依赖与 SDK synthetic 门禁均通过，最终 diff 和独立审查完成；未部署或发布，
+这些本地结果不替代真实飞书交互或目标平台启动迁移验收。
 
 真实群聊消息和客户端操作须在指定的测试环境验收；缺少该条件时分别记录未验证范围，
 不能用 synthetic 结果声明飞书卡片、catch-up 或目标机安装回滚已通过。
@@ -1697,9 +1716,9 @@ HTTP，不得把端口直接暴露到不受信网络。正式链路的真人和�
 [专项验收](#admin-飞书登录与管理员维护验收)。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel 业务只支持当前完整 schema v15；实际启动入口按
+Binding 的默认 cwd。Channel 业务只支持当前完整 schema v16；实际启动入口按
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 在 lifetime lock 内
-检查数据并按需迁移，setup 才创建新库。当前有冻结的 v14 → v15 转换，最低受支持基线
+检查数据并按需迁移，setup 才创建新库。当前有冻结的 v14 → v15 → v16 转换，最低受支持基线
 仍为 v14。提交前错误回滚事务，提交后服务失败保留新库，不自动恢复旧备份。
 
 `worktrees.root` 可省略，默认 `<instance-root>/worktrees`；`fetchBeforeCreate` 默认
@@ -1708,7 +1727,8 @@ false。Admin 修改同一配置段，只影响以后新建；不移动已有 ch
 dirty 状态；已物化会话的 cwd 以原生结果为准。
 
 `session_defaults` 和 `session_defaults_order` 仅保存 App 隔离的聊天默认配置、群名匹配
-条件与有序规则元数据，不保存聊天正文或有效 Codex 配置。
+条件与有序规则元数据；v16 增加独立 `workspace_json` 保存默认工作区创建意图，旧规则
+迁移为项目目录。它不属于 SessionSettings，不保存聊天正文、Git 状态或有效 Codex 配置。
 `schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
 最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。
 当前库重装及后续受支持迁移保留 Scope/Binding/Project、会话默认配置及规则顺序、去重
