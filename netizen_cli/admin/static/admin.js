@@ -2565,12 +2565,13 @@ function renderDefaultSettings() {
   const model = renderSessionSettingsFields(defaultsInput, settings, editor.models, editor.contextAvailable);
   defaultsInput("context-field").hidden = editor.kind === "chat"
     && chatTarget("defaults").kind() === "p2p" && settings.message_context_mode === "current-only";
+  renderDefaultWorkspace();
   const notes = [editor.loading ? "正在读取配置…" : "", editor.sourceNote, editor.error, editor.catalogError];
   if (turn && !model) notes.push("已保存的模型当前不可用，选择保持不变；可显式选择其他模型。");
   if (editor.contextAvailable === false) notes.push("单聊不支持补齐未读上下文，请使用当前消息。");
   defaultsInput("note").textContent = notes.filter(Boolean).join(" ");
   defaultsInput("note").classList.toggle("error", Boolean(editor.error));
-  defaultsInput("save").disabled = defaultsBusy || editor.loading || !editor.action;
+  defaultsInput("save").disabled = defaultsBusy || editor.loading || !editor.action || !defaultWorkspaceAvailable();
   defaultsInput("save").textContent = defaultsBusy ? "保存中…" : "保存";
   defaultsInput("editor").setAttribute("aria-busy", String(defaultsBusy || editor.loading));
 }
@@ -2595,6 +2596,77 @@ function renderDefaultProject(project) {
   ])], project);
 }
 
+function defaultWorkspaceAvailable() {
+  const editor = defaultsEditor;
+  if (!editor || editor.workspace.mode === "project") return true;
+  const options = editor.workspaceOptions;
+  if (!options?.isGit || options.projectAlias !== defaultsInput("project").value) return false;
+  return editor.workspace.mode === "new"
+    || options.items.some((item) => item.id === editor.workspace.worktree_id);
+}
+
+function renderDefaultWorkspace() {
+  const editor = defaultsEditor;
+  const workspace = editor.workspace;
+  const options = editor.workspaceOptions;
+  const available = options?.isGit && options.projectAlias === defaultsInput("project").value;
+  defaultsInput("workspace").value = workspace.mode;
+  for (const option of defaultsInput("workspace").querySelectorAll("option")) {
+    option.disabled = option.value !== "project" && (!available || option.value === "existing" && !options.items.length);
+  }
+  defaultsInput("worktree-field").hidden = workspace.mode !== "existing";
+  defaultsInput("workspace-ref-field").hidden = workspace.mode !== "new";
+  scheduleSelectOptions(defaultsInput("worktree"), [["", "选择受管 Worktree"],
+    ...(available ? options.items : []).map((item) => [item.id, `${item.cwd} · ${item.branch || "detached"} · ${item.id}`])],
+  workspace.worktree_id || "");
+  defaultsInput("worktree").required = workspace.mode === "existing";
+  defaultsInput("workspace-ref").value = workspace.ref || "";
+  defaultsInput("workspace-refs").replaceChildren();
+  for (const branch of options?.branches || []) {
+    const option = document.createElement("option");
+    option.value = branch.ref;
+    option.textContent = branch.name;
+    defaultsInput("workspace-refs").append(option);
+  }
+  const notes = [];
+  if (editor.workspaceError) notes.push(editor.workspaceError);
+  else if (options?.isGit === false) notes.push("该 Project 不是 Git 仓库，只支持项目目录。");
+  else if (!defaultsInput("project").value) notes.push("先选择 Project，再选择工作区策略。");
+  if (workspace.mode === "existing") {
+    notes.push("新会话共享所选 Worktree 的文件和分支；删除或失效后保留此配置，自动创建会话时明确报错。");
+    if (!editor.loading && !defaultWorkspaceAvailable()) notes.push("所选 Worktree 当前不可用，请重新选择；不会切回项目目录。");
+  } else if (workspace.mode === "new") {
+    notes.push("每次自动创建新会话时创建一次 detached Worktree；后续消息复用。留空使用创建时 Project 的 HEAD，保存配置不创建目录。");
+    if (!editor.loading && !available) notes.push("当前无法使用新建 Worktree 策略，请检查 Project。");
+  } else notes.push("新会话使用 Project 的项目目录。");
+  defaultsInput("workspace-help").textContent = notes.join(" ");
+  defaultsInput("workspace-help").classList.toggle("error", !editor.loading && !defaultWorkspaceAvailable());
+}
+
+async function changeDefaultProject() {
+  const editor = defaultsEditor;
+  if (!editor || defaultsBusy) return;
+  editor.workspace = { mode: "project" };
+  editor.workspaceOptions = null;
+  editor.workspaceError = "";
+  await loadDefaultOptions();
+}
+
+function changeDefaultWorkspace(field) {
+  const editor = defaultsEditor;
+  if (!editor || editor.loading || defaultsBusy) return;
+  if (field === "workspace") {
+    const mode = defaultsInput("workspace").value;
+    editor.workspace = mode === "existing" ? { mode, worktree_id: "" } : { mode };
+  } else if (field === "worktree") {
+    editor.workspace = { mode: "existing", worktree_id: defaultsInput(field).value };
+  } else {
+    const ref = defaultsInput(field).value.trim();
+    editor.workspace = { mode: "new", ...(ref ? { ref } : {}) };
+  }
+  renderDefaultSettings();
+}
+
 async function loadDefaultOptions(resolveChat = false) {
   const editor = defaultsEditor;
   if (!editor) return;
@@ -2603,6 +2675,8 @@ async function loadDefaultOptions(resolveChat = false) {
   const chatId = editor.kind === "chat" ? defaultsInput("chat").value.trim() : "";
   editor.loading = true;
   editor.error = "";
+  editor.workspaceOptions = null;
+  editor.workspaceError = "";
   renderDefaultSettings();
   try {
     let view = null;
@@ -2614,10 +2688,12 @@ async function loadDefaultOptions(resolveChat = false) {
       const effective = view.exact || view.effective;
       if (effective) {
         editor.settings = structuredClone(effective.session_settings);
+        editor.workspace = structuredClone(effective.workspace);
         renderDefaultProject(effective.project);
         editor.touched = true;
       } else {
         editor.settings = defaultScheduleSessionSettings();
+        editor.workspace = { mode: "project" };
         renderDefaultProject("");
         editor.touched = false;
       }
@@ -2627,10 +2703,14 @@ async function loadDefaultOptions(resolveChat = false) {
     }
     const query = new URLSearchParams({ mode: "options" });
     if (chatId) query.set("chat_id", chatId);
+    const project = defaultsInput("project").value;
+    if (project) query.set("project", project);
     const data = await api(`/api/v1/defaults?${query}`);
     if (defaultsEditor !== editor || serial !== editor.serial) return;
     editor.models = data.models;
     editor.contextAvailable = data.context_mode_available;
+    editor.workspaceOptions = data.workspace_options || null;
+    editor.workspaceError = data.workspace_options_error || "";
     if (editor.kind === "chat") chatTarget("defaults").resolveKind(editor.contextAvailable);
     editor.catalogError = typeof data.model_catalog_error === "string"
       ? data.model_catalog_error : data.model_catalog_error?.message || "";
@@ -2657,6 +2737,7 @@ function openDefaultEditor(kind, record = null) {
     returnFocus: document.activeElement,
     settings: structuredClone(record?.session_settings || defaultScheduleSessionSettings()),
     models: [], serial: 0, loading: true, touched: false, contextAvailable: null,
+    workspace: structuredClone(record ? record.workspace : { mode: "project" }), workspaceOptions: null, workspaceError: "",
     sourceNote: record ? "修改已保存的配置，只影响之后创建的会话。" : "保存后，在没有当前会话的位置收到消息时生效。",
     error: "", catalogError: "", lockedTarget: Boolean(record) };
   defaultsInput("editor").hidden = false;
@@ -2701,7 +2782,7 @@ function defaultEditorValues() {
   if (!editor) return null;
   return { kind: editor.kind, project: defaultsInput("project").value,
     target: defaultsInput(editor.kind === "chat" ? "chat" : "keyword").value,
-    settings: sessionSettingsFingerprint(editor.settings) };
+    settings: sessionSettingsFingerprint(editor.settings), workspace: structuredClone(editor.workspace) };
 }
 
 function defaultEditorHasChanges() {
@@ -2752,7 +2833,7 @@ async function defaultMutation(mode, action, extra = {}) {
 async function saveDefault(event) {
   event.preventDefault();
   const editor = defaultsEditor;
-  if (!editor || editor.loading || !editor.action || defaultsBusy) return;
+  if (!editor || editor.loading || !editor.action || defaultsBusy || !defaultWorkspaceAvailable()) return;
   if (editor.kind === "chat") {
     editor.loading = true;
     renderDefaultSettings();
@@ -2765,7 +2846,10 @@ async function saveDefault(event) {
     if (defaultsEditor !== editor) return;
   }
   const definition = { kind: editor.kind, project: defaultsInput("project").value,
-    session_settings: structuredClone(editor.settings) };
+    session_settings: structuredClone(editor.settings), workspace: structuredClone(editor.workspace) };
+  if (editor.workspaceOptions?.projectAlias === definition.project) {
+    definition.expected_project_revision = editor.workspaceOptions.projectRevision;
+  }
   if (editor.kind === "chat") definition.chat_id = defaultsInput("chat").value.trim();
   else definition.keyword = defaultsInput("keyword").value.trim();
   const action = editor.action;
@@ -2828,7 +2912,7 @@ function defaultChatCell(row, rule) {
   row.append(td);
 }
 
-function defaultSettingsCell(row, settings) {
+function defaultSettingsCell(row, settings, workspace) {
   const td = document.createElement("td");
   const model = settings.turn_settings;
   const title = document.createElement("div");
@@ -2836,7 +2920,11 @@ function defaultSettingsCell(row, settings) {
   const detail = document.createElement("div");
   detail.className = "default-settings-detail";
   detail.textContent = scheduleSessionSummary(settings).split(" · ").slice(1).join(" · ");
-  td.append(title, detail);
+  const location = document.createElement("div");
+  location.className = "default-settings-detail";
+  location.textContent = workspace.mode === "existing" ? `指定 Worktree：${workspace.worktree_id}`
+    : workspace.mode === "new" ? `每个新会话创建 Worktree · ${workspace.ref || "创建时 Project HEAD"}` : "项目目录";
+  td.append(title, detail, location);
   row.append(td);
 }
 
@@ -2863,7 +2951,7 @@ async function loadDefaults(offset = defaultsOffset, returnFocus = null) {
         cell(row, rule.keyword);
       } else defaultChatCell(row, rule);
       cell(row, rule.project);
-      defaultSettingsCell(row, rule.session_settings);
+      defaultSettingsCell(row, rule.session_settings, rule.workspace);
       const actions = document.createElement("td");
       const buttons = document.createElement("div");
       buttons.className = "actions";
@@ -4418,6 +4506,11 @@ defaultsInput("drawer").addEventListener("cancel", (event) => {
 });
 defaultsInput("editor").addEventListener("submit", saveDefault);
 defaultsInput("chat").addEventListener("change", () => changeDefaultChat());
+defaultsInput("project").addEventListener("change", changeDefaultProject);
+for (const field of ["workspace", "worktree"]) {
+  defaultsInput(field).addEventListener("change", () => changeDefaultWorkspace(field));
+}
+defaultsInput("workspace-ref").addEventListener("input", () => changeDefaultWorkspace("workspace-ref"));
 for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
   defaultsInput(field).addEventListener("change", () => changeDefaultSettings(field));
 }

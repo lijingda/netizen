@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,11 +13,15 @@ from unittest.mock import AsyncMock
 from netizen_cli.bindings import BindingStore, validate_channel_database
 from netizen_cli.chat_targets import ChatTargetError
 from netizen_cli.defaults import DefaultConfigurationError
+from netizen_cli.defaults.models import WorkspacePolicy
 from netizen_cli.defaults.service import SessionDefaultsService
 from netizen_cli.domain import MentionContextMode
 from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption
+from netizen_cli.management import InstanceManagementService, ScopeCoordinator
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.session_settings import BindingTurnSettings, SessionSettings
+from netizen_cli.worktrees.errors import WorktreeError
+from netizen_cli.worktrees.settings import WorktreeSettingsService
 from tests.support.chat_targets import FakeChatTargetDirectory
 
 
@@ -32,6 +38,7 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
             (EffortOption("high", "High", "high"),), (),
         ),))
         self.runtime = SimpleNamespace(model_catalog=AsyncMock(return_value=self.catalog))
+        self.worktree_management = None
         self.service = self.new_service()
 
     def new_service(self, app_id="app"):
@@ -42,8 +49,32 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self):
+        if self.worktree_management is not None:
+            await self.worktree_management.close()
         self.bindings.close()
         self.directory.cleanup()
+
+    def enable_worktrees(self, *, git=True):
+        if git:
+            self.git("init", "-b", "main")
+            self.git("config", "user.email", "test@example.invalid")
+            self.git("config", "user.name", "Defaults Test")
+            (self.root / "tracked.txt").write_text("committed")
+            self.git("add", "tracked.txt")
+            self.git("commit", "-m", "initial")
+        self.worktree_management = InstanceManagementService(
+            bindings=self.bindings, projects=self.projects, runtime=self.runtime, scope_coordinator=ScopeCoordinator(),
+        )
+        worktrees = self.worktree_management.enable_worktrees(
+            settings=WorktreeSettingsService(default_root=self.root / "managed"),
+        )
+        self.service._worktrees = lambda: worktrees
+        return worktrees
+
+    def git(self, *args):
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        return subprocess.run(["git", "-C", str(self.root), *args], check=True, capture_output=True, env=env).stdout
 
     def save_request(self, **fields):
         return {"mode": "save", "kind": "chat", "chat_id": "oc_chat",
@@ -327,6 +358,128 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
         results = await asyncio.gather(self.save(), self.save(), return_exceptions=True)
         self.assertEqual(sum(isinstance(result, dict) for result in results), 1)
         self.assertEqual(sum(isinstance(result, DefaultConfigurationError) for result in results), 1)
+
+    async def test_new_workspace_policy_saves_intent_without_creating_resources(self):
+        worktrees = self.enable_worktrees()
+        rule = await self.save(workspace={"mode": "new"})
+        self.assertEqual(rule["workspace"], {"mode": "new"})
+        self.assertFalse((self.root / "managed").exists())
+        self.assertEqual(self.bindings.worktrees.list_for_project("p"), ())
+        await self.service.validate(await self.service.resolve("oc_chat"))
+        self.assertFalse((self.root / "managed").exists())
+        revised = await self.save(id=rule["id"], expected_revision=1, workspace={"mode": "new", "ref": "refs/heads/main"})
+        self.assertEqual(revised["workspace"], {"mode": "new", "ref": "refs/heads/main"})
+        self.assertEqual((await worktrees.query())["items"], [])
+        validate_channel_database(self.root / "channel.sqlite3")
+
+    async def test_new_workspace_requires_git_but_project_directory_remains_available(self):
+        self.enable_worktrees(git=False)
+        with self.assertRaises(DefaultConfigurationError) as caught:
+            await self.save(workspace={"mode": "new"})
+        self.assertEqual(caught.exception.code, "workspace_unavailable")
+        self.assertIsNone(self.bindings.defaults.exact("app", "oc_chat"))
+        self.assertEqual((await self.save())["workspace"], {"mode": "project"})
+
+    async def test_existing_workspace_deleted_keeps_rule_and_never_adopts_replacement(self):
+        worktrees = self.enable_worktrees()
+        resource = await worktrees.create(project_alias="p")
+        workspace = {"mode": "existing", "worktree_id": resource["id"]}
+        rule = await self.save(workspace=workspace)
+        self.git("worktree", "remove", resource["root"])
+        match = await self.service.resolve("oc_chat")
+        with self.assertRaises(DefaultConfigurationError) as caught:
+            await self.service.validate(match)
+        self.assertEqual(caught.exception.code, "workspace_unavailable")
+        self.assertEqual(match.to_dict(), rule)
+        snapshot = self.bindings.worktrees.preview_delete(resource["id"])
+        self.bindings.worktrees.reserve_delete(resource["id"], expected_fingerprint=snapshot.fingerprint)
+        self.bindings.worktrees.finish_delete(resource["id"], expected_fingerprint=snapshot.fingerprint)
+        replacement = await worktrees.create(project_alias="p")
+        self.assertNotEqual(replacement["id"], resource["id"])
+        with self.assertRaises(DefaultConfigurationError):
+            await self.service.validate(await self.service.resolve("oc_chat"))
+        self.assertEqual(self.bindings.defaults.get("app", rule["id"]).workspace.to_dict(), workspace)
+        validate_channel_database(self.root / "channel.sqlite3")
+        revised = await self.save(id=rule["id"], expected_revision=1,
+            workspace={"mode": "existing", "worktree_id": replacement["id"]})
+        self.assertEqual(revised["workspace"]["worktree_id"], replacement["id"])
+
+    async def test_existing_workspace_cannot_follow_project_alias_reregistration(self):
+        worktrees = self.enable_worktrees()
+        resource = await worktrees.create(project_alias="p")
+        rule = await self.save(workspace={"mode": "existing", "worktree_id": resource["id"]})
+        before = self.projects.preview_delete("p")
+        reserved = self.projects.begin_delete(alias="p", expected_revision=1,
+            expected_inventory_fingerprint=before.fingerprint)
+        self.projects.finish_delete(alias="p", expected_revision=reserved.project.revision,
+            expected_inventory_fingerprint=reserved.fingerprint)
+        with self.assertRaises(DefaultConfigurationError) as caught:
+            await self.service.validate(await self.service.resolve("oc_chat"))
+        self.assertEqual(caught.exception.code, "project_unavailable")
+        self.projects.register(alias="p", path=str(self.root), create_directory=False)
+        with self.assertRaises(DefaultConfigurationError) as caught:
+            await self.service.validate(await self.service.resolve("oc_chat"))
+        self.assertEqual(caught.exception.code, "workspace_unavailable")
+        self.assertEqual(self.bindings.defaults.get("app", rule["id"]).to_dict(), rule)
+
+    async def test_existing_workspace_save_rechecks_delete_admission_after_model_await(self):
+        worktrees = self.enable_worktrees()
+        resource = await worktrees.create(project_alias="p")
+        for deleted in (False, True):
+            with self.subTest(deleted=deleted):
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def catalog():
+                    entered.set()
+                    await release.wait()
+                    return self.catalog
+
+                self.runtime.model_catalog.side_effect = catalog
+                explicit = SessionSettings(turn_settings=BindingTurnSettings("model", "high", "default"))
+                pending = asyncio.create_task(self.save(
+                    workspace={"mode": "existing", "worktree_id": resource["id"]},
+                    session_settings=explicit.to_dict(),
+                ))
+                await asyncio.wait_for(entered.wait(), 3)
+                snapshot = self.bindings.worktrees.preview_delete(resource["id"])
+                self.bindings.worktrees.reserve_delete(resource["id"], expected_fingerprint=snapshot.fingerprint)
+                if deleted:
+                    self.bindings.worktrees.finish_delete(resource["id"], expected_fingerprint=snapshot.fingerprint)
+                release.set()
+                with self.assertRaises(DefaultConfigurationError) as caught:
+                    await pending
+                self.assertEqual(caught.exception.code, "workspace_unavailable")
+                self.assertIsNone(self.bindings.defaults.exact("app", "oc_chat"))
+                self.bindings.worktrees.release_delete(resource["id"])
+
+    async def test_workspace_options_keep_query_failure_distinct_from_non_git(self):
+        worktrees = self.enable_worktrees(git=False)
+        options = await self.service.manage({"mode": "options", "project": "p", "expected_project_revision": 1})
+        self.assertFalse(options["workspace_options"]["isGit"])
+        self.assertIsNone(options["workspace_options_error"])
+        worktrees.options = AsyncMock(side_effect=WorktreeError("unavailable", "状态未取得，请刷新。"))
+        options = await self.service.manage({"mode": "options", "project": "p", "expected_project_revision": 1})
+        self.assertIsNone(options["workspace_options"])
+        self.assertIn("状态未取得", options["workspace_options_error"])
+        worktrees.options.assert_awaited_once_with(project_alias="p", expected_project_revision=1)
+
+
+class WorkspacePolicyTest(unittest.TestCase):
+    def test_round_trip_preserves_only_explicit_creation_intent(self):
+        for value in ({"mode": "project"}, {"mode": "existing", "worktree_id": "exact-id"},
+                      {"mode": "new"}, {"mode": "new", "ref": "refs/remotes/origin/main"}):
+            with self.subTest(value=value):
+                self.assertEqual(WorkspacePolicy.from_dict(value).to_dict(), value)
+
+    def test_invalid_and_mixed_policy_fields_are_rejected(self):
+        for value in (None, {}, [], {"mode": "unknown"}, {"mode": "project", "ref": "HEAD"},
+                      {"mode": "existing"}, {"mode": "existing", "worktree_id": ""},
+                      {"mode": "existing", "worktree_id": "id", "ref": "HEAD"},
+                      {"mode": "new", "ref": None}, {"mode": "new", "ref": " "},
+                      {"mode": "new", "ref": "\nHEAD"}, {"mode": "new", "ref": "x" * 257},
+                      {"mode": "new", "worktree_id": "id"}):
+            with self.subTest(value=value), self.assertRaises(DefaultConfigurationError):
+                WorkspacePolicy.from_dict(value)
 
 
 class DefaultsSchemaTest(unittest.TestCase):

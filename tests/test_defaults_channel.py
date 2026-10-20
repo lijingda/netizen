@@ -399,6 +399,126 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.store.defaults.exact("cli_test", "oc_group"), saved)
                 self.assertIsNone(self.store.defaults.exact("cli_test", "oc_other"))
 
+    def enable_default_workspaces(self):
+        directory = self.fixture.project_root / "managed"
+        self.store.worktrees.register(
+            worktree_id="wt-existing", project_alias="test",
+            expected_project_revision=self.store.get_project("test").revision,
+            root=str(directory), cwd=str(directory), common_dir=str(self.fixture.project / ".git"),
+        )
+        self.store.worktrees.mark_ready(
+            "wt-existing", git_dir=str(self.fixture.project / ".git/worktrees/managed"), identity_token="test-identity",
+        )
+
+        async def options(*, project_alias, expected_project_revision=None):
+            project = self.fixture.projects.resolve_for_new(project_alias, expected_revision=expected_project_revision)
+            return {
+                "projectAlias": project.alias, "projectRevision": project.revision, "isGit": True,
+                "items": ([{"id": "wt-existing", "cwd": str(directory), "branch": None,
+                            "state": "ready", "available": True}] if project.alias == "test" else []),
+                "branches": [{"name": "main", "ref": "refs/heads/main", "remote": False}],
+            }
+        service = SimpleNamespace(
+            options=AsyncMock(side_effect=options), branches=AsyncMock(return_value={"isGit": True}),
+            select=AsyncMock(), create=AsyncMock(), close=AsyncMock(),
+        )
+        self.fixture.management.worktrees = service
+        return service
+
+    async def test_defaults_workspace_load_and_save_remain_configuration_only(self):
+        worktrees = self.enable_default_workspaces()
+        scope = self.app._scope(self.message())
+        card = await self.app._defaults_card(scope)
+        form = form_values(card)
+        project = next(field for field in elements(card.card, "select_static")
+                       if field["name"].startswith("defaults_project"))
+        form[project["name"]] = project["options"][0]["value"]
+        form.update(defaults_session_task_reactions="task-feedback:v2:on",
+                    defaults_session_context_mode="context-mode:v1:catch-up")
+        await self.app.handle_card_action(self.card_event(value=callback(card, "加载项目目录选项"), form=form))
+        self.assertIsNone(self.store.defaults.exact("cli_test", "oc_group"))
+        worktrees.options.assert_awaited_once()
+        refreshed = OutboundCard(card=self.channel.updates[-1][1])
+        form = form_values(refreshed)
+        workspace = next(field for field in elements(refreshed.card, "select_static")
+                         if field["name"] == "defaults_workspace")
+        form["defaults_workspace"] = next(option["value"] for option in workspace["options"]
+                                          if option["text"]["content"].startswith("每个新会话"))
+        form["defaults_worktree_ref"] = "refs/heads/main"
+        await self.app.handle_card_action(self.card_event(form=form))
+        saved = self.store.defaults.exact("cli_test", "oc_group")
+        self.assertEqual(saved.workspace.to_dict(), {"mode": "new", "ref": "refs/heads/main"})
+        self.assertTrue(saved.session_settings.task_feedback.reaction_pulse_enabled)
+        self.assertIs(saved.session_settings.message_context_mode, MentionContextMode.CATCH_UP)
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertFalse(self.submissions)
+        worktrees.branches.assert_awaited_once()
+        worktrees.create.assert_not_awaited()
+
+    async def test_defaults_workspace_refresh_preserves_policy_and_model_draft_on_failure(self):
+        from netizen_cli.cards.callbacks import _new_model_reference
+        from netizen_cli.defaults.models import WorkspacePolicy
+        from netizen_cli.worktrees.errors import WorktreeError
+
+        worktrees = self.enable_default_workspaces()
+        saved = self.store.defaults.save(
+            app_id="cli_test", kind="chat", chat_id="oc_group", keyword=None,
+            project="test", session_settings=SessionSettings(), rule_id=None, expected_revision=None,
+            workspace=WorkspacePolicy("existing", worktree_id="wt-existing"),
+        )
+        scope = self.app._scope(self.message())
+        card = await self.app._defaults_card(scope)
+        form = form_values(card)
+        form.update(defaults_session_model=_new_model_reference("future-model"),
+                    defaults_session_effort="ultra", defaults_session_speed="future-speed",
+                    defaults_session_progress_card="task-feedback:v2:off")
+        worktrees.options.side_effect = WorktreeError("unavailable", "目录查询失败")
+        with patch.object(self.runtime, "model_catalog", AsyncMock(side_effect=RuntimeError("catalog offline"))):
+            await self.app.handle_card_action(self.card_event(value=callback(card, "加载项目目录选项"), form=form))
+        self.assertEqual(self.store.defaults.exact("cli_test", "oc_group"), saved)
+        refreshed = OutboundCard(card=self.channel.updates[-1][1])
+        request = decode_defaults_action(scope, {}, form_values(refreshed))
+        self.assertEqual(request["workspace"], {"mode": "existing", "worktree_id": "wt-existing"})
+        self.assertEqual(request["session_settings"]["turn_settings"], {
+            "model_id": "future-model", "effort_id": "ultra", "service_tier_id": "future-speed",
+        })
+        self.assertFalse(request["session_settings"]["progress_card_enabled"])
+        self.assertIn("目录查询失败", str(refreshed.card))
+        await self.app.handle_card_action(self.card_event(value=callback(refreshed, "删除默认配置")))
+        self.assertIsNone(self.store.defaults.exact("cli_test", "oc_group"))
+        worktrees.create.assert_not_awaited()
+
+    async def test_defaults_workspace_project_switch_requires_load_and_resets_choice(self):
+        from netizen_cli.defaults.models import WorkspacePolicy
+
+        worktrees = self.enable_default_workspaces()
+        self.store.defaults.save(
+            app_id="cli_test", kind="chat", chat_id="oc_group", keyword=None,
+            project="test", session_settings=SessionSettings(), rule_id=None, expected_revision=None,
+            workspace=WorkspacePolicy("existing", worktree_id="wt-existing"),
+        )
+        other = self.fixture.project_root / "other"
+        other.mkdir()
+        self.fixture.projects.register(alias="other", path=str(other), create_directory=False)
+        scope = self.app._scope(self.message())
+        card = await self.app._defaults_card(scope)
+        form = form_values(card)
+        project = next(field for field in elements(card.card, "select_static")
+                       if field["name"].startswith("defaults_project"))
+        form[project["name"]] = next(option["value"] for option in project["options"]
+                                     if option["text"]["content"].startswith("other ·"))
+        await self.app.handle_card_action(self.card_event(form=form))
+        self.assertEqual(self.store.defaults.exact("cli_test", "oc_group").project, "test")
+        self.assertIn("重新加载", str(self.channel.updates[-1][1]))
+        await self.app.handle_card_action(self.card_event(value=callback(card, "加载项目目录选项"), form=form))
+        refreshed = OutboundCard(card=self.channel.updates[-1][1])
+        request = decode_defaults_action(scope, {}, form_values(refreshed))
+        self.assertEqual(request["project"], "other")
+        self.assertEqual(request["workspace"], {"mode": "project"})
+        await self.app.handle_card_action(self.card_event(form=form_values(refreshed)))
+        self.assertEqual(self.store.defaults.exact("cli_test", "oc_group").project, "other")
+        worktrees.create.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

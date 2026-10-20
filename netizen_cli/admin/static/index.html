@@ -271,6 +271,12 @@
             <h4>会话配置</h4>
             <div class="schedule-form-grid">
               <label>Project<select id="defaults-project" required><option value="">选择 Project</option></select></label>
+              <label>工作区策略<select id="defaults-workspace"><option value="project">项目目录</option><option value="existing">指定已有 Worktree</option><option value="new">每个新会话创建 Worktree</option></select></label>
+              <label id="defaults-worktree-field" hidden>受管 Worktree<select id="defaults-worktree"></select></label>
+              <label id="defaults-workspace-ref-field" hidden>起点提交 / 分支<input id="defaults-workspace-ref" list="defaults-workspace-refs" maxlength="256" placeholder="留空使用创建时 Project 的 HEAD"><datalist id="defaults-workspace-refs"></datalist></label>
+            </div>
+            <p id="defaults-workspace-help" class="defaults-field-help" role="status"></p>
+            <div class="schedule-form-grid">
               <label>模型<select id="defaults-model"><option value="">继承 Codex</option></select></label>
               <label>推理强度<select id="defaults-effort" disabled></select></label>
               <label>速度<select id="defaults-tier" disabled></select></label>

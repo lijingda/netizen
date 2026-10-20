@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from ..bindings import BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout, BindingStore
 from ..channel.messages import public_chat_kind
@@ -12,17 +13,21 @@ from ..domain import MentionContextMode
 from ..model_settings import ModelCatalogError, STANDARD_SERVICE_TIER_ID
 from ..projects import Project, ProjectError, ProjectRegistry
 from ..session_settings import SessionSettings, SessionSettingsError
-from .models import DefaultConfigurationError, DefaultRule
+from ..worktrees.errors import WorktreeError
+from .models import DefaultConfigurationError, DefaultRule, WorkspacePolicy
 from .store import MAX_GROUP_RULES
+
+if TYPE_CHECKING:
+    from ..worktrees.service import WorktreeService
 
 
 _FIELDS = {
     "view": {"chat_id"},
     "list": {"kind", "offset", "limit"},
-    "save": {"kind", "chat_id", "keyword", "id", "expected_revision", "project", "expected_project_revision", "session_settings"},
+    "save": {"kind", "chat_id", "keyword", "id", "expected_revision", "project", "expected_project_revision", "session_settings", "workspace"},
     "delete": {"id", "expected_revision", "chat_id", "kind"},
     "reorder": {"rule_ids", "order_revision"},
-    "options": {"chat_id"},
+    "options": {"chat_id", "project", "expected_project_revision"},
 }
 
 
@@ -31,6 +36,7 @@ class SessionDefaultsService:
         self, *, bindings: BindingStore, projects: ProjectRegistry,
         runtime: Any, app_id: str, chat_info: Any = None, blocking_io: Any = None,
         chat_target_validator: ChatTargetValidator | None = None,
+        worktrees: Callable[[], WorktreeService | None] | None = None,
     ) -> None:
         self.app_id = app_id
         self._store = bindings.defaults
@@ -39,6 +45,7 @@ class SessionDefaultsService:
         self._chat_info = chat_info
         self._chat_target_validator = chat_target_validator
         self._blocking_io = blocking_io
+        self._worktrees = worktrees
 
     async def _chat(self, chat_id: str) -> tuple[str, Any]:
         if self._chat_info is None:
@@ -92,6 +99,7 @@ class SessionDefaultsService:
             raise DefaultConfigurationError(f"默认配置的 Project {rule.project} 不可用：{error}", code="project_unavailable") from error
         except Exception as error:
             raise DefaultConfigurationError("暂时无法校验默认配置的 Project，请稍后重试。", code="project_unavailable") from error
+        await self._validate_workspace(rule, project)
         if rule.session_settings.turn_settings is None:
             return project
         try:
@@ -104,6 +112,37 @@ class SessionDefaultsService:
             raise DefaultConfigurationError("暂时无法校验默认配置的模型目录，请稍后重试。", code="model_catalog_unavailable") from error
         return project
 
+    def _worktree_service(self) -> WorktreeService:
+        service = self._worktrees() if self._worktrees is not None else None
+        if service is None:
+            raise DefaultConfigurationError("工作区服务暂不可用，请稍后重试。", code="workspace_unavailable")
+        return service
+
+    async def _validate_workspace(self, rule: DefaultRule, project: Project) -> None:
+        if rule.workspace.mode == "project":
+            return
+        try:
+            worktrees = self._worktree_service()
+            if rule.workspace.mode == "existing":
+                assert rule.workspace.worktree_id is not None
+                await worktrees.select(
+                    project_alias=project.alias, worktree_id=rule.workspace.worktree_id,
+                    expected_project_revision=project.revision,
+                )
+            else:
+                # Read-only Git discovery; saving a policy never creates a checkout.
+                await worktrees.branches(project_alias=project.alias)
+        except WorktreeError as error:
+            raise DefaultConfigurationError(
+                f"默认配置的工作区不可用：{error}", code="workspace_unavailable",
+            ) from error
+        except DefaultConfigurationError:
+            raise
+        except Exception as error:
+            raise DefaultConfigurationError(
+                "暂时无法校验默认配置的工作区，请稍后重试。", code="workspace_unavailable",
+            ) from error
+
     async def manage(self, request: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(request, dict):
             raise DefaultConfigurationError("默认配置管理参数必须是对象。")
@@ -114,7 +153,17 @@ class SessionDefaultsService:
             return await self._view(_text(request.get("chat_id"), "chat_id"))
         if mode == "options":
             chat = request.get("chat_id")
-            return await self._options(_text(chat, "chat_id") if chat is not None else None)
+            project = request.get("project")
+            revision = request.get("expected_project_revision")
+            if revision is not None:
+                revision = _integer(revision, "expected_project_revision")
+                if project is None:
+                    raise DefaultConfigurationError("expected_project_revision 需要指定 Project。")
+            return await self._options(
+                _text(chat, "chat_id") if chat is not None else None,
+                project=_text(project, "project", maximum=64) if project is not None else None,
+                expected_project_revision=revision,
+            )
         if mode == "list":
             kind = _kind(request.get("kind"))
             offset = _integer(request.get("offset", 0), "offset", minimum=0, maximum=2**31 - 1)
@@ -174,6 +223,7 @@ class SessionDefaultsService:
             settings = SessionSettings.from_dict(request.get("session_settings"))
         except SessionSettingsError as error:
             raise DefaultConfigurationError(str(error)) from error
+        workspace = WorkspacePolicy.from_dict(request.get("workspace", {"mode": "project"}))
         project = _text(request.get("project"), "project", maximum=64)
         if chat_id is not None:
             if self._chat_target_validator is None:
@@ -184,7 +234,9 @@ class SessionDefaultsService:
                 raise DefaultConfigurationError(str(error), code=error.code) from error
             if chat_kind == "p2p" and settings.message_context_mode is MentionContextMode.CATCH_UP:
                 raise DefaultConfigurationError("单聊默认配置只支持 current-only。")
-        candidate = DefaultRule(rule_id or "", self.app_id, kind, chat_id, keyword, project, settings, expected or 1, None)
+        candidate = DefaultRule(
+            rule_id or "", self.app_id, kind, chat_id, keyword, project, settings, expected or 1, None, workspace,
+        )
         project_revision = request.get("expected_project_revision")
         if project_revision is not None:
             project_revision = _integer(project_revision, "expected_project_revision")
@@ -192,10 +244,13 @@ class SessionDefaultsService:
         return self._store.save(
             app_id=self.app_id, kind=kind, chat_id=chat_id, keyword=keyword,
             project=project, session_settings=settings, rule_id=rule_id, expected_revision=expected,
-            checked_project_revision=checked_project.revision,
+            checked_project_revision=checked_project.revision, workspace=workspace,
         )
 
-    async def _options(self, chat_id: str | None) -> dict[str, Any]:
+    async def _options(
+        self, chat_id: str | None, *, project: str | None = None,
+        expected_project_revision: int | None = None,
+    ) -> dict[str, Any]:
         kind = (await self._chat(chat_id))[0] if chat_id is not None else "group"
         catalog = None
         error = None
@@ -204,8 +259,20 @@ class SessionDefaultsService:
                 catalog = await self._runtime.model_catalog()
         except Exception:
             error = "Codex 模型目录暂不可用；可以选择继承 Codex，稍后再选择模型。"
+        workspace_options = None
+        workspace_error = None
+        if project is not None:
+            try:
+                workspace_options = await self._worktree_service().options(
+                    project_alias=project, expected_project_revision=expected_project_revision,
+                )
+            except (DefaultConfigurationError, WorktreeError) as failure:
+                workspace_error = str(failure)
+            except Exception:
+                workspace_error = "工作区选项暂不可用，请稍后刷新。"
         return {"models": _models(catalog), "session_settings": SessionSettings.new_defaults(catalog).to_dict(),
-                "context_mode_available": kind != "p2p", "model_catalog_error": error}
+                "context_mode_available": kind != "p2p", "model_catalog_error": error,
+                "workspace_options": workspace_options, "workspace_options_error": workspace_error}
 
 
 def _kind(value: Any) -> str:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -350,7 +350,7 @@ def _new_binding_form(
         ),
         None,
     )
-    elements = [_new_form_section("项目", [
+    elements = [_form_section("项目", [
         _static_select(
             name="new_project",
             placeholder="选择项目",
@@ -393,31 +393,15 @@ def _new_binding_form(
             model_value_encoder=_new_model_reference,
             inherit_initial_when_unset=False,
         )
-    _restore_new_settings_draft(model_fields, settings_draft)
-    model_elements = [model_fields[1]]
-    if len(model_fields) > 2:
-        model_elements.append(_new_form_columns(
-            (1, model_fields[2:4]), (1, model_fields[4:6]),
-        ))
-    elements.append(_new_form_section("模型配置", model_elements))
-    if allow_context_mode:
-        context = _context_mode_form_elements(prefix="new", initial_mode=message_context_mode)
-        context[-1] = _form_hint(
-            "机器人始终只响应 @。选择“自动带上”会把两次 @ 之间未 @ 机器人的群聊消息交给 Codex。"
-        )
-        _restore_new_settings_draft(context, settings_draft)
-        elements.append(_new_form_section("消息上下文", context))
-    feedback = _task_feedback_form_elements(prefix="new", initial=task_feedback)
-    _restore_new_settings_draft(feedback, settings_draft)
-    feedback_hints = (
-        "执行时闪烁；关闭仍保留状态表情。部分移动端会显示为消息。",
-        "展示执行状态与清单，结束后自动折叠。",
-        "完成或失败时 @ 发起人；主动停止、定时自动首轮不提醒。",
+    context = (
+        _context_mode_form_elements(prefix="new", initial_mode=message_context_mode)
+        if allow_context_mode else []
     )
-    elements.append(_new_form_section("任务反馈", [
-        _new_form_columns((3, [label, _form_hint(hint)]), (1, [select]))
-        for label, select, hint in zip(feedback[::3], feedback[1::3], feedback_hints, strict=True)
-    ]))
+    feedback = _task_feedback_form_elements(prefix="new", initial=task_feedback)
+    _restore_settings_draft([*model_fields, *context, *feedback], settings_draft)
+    elements.extend(_session_settings_sections(
+        model_fields=model_fields, context_fields=context, feedback_fields=feedback,
+    ))
     if allow_workspace_selection:
         workspace_elements = [
             _form_hint("使用上方选择的项目加载目录选项；不会创建会话。切换项目后请重新加载。"),
@@ -434,7 +418,7 @@ def _new_binding_form(
             ))
         if workspace_options is not None and workspace_options.get("isGit") is True:
             workspace_elements.extend(_new_workspace_elements(workspace_options))
-        elements.append(_new_form_section("工作区", workspace_elements))
+        elements.append(_form_section("工作区", workspace_elements))
     elements.append(
         _form_submit_button(name="new_binding_submit_v6", label="新建会话")
     )
@@ -446,7 +430,7 @@ def _new_binding_form(
     }
 
 
-def _restore_new_settings_draft(
+def _restore_settings_draft(
     elements: list[dict[str, Any]], draft: Mapping[str, str] | None,
 ) -> None:
     """Retain this form submission only; never silently replace an unavailable choice."""
@@ -461,8 +445,8 @@ def _restore_new_settings_draft(
         element["initial_option"] = value
 
 
-def _new_form_columns(*columns: tuple[int, list[dict[str, Any]]]) -> dict[str, Any]:
-    """Arrange existing /new controls without changing their submitted values."""
+def _form_columns(*columns: tuple[int, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Arrange existing controls without changing their submitted values."""
     rendered = []
     for weight, elements in columns:
         styled = []
@@ -482,8 +466,41 @@ def _new_form_columns(*columns: tuple[int, list[dict[str, Any]]]) -> dict[str, A
     }
 
 
-def _new_form_section(title: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
-    return _new_form_columns((1, [{"tag": "markdown", "content": f"**{title}**"}, *elements]))
+def _form_section(title: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
+    return _form_columns((1, [{"tag": "markdown", "content": f"**{title}**"}, *elements]))
+
+
+def _session_settings_sections(
+    *,
+    model_fields: list[dict[str, Any]],
+    context_fields: list[dict[str, Any]],
+    feedback_fields: list[dict[str, Any]],
+    model_notices: Sequence[dict[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    """Share presentation while each caller owns field values and validation."""
+    model_elements = [*model_notices, model_fields[1]]
+    if len(model_fields) > 2:
+        model_elements.append(_form_columns(
+            (1, model_fields[2:4]), (1, model_fields[4:6]),
+        ))
+    sections = [_form_section("模型配置", model_elements)]
+    if context_fields:
+        sections.append(_form_section("消息上下文", [
+            *context_fields[:-1],
+            _form_hint("机器人始终只响应 @。选择“自动带上”会把两次 @ 之间未 @ 机器人的群聊消息交给 Codex。"),
+        ]))
+    feedback_hints = (
+        "执行时闪烁；关闭仍保留状态表情。部分移动端会显示为消息。",
+        "展示执行状态与清单，结束后自动折叠。",
+        "完成或失败时 @ 发起人；主动停止、定时自动首轮不提醒。",
+    )
+    sections.append(_form_section("任务反馈", [
+        _form_columns((3, [label, _form_hint(hint)]), (1, [select]))
+        for label, select, hint in zip(
+            feedback_fields[::3], feedback_fields[1::3], feedback_hints, strict=True,
+        )
+    ]))
+    return sections
 
 
 def _workspace_reference(options: Mapping[str, Any], choice: str) -> str:
@@ -567,38 +584,31 @@ def _binding_config_form(
             model_id=model_id,
         )
 
-    elements: list[dict[str, Any]] = []
     if catalog is None:
-        elements.extend(
-            [
-                _form_label("Model"),
-                _static_select(
-                    name="config_model",
-                    placeholder="选择 Model 来源",
-                    options=(("继承 Codex", model_reference(None)),),
-                    initial_option=model_reference(None),
-                ),
-            ]
-        )
+        model_fields = [
+            _form_label("Model"),
+            _static_select(
+                name="config_model",
+                placeholder="选择 Model 来源",
+                options=(("继承 Codex", model_reference(None)),),
+                initial_option=model_reference(None),
+            ),
+        ]
     else:
-        elements.extend(
-            _model_settings_form_elements(
-                prefix="config",
-                catalog=catalog,
-                turn_settings=turn_settings,
-                model_value_encoder=model_reference,
-                inherit_initial_when_unset=True,
-            )
+        model_fields = _model_settings_form_elements(
+            prefix="config",
+            catalog=catalog,
+            turn_settings=turn_settings,
+            model_value_encoder=model_reference,
+            inherit_initial_when_unset=True,
         )
-    if allow_context_mode:
-        elements.extend(
-            _context_mode_form_elements(
-                prefix="config",
-                initial_mode=message_context_mode,
-            )
-        )
-    elements.extend(
-        _task_feedback_form_elements(prefix="config", initial=task_feedback)
+    elements = _session_settings_sections(
+        model_fields=model_fields,
+        context_fields=(
+            _context_mode_form_elements(prefix="config", initial_mode=message_context_mode)
+            if allow_context_mode else []
+        ),
+        feedback_fields=_task_feedback_form_elements(prefix="config", initial=task_feedback),
     )
     elements.append(
         _form_submit_button(
@@ -609,6 +619,7 @@ def _binding_config_form(
     return {
         "tag": "form",
         "name": "binding_config_v6",
+        "vertical_spacing": "12px",
         "elements": elements,
     }
 
@@ -778,6 +789,8 @@ def session_settings_form_elements(
     catalog: ModelCatalog | None,
     catalog_error: str | None = None,
     allow_context_mode: bool,
+    grouped: bool = False,
+    settings_draft: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Use ordinary controls while preserving unavailable explicit intent."""
     usable_catalog = catalog
@@ -787,34 +800,43 @@ def session_settings_form_elements(
         except ValueError:
             usable_catalog = None
             catalog_error = "已有 Model / Effort / Speed 暂不可用，当前选择完整保留。"
-    elements: list[dict[str, Any]] = []
+    model_notices: list[dict[str, Any]] = []
     if usable_catalog is not None:
-        elements.extend(_model_settings_form_elements(
+        model_fields = _model_settings_form_elements(
             prefix=prefix, catalog=usable_catalog, turn_settings=settings.turn_settings,
             model_value_encoder=_new_model_reference, inherit_initial_when_unset=True,
-        ))
+        )
     else:
-        elements.append(_notice(catalog_error or "模型目录暂不可用；可以保留原配置或明确选择继承 Codex。"))
+        model_notices.append(_notice(catalog_error or "模型目录暂不可用；可以保留原配置或明确选择继承 Codex。"))
         options = [("继承 Codex", _new_model_reference(None))]
         turn = settings.turn_settings
         if turn is not None:
             options.append(("保留已有显式配置", _new_model_reference(turn.model_id)))
-        elements.extend([
+        model_fields = [
             _form_label("Model"),
             _static_select(name=f"{prefix}_model", placeholder="选择 Model 来源", options=tuple(options),
                 initial_option=_new_model_reference(turn.model_id if turn else None)),
-        ])
+        ]
         if turn is not None:
             for field, label, value in (("effort", "Effort", turn.effort_id), ("speed", "Speed", turn.service_tier_id)):
-                elements.extend([
+                model_fields.extend([
                     _form_label(label),
                     _static_select(name=f"{prefix}_{field}", placeholder=label,
                         options=((value, value),), initial_option=value),
                 ])
-    if allow_context_mode:
-        elements.extend(_context_mode_form_elements(prefix=prefix, initial_mode=settings.message_context_mode))
-    elements.extend(_task_feedback_form_elements(prefix=prefix, initial=settings.task_feedback))
-    return elements
+    context = (
+        _context_mode_form_elements(prefix=prefix, initial_mode=settings.message_context_mode)
+        if allow_context_mode else []
+    )
+    feedback = _task_feedback_form_elements(prefix=prefix, initial=settings.task_feedback)
+    fields = [*model_fields, *context, *feedback]
+    _restore_settings_draft(fields, settings_draft)
+    if grouped:
+        return _session_settings_sections(
+            model_fields=model_fields, context_fields=context, feedback_fields=feedback,
+            model_notices=model_notices,
+        )
+    return [*model_notices, *fields]
 
 
 def session_settings_summary(settings: SessionSettings, *, allow_context_mode: bool = True) -> str:

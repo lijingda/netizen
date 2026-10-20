@@ -93,6 +93,7 @@ from ..defaults.service import SessionDefaultsService
 from ..model_settings import ModelCatalog
 from ..session_inventory import NativeSessionCursor as SessionNativeCursor, query_native_sessions
 from ..worktrees.errors import WorktreeError
+from ..worktrees.models import WorktreeConflict, WorktreeNotFound
 from ..worktrees.service import WorktreeService
 from ..worktrees.settings import WorktreeSettingsService
 
@@ -465,6 +466,7 @@ class CreatedBinding:
     project: Project | None
     binding: ThreadBinding
     created: bool = True
+    retained_worktree_cwd: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -817,6 +819,7 @@ class InstanceManagementService:
         self.schedules: ScheduleService | None = None
         self.defaults: SessionDefaultsService | None = None
         self.worktrees: WorktreeService | None = None
+        self._default_creations: dict[str, asyncio.Future[CreatedBinding]] = {}
         self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
 
     def enable_worktrees(self, *, settings: WorktreeSettingsService) -> WorktreeService:
@@ -847,6 +850,7 @@ class InstanceManagementService:
                 runtime=self._runtime, app_id=app_id, chat_info=chat_info,
                 chat_target_validator=self.validate_chat_target,
                 blocking_io=self._blocking_io,
+                worktrees=lambda: self.worktrees,
             )
         elif self.defaults.app_id != app_id:
             raise ValueError("default configuration App identity cannot change")
@@ -1543,6 +1547,66 @@ class InstanceManagementService:
         worktree_id: str | None = None,
         worktree_create: dict[str, Any] | None = None,
     ) -> CreatedBinding:
+        parameters = dict(
+            scope=scope, creator_id=creator_id, project_alias=project_alias,
+            expected_project_revision=expected_project_revision,
+            turn_settings=turn_settings, task_feedback=task_feedback,
+            message_context_mode=message_context_mode, context_anchor=context_anchor,
+            deadline=deadline, only_if_empty=only_if_empty,
+            worktree_id=worktree_id, worktree_create=worktree_create,
+        )
+        if not only_if_empty:
+            return await self._create_current_binding_once(**parameters)
+
+        # Reserve only creation, not input execution. All callers subsequently
+        # capture their own exact admission. Git and waiting never hold Scope.
+        async with self._scope_coordinator.hold(scope.key):
+            current = self._bindings.active_binding(scope.key)
+            if current is not None:
+                return CreatedBinding(project=None, binding=current, created=False)
+            pending = self._default_creations.get(scope.key)
+            owner = pending is None
+            if pending is None:
+                pending = asyncio.get_running_loop().create_future()
+                pending.add_done_callback(
+                    lambda result: result.exception() if not result.cancelled() else None
+                )
+                self._default_creations[scope.key] = pending
+        if not owner:
+            result = await asyncio.shield(pending)
+            return replace(result, created=False, retained_worktree_cwd=None)
+        try:
+            result = await self._create_current_binding_once(**parameters)
+        except BaseException as error:
+            pending.set_exception(
+                WorktreeError("creation_interrupted",
+                    "自动创建已中断；请检查当前会话和受管工作区的实际结果，勿自动重试。")
+                if isinstance(error, asyncio.CancelledError) else error
+            )
+            raise
+        else:
+            pending.set_result(result)
+            return result
+        finally:
+            if self._default_creations.get(scope.key) is pending:
+                del self._default_creations[scope.key]
+
+    async def _create_current_binding_once(
+        self,
+        *,
+        scope: FeishuScope,
+        creator_id: str,
+        project_alias: str,
+        expected_project_revision: int | None,
+        turn_settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
+        message_context_mode: MentionContextMode,
+        context_anchor: MessageContextAnchor | None,
+        deadline: float | None,
+        only_if_empty: bool,
+        worktree_id: str | None,
+        worktree_create: dict[str, Any] | None,
+    ) -> CreatedBinding:
         project = await self._blocking_io.submit(
             self._projects.resolve_for_new,
             project_alias,
@@ -1552,7 +1616,7 @@ class InstanceManagementService:
         workspace = None
         resource = None
         if worktree_id is not None or worktree_create is not None:
-            if only_if_empty or self.worktrees is None or (worktree_id is not None and worktree_create is not None):
+            if self.worktrees is None or (worktree_id is not None and worktree_create is not None):
                 raise WorktreeError("invalid_arguments", "无效的工作区创建选择。")
             if worktree_create is not None:
                 if not isinstance(worktree_create, dict) or worktree_create.keys() - {"mode", "ref", "branch"}:
@@ -1574,6 +1638,7 @@ class InstanceManagementService:
             if only_if_empty and previous_id is not None:
                 return CreatedBinding(
                     project=None, binding=self._bindings.get(previous_id), created=False,
+                    retained_worktree_cwd=resource["cwd"] if resource is not None else None,
                 )
             try:
                 binding = self._bindings.create_channel_binding(
@@ -1605,6 +1670,8 @@ class InstanceManagementService:
                     raise WorktreeError("session_creation_failed",
                         f"工作区已创建并保留：{resource['cwd']}；会话创建未完成，请在 Admin 检查后通过 /new 复用。",
                         details={"worktree": resource}) from error
+                if isinstance(error, (WorktreeConflict, WorktreeNotFound)):
+                    raise WorktreeError("unavailable", f"所选工作区已不可用：{error}") from error
                 raise
             try:
                 await self._runtime.binding_pointer_changed(previous_id, binding.id)

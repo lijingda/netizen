@@ -38,6 +38,7 @@ SDK 尚未提供的专用管理接口，或复制 Codex App 的全部环境、�
 | --- | --- |
 | Admin | 配置、分页查询、刷新、创建和显式删除受管 worktree；不创建普通会话，不提供 “New chat in this worktree”。 |
 | 飞书 `/new` | 单个工作区选择：项目目录（默认）、已有可用受管 worktree、新建 worktree。非 Git 项目隐藏 worktree 控件。 |
+| 默认会话配置 | Admin 与 `/defaults` 保存项目目录、指定已有受管 worktree、每个自动新建 Binding 创建 detached worktree 三种策略；保存不创建资源，实际自动创建时复用本服务。 |
 | 飞书 `/fork` | 本版不增加 worktree 创建或选择，沿用普通持久 fork；来源已在 worktree 时正确继承实际目录和关联。 |
 | Agent worktree 工具 | 仅提供发现受管工作区和创建能力，复用同一服务；创建返回资源标识、根目录/实际工作目录及真实分支或 detached 状态。分支由 Agent 按需通过 Git 查询并填写 `ref`，不提供专用分支查询或删除工具。 |
 | Agent `create_thread` | 参数保持 CLI 形态，不增加 `cwd`、worktree 或 branch；后台使用来源 Thread 的实际 cwd 创建会话。 |
@@ -51,6 +52,12 @@ SDK 尚未提供的专用管理接口，或复制 Codex App 的全部环境、�
 Binding；普通首条输入或首条 `/goal` 才通过已有 SDK `thread_start(cwd=所选目录)`
 物化 Thread。已有 worktree 则保存明确选择，不重新创建。Project 在仓库子目录时，
 区分 checkout 根与相对子目录；目标提交不含对应安全目录则明确失败，不补复制源目录。
+
+2026-10-20 默认会话扩展遵循 [ADR 0073](0073-create-sessions-from-chat-defaults.md) 的
+真实 Scope、规则优先级与输入准入。工作区策略与 SessionSettings 分开保存；每个自动
+新建 Binding 创建一次工作区，后续消息继续使用该 Binding。自动新建仅建 detached checkout，
+可选 `ref` 留空时使用创建时 Project HEAD，不持久化某次解析出的 commit，也不提供重复
+使用的命名分支。已有 Binding、显式 `/new` 及定时新话题不读取这项默认策略。
 
 2026-10-19 复审确认：若登记的 Project 目录因用户切分支等操作而缺失，沿用现有
 Project 不可用处理，由用户修复 Project；不为 `/new` 复用已有 worktree 增加绕过
@@ -158,6 +165,12 @@ untracked/ignored 文件和仅存在于 detached HEAD 的提交；clean 不等�
 Project 删除而保留工作区时，Admin 全局列表继续展示其原 Project 已删除；本版**不做
 重新关联 Project**，也不因同 alias 重建就自动挂回。这些工作区不再出现在 `/new`
 候选中，用户自行处理内容后在 Admin 显式删除。
+
+默认配置不是会话关联或删除级联项。删除 Project 或 Worktree 后保留引用它的默认规则，
+下次自动创建时明确报告不可用；不换规则、不改用项目目录、不自动重建指定资源。
+Project alias 可在显式重新登记后恢复使用；指定已有工作区仍须匹配 exact ID 和新 Project
+的登记代次，因此不能因同 alias 或同路径出现而恢复旧资源引用。用户须重新选择有效
+工作区或修改策略。保存、修改和删除默认配置都不回收已经创建的工作区。
 
 ## 明确不做与默认策略
 

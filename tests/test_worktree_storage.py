@@ -430,7 +430,7 @@ class WorktreeMigrationTest(unittest.TestCase):
 
         step = migrations.Migration(14, 15, fail, v15.validate)
         before = self.path.read_bytes()
-        with patch.object(migrations, "MIGRATIONS", (step,)), self.assertRaisesRegex(RuntimeError, "after Worktree"):
+        with patch.object(migrations, "MIGRATIONS", (step, *migrations.MIGRATIONS[1:])), self.assertRaisesRegex(RuntimeError, "after Worktree"):
             migrations.migrate_channel_database(self.path, expected_source_version=14)
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(migrations.plan_channel_database(self.path)["source_version"], 14)

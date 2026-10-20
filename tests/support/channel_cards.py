@@ -145,8 +145,7 @@ def config_form_values(
     )
     fields = {
         item["name"]: item
-        for item in form["elements"]
-        if "name" in item
+        for item in form_controls(form)
     }
     model_field = fields["config_model"]
     model_value = model_field["initial_option"]

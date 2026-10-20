@@ -8,7 +8,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from ..session_settings import SessionSettings
-from .models import DefaultConfigurationError, DefaultRule
+from .models import DefaultConfigurationError, DefaultRule, WorkspacePolicy
 
 if TYPE_CHECKING:
     from ..bindings import BindingStore
@@ -23,6 +23,7 @@ SCHEMA = (
         chat_id TEXT, keyword TEXT,
         project TEXT NOT NULL CHECK(length(project) > 0),
         session_settings_json TEXT NOT NULL,
+        workspace_json TEXT NOT NULL DEFAULT '{"mode":"project"}',
         revision INTEGER NOT NULL CHECK(typeof(revision) = 'integer' AND revision >= 1),
         position INTEGER,
         CHECK((kind = 'chat' AND chat_id IS NOT NULL AND length(chat_id) > 0
@@ -51,6 +52,7 @@ def require_schema(connection: sqlite3.Connection) -> None:
             "kind": ("TEXT", 1, 0), "chat_id": ("TEXT", 0, 0),
             "keyword": ("TEXT", 0, 0), "project": ("TEXT", 1, 0),
             "session_settings_json": ("TEXT", 1, 0),
+            "workspace_json": ("TEXT", 1, 0),
             "revision": ("INTEGER", 1, 0), "position": ("INTEGER", 0, 0),
         },
         "session_defaults_order": {"app_id": ("TEXT", 0, 1), "revision": ("INTEGER", 1, 0)},
@@ -113,6 +115,7 @@ def _rule(row: sqlite3.Row) -> DefaultRule:
         id=row["id"], app_id=row["app_id"], kind=row["kind"],
         chat_id=row["chat_id"], keyword=row["keyword"], project=row["project"],
         session_settings=SessionSettings.from_dict(json.loads(row["session_settings_json"])),
+        workspace=WorkspacePolicy.from_dict(json.loads(row["workspace_json"])),
         revision=row["revision"], position=row["position"],
     )
 
@@ -177,10 +180,13 @@ class DefaultsStore:
         self, *, app_id: str, kind: str, chat_id: str | None, keyword: str | None,
         project: str, session_settings: SessionSettings, rule_id: str | None,
         expected_revision: int | None, checked_project_revision: int | None = None,
+        workspace: WorkspacePolicy = WorkspacePolicy(),
     ) -> DefaultRule:
         with self.owner._transaction():
             if checked_project_revision is not None:
                 self._require_checked_project(project, checked_project_revision)
+            if workspace.mode == "existing":
+                self._require_checked_workspace(project, workspace)
             if expected_revision is None:
                 if rule_id is not None:
                     raise DefaultConfigurationError("新增默认配置不能指定已有 ID。")
@@ -196,9 +202,12 @@ class DefaultsStore:
                     self._bump_order(app_id)
                 rule_id = str(uuid.uuid4())
                 self._db.execute(
-                    "INSERT INTO session_defaults VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                    "INSERT INTO session_defaults "
+                    "(id,app_id,kind,chat_id,keyword,project,session_settings_json,workspace_json,revision,position) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
                     (rule_id, app_id, kind, chat_id, keyword, project,
-                     json.dumps(session_settings.to_dict(), ensure_ascii=False), position),
+                     json.dumps(session_settings.to_dict(), ensure_ascii=False),
+                     json.dumps(workspace.to_dict(), ensure_ascii=False), position),
                 )
             else:
                 if rule_id is None:
@@ -209,8 +218,10 @@ class DefaultsStore:
                     raise DefaultConfigurationError("默认配置的类型和聊天不可修改；请新建配置。")
                 self._db.execute(
                     "UPDATE session_defaults SET keyword = ?, project = ?, session_settings_json = ?, "
+                    "workspace_json = ?, "
                     "revision = revision + 1 WHERE id = ? AND app_id = ?",
-                    (keyword, project, json.dumps(session_settings.to_dict(), ensure_ascii=False), rule_id, app_id),
+                    (keyword, project, json.dumps(session_settings.to_dict(), ensure_ascii=False),
+                     json.dumps(workspace.to_dict(), ensure_ascii=False), rule_id, app_id),
                 )
             return self.get(app_id, rule_id)
 
@@ -224,6 +235,23 @@ class DefaultsStore:
             raise DefaultConfigurationError("Project 已不可用于新建会话，请刷新后重试。", code="project_unavailable") from error
         if project.revision != checked_revision or not project.enabled:
             raise DefaultConfigurationError("Project 已被其他操作修改，请刷新后重试。", code="project_unavailable")
+
+    def _require_checked_workspace(self, alias: str, workspace: WorkspacePolicy) -> None:
+        from ..bindings import ProjectConflict, ProjectNotFound
+        from ..worktrees.models import WorktreeConflict, WorktreeNotFound
+
+        try:
+            self.owner.require_project_not_deleting(alias)
+            project = self.owner.get_project(alias)
+            if not project.enabled:
+                raise ProjectConflict("Project 已停用。")
+            assert workspace.worktree_id is not None
+            record = self.owner.worktrees.get(workspace.worktree_id)
+            self.owner.worktrees.require_bindable(record.id, project=project, cwd=record.cwd)
+        except (ProjectConflict, ProjectNotFound, WorktreeConflict, WorktreeNotFound) as error:
+            raise DefaultConfigurationError(
+                "默认配置的工作区已不可用，请刷新并重新选择。", code="workspace_unavailable",
+            ) from error
 
     @staticmethod
     def _check_revision(rule: DefaultRule, revision: int) -> None:

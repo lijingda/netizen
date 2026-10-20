@@ -6,13 +6,14 @@ import json
 import unittest
 from pathlib import Path
 
-from netizen_cli.cards.callbacks import CardActionError
+from netizen_cli.cards.callbacks import CardActionError, _new_model_reference
+from netizen_cli.cards.controls import decode_session_settings_form, session_settings_form_elements
 from netizen_cli.cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
 from netizen_cli.domain import FeishuScope, MentionContextMode, ScopeKind
 from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption, ServiceTierOption
 from netizen_cli.projects import Project
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
-from tests.support.channel_cards import callback, elements, form_values, option_value
+from tests.support.channel_cards import callback, elements, form_controls, form_values, option_value
 
 
 class DefaultsCardsTest(unittest.TestCase):
@@ -28,12 +29,13 @@ class DefaultsCardsTest(unittest.TestCase):
             BindingTaskFeedback(True, False, False), MentionContextMode.CATCH_UP,
         )
         self.record = {"id": "defaults-1", "kind": "chat", "chat_id": "oc_group", "keyword": None,
-                       "project": "work", "session_settings": self.settings.to_dict(), "revision": 3, "position": None}
+                       "project": "work", "session_settings": self.settings.to_dict(),
+                       "workspace": {"mode": "project"}, "revision": 3, "position": None}
         self.view = {"exact": self.record, "effective": self.record, "chat_kind": "group", "match_error": None}
 
-    def card(self, *, view=None, projects=None, catalog=True, scope=None):
+    def card(self, *, view=None, projects=None, catalog=True, scope=None, **kwargs):
         return defaults_card(scope or self.scope, view or self.view,
-            self.projects if projects is None else projects, self.catalog if catalog else None)
+            self.projects if projects is None else projects, self.catalog if catalog else None, **kwargs)
 
     @staticmethod
     def project_field(card):
@@ -221,6 +223,162 @@ class DefaultsCardsTest(unittest.TestCase):
         before = copy.deepcopy(view)
         self.card(view=view)
         self.assertEqual(view, before)
+
+    def workspace_options(self, **changes):
+        return {
+            "projectAlias": "work", "projectRevision": 2, "isGit": True,
+            "items": [
+                {"id": "wt-ready", "cwd": "/tmp/worktrees/ready", "branch": None,
+                 "state": "ready", "available": True},
+                {"id": "wt-missing", "cwd": "/tmp/worktrees/missing", "branch": None,
+                 "state": "missing", "available": False},
+            ],
+            "branches": [{"name": "main", "ref": "refs/heads/main", "remote": False}],
+            **changes,
+        }
+
+    def workspace_card(self, workspace=None, **kwargs):
+        record = {**self.record, "workspace": workspace or {"mode": "project"}}
+        return self.card(view={**self.view, "exact": record, "effective": record},
+                         allow_workspace_selection=True, **kwargs)
+
+    def test_workspace_policies_roundtrip_and_only_offer_available_resources(self):
+        for workspace in (
+            {"mode": "project"}, {"mode": "existing", "worktree_id": "wt-ready"},
+            {"mode": "new"}, {"mode": "new", "ref": "refs/heads/main"},
+        ):
+            with self.subTest(workspace=workspace):
+                card = self.workspace_card(workspace, workspace_options=self.workspace_options())
+                request = decode_defaults_action(self.scope, {}, form_values(card))
+                self.assertEqual(request["workspace"], workspace)
+                self.assertEqual(request["session_settings"], self.settings.to_dict())
+                self.assertNotIn("wt-missing", str(card.card))
+                self.assertIn("加载项目目录选项", str(card.card))
+        card = self.workspace_card({"mode": "new", "ref": "abc123"}, workspace_options=self.workspace_options())
+        self.assertEqual(decode_defaults_action(self.scope, {}, form_values(card))["workspace"]["ref"], "abc123")
+
+    def test_missing_workspace_and_failed_catalog_preserve_policy_and_delete(self):
+        workspace = {"mode": "existing", "worktree_id": "wt-removed"}
+        for options in (None, self.workspace_options(), self.workspace_options(isGit=False)):
+            with self.subTest(options=options):
+                card = self.workspace_card(workspace, workspace_options=options, workspace_error="目录查询失败")
+                self.assertIn("wt-removed", str(card.card))
+                self.assertIn("保留原配置", str(card.card))
+                request = decode_defaults_action(self.scope, {}, form_values(card))
+                self.assertEqual(request["workspace"], workspace)
+                self.assertEqual(decode_defaults_action(self.scope, callback(card, "删除默认配置"))["mode"], "delete")
+
+    def test_load_preserves_draft_policy_settings_and_configuration_revision(self):
+        card = self.workspace_card({"mode": "new"}, workspace_options=self.workspace_options())
+        form = form_values(card)
+        form.update(defaults_session_model=_new_model_reference("future"),
+                    defaults_session_effort="ultra", defaults_session_speed="priority-v2",
+                    defaults_session_task_reactions="task-feedback:v2:off",
+                    defaults_session_completion_mention="task-feedback:v2:on",
+                    defaults_session_context_mode="context-mode:v1:current-only",
+                    defaults_worktree_ref="refs/heads/main")
+        request = decode_defaults_action(self.scope, callback(card, "加载项目目录选项"), form)
+        self.assertEqual(request["mode"], "load_workspace")
+        self.assertEqual(request["workspace"], {"mode": "new", "ref": "refs/heads/main"})
+        updated = {**self.record, "revision": 6}
+        refreshed = self.card(view={**self.view, "exact": updated, "effective": updated}, draft=request,
+                              workspace_options=self.workspace_options(), allow_workspace_selection=True, catalog=False)
+        saved = decode_defaults_action(self.scope, {}, form_values(refreshed))
+        self.assertEqual(saved["expected_revision"], 3)
+        self.assertEqual(saved["workspace"], request["workspace"])
+        self.assertEqual(saved["session_settings"], request["session_settings"])
+
+    def test_switching_project_rejects_stale_workspace_until_explicit_load(self):
+        other = Project("other", Path("/tmp/other"), True, 4)
+        card = self.workspace_card({"mode": "existing", "worktree_id": "wt-ready"},
+                                   workspace_options=self.workspace_options(), projects=[*self.projects, other])
+        form = form_values(card)
+        project = self.project_field(card)
+        form[project["name"]] = project["options"][1]["value"]
+        with self.assertRaisesRegex(CardActionError, "重新加载"):
+            decode_defaults_action(self.scope, {}, form)
+        request = decode_defaults_action(self.scope, callback(card, "加载项目目录选项"), form)
+        self.assertEqual(request["project"], "other")
+        self.assertEqual(request["workspace"], {"mode": "project"})
+        refreshed = self.card(draft=request, projects=[*self.projects, other], allow_workspace_selection=True,
+                              workspace_options=self.workspace_options(projectAlias="other", projectRevision=4))
+        self.assertEqual(decode_defaults_action(self.scope, {}, form_values(refreshed))["workspace"], {"mode": "project"})
+
+    def test_load_ignores_invalid_old_workspace_but_save_rejects_it(self):
+        card = self.workspace_card({"mode": "new"}, workspace_options=self.workspace_options())
+        form = form_values(card)
+        malformed = [
+            {**form, "defaults_workspace": "bad"},
+            {**form, "defaults_worktree_ref": ["not", "a", "ref"]},
+            {**form, "defaults_workspace": base64.urlsafe_b64encode(json.dumps({
+                "project": "work", "project_revision": True, "mode": "new",
+            }).encode()).decode().rstrip("=")},
+            {**form, "defaults_workspace": base64.urlsafe_b64encode(json.dumps({
+                "project": "work", "project_revision": 2, "mode": [],
+            }).encode()).decode().rstrip("=")},
+        ]
+        for fields in malformed:
+            with self.subTest(fields=fields):
+                with self.assertRaises(CardActionError):
+                    decode_defaults_action(self.scope, {}, fields)
+                self.assertEqual(
+                    decode_defaults_action(self.scope, callback(card, "加载项目目录选项"), fields)["mode"],
+                    "load_workspace",
+                )
+
+    def test_non_git_and_unloaded_projects_allow_refresh_without_new_policy(self):
+        for view, options in (
+            (self.view, self.workspace_options(isGit=False, items=[], branches=[])),
+            ({**self.view, "exact": None, "effective": None}, None),
+        ):
+            with self.subTest(view=view):
+                card = self.card(view=view, workspace_options=options, allow_workspace_selection=True)
+                self.assertIn("加载项目目录选项", str(card.card))
+                self.assertNotIn("defaults_worktree_ref", str(card.card))
+                self.assertNotIn("每个新会话新建 Worktree", str(card.card))
+
+    def test_grouped_form_keeps_workspace_last_and_delete_outside_form(self):
+        card = self.workspace_card({"mode": "new", "ref": "refs/heads/main"},
+                                   workspace_options=self.workspace_options())
+        form = elements(card.card, "form")[0]
+        groups = [[item["name"] for item in form_controls(section)]
+                  for section in form["elements"][:-1]]
+        self.assertEqual(groups, [
+            [self.project_field(card)["name"]],
+            ["defaults_session_model", "defaults_session_effort", "defaults_session_speed"],
+            ["defaults_session_context_mode"],
+            ["defaults_session_task_reactions", "defaults_session_progress_card", "defaults_session_completion_mention"],
+            ["defaults_workspace_load", "defaults_workspace", "defaults_worktree_ref"],
+        ])
+        self.assertEqual([item["name"] for item in form_controls(form["elements"][-1])], ["defaults_save"])
+        self.assertFalse(any(button.get("behaviors", [{}])[0].get("value", {}).get("action") == "delete"
+                             for button in elements(form, "button")))
+        self.assertEqual(decode_defaults_action(self.scope, callback(card, "删除默认配置"))["mode"], "delete")
+        request = decode_defaults_action(self.scope, {}, form_values(card))
+        self.assertEqual(request["chat_id"], self.scope.chat_id)
+        self.assertEqual(request["session_settings"], self.settings.to_dict())
+        self.assertEqual(request["workspace"], {"mode": "new", "ref": "refs/heads/main"})
+
+    def test_grouped_and_flat_shared_settings_preserve_explicit_choices_when_catalog_is_unavailable(self):
+        settings = SessionSettings(
+            BindingTurnSettings("unavailable-model", "unavailable-effort", "unavailable-speed"),
+            self.settings.task_feedback, MentionContextMode.CURRENT_ONLY,
+        )
+        for catalog in (None, self.catalog):
+            for allow_context in (True, False):
+                with self.subTest(catalog=catalog, allow_context=allow_context):
+                    values = []
+                    for grouped in (False, True):
+                        controls = session_settings_form_elements(
+                            prefix="test", settings=settings, catalog=catalog,
+                            allow_context_mode=allow_context, grouped=grouped,
+                        )
+                        fields = {item["name"]: item["initial_option"] for item in form_controls(controls)
+                                  if item["tag"] == "select_static"}
+                        values.append(fields)
+                        self.assertEqual("test_context_mode" in fields, allow_context)
+                        self.assertEqual(decode_session_settings_form(fields, prefix="test"), settings)
+                    self.assertEqual(values[0], values[1])
 
 
 if __name__ == "__main__":
