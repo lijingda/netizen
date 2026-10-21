@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 
 from openai_codex import AsyncCodex, CodexConfig
@@ -98,6 +99,14 @@ async def _codex(config: CodexConfig):
             stream = getattr(process, name, None)
             if stream is not None:
                 stream.close()
+        # Closing the pipes only asks the App Server to exit; reap it before
+        # the caller deletes the temporary HOME/CODEX_HOME it may still write.
+        if process is not None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 def main() -> None:
