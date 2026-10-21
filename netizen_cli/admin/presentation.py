@@ -23,6 +23,17 @@ def _chat_open_url(chat: ChatLabel) -> str:
     )
 
 
+def _chat_label_json(chat: ChatLabel) -> dict[str, object]:
+    return {
+        "chatId": chat.chat_id,
+        "chatLabel": chat.display_name,
+        "chatLabelResolved": chat.resolved,
+        "chatMode": chat.chat_mode,
+        "chatType": chat.chat_type,
+        "chatOpenUrl": _chat_open_url(chat),
+    }
+
+
 def _schedule_plan_json(plan: dict[str, Any], chat: ChatLabel) -> dict[str, Any]:
     rule = plan.get("schedule")
     local_at = None

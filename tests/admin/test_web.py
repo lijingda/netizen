@@ -146,7 +146,7 @@ class FakeFeishuClient:
 
 
 class FakeManagement:
-    async def resolve_chat_labels(self, chat_ids, *, deadline):
+    async def resolve_chat_labels(self, chat_ids, *, deadline, lookup_budget_seconds=None):
         return {chat_id: ChatLabelResolver.fallback(chat_id) for chat_id in chat_ids}
 
     def __init__(self, root: Path) -> None:
@@ -1954,6 +1954,67 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             status, _, error = await self.json_get("/api/v1/sessions?" + urlencode({**equivalent, "updatedBefore": "2030-04-02T00:00Z", "cursor": page["nextCursor"]}), session)
             self.assertEqual(status, 400, error)
             self.assertEqual(error["code"], "invalid_cursor")
+
+    async def test_chat_label_batch_is_authenticated_bounded_and_display_only(self) -> None:
+        self.runner.open_admission()
+        endpoint = "/api/v1/chat-labels"
+        with patch.object(self.management, "resolve_chat_labels") as resolve:
+            status, _, _ = await self.request("GET", endpoint + "?chatIds=oc_direct")
+            self.assertEqual(status, 401)
+            resolve.assert_not_awaited()
+        session = await self.login()
+        before = self.runner.application._auth.state_counts().actions
+        labels = {
+            "oc_direct": ChatLabel("oc_direct", "Alice", "p2p", True, "ou_alice"),
+            "oc_missing": ChatLabelResolver.fallback("oc_missing"),
+        }
+        started = asyncio.get_running_loop().time()
+        with (
+            patch.object(self.management, "resolve_chat_labels", return_value=labels) as resolve,
+            patch.object(self.management, "query_sessions") as inventory,
+            patch.object(self.management, "binding_statuses_exact") as statuses,
+        ):
+            status, _, response = await self.json_get(
+                endpoint + "?chatIds=oc_direct,oc_missing,oc_direct", session,
+            )
+            self.assertEqual(status, 200, response)
+            self.assertEqual(set(response), {"requestId", "items"})
+            self.assertEqual(len(response["items"]), 2)
+            direct, missing = response["items"]
+            self.assertEqual(direct, {
+                "chatId": "oc_direct", "chatLabel": "Alice", "chatLabelResolved": True,
+                "chatMode": "p2p", "chatType": None,
+                "chatOpenUrl": _chat_open_url(labels["oc_direct"]),
+            })
+            self.assertEqual(missing["chatId"], "oc_missing")
+            self.assertFalse(missing["chatLabelResolved"])
+            self.assertEqual(resolve.call_args.args, (("oc_direct", "oc_missing"),))
+            self.assertEqual(resolve.call_args.kwargs["lookup_budget_seconds"], 8)
+            self.assertGreaterEqual(resolve.call_args.kwargs["deadline"], started + 8)
+            self.assertLessEqual(resolve.call_args.kwargs["deadline"], asyncio.get_running_loop().time() + 8)
+            inventory.assert_not_awaited()
+            statuses.assert_not_awaited()
+        self.assertEqual(before, self.runner.application._auth.state_counts().actions)
+
+        with patch.object(self.management, "resolve_chat_labels", return_value={}) as resolve:
+            for query in (
+                "", "chatIds=", "chatIds=oc_", "chatIds=ou_user", "chatIds=oc_a,",
+                "chatIds=oc_a%2Fmembers", "chatIds=oc_a%0A", "chatIds=oc_中文",
+                "chatIds=" + "oc_" + "x" * 254,
+                "chatIds=" + ",".join(f"oc_{i}" for i in range(101)),
+                "chatIds=oc_a&extra=value",
+            ):
+                # HTTP targets are ASCII; encode the unicode invalid input explicitly.
+                target = endpoint + "?" + query.replace("中文", "%E4%B8%AD%E6%96%87") if query else endpoint
+                with self.subTest(query=query):
+                    status, _, error = await self.json_get(target, session)
+                    self.assertEqual(status, 400, error)
+            resolve.assert_not_awaited()
+            status, _, response = await self.json_get(
+                endpoint + "?chatIds=" + ",".join(f"oc_{i}" for i in range(100)), session,
+            )
+            self.assertEqual(status, 200, response)
+            self.assertEqual(len(resolve.call_args.args[0]), 100)
 
     async def test_project_options_are_authenticated_paginated_and_issue_no_actions(self) -> None:
         self.runner.open_admission()

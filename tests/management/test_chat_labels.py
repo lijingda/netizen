@@ -62,6 +62,269 @@ class FakeChatLabelProvider:
 
 
 class ChatLabelResolverTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_many_never_starts_io_or_waits_for_inflight_lookup(self) -> None:
+        provider = FakeChatLabelProvider()
+        provider.info["oc_group"] = FakeChatInfo("Engineering", "group")
+        provider.gate = asyncio.Event()
+        resolver = ChatLabelResolver(provider)
+        self.addAsyncCleanup(resolver.aclose)
+
+        labels = resolver.cached_many(("oc_group", "oc_group"))
+        self.assertEqual(tuple(labels), ("oc_group",))
+        self.assertFalse(labels["oc_group"].resolved)
+        self.assertEqual(provider.info_calls, [])
+        self.assertEqual(provider.member_calls, [])
+
+        request = asyncio.create_task(resolver.resolve_many(
+            ("oc_group",), deadline=asyncio.get_running_loop().time() + 1,
+        ))
+        await asyncio.wait_for(provider.info_started.get(), 1)
+        self.assertEqual(resolver.cached_many(("oc_group",)), labels)
+        self.assertFalse(request.done())
+        provider.gate.set()
+        resolved = await request
+        self.assertEqual(resolver.cached_many(("oc_group",)), resolved)
+        self.assertEqual(provider.info_calls, ["oc_group"])
+
+    async def test_cached_many_reads_positive_and_negative_cache_until_expiry(self) -> None:
+        now = [100.0]
+        provider = FakeChatLabelProvider()
+        provider.info = {
+            "oc_group": FakeChatInfo("Engineering", "group"),
+            "oc_direct": FakeChatInfo("", "p2p"),
+        }
+        resolver = ChatLabelResolver(
+            provider, clock=lambda: now[0], positive_ttl_seconds=60,
+        )
+        self.addAsyncCleanup(resolver.aclose)
+        chat_ids = ("oc_group", "oc_direct")
+        original = await resolver.resolve_many(
+            chat_ids, deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertFalse(original["oc_direct"].resolved)
+        self.assertEqual(original["oc_direct"].chat_mode, "p2p")
+        self.assertEqual(resolver.cached_many(chat_ids), original)
+
+        now[0] += 30
+        cached = resolver.cached_many(chat_ids)
+        self.assertEqual(cached["oc_group"], original["oc_group"])
+        self.assertIsNone(cached["oc_direct"].chat_mode)
+        now[0] += 30
+        self.assertFalse(resolver.cached_many(chat_ids)["oc_group"].resolved)
+        self.assertEqual(provider.info_calls, ["oc_group", "oc_direct"])
+        self.assertEqual(provider.member_calls, ["oc_direct"])
+
+    async def test_call_budget_is_independent_and_short_waiter_preserves_shared_lookup(self) -> None:
+        provider = FakeChatLabelProvider()
+        provider.info["oc_group"] = FakeChatInfo("Engineering", "group")
+        provider.gate = asyncio.Event()
+        resolver = ChatLabelResolver(provider, lookup_budget_seconds=0.1)
+        self.addAsyncCleanup(resolver.aclose)
+        loop = asyncio.get_running_loop()
+        long_request = asyncio.create_task(resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 5, lookup_budget_seconds=2,
+        ))
+        await asyncio.wait_for(provider.info_started.get(), 1)
+
+        short_labels = await asyncio.wait_for(resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 5,
+        ), 1)
+        self.assertFalse(short_labels["oc_group"].resolved)
+        self.assertFalse(long_request.done())
+        provider.gate.set()
+        self.assertTrue((await long_request)["oc_group"].resolved)
+        self.assertEqual(provider.info_calls, ["oc_group"])
+
+    async def test_long_waiter_extends_short_lookup_without_repeating_provider_calls(self) -> None:
+        for stage in ("not_started", "info", "members"):
+            with self.subTest(stage=stage):
+                provider = FakeChatLabelProvider()
+                provider.info["oc_direct"] = FakeChatInfo("", "p2p")
+                provider.members["oc_direct"] = [FakeChatMember("ou_user", "User")]
+                gate = asyncio.Event()
+                if stage == "members":
+                    provider.member_gate = gate
+                    started = provider.member_started
+                else:
+                    provider.gate = gate
+                    started = provider.info_started
+                resolver = ChatLabelResolver(provider, lookup_budget_seconds=0.1)
+                self.addAsyncCleanup(resolver.aclose)
+                loop = asyncio.get_running_loop()
+                short_request = asyncio.create_task(resolver.resolve_many(
+                    ("oc_direct",), deadline=loop.time() + 5,
+                ))
+                if stage != "not_started":
+                    await asyncio.wait_for(started.get(), 1)
+                long_request = asyncio.create_task(resolver.resolve_many(
+                    ("oc_direct",), deadline=loop.time() + 5,
+                    lookup_budget_seconds=2,
+                ))
+                if stage == "not_started":
+                    await asyncio.wait_for(started.get(), 1)
+
+                self.assertFalse((await short_request)["oc_direct"].resolved)
+                self.assertFalse(long_request.done())
+                gate.set()
+                labels = await asyncio.wait_for(long_request, 1)
+                self.assertEqual(labels["oc_direct"].display_name, "User")
+                self.assertEqual(provider.info_calls, ["oc_direct"])
+                self.assertEqual(provider.member_calls, ["oc_direct"])
+
+    async def test_later_equal_budgets_do_not_renew_worker_lifetime(self) -> None:
+        cancelled = asyncio.Event()
+
+        class CancelObservedProvider(FakeChatLabelProvider):
+            async def get_chat_info(self, chat_id: str):
+                try:
+                    return await super().get_chat_info(chat_id)
+                finally:
+                    cancelled.set()
+
+        provider = CancelObservedProvider()
+        provider.gate = asyncio.Event()
+        resolver = ChatLabelResolver(provider, lookup_budget_seconds=0.3)
+        self.addAsyncCleanup(resolver.aclose)
+        loop = asyncio.get_running_loop()
+        first = asyncio.create_task(resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 5,
+        ))
+        await asyncio.wait_for(provider.info_started.get(), 1)
+        # This bounded short waiter lets a substantial part of the original
+        # budget elapse before another equal-budget request joins the worker.
+        short = await resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 0.2,
+        )
+        self.assertFalse(short["oc_group"].resolved)
+        later = asyncio.create_task(resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 5,
+        ))
+        self.assertFalse((await first)["oc_group"].resolved)
+        await asyncio.wait_for(cancelled.wait(), 0.1)
+        self.assertFalse((await later)["oc_group"].resolved)
+        self.assertEqual(provider.info_calls, ["oc_group"])
+
+    async def test_caller_deadline_clamps_override_and_info_timeout_can_retry(self) -> None:
+        provider = FakeChatLabelProvider()
+        provider.info["oc_group"] = FakeChatInfo("Engineering", "group")
+        provider.gate = asyncio.Event()
+        resolver = ChatLabelResolver(provider)
+        self.addAsyncCleanup(resolver.aclose)
+        loop = asyncio.get_running_loop()
+        request = asyncio.create_task(resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 0.1, lookup_budget_seconds=5,
+        ))
+        await asyncio.wait_for(provider.info_started.get(), 1)
+        self.assertFalse((await asyncio.wait_for(request, 1))["oc_group"].resolved)
+        provider.gate.set()
+
+        retried = await resolver.resolve_many(("oc_group",), deadline=loop.time() + 1)
+        self.assertTrue(retried["oc_group"].resolved)
+        self.assertEqual(provider.info_calls, ["oc_group", "oc_group"])
+
+    async def test_cancelled_caller_does_not_cancel_shared_lookup(self) -> None:
+        provider = FakeChatLabelProvider()
+        provider.info["oc_group"] = FakeChatInfo("Engineering", "group")
+        provider.gate = asyncio.Event()
+        resolver = ChatLabelResolver(provider)
+        self.addAsyncCleanup(resolver.aclose)
+        loop = asyncio.get_running_loop()
+        request = asyncio.create_task(resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 2,
+        ))
+        await asyncio.wait_for(provider.info_started.get(), 1)
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        self.assertEqual(provider.active, 1)
+        provider.gate.set()
+        labels = await resolver.resolve_many(("oc_group",), deadline=loop.time() + 1)
+        self.assertTrue(labels["oc_group"].resolved)
+        self.assertEqual(provider.info_calls, ["oc_group"])
+
+    async def test_member_timeout_can_retry_without_waiting_for_negative_ttl(self) -> None:
+        provider = FakeChatLabelProvider()
+        provider.info["oc_direct"] = FakeChatInfo("", "p2p", "private")
+        provider.members["oc_direct"] = [FakeChatMember("ou_user", "User")]
+        provider.member_gate = asyncio.Event()
+        resolver = ChatLabelResolver(provider)
+        self.addAsyncCleanup(resolver.aclose)
+        loop = asyncio.get_running_loop()
+        request = asyncio.create_task(resolver.resolve_many(
+            ("oc_direct",), deadline=loop.time() + 0.1,
+        ))
+        await asyncio.wait_for(provider.member_started.get(), 1)
+        self.assertFalse((await asyncio.wait_for(request, 1))["oc_direct"].resolved)
+        provider.member_gate.set()
+
+        retried = await resolver.resolve_many(("oc_direct",), deadline=loop.time() + 1)
+        self.assertEqual(retried["oc_direct"].display_name, "User")
+        self.assertEqual(retried["oc_direct"].p2p_target_open_id, "ou_user")
+        self.assertEqual(provider.member_calls, ["oc_direct", "oc_direct"])
+
+    async def test_invalid_call_budgets_are_rejected_before_io(self) -> None:
+        provider = FakeChatLabelProvider()
+        resolver = ChatLabelResolver(provider)
+        self.addAsyncCleanup(resolver.aclose)
+        for budget in (0, -1, float("inf"), float("-inf"), float("nan")):
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                await resolver.resolve_many(
+                    ("oc_group",), deadline=asyncio.get_running_loop().time() + 1,
+                    lookup_budget_seconds=budget,
+                )
+        self.assertEqual(provider.info_calls, [])
+
+    async def test_expired_worker_retains_slot_and_remains_owned_until_close(self) -> None:
+        cleanup_started = asyncio.Event()
+        cleanup_release = asyncio.Event()
+        cleanup_cancellations: asyncio.Queue[None] = asyncio.Queue()
+
+        class SlowCleanupProvider(FakeChatLabelProvider):
+            async def get_chat_info(self, chat_id: str):
+                self.info_calls.append(chat_id)
+                self.info_started.put_nowait(chat_id)
+                self.active += 1
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cleanup_started.set()
+                    while not cleanup_release.is_set():
+                        try:
+                            await cleanup_release.wait()
+                        except asyncio.CancelledError:
+                            cleanup_cancellations.put_nowait(None)
+                    raise
+                finally:
+                    self.active -= 1
+
+        provider = SlowCleanupProvider()
+        resolver = ChatLabelResolver(provider, concurrency=1)
+        self.addAsyncCleanup(resolver.aclose)
+        self.addCleanup(cleanup_release.set)
+        loop = asyncio.get_running_loop()
+        first = asyncio.create_task(resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 0.1,
+        ))
+        await asyncio.wait_for(provider.info_started.get(), 1)
+        self.assertFalse((await first)["oc_group"].resolved)
+        await asyncio.wait_for(cleanup_started.wait(), 1)
+
+        second = asyncio.create_task(resolver.resolve_many(
+            ("oc_group",), deadline=loop.time() + 5,
+        ))
+        await asyncio.wait_for(cleanup_cancellations.get(), 1)
+        self.assertEqual(provider.info_calls, ["oc_group"])
+        self.assertEqual(provider.active, 1)
+
+        closing = asyncio.create_task(resolver.aclose())
+        await asyncio.wait_for(cleanup_cancellations.get(), 1)
+        self.assertFalse(closing.done())
+        cleanup_release.set()
+        await asyncio.wait_for(closing, 1)
+        self.assertFalse((await second)["oc_group"].resolved)
+        self.assertEqual(provider.info_calls, ["oc_group"])
+        self.assertEqual(provider.active, 0)
+
     async def test_group_and_p2p_use_chat_mode_and_member_name(self) -> None:
         provider = FakeChatLabelProvider()
         provider.info = {
@@ -323,7 +586,7 @@ class ChatLabelResolverTest(unittest.IsolatedAsyncioTestCase):
     async def test_rate_wait_expires_without_starting_or_spending_a_chat(self) -> None:
         now = [100.25]
         provider = FakeChatLabelProvider()
-        provider.info = {chat_id: FakeChatInfo("Group", "group") for chat_id in ("oc_first", "oc_waiting", "oc_next")}
+        provider.info = {chat_id: FakeChatInfo("Group", "group") for chat_id in ("oc_first", "oc_waiting")}
         resolver = ChatLabelResolver(
             provider, clock=lambda: now[0], lookups_per_second=1, lookups_per_minute=2,
         )
@@ -348,9 +611,9 @@ class ChatLabelResolverTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(labels["oc_waiting"].resolved)
         self.assertEqual(provider.info_calls, ["oc_first"])
         now[0] += 1
-        labels = await resolver.resolve_many(("oc_next",), deadline=loop.time() + 1)
-        self.assertTrue(labels["oc_next"].resolved)
-        self.assertEqual(provider.info_calls, ["oc_first", "oc_next"])
+        labels = await resolver.resolve_many(("oc_waiting",), deadline=loop.time() + 1)
+        self.assertTrue(labels["oc_waiting"].resolved)
+        self.assertEqual(provider.info_calls, ["oc_first", "oc_waiting"])
 
     async def test_simultaneous_rate_waiters_recheck_the_shared_allowance(self) -> None:
         now = [100.25]
@@ -391,7 +654,6 @@ class ChatLabelResolverTest(unittest.IsolatedAsyncioTestCase):
         provider.info = {
             "oc_direct": FakeChatInfo("", "p2p"),
             "oc_waiting": FakeChatInfo("Waiting", "group"),
-            "oc_next": FakeChatInfo("Next", "group"),
         }
         provider.members["oc_direct"] = [FakeChatMember("ou_user", "User")]
         provider.member_gate = asyncio.Event()
@@ -405,8 +667,8 @@ class ChatLabelResolverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.info_calls, ["oc_direct"])
         provider.member_gate.set()
         self.assertTrue((await first)["oc_direct"].resolved)
-        self.assertTrue((await resolver.resolve_many(("oc_next",), deadline=loop.time() + 1))["oc_next"].resolved)
-        self.assertEqual(provider.info_calls, ["oc_direct", "oc_next"])
+        self.assertTrue((await resolver.resolve_many(("oc_waiting",), deadline=loop.time() + 1))["oc_waiting"].resolved)
+        self.assertEqual(provider.info_calls, ["oc_direct", "oc_waiting"])
 
     async def test_failed_lookup_spends_allowance_and_close_cancels_rate_wait(self) -> None:
         provider = FakeChatLabelProvider()
