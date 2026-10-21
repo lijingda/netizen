@@ -75,7 +75,7 @@ class ScheduleWorkspaceCardsTest(unittest.TestCase):
         values.update(cron_every_minutes="not-yet-valid", cron_target_mode="id",
             cron_chat_id="oc_pending", cron_chat_query="草稿查询")
         before = read_schedule_form(self.scope, values)
-        load = decode_schedule_action(scope=self.scope, value=callback(card, "加载项目目录选项"), form=values)
+        load = decode_schedule_action(scope=self.scope, value=callback(card, "加载 worktree 选项"), form=values)
         self.assertEqual(load.action, "load_workspace")
         for options in (None, {**self.options, "projectRevision": 5}):
             with self.subTest(loaded=options is not None):
@@ -134,7 +134,7 @@ class ScheduleWorkspaceCardsTest(unittest.TestCase):
         self.assertIn("/tmp/binding-cwd", str(card.card))
         self.assertIn("wt-binding", str(card.card))
         self.assertIn("以原生会话为准", str(card.card))
-        self.assertNotIn("加载项目目录选项", str(card.card))
+        self.assertNotIn("加载 worktree 选项", str(card.card))
         values["cron_workspace"] = workspace_reference("work", 4, {"mode": "project"})
         with self.assertRaises(CardActionError):
             decode_schedule_action(scope=self.scope, value=None, form=values)

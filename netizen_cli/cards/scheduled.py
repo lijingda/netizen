@@ -88,10 +88,10 @@ _STATES = {
     "input_steered": "已追加当前任务", "input_unknown": "输入接收情况待确认",
     "input_rejected": "输入被拒绝", "anchor_failed": "触发消息发送失败",
     "anchor_unknown": "触发消息发送结果待确认",
-    "workspace_unavailable": "工作区不可用，本次未执行",
-    "workspace_creation_failed": "工作区创建失败，本次未启动",
-    "workspace_creation_unknown": "工作区创建结果待确认，本次未启动",
-    "workspace_handoff_failed": "工作区已保留，后续启动失败",
+    "workspace_unavailable": "worktree 不可用，本次未执行",
+    "workspace_creation_failed": "worktree 创建失败，本次未启动",
+    "workspace_creation_unknown": "worktree 创建结果待确认，本次未启动",
+    "workspace_handoff_failed": "worktree 已保留，后续启动失败",
     "dispatch_cancelled": "准备阶段已中断，本次未启动",
     "recovery_no_start": "准备阶段已中断，未重新执行",
 }
@@ -382,8 +382,9 @@ def _plan_summary(plan: Mapping[str, Any]) -> str:
         f"Project：{plan.get('project_alias', '')}\n"
         f"目标飞书聊天：{plan.get('chat_id', '')}\n"
         + (f"执行目标：Agent 会话 · {plan.get('target_label') or plan.get('target_binding_id', '')}\n" if plan.get("target_kind") == "binding" else "执行目标：每次新建独立话题\n")
-        + "工作区：" + workspace_summary(None if plan.get("target_kind") == "binding"
-            else plan.get("workspace", {"mode": "project"}), new_label="每次执行新建 Worktree") + "\n"
+        + ("工作目录：" if plan.get("target_kind") == "binding" else "worktree 使用方式：")
+        + workspace_summary(None if plan.get("target_kind") == "binding"
+            else plan.get("workspace", {"mode": "project"}), new_label="每次执行新建 worktree") + "\n"
         + f"启停：{'已启用' if plan.get('enabled') else '已暂停'}\n"
         + f"时间：{rule_text} · {rule.get('timezone', '')}\n"
         f"状态：{status}" + (f" · {_display_state(blocked)}" if blocked else "")
@@ -437,10 +438,10 @@ def _render_selected_plan(builder: Any, scope: FeishuScope, result: dict[str, An
 
 
 def _binding_workspace_summary(workspace: Mapping[str, Any] | None) -> str:
-    lines = ["工作区：沿用目标 Agent 会话的实际工作目录，不另存工作区策略。"]
+    lines = ["工作目录：沿用目标 Agent 会话的实际工作目录，无需另选 worktree 使用方式。"]
     if workspace:
         if workspace.get("worktree_id"):
-            lines.append("登记 Worktree：" + str(workspace["worktree_id"]))
+            lines.append("登记 worktree：" + str(workspace["worktree_id"]))
         if workspace.get("working_cwd"):
             lines.append("登记工作目录：" + str(workspace["working_cwd"]))
         if workspace.get("native_cwd_unresolved"):
@@ -453,7 +454,7 @@ def _run_workspace_receipt(run: Mapping[str, Any]) -> str:
     worktree_id = run.get("worktree_id") or receipt.get("id")
     if not worktree_id:
         return ""
-    lines = [f"\n本次工作区：{worktree_id}（独立资源，可在 Admin 查看）"]
+    lines = [f"\n本次 worktree：{worktree_id}（独立资源，可在 Admin 查看）"]
     if receipt.get("root"):
         lines.append("登记根目录：" + str(receipt["root"]))
     if receipt.get("cwd"):
@@ -681,17 +682,17 @@ def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[
         elements.extend(_chat_target_form_fields(draft, chats=chats, chat_avatar_keys=chat_avatar_keys,
             chat_snapshot=chat_snapshot, chat_page=chat_page,
             chat_directory_error=chat_directory_error))
-        load = _button(scope, "加载项目目录选项", "load_workspace", navigation=meta["navigation"])
+        load = _button(scope, "加载 worktree 选项", "load_workspace", navigation=meta["navigation"])
         load.update(name="cron_workspace_load", form_action_type="submit")
         workspace_fields = draft.workspace_fields or {}
         selected = (read_workspace_reference(workspace_fields["cron_workspace"])
                     if "cron_workspace" in workspace_fields else {"mode": "project"})
         policy = {key: value for key, value in selected.items() if key not in {"project", "project_revision"}}
-        elements.append(_form_section("工作区", workspace_form_elements(
+        elements.append(_form_section("worktree", workspace_form_elements(
             meta["project"], meta.get("project_revision"), policy, prefix="cron", load_button=load,
             options=workspace_options, error=workspace_error, draft_fields=workspace_fields,
-            new_label="每次执行新建 Worktree",
-            footer="已有 Worktree 由各次执行共享文件；不可用时不新建话题，不切回项目目录。已生成工作区需在 Admin 显式管理。",
+            new_label="每次执行新建 worktree",
+            footer="已有 worktree 由各次执行共享文件；不可用时不新建话题，不切回项目目录。已生成 worktree 需在 Admin 显式管理。",
         )))
     elements.append(_form_hint("只使用所选频率对应的日期、时间、星期或间隔；日期与时间以所填时区为准。"))
     elements.append({"tag": "button", "name": "cron_save", "text": _plain_text("保存修改" if editing else "创建任务"),
@@ -852,7 +853,7 @@ def _plan_form_metadata(form: Mapping[str, Any]) -> dict[str, Any]:
         meta["project"] = _text(meta["project"], "Project")
         if (meta.get("project_revision") is not None
                 and (type(meta["project_revision"]) is not int or meta["project_revision"] < 1)):
-            raise CardActionError("Project 版本无效，请重新加载项目目录选项。")
+            raise CardActionError("Project 版本无效，请重新加载 worktree 选项。")
     meta["navigation"] = schedule_navigation(meta["navigation"])
     instructions = [name for name in form if isinstance(name, str) and (name == "cron_instructions" or name.startswith("cron_instructions__"))]
     if len(instructions) != 1:
@@ -899,7 +900,7 @@ def read_schedule_form(scope: FeishuScope, form: Mapping[str, Any]) -> ScheduleF
         elif key in workspace_field_names("cron"):
             value = "" if value is None else value
             if binding_target or not isinstance(value, str):
-                raise CardActionError("固定会话不能配置工作区，或工作区字段格式无效。")
+                raise CardActionError("固定会话不能配置 worktree，或 worktree 字段格式无效。")
             workspace_fields[key] = value
             continue
         elif decorated:
@@ -956,7 +957,7 @@ def refresh_schedule_workspace(
 ) -> ScheduleFormDraft:
     """Explicit refresh can renew selection identity, never the plan write identity."""
     if draft.meta.get("target_kind") == "binding":
-        raise CardActionError("固定 Agent 会话任务沿用目标工作区。")
+        raise CardActionError("固定 Agent 会话任务沿用目标会话的实际工作目录。")
     meta = dict(draft.meta)
     fields = draft.workspace_fields or {}
     selected = read_workspace_reference(fields["cron_workspace"]) if fields.get("cron_workspace") else None
@@ -965,7 +966,7 @@ def refresh_schedule_workspace(
         policy = {key: value for key, value in selected.items() if key not in {"project", "project_revision"}}
     if options is not None:
         if options["projectAlias"] != meta["project"]:
-            raise CardActionError("工作区选项不属于所选项目。")
+            raise CardActionError("worktree 选项不属于所选项目。")
         meta["project_revision"] = options["projectRevision"]
     ref = fields.get("cron_worktree_ref", "HEAD") if policy["mode"] == "new" else "HEAD"
     return replace(draft, meta=meta, workspace_fields={

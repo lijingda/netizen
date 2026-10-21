@@ -1025,7 +1025,7 @@ class AdminWebApplication:
     def _worktree_service(self):
         service = getattr(self._management, "worktrees", None)
         if service is None:
-            raise AdminWebError(503, "unavailable", "Worktree 管理暂不可用。")
+            raise AdminWebError(503, "unavailable", "worktree 管理暂不可用。")
         return service
 
     async def _worktrees(self, context: _RequestContext) -> Response:
@@ -1779,8 +1779,8 @@ class AdminWebApplication:
             "schedule_creation_in_progress": "关联定时任务仍在创建话题或执行交接结果未决，请查看剩余记录后重新确认。",
             "fork_creation_in_progress": "关联分支仍在创建话题，请等待创建完成后刷新并重新确认。",
             "delete_failed": "删除未全部完成，请查看剩余会话状态后重新确认。",
-            "worktree_delete_failed": "受管 Worktree 尚未安全删除，请处理剩余项后重新确认。",
-            "worktree_creation_in_progress": "受管 Worktree 正在创建，请等待交接完成后重新确认。",
+            "worktree_delete_failed": "受管 worktree 尚未安全删除，请处理剩余项后重新确认。",
+            "worktree_creation_in_progress": "受管 worktree 正在创建，请等待交接完成后重新确认。",
         }
         if result.deleted:
             message = f"已删除 Project {result.project_alias} 及关联 Sessions，代码目录已保留。"

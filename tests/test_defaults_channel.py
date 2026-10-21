@@ -435,7 +435,7 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
         form[project["name"]] = project["options"][0]["value"]
         form.update(defaults_session_task_reactions="task-feedback:v2:on",
                     defaults_session_context_mode="context-mode:v1:catch-up")
-        await self.app.handle_card_action(self.card_event(value=callback(card, "加载项目目录选项"), form=form))
+        await self.app.handle_card_action(self.card_event(value=callback(card, "加载 worktree 选项"), form=form))
         self.assertIsNone(self.store.defaults.exact("cli_test", "oc_group"))
         worktrees.options.assert_awaited_once()
         refreshed = OutboundCard(card=self.channel.updates[-1][1])
@@ -474,7 +474,7 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
                     defaults_session_progress_card="task-feedback:v2:off")
         worktrees.options.side_effect = WorktreeError("unavailable", "目录查询失败")
         with patch.object(self.runtime, "model_catalog", AsyncMock(side_effect=RuntimeError("catalog offline"))):
-            await self.app.handle_card_action(self.card_event(value=callback(card, "加载项目目录选项"), form=form))
+            await self.app.handle_card_action(self.card_event(value=callback(card, "加载 worktree 选项"), form=form))
         self.assertEqual(self.store.defaults.exact("cli_test", "oc_group"), saved)
         refreshed = OutboundCard(card=self.channel.updates[-1][1])
         request = decode_defaults_action(scope, {}, form_values(refreshed))
@@ -510,7 +510,7 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_card_action(self.card_event(form=form))
         self.assertEqual(self.store.defaults.exact("cli_test", "oc_group").project, "test")
         self.assertIn("重新加载", str(self.channel.updates[-1][1]))
-        await self.app.handle_card_action(self.card_event(value=callback(card, "加载项目目录选项"), form=form))
+        await self.app.handle_card_action(self.card_event(value=callback(card, "加载 worktree 选项"), form=form))
         refreshed = OutboundCard(card=self.channel.updates[-1][1])
         request = decode_defaults_action(scope, {}, form_values(refreshed))
         self.assertEqual(request["project"], "other")

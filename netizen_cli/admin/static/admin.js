@@ -609,7 +609,7 @@ function confirmProjectDelete(preview) {
     + "\n定时计划将被删除；后续会话清理失败也不会恢复计划。"
     + "\n\n原生会话、派生子会话、Codex App/CLI 历史和本地会话登记将永久删除，无法恢复。"
     + "\n全部会话删除确认成功后，才会删除 Project 登记；部分失败时会保留 Project 和剩余会话。"
-    + `\n关联受管 Worktrees：${preview.worktreeCount || 0}，${preview.deleteWorktrees ? "同时安全删除；失败项保留，不强制丢弃成果" : "保留目录，可在 Worktrees 页面处理；不会自动关联到同名新 Project"}。`
+    + `\n关联受管 worktree：${preview.worktreeCount || 0}，${preview.deleteWorktrees ? "同时安全删除；失败项保留，不强制丢弃成果" : "保留目录，可在 worktree 页面处理；不会自动关联到同名新 Project"}。`
     + (preview.deleteWorktrees && preview.worktrees?.length ? `\n将删除的 checkout 根目录：\n${preview.worktrees.map((item) => `${item.id} · ${item.root}`).join("\n")}` : "")
     + `\n\n磁盘代码目录保留：${preview.project.cwd}`,
   );
@@ -665,10 +665,10 @@ async function deleteProject(project, deleteWorktrees = false) {
     if (result.remainingScheduledRunCount) {
       details.push(`仍有 ${result.remainingScheduledRunCount} 条定时执行的交接或清理未确认。`);
     }
-    if (result.deletedWorktreeCount) message += `\n已删除 ${result.deletedWorktreeCount} 个受管 Worktree。`;
+    if (result.deletedWorktreeCount) message += `\n已删除 ${result.deletedWorktreeCount} 个受管 worktree。`;
     if (result.remainingWorktreeCount) {
-      if (result.deleteWorktrees) details.push(`仍有 ${result.remainingWorktreeCount} 个受管 Worktree 未安全删除，请在 Worktrees 页面检查。`);
-      else message += `\n已按选择保留 ${result.remainingWorktreeCount} 个受管 Worktree，可在 Worktrees 页面处理。`;
+      if (result.deleteWorktrees) details.push(`仍有 ${result.remainingWorktreeCount} 个受管 worktree 未安全删除，请在 worktree 页面检查。`);
+      else message += `\n已按选择保留 ${result.remainingWorktreeCount} 个受管 worktree，可在 worktree 页面处理。`;
     }
     return result;
   } catch (error) {
@@ -727,7 +727,7 @@ async function loadProjects(cursor = undefined) {
       cascadeLabel.className = "cascade-choice";
       const cascade = document.createElement("input");
       cascade.type = "checkbox";
-      cascadeLabel.append(cascade, document.createTextNode("同时删除关联受管 Worktrees"));
+      cascadeLabel.append(cascade, document.createTextNode("同时删除关联受管 worktree"));
       actions.append(cascadeLabel);
       actions.append(actionButton(
         "删除 Project 及关联 Sessions", () => deleteProject(project, cascade.checked), true,
@@ -2533,9 +2533,9 @@ function workspacePolicyAvailable(workspace, options, project) {
 
 function workspacePolicySummary(workspace, { scheduled = false } = {}) {
   if (!workspace) return "沿用原会话的实际工作目录";
-  if (workspace.mode === "existing") return `指定 Worktree：${workspace.worktree_id}`;
-  if (workspace.mode === "new") return `${scheduled ? "每次执行" : "每个新会话"}创建 Worktree · ${workspace.ref || "创建时 Project HEAD"}`;
-  return "项目目录";
+  if (workspace.mode === "existing") return `使用已有 worktree：${workspace.worktree_id}`;
+  if (workspace.mode === "new") return `${scheduled ? "每次执行" : "每个新会话"}新建 worktree · ${workspace.ref || "创建时 Project HEAD"}`;
+  return "项目目录（不使用 worktree）";
 }
 
 function renderWorkspacePolicy(input, editor, { project, loading = false, scheduled = false } = {}) {
@@ -2549,8 +2549,8 @@ function renderWorkspacePolicy(input, editor, { project, loading = false, schedu
   }
   input("worktree-field").hidden = workspace.mode !== "existing";
   input("workspace-ref-field").hidden = workspace.mode !== "new";
-  scheduleSelectOptions(input("worktree"), [["", "选择受管 Worktree"],
-    ...items.map((item) => [item.id, `${item.cwd} · ${item.branch || "detached"} · ${item.id}`])],
+  scheduleSelectOptions(input("worktree"), [["", "选择受管 worktree"],
+    ...items.map((item) => [item.id, `已有 worktree · ${item.branch || "detached"} · ${item.cwd}`])],
   workspace.worktree_id || "");
   input("worktree").required = workspace.mode === "existing";
   input("workspace-ref").value = workspace.ref || "";
@@ -2563,21 +2563,21 @@ function renderWorkspacePolicy(input, editor, { project, loading = false, schedu
     input("workspace-refs").append(option);
   }
   const notes = [];
-  if (loading) notes.push("正在读取工作区选项…");
+  if (loading) notes.push("正在读取 worktree 选项…");
   if (editor.workspaceError) notes.push(workspaceErrorMessage(editor.workspaceError));
   else if (options?.isGit === false) notes.push("该 Project 不是 Git 仓库，只支持项目目录。");
-  else if (!project) notes.push("先选择 Project，再选择工作区策略。");
+  else if (!project) notes.push("先选择 Project，再选择 worktree 使用方式。");
   if (workspace.mode === "existing") {
-    notes.push(scheduled ? "各次执行共享所选 Worktree 的文件和分支；资源不可用时保留计划并跳过执行。"
-      : "新会话共享所选 Worktree 的文件和分支；删除或失效后保留此配置，自动创建会话时明确报错。");
+    notes.push(scheduled ? "各次执行共享所选 worktree 的文件和分支；资源不可用时保留计划并跳过执行。"
+      : "新会话共享所选 worktree 的文件和分支；删除或失效后保留此配置，自动创建会话时明确报错。");
     if (!loading && !workspacePolicyAvailable(workspace, options, project)) {
-      notes.push("所选 Worktree 当前不可用，请重新选择；不会切回项目目录。");
+      notes.push("所选 worktree 当前不可用，请重新选择；不会切回项目目录。");
     }
   } else if (workspace.mode === "new") {
     notes.push(scheduled
-      ? "每次执行创建一份 detached Worktree；该次会话的后续消息复用。留空使用执行时 Project 的 HEAD，预览和保存不创建目录。"
-      : "每次自动创建新会话时创建一次 detached Worktree；后续消息复用。留空使用创建时 Project 的 HEAD，保存配置不创建目录。");
-    if (!loading && !available) notes.push("当前无法使用新建 Worktree 策略，请检查 Project。");
+      ? "每次执行新建 detached worktree；该次会话的后续消息复用。留空使用执行时 Project 的 HEAD，预览和保存不创建目录。"
+      : "每个自动创建的新会话新建 detached worktree；后续消息复用。留空使用创建时 Project 的 HEAD，保存配置不创建目录。");
+    if (!loading && !available) notes.push("当前无法使用新建 worktree 方式，请检查 Project。");
   } else notes.push(scheduled ? "每次执行创建的会话使用 Project 的项目目录。" : "新会话使用 Project 的项目目录。");
   input("workspace-help").textContent = notes.join(" ");
   input("workspace-help").classList.toggle("error", !loading && !workspacePolicyAvailable(workspace, options, project));
@@ -3093,10 +3093,10 @@ function scheduleRunStatus(status) {
     not_started: "尚未执行", expired: "已过期，未执行", missed: "已错过",
     skipped_busy: "上次仍在执行，本次跳过", blocked_unknown: "上次结果待确认，本次跳过",
     project_disabled: "Project 已停用，本次未执行", project_unavailable: "Project 不可用，本次未执行",
-    workspace_unavailable: "工作区不可用，本次未执行",
-    workspace_creation_failed: "工作区创建失败，本次未执行",
-    workspace_creation_unknown: "工作区创建结果待确认，本次未执行",
-    workspace_handoff_failed: "工作区已保留，会话交接失败",
+    workspace_unavailable: "worktree 不可用，本次未执行",
+    workspace_creation_failed: "worktree 创建失败，本次未执行",
+    workspace_creation_unknown: "worktree 创建结果待确认，本次未执行",
+    workspace_handoff_failed: "worktree 已保留，会话交接失败",
     released: "调度已收尾", recovery_no_start: "服务恢复，本次未启动",
     publishing_unknown: "话题投递待确认", deleted: "执行会话已删除",
     initial_start_rejected: "启动被拒绝", publishing_failed: "话题发布失败",
@@ -3113,7 +3113,7 @@ function scheduleTriggerSource(source) {
 
 function scheduleWorktreeReceipt(run, { details = true } = {}) {
   if (!run?.worktree_id) return "";
-  const labels = [`Worktree：${run.worktree_id}`];
+  const labels = [`worktree：${run.worktree_id}`];
   const receipt = run.worktree;
   if (details && receipt) {
     if (receipt.cwd) labels.push(`工作目录：${receipt.cwd}`);
@@ -3139,7 +3139,7 @@ function scheduleBlockedLabel(plan) {
     project_unavailable: "Project 不可用", target_inactive: "原会话已切走或归档，自动暂停",
     target_missing: "原会话不可用", target_mismatch: "原会话位置不匹配" }[plan.blocked_reason] || "";
   const workspace = workspaceErrorMessage(plan.workspace_error)
-    || ([plan.blocked_reason, plan.suspended_reason].includes("workspace_unavailable") ? "工作区不可用" : "");
+    || ([plan.blocked_reason, plan.suspended_reason].includes("workspace_unavailable") ? "worktree 不可用" : "");
   return [primary, workspace].filter(Boolean).join(" · ");
 }
 
@@ -3153,7 +3153,7 @@ function scheduleInheritedWorkspace(plan) {
   const labels = [workspace.working_cwd
     ? `${workspace.native_cwd_unresolved ? "已登记" : "已选"}工作目录：${workspace.working_cwd}`
     : "工作目录尚未登记"];
-  if (workspace.worktree_id) labels.push(`Worktree：${workspace.worktree_id}`);
+  if (workspace.worktree_id) labels.push(`worktree：${workspace.worktree_id}`);
   labels.push(workspace.native_cwd_unresolved
     ? "实际目录由原会话确定，本次未查询原生目录。" : "执行时沿用原会话的工作目录。");
   return labels.join(" · ");
@@ -3273,8 +3273,8 @@ function validateScheduleFields({ saving = false } = {}) {
     setScheduleFieldError("weekdays", "请至少选择一天。");
   }
   if (saving && !scheduleWorkspaceCanSave()) {
-    setScheduleFieldError("workspace", scheduleEditor.workspaceLoading ? "工作区选项仍在读取，请稍后保存。"
-      : workspaceErrorMessage(scheduleEditor.workspaceError) || "请选择可用的工作区策略。");
+    setScheduleFieldError("workspace", scheduleEditor.workspaceLoading ? "worktree 选项仍在读取，请稍后保存。"
+      : workspaceErrorMessage(scheduleEditor.workspaceError) || "请选择可用的 worktree 使用方式。");
   }
   if (scheduleFieldErrors.size) {
     if (scheduleEditor?.action) showScheduleFormError("请检查标红的表单项。");

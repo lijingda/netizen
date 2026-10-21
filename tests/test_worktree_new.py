@@ -65,7 +65,7 @@ def load_value():
         scope=SCOPE, projects=(Project("test", Path("/project"), True, 1),),
         allow_workspace_selection=True,
     )
-    return _card_button_value(card, "加载项目目录选项")
+    return _card_button_value(card, "加载 worktree 选项")
 
 
 def load_event(channel, payload=None):
@@ -122,7 +122,7 @@ class WorktreeNewCardTest(unittest.TestCase):
         form = next(item for item in _elements(card.card, "form") if item["name"] == "new_binding_v6")
         sections = form["elements"][:-1]
         self.assertEqual([item["columns"][0]["elements"][0]["content"] for item in sections],
-                         ["**项目**", "**模型配置**", "**任务反馈**", "**工作区**"])
+                         ["**项目**", "**模型配置**", "**任务反馈**", "**worktree**"])
         selected = fields(card)
         for original in form_controls(_new_workspace_elements(data)):
             self.assertEqual({key: value for key, value in selected[original["name"]].items() if key != "width"}, original)
@@ -367,7 +367,7 @@ class WorktreeNewChannelTest(unittest.IsolatedAsyncioTestCase):
                                  "new_task_reactions", "new_progress_card", "new_completion_mention"):
                         self.assertEqual(refreshed[name]["initial_option"], draft[name])
                     self.assertEqual(refreshed["new_workspace"]["initial_option"], "workspace:v1:test:1:project")
-                    self.assertNotEqual(_card_button_value(OutboundCard(card=card), "加载项目目录选项")["nonce"], event.action.value["nonce"])
+                    self.assertNotEqual(_card_button_value(OutboundCard(card=card), "加载 worktree 选项")["nonce"], event.action.value["nonce"])
                     self.assertIsNone(f.store.active_binding(SCOPE.key))
                     self.assertEqual(f.runtime.submit_calls, [])
 

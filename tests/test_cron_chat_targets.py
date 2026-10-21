@@ -129,7 +129,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         }))
         service.manage = AsyncMock(wraps=service.manage)
         changes = self.store._connection.total_changes
-        restored = await self.action(value=callback(card, "加载项目目录选项"), form=values)
+        restored = await self.action(value=callback(card, "加载 worktree 选项"), form=values)
         after = read_schedule_form(self.scope, form_values(restored))
         self.assertEqual(after, before)
         self.assertIn("工作区读取超时", str(restored.card))
@@ -162,7 +162,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(drafted.workspace_fields, {key: values[key] for key in ("cron_workspace", "cron_worktree_ref")})
         self.assertEqual(drafted.meta["request_id"], project["request_id"])
         self.management.query_available_chats.reset_mock()
-        refreshed = await self.action(value=callback(paged, "加载项目目录选项"), form=form_values(paged))
+        refreshed = await self.action(value=callback(paged, "加载 worktree 选项"), form=form_values(paged))
         self.assertEqual(read_schedule_form(self.scope, form_values(refreshed)),
             replace(drafted, fields={key: value for key, value in drafted.fields.items() if key != "cron_chat_page"}))
         self.management.query_available_chats.assert_not_awaited()

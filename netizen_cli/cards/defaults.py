@@ -163,7 +163,7 @@ def defaults_card(
     )
     workspace_elements: list[dict[str, Any]] = []
     if allow_workspace_selection or workspace["mode"] != "project":
-        workspace_elements = [_form_section("工作区", _workspace_elements(
+        workspace_elements = [_form_section("worktree", _workspace_elements(
             selected_project, None if selected_value is None else _decoded(selected_value)["project_revision"],
             workspace, options=workspace_options, error=workspace_error,
         ))]
@@ -188,14 +188,14 @@ def _workspace_elements(
     project: str | None, project_revision: int | None, workspace: Mapping[str, Any],
     *, options: Mapping[str, Any] | None, error: str | None,
 ) -> list[dict[str, Any]]:
-    button = {"tag": "button", "name": "defaults_workspace_load", "text": _plain_text("加载项目目录选项"),
+    button = {"tag": "button", "name": "defaults_workspace_load", "text": _plain_text("加载 worktree 选项"),
         "type": "default", "width": "fill", "form_action_type": "submit",
         "behaviors": [{"type": "callback", "value": {
             "kind": "netizen_defaults", "action": "load_workspace", "v": _VERSION, "nonce": uuid4().hex,
         }}]}
     return workspace_form_elements(project, project_revision, workspace, prefix="defaults", load_button=button,
         options=options, error=error,
-        footer="指定已有 Worktree 会共享文件；资源失效时自动创建失败，不切回项目目录。已有会话不受默认配置修改影响。")
+        footer="使用已有 worktree 会共享文件；资源失效时自动创建失败，不切回项目目录。已有会话不受默认配置修改影响。")
 
 
 def _decode_workspace(fields: Mapping[str, Any], project: str, revision: int | None) -> dict[str, str]:

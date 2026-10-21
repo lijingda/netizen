@@ -28,12 +28,12 @@ class WorkspacePolicy:
         else:
             valid = False
         if not valid:
-            raise WorkspacePolicyError("工作区策略无效，请重新选择项目目录、已有工作区或每次新建工作区。")
+            raise WorkspacePolicyError("worktree 使用方式无效，请重新选择项目目录、已有 worktree 或每次新建 worktree。")
 
     @classmethod
     def from_dict(cls, value: Any) -> WorkspacePolicy:
         if not isinstance(value, dict):
-            raise WorkspacePolicyError("workspace 必须是工作区策略对象。")
+            raise WorkspacePolicyError("workspace 必须是 worktree 使用方式对象。")
         mode = value.get("mode")
         if mode == "project" and value.keys() == {"mode"}:
             return cls()
@@ -42,7 +42,7 @@ class WorkspacePolicy:
         if mode == "new" and value.keys() in ({"mode"}, {"mode", "ref"}):
             if "ref" not in value or _workspace_text(value["ref"]):
                 return cls(mode, ref=value.get("ref"))
-        raise WorkspacePolicyError("工作区策略字段无效，请重新选择工作区。")
+        raise WorkspacePolicyError("worktree 使用方式字段无效，请重新选择 worktree。")
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"mode": self.mode}

@@ -57,7 +57,7 @@ class WorktreeService:
         except AdminPortConfigurationError as error:
             raise WorktreeError("configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from error
         except OSError as error:
-            raise WorktreeError("configuration_unavailable", "无法保存工作区配置，当前配置未更新。") from error
+            raise WorktreeError("configuration_unavailable", "无法保存 worktree 配置，当前配置未更新。") from error
         return self.settings_view()
 
     def _project(self, alias: str, revision: int | None = None):
@@ -74,7 +74,7 @@ class WorktreeService:
         try:
             return self._store.get(worktree_id)
         except WorktreeNotFound as error:
-            raise WorktreeError("not_found", "受管工作区登记不存在，请刷新。") from error
+            raise WorktreeError("not_found", "受管 worktree 登记不存在，请刷新。") from error
 
     def _orphaned(self, record: WorktreeRecord) -> bool:
         try:
@@ -142,7 +142,7 @@ class WorktreeService:
                     raise ValueError()
                 position = WorktreeCursor(value[1], value[2])
             except (ValueError, TypeError, UnicodeError) as error:
-                raise WorktreeError("invalid_arguments", "工作区分页已失效，请从第一页重新查询。") from error
+                raise WorktreeError("invalid_arguments", "worktree 分页已失效，请从第一页重新查询。") from error
         deadline = deadline or asyncio.get_running_loop().time() + _READ_SECONDS + 2
         async with asyncio.timeout_at(deadline):
             page = await self._store.list_page(project_alias=project_alias, cursor=position, limit=limit)
@@ -221,8 +221,8 @@ class WorktreeService:
             raise WorktreeError("conflict", str(error)) from error
         state = await self._state(record)
         if state.status != "ready":
-            reason = {"missing": "工作区目录缺失", "replaced": "工作区身份已被替换",
-                      "unknown": "工作区状态暂时无法确认"}.get(state.status, "工作区不可用")
+            reason = {"missing": "worktree 目录缺失", "replaced": "worktree 身份已被替换",
+                      "unknown": "worktree 状态暂时无法确认"}.get(state.status, "worktree 不可用")
             raise WorktreeError("unavailable", reason + "，请刷新；不会切回项目目录。")
         return record
 
@@ -232,7 +232,7 @@ class WorktreeService:
     ) -> WorktreeRecord | None:
         """Read creation eligibility without creating a checkout or freezing HEAD."""
         if not isinstance(policy, WorkspacePolicy):
-            raise WorktreeError("invalid_arguments", "工作区策略无效。")
+            raise WorktreeError("invalid_arguments", "worktree 使用方式无效。")
         if policy.mode == "project":
             return None
         try:
@@ -251,7 +251,7 @@ class WorktreeService:
                 await self._git.inspect_repository(Path(project.cwd))
         except GitError as error:
             raise WorktreeError("not_git" if isinstance(error, NotGitRepository) else "unavailable",
-                                "无法确认 Project 的 Git 仓库；未创建工作区。") from error
+                                "无法确认 Project 的 Git 仓库；未创建 worktree。") from error
         except TimeoutError as error:
             raise WorktreeError("unavailable", "Git 仓库状态未在时限内取得，请稍后刷新。") from error
         self._project(project_alias, revision)
@@ -262,7 +262,7 @@ class WorktreeService:
                      source_cwd: str | Path | None = None, origin_binding_id: str | None = None,
                      agent_default: bool = False, scheduled_run_id: str | None = None) -> dict[str, Any]:
         if self._closed:
-            raise WorktreeError("unavailable", "服务正在关闭，未开始创建工作区。")
+            raise WorktreeError("unavailable", "服务正在关闭，未开始创建 worktree。")
         if mode not in {"detached", "existing", "new"} or any(
             value is not None and (not isinstance(value, str) or not value or len(value) > 256
                                   or any(ord(character) < 32 for character in value))
@@ -333,8 +333,8 @@ class WorktreeService:
                                        "creationState": record.creation_state}
             logger.warning("worktree_create_failed type=%s", type(error).__name__)
             raise WorktreeError("outcome_unknown" if record is not None else "unavailable",
-                "工作区创建未确认完成；已知登记和目录保留，可在 Admin 检查，勿自动重试。" if record else
-                "无法准备工作区；本次未开始创建 Git 工作区。若已执行 fetch，更新的引用不会回滚。",
+                "worktree 创建未确认完成；已知登记和目录保留，可在 Admin 检查，勿自动重试。" if record else
+                "无法准备 worktree；本次未开始创建 Git worktree。若已执行 fetch，更新的引用不会回滚。",
                 details=details) from error
         finally:
             self._mutations.discard(task)
@@ -400,7 +400,7 @@ class WorktreeService:
         if any(side.state is SideTopicState.CREATING for side in sides):
             reasons.append("关联 Side 仍在创建，请完成后重新确认。")
         if sides and not delete_sessions:
-            reasons.append("该工作区仍有关联 Side，请先结束 Side 或选择同时删除关联会话。")
+            reasons.append("该 worktree 仍有关联 Side，请先结束 Side 或选择同时删除关联会话。")
         if any(side.parent_binding_id not in associated | project_deletion_bindings for side in sides):
             reasons.append("仍有非级联会话的 Side 使用此目录，请先结束该 Side。")
         if delete_sessions and any(binding.native_thread_id for binding in snapshot.bindings) and not self._management.native_delete_available:
@@ -411,7 +411,7 @@ class WorktreeService:
         # A code directory explicitly registered as another Project is never
         # silently removed, even if the same path was originally allocated here.
         if any(Path(project.cwd).is_relative_to(Path(record.root)) for project in self._bindings.list_projects()):
-            return await self._state(record), ["该目录同时是一个 Project 的代码目录，不能作为工作区删除。"]
+            return await self._state(record), ["该目录同时是一个 Project 的代码目录，不能作为 worktree 删除。"]
         if not record.git_dir or not record.identity_token:
             state = await self._state(record)
             return state, [] if state.status == "missing" else ["创建身份未确认；请先人工处理目录后清理登记。"]
@@ -433,7 +433,7 @@ class WorktreeService:
                 reasons.extend(await self._usage_reasons(snapshot, sides, delete_sessions=delete_sessions,
                     project_deletion_bindings=_project_deletion_bindings, usage_bindings=usage_bindings))
         except WorktreeNotFound as error:
-            raise WorktreeError("not_found", "工作区登记不存在。") from error
+            raise WorktreeError("not_found", "worktree 登记不存在。") from error
         except WorktreeConflict as error:
             raise WorktreeError("conflict", str(error)) from error
         except TimeoutError as error:
@@ -468,7 +468,7 @@ class WorktreeService:
                 usage_bindings = self._store.usage_bindings(worktree_id)
                 sides = await self._sides(snapshot.record, snapshot.bindings, usage_bindings)
                 if self._fingerprint(snapshot, sides, delete_sessions, usage_bindings) != expected_fingerprint:
-                    raise WorktreeError("inventory_changed", "工作区、关联会话或删除选项已经改变，请重新确认。")
+                    raise WorktreeError("inventory_changed", "worktree、关联会话或删除选项已经改变，请重新确认。")
                 self._store.reserve_delete(worktree_id, expected_fingerprint=snapshot.fingerprint)
                 reserved = True
                 # Admission is now closed for both users and the creating source.

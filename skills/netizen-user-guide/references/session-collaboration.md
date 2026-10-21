@@ -57,10 +57,10 @@ Netizen 会在当前聊天中新建普通话题。来源已经是话题时，新
 
 这组设置控制会话协作工具，不改变普通飞书消息的准入或其他原生工具权限。
 
-## 让 Agent 查询或创建受管 Worktree
+## 让 Agent 查询或创建受管 worktree
 
-Agent 可调用 `list_worktrees` 分页查看当前 Project 的本实例受管工作区，调用
-`create_worktree` 创建并登记独立 detached 工作区。发现受“发现”范围约束，创建受“读取与发送”范围约束；来源取
+Agent 可调用 `list_worktrees` 分页查看当前 Project 的本实例受管 worktree，调用
+`create_worktree` 创建并登记独立 detached worktree。发现受“发现”范围约束，创建受“读取与发送”范围约束；来源取
 当前原生会话，不能指定另一个 Project 或任意目标路径。删除仅在 Admin 提供。
 
 创建可指定 `ref`，需要时由 Agent 通过 Git 查询分支后填写；省略时采用仓库缓存的默认
@@ -69,5 +69,5 @@ Agent 可调用 `list_worktrees` 分页查看当前 Project 的本实例受管�
 
 创建 worktree **不会改变当前会话工作目录**，也不会直接创建会话。模型 `create_thread`
 没有 cwd/worktree 参数：来源在 A，即使刚创建 B，新会话仍在 A；来源本就在 B，则新会话
-也在 B。用户要显式使用新工作区，请通过 `/new` 选择它。结果未知时先查询/Admin 核查，
+也在 B。用户要显式使用新 worktree，请通过 `/new` 选择它。结果未知时先查询/Admin 核查，
 不要自动重试创建。

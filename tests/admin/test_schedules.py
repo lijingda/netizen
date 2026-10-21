@@ -412,7 +412,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(updated["plan"]["workspace"], workspace)
         self.schedules.plan.update(
             enabled=True, workspace={"mode": "existing", "worktree_id": "wt-exact"},
-            workspace_error={"code": "not_found", "message": "所选工作区登记已删除"},
+            workspace_error={"code": "not_found", "message": "所选 worktree 登记已删除"},
             workspace_available=False, blocked_reason="workspace_unavailable",
             suspended_reason="workspace_unavailable", can_run_now=False,
         )

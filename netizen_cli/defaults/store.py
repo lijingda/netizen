@@ -251,7 +251,7 @@ class DefaultsStore:
             self.owner.worktrees.require_bindable(record.id, project=project, cwd=record.cwd)
         except (ProjectConflict, ProjectNotFound, WorktreeConflict, WorktreeNotFound) as error:
             raise DefaultConfigurationError(
-                "默认配置的工作区已不可用，请刷新并重新选择。", code="workspace_unavailable",
+                "默认配置的 worktree 已不可用，请刷新并重新选择。", code="workspace_unavailable",
             ) from error
 
     @staticmethod

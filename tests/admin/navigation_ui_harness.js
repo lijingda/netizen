@@ -127,7 +127,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     assert.equal(state.tab, "worktrees");
     assert.equal(href(), "/worktrees");
     assert.equal(document.querySelector("#worktrees").hidden, false);
-    assert.match(document.querySelector("#worktrees-body").textContent, /本页没有受管 Worktree/);
+    assert.match(document.querySelector("#worktrees-body").textContent, /本页没有受管 worktree/);
     assert.equal(document.querySelector("#worktree-create-submit").disabled, true);
     assert(!lastQuery("/api/v1/worktrees").has("cursor"));
     return;

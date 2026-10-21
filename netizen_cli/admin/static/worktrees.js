@@ -60,7 +60,7 @@ window.NetizenWorktrees = (() => {
     node("existing").required = mode === "existing";
     node("create-submit").disabled = disabled || editor?.kind !== "create" || editor.loading || editor.checking
       || editor.uncertain || !branches?.actions?.create || (mode === "existing" && !node("existing").value);
-    node("create-submit").textContent = pending && editor?.kind === "create" ? "正在创建…" : "创建 Worktree";
+    node("create-submit").textContent = pending && editor?.kind === "create" ? "正在创建…" : "创建 worktree";
     node("new").disabled = disabled;
     node("configure").disabled = disabled;
     for (const button of document.querySelector("#worktrees-body").querySelectorAll("button, input")) button.disabled = disabled;
@@ -169,7 +169,7 @@ window.NetizenWorktrees = (() => {
         if (!branch.remote) option(node("existing"), branch.name,
           `${branch.name}${branch.occupiedPaths?.length ? "（已被其他 checkout 占用）" : ""}`, Boolean(branch.occupiedPaths?.length));
       }
-      node("create-note").textContent = result.isGit === false ? "该 Project 不是 Git 仓库，不能创建 Worktree。"
+      node("create-note").textContent = result.isGit === false ? "该 Project 不是 Git 仓库，不能创建 worktree。"
         : "默认从此 Project 当前 HEAD 检出；不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。";
     } catch (error) {
       if (editor === current && request === branchSerial && !expired()) node("create-note").textContent = error.message;
@@ -203,9 +203,9 @@ window.NetizenWorktrees = (() => {
     }
     if (!items.length) {
       const row = document.createElement("tr"); const empty = document.createElement("td");
-      empty.colSpan = 6; empty.textContent = "本页没有受管 Worktree。";
+      empty.colSpan = 6; empty.textContent = "本页没有受管 worktree。";
       const button = document.createElement("button"); button.type = "button"; button.className = "action";
-      button.textContent = "新建 Worktree";
+      button.textContent = "新建 worktree";
       button.addEventListener("click", () => openEditor("create", node("new")));
       empty.append(button); row.append(empty); body.append(row);
     }
@@ -237,7 +237,7 @@ window.NetizenWorktrees = (() => {
       } else {
         await loadRows();
         if (expired() || editor !== current) return;
-        editorMessage("列表已刷新。请关闭抽屉核对 Worktrees；当前输入已保留，未重复提交创建。", current.uncertain);
+        editorMessage("列表已刷新。请关闭抽屉核对 worktree；当前输入已保留，未重复提交创建。", current.uncertain);
       }
     } catch (error) {
       if (!expired() && editor === current) editorMessage(`刷新核对失败：${error.message}`, true);
@@ -266,7 +266,7 @@ window.NetizenWorktrees = (() => {
       }
     } finally { pending = false; controls(); }
     if (saved && !expired() && editor === current) {
-      closeEditor({ saved: true }); message("Worktree 配置已保存；已有目录未移动。");
+      closeEditor({ saved: true }); message("worktree 配置已保存；已有目录未移动。");
     }
   }
   async function create(event) {
@@ -278,7 +278,7 @@ window.NetizenWorktrees = (() => {
     const branch = mode === "existing" ? node("existing").value : mode === "new" ? node("new-branch").value.trim() : null;
     const ref = mode === "existing" ? `refs/heads/${branch}` : node("ref").value.trim() || "HEAD";
     const grant = branches.actions.create; branches.actions.create = null;
-    pending = true; controls(); editorMessage("正在创建 Worktree…");
+    pending = true; controls(); editorMessage("正在创建 worktree…");
     let result;
     try {
       result = await post("/api/v1/worktrees/create", grant, { mode, branch, ref });
@@ -286,13 +286,13 @@ window.NetizenWorktrees = (() => {
       if (!expired() && editor === current) {
         current.uncertain = !error.status || error.status >= 500;
         current.checkAvailable = true;
-        editorMessage(current.uncertain ? "创建结果未确认，请刷新核对 Worktrees；不要重复提交。" : error.message, true);
+        editorMessage(current.uncertain ? "创建结果未确认，请刷新核对 worktree；不要重复提交。" : error.message, true);
         message(node("create-status").textContent, true);
       }
     } finally { pending = false; controls(); }
     if (result && !expired() && editor === current) {
       closeEditor({ saved: true });
-      message(`Worktree 已创建：${result.resource.cwd}。可在飞书 /new 中选择；尚未创建会话。`);
+      message(`worktree 已创建：${result.resource.cwd}。可在飞书 /new 中选择；尚未创建会话。`);
     }
     // Read-only reconciliation never repeats the create request or reissues a
     // consumed grant, including when the original response was lost.
@@ -317,12 +317,12 @@ window.NetizenWorktrees = (() => {
       const bindings = preview.bindings || [];
       const identity = bindings.map((binding) => `${binding.shortId || binding.bindingId || binding.id}${binding.nativeThreadId ? ` (${binding.nativeThreadId})` : ""}`).join("、");
       const protectedNotice = preview.protectedSessionCount ? `\n另有 ${preview.protectedSessionCount} 个已知目录使用者，不在级联清单中，将保留其会话与原 cwd。` : "";
-      if (!window.confirm(`${preview.resource.state === "missing" ? "清理已缺失 Worktree 的登记" : "删除受管 Worktree"}？\ncheckout 根目录：${preview.resource.root || resource.root}\n会话工作目录：${preview.resource.cwd || resource.cwd}\n\n本实例关联会话：${bindings.length}${identity ? `\n${identity}` : ""}\n${preview.deleteSessions ? "同时永久删除关联会话及原生派生历史，无法恢复。" : "保留会话历史与原工作目录；目录删除后继续请求可能失败，不自动切回项目目录。"}${protectedNotice}\n仅依据本实例已知引用，无法排除外部客户端使用。目录没有快照恢复；操作会复核安全状态，部分成功不回滚。`)) {
+      if (!window.confirm(`${preview.resource.state === "missing" ? "清理已缺失 worktree 的登记" : "删除受管 worktree"}？\ncheckout 根目录：${preview.resource.root || resource.root}\n会话工作目录：${preview.resource.cwd || resource.cwd}\n\n本实例关联会话：${bindings.length}${identity ? `\n${identity}` : ""}\n${preview.deleteSessions ? "同时永久删除关联会话及原生派生历史，无法恢复。" : "保留会话历史与原工作目录；目录删除后继续请求可能失败，不自动切回项目目录。"}${protectedNotice}\n仅依据本实例已知引用，无法排除外部客户端使用。目录没有快照恢复；操作会复核安全状态，部分成功不回滚。`)) {
         message("已取消，未提交删除。"); return;
       }
       submitted = true;
       const result = await post("/api/v1/worktrees/delete", preview.actions.delete);
-      if (result.deleted) message(`Worktree 删除已确认。已删除 ${result.deletedSessionCount || 0} 个关联会话；保留 ${result.retainedSessionCount || 0} 个关联会话。`);
+      if (result.deleted) message(`worktree 删除已确认。已删除 ${result.deletedSessionCount || 0} 个关联会话；保留 ${result.retainedSessionCount || 0} 个关联会话。`);
       else message(`删除尚未完成（${result.code || "结果未确认"}）；已确认删除 ${result.deletedSessionCount || 0} 个关联会话，剩余 ${result.remainingSessionCount ?? "未取得"} 个。\n${result.message || ""}\n已成功项不回滚。请刷新检查剩余会话与目录后重新确认。`, true);
     } catch (error) {
       message(submitted && (!error.status || error.status >= 500)
@@ -330,7 +330,7 @@ window.NetizenWorktrees = (() => {
         : error.status ? error.message : "无法读取删除范围，未提交删除。", true);
     } finally {
       pending = false;
-      if (!expired()) { try { await loadRows(); } catch { message(`${node("result").textContent}\nWorktrees 刷新失败，请手动刷新检查。`, true); } }
+      if (!expired()) { try { await loadRows(); } catch { message(`${node("result").textContent}\nworktree 刷新失败，请手动刷新检查。`, true); } }
       controls();
     }
   }

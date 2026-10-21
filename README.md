@@ -116,10 +116,10 @@ Agent／脚本使用 `netizen update --json`：stdout 只输出最终 JSON，进
 群聊和群话题中的每条请求都需要重新 **@机器人**，包括命令。`/new` 只通过卡片创建会话，
 不接受参数。普通任务执行中发来的新消息用于调整当前任务，不会排队成下一个任务。
 
-Git 项目可在 `/new` 中加载项目目录选项，选择已有受管 worktree 或新建 worktree；默认
+Git 项目可在 `/new` 中加载 worktree 选项，选择已有受管 worktree 或新建 worktree；默认
 仍使用项目目录。新建只检出提交内容，不复制本地改动或执行环境初始化。
-配置、状态查询与删除在 [Admin Worktrees](skills/netizen-user-guide/references/admin.md#worktree-配置与管理)
-中完成；不同会话可以共享同一工作区。`/fork` 不提供新建或选择 worktree 的入口。
+配置、状态查询与删除在 [Admin worktree](skills/netizen-user-guide/references/admin.md#worktree-配置与管理)
+中完成；不同会话可以共享同一 worktree。`/fork` 不提供新建或选择 worktree 的入口。
 
 安装遇到问题可从[部署文档](docs/deployment.md)继续；已能对话时，常见疑问见
 [使用 FAQ](skills/netizen-user-guide/references/faq.md#常见问题)。

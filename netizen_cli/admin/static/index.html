@@ -25,7 +25,7 @@
 
   <nav class="tabs" aria-label="管理模块">
     <a class="tab active" data-tab="projects" href="/projects" aria-current="page">Projects</a>
-    <a class="tab" data-tab="worktrees" href="/worktrees">Worktrees</a>
+    <a class="tab" data-tab="worktrees" href="/worktrees">worktree</a>
     <a class="tab" data-tab="sessions" href="/sessions/ordinary">Sessions</a>
     <a class="tab" data-tab="schedules" href="/schedules">定时任务</a>
     <a class="tab" data-tab="defaults" href="/defaults">默认会话配置</a>
@@ -79,16 +79,16 @@
     </dialog>
 
     <section id="worktrees" class="panel" aria-labelledby="worktrees-heading" hidden>
-      <div class="section-head"><div><p class="eyebrow">MANAGED CHECKOUTS</p><h2 id="worktrees-heading">Worktrees</h2></div><div class="actions"><button id="worktree-new" class="action">新建 Worktree</button><button id="worktree-configure" class="refresh">创建配置</button><button class="refresh" data-refresh="worktrees">刷新</button></div></div>
-      <p class="hint">仅管理本实例创建的工作区。多个会话可共享文件和分支；列表按需查询，不扫描未提交内容，也不能证明没有外部客户端使用。</p>
+      <div class="section-head"><div><p class="eyebrow">managed worktree</p><h2 id="worktrees-heading">worktree</h2></div><div class="actions"><button id="worktree-new" class="action">新建 worktree</button><button id="worktree-configure" class="refresh">创建配置</button><button class="refresh" data-refresh="worktrees">刷新</button></div></div>
+      <p class="hint">仅管理本实例创建的 worktree。多个会话可共享文件和分支；列表按需查询，不扫描未提交内容，也不能证明没有外部客户端使用。</p>
       <p id="worktree-result" class="status" role="status" aria-live="polite"></p>
       <div class="table-wrap"><table><thead><tr><th>Project / 标识</th><th>工作目录</th><th>当前状态</th><th>分支 / HEAD</th><th>关联会话</th><th>操作</th></tr></thead><tbody id="worktrees-body"></tbody></table></div>
-      <nav class="pagination" aria-label="Worktrees 分页"><button id="worktrees-previous" class="next" disabled>上一页</button><span id="worktrees-page" aria-live="polite">第 1 页</span><button id="worktrees-next" class="next" disabled>下一页</button></nav>
+      <nav class="pagination" aria-label="worktree 分页"><button id="worktrees-previous" class="next" disabled>上一页</button><span id="worktrees-page" aria-live="polite">第 1 页</span><button id="worktrees-next" class="next" disabled>下一页</button></nav>
     </section>
 
     <dialog id="worktree-create-drawer" class="editor-drawer" aria-labelledby="worktree-create-title">
       <form id="worktree-create" class="card-form drawer-form workspace-form" hidden>
-        <div class="drawer-head"><div><p class="eyebrow">WORKTREE</p><h3 id="worktree-create-title">新建 Worktree</h3></div><button id="worktree-create-close" class="drawer-close" type="button" aria-label="关闭新建 Worktree 表单">×</button></div>
+        <div class="drawer-head"><div><p class="eyebrow">worktree</p><h3 id="worktree-create-title">新建 worktree</h3></div><button id="worktree-create-close" class="drawer-close" type="button" aria-label="关闭新建 worktree 表单">×</button></div>
         <div class="drawer-body">
           <div class="workspace-fields">
             <label>Project<select id="worktree-project" required><option value="">选择 Project</option></select></label>
@@ -100,19 +100,19 @@
           <p id="worktree-create-note" class="hint">只检出已提交内容，不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。</p>
           <h4>当前创建配置</h4>
           <p id="worktree-create-config" class="target-summary hint"></p>
-          <p class="hint">使用本实例已保存的配置；可在 Worktrees 页的“创建配置”中修改。</p>
+          <p class="hint">使用本实例已保存的配置；可在 worktree 页的“创建配置”中修改。</p>
           <p id="worktree-create-status" class="status" role="status" aria-live="polite"></p>
           <button id="worktree-create-check" class="drawer-cancel" type="button" hidden>刷新列表核对</button>
         </div>
-        <div class="drawer-footer"><button id="worktree-create-cancel" class="drawer-cancel" type="button">取消</button><button id="worktree-create-submit" type="submit" disabled>创建 Worktree</button></div>
+        <div class="drawer-footer"><button id="worktree-create-cancel" class="drawer-cancel" type="button">取消</button><button id="worktree-create-submit" type="submit" disabled>创建 worktree</button></div>
       </form>
     </dialog>
 
     <dialog id="worktree-settings-drawer" class="editor-drawer" aria-labelledby="worktree-settings-title">
       <form id="worktree-settings" class="card-form drawer-form workspace-form" hidden>
-        <div class="drawer-head"><div><p class="eyebrow">WORKTREE SETTINGS</p><h3 id="worktree-settings-title">Worktree 创建配置</h3></div><button id="worktree-settings-close" class="drawer-close" type="button" aria-label="关闭 Worktree 创建配置">×</button></div>
+        <div class="drawer-head"><div><p class="eyebrow">worktree settings</p><h3 id="worktree-settings-title">worktree 创建配置</h3></div><button id="worktree-settings-close" class="drawer-close" type="button" aria-label="关闭 worktree 创建配置">×</button></div>
         <div class="drawer-body">
-          <p class="hint">用于本实例后续创建，包括 Admin、飞书和 Agent 入口。已有工作区仍按原路径管理；不修改 Codex App 配置。</p>
+          <p class="hint">用于本实例后续创建，包括 Admin、飞书和 Agent 入口。已有 worktree 仍按原路径管理；不修改 Codex App 配置。</p>
           <div class="workspace-fields">
             <label>新建根目录（留空使用实例默认目录）<input id="worktree-root" maxlength="4096" aria-describedby="worktree-effective-root"></label>
             <p id="worktree-effective-root" class="hint"></p>
@@ -271,8 +271,8 @@
             <h4>会话配置</h4>
             <div class="schedule-form-grid">
               <label>Project<select id="defaults-project" required><option value="">选择 Project</option></select></label>
-              <label>工作区策略<select id="defaults-workspace"><option value="project">项目目录</option><option value="existing">指定已有 Worktree</option><option value="new">每个新会话创建 Worktree</option></select></label>
-              <label id="defaults-worktree-field" hidden>受管 Worktree<select id="defaults-worktree"></select></label>
+              <label>worktree 使用方式<select id="defaults-workspace"><option value="project">项目目录（不使用 worktree）</option><option value="existing">使用已有 worktree</option><option value="new">每个新会话新建 worktree</option></select></label>
+              <label id="defaults-worktree-field" hidden>受管 worktree<select id="defaults-worktree"></select></label>
               <label id="defaults-workspace-ref-field" hidden>起点提交 / 分支<input id="defaults-workspace-ref" list="defaults-workspace-refs" maxlength="256" placeholder="留空使用创建时 Project 的 HEAD"><datalist id="defaults-workspace-refs"></datalist></label>
             </div>
             <p id="defaults-workspace-help" class="defaults-field-help" role="status"></p>
@@ -380,8 +380,8 @@
                 </div>
                 <label id="schedule-project-field">Project<select id="schedule-project" required><option value="">选择 Project</option></select></label>
                 <div id="schedule-workspace-fields" class="schedule-section-fields">
-                  <label>工作区策略<select id="schedule-workspace"><option value="project">项目目录</option><option value="existing">指定已有 Worktree</option><option value="new">每次执行创建 Worktree</option></select></label>
-                  <label id="schedule-worktree-field" hidden>受管 Worktree<select id="schedule-worktree"></select></label>
+                  <label>worktree 使用方式<select id="schedule-workspace"><option value="project">项目目录（不使用 worktree）</option><option value="existing">使用已有 worktree</option><option value="new">每次执行新建 worktree</option></select></label>
+                  <label id="schedule-worktree-field" hidden>受管 worktree<select id="schedule-worktree"></select></label>
                   <label id="schedule-workspace-ref-field" hidden>起点提交 / 分支<input id="schedule-workspace-ref" list="schedule-workspace-refs" maxlength="256" placeholder="留空使用执行时 Project 的 HEAD"><datalist id="schedule-workspace-refs"></datalist></label>
                   <p id="schedule-workspace-help" class="schedule-field-help" role="status"></p>
                 </div>

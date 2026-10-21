@@ -118,7 +118,8 @@ Project 不限制工具读取该账号可访问的其他文件，Codex 用户状
 ### 受管 Worktree 与实际目录
 
 [ADR 0085](adr/0085-manage-worktrees-independently-of-sessions.md) 定义独立资源与共享
-语义。Admin、飞书 `/new`、默认会话自动创建、定时新话题和 Agent 工具共用 `WorktreeService` 与窄 Git 后端，只管理
+语义；产品展示统一使用小写 `worktree`，命名约定见 [worktree 词汇](../CONTEXT.md#worktree-词汇)。
+Admin、飞书 `/new`、默认会话自动创建、定时新话题和 Agent 工具共用 `WorktreeService` 与窄 Git 后端，只管理
 本实例通过该服务创建并登记的资源；不会收编 shell Git、Codex App/CLI 或其他实例的工作区，
 也不写 Codex 私有索引或宣称生命周期互通。Worktree 不属于某个会话私有，删除或归档
 单个会话不会顺带回收目录。
@@ -1514,10 +1515,10 @@ cwd/path 或原生 Thread ID。修改 Project 必须使现有资源重新符合�
 也不回退目录或自动重建。恢复同一有效资源或重选策略仅使未来执行重新具备条件。
 
 Admin 列表/详情、`/cron` 摘要/详情和 MCP list/view/mutation 计划投影提供策略、不可用
-原因与 `can_run_now=false`；原会话工作区为只读继承信息。选项和状态打开/刷新时按需有界
-读取，相同资源在本次查询内去重，不持久化健康状态、不扫描完整 dirty 文件或后台巡检。
+原因与 `can_run_now=false`；界面以“worktree 使用方式”展示策略，原会话实际工作目录为只读继承信息。
+选项和状态打开/刷新时按需有界读取，相同资源在本次查询内去重，不持久化健康状态、不扫描完整 dirty 文件或后台巡检。
 未取得新鲜状态不能当成确定可用。编辑器保留失效 exact 选择并说明原因，可重新选择；
-模型、聊天和工作区某组选项读取失败不丢弃其他选项或草稿。UI 状态不替代实际 dispatch 复核。
+模型、聊天和 worktree 某组选项读取失败不丢弃其他选项或草稿。UI 状态不替代实际 dispatch 复核。
 
 ### 原会话目标
 
@@ -1641,9 +1642,9 @@ Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后�
 放在底部，并提供冻结当前 Binding 的原会话入口。新建/编辑各用一张完整表单，频率
 不触发多级页面跳转，只校验对应时间字段。原会话表单只展示目标及继承说明，不编辑配置。
 卡片默认每批最多 50 个计划、5 条执行记录；更长指令通过 Admin/自然语言编辑。
-新话题表单按项目、工作区、模型、消息上下文与反馈分组，复用 `/defaults` 的工作区策略
-渲染和解析组件；指令、时间与投递位置保留计划自身语义。加载工作区或查找聊天均只读，
-完整保留草稿、分组内字段、exact revision、request_id 与真实 Scope，不保存卡片 session。
+新话题表单按项目、worktree、模型、消息上下文与反馈分组，复用 `/defaults` 的 worktree 使用方式
+渲染和解析组件；新建选项展示“每次执行新建 worktree”。指令、时间与投递位置保留计划自身语义。
+加载 worktree 选项或查找聊天均只读，完整保留草稿、分组内字段、exact revision、request_id 与真实 Scope，不保存卡片 session。
 筛选、选择和导航留在回调中，后台不存卡片 session 或草稿。提交以本次完整表单为准，
 经业务校验保存；出错恢复正常输入、exact revision、时间偏移和业务 request_id，每次
 重绘更换传输 nonce。损坏的原生控件值明确拒绝，恢复的 Scope 不替代下次真实消息位置校验。
@@ -1679,8 +1680,8 @@ Prompt。它与 `/cron`、MCP 调用相同服务入口，交接屏障占用、Pr
 未知后先查最近执行；卡片/MCP 原样重试保留请求 ID。
 卡片按钮与 Admin action grant 统一消费公共 `can_run_now`，不另算一套执行资格；
 后端认领和普通 Runtime 提交仍重新校验，按钮可用不是执行许可的最终凭据。
-Admin 默认配置与计划编辑器复用参数化工作区组件，保留失效选择、加载错误与字段校验；
-原会话只读展示目录继承信息，不出现可编辑的独立工作区策略。
+Admin 默认配置与计划编辑器复用参数化 worktree 组件，保留失效选择、加载错误与字段校验；
+原会话只读展示目录继承信息，不出现可编辑的独立 worktree 使用方式。
 
 三个入口共用写事务：稳定 request_id 去重，相同 ID 和规范 payload 返回原标识，内容
 不同则冲突；修改/删除以 expected_revision 做 CAS，不擅自递增。凭据保留七天，响应未知
@@ -2106,7 +2107,7 @@ type 为 user 后仍须管理员确认及服务端授权校验。当前用户资
 无效目标回退 `/projects`；登录成功后重新查询，不重放操作。
 
 Projects 页通过“添加 Project”抽屉切换登记已有目录和创建空目录，共用 Alias，
-分别保留两种方式的路径草稿；仍调用各自原有接口。Worktrees 页通过“新建 Worktree”
+分别保留两种方式的路径草稿；仍调用各自原有接口。worktree 页通过“新建 worktree”
 与“创建配置”分别打开抽屉，创建表单只读展示当前实例配置。列表刷新与抽屉初始化
 独立，创建及配置草稿互不覆盖；核对结果只读查询，不重发写请求。Project 明确拒绝后
 可显式刷新授权、保留输入再提交；结果未知时仅核对，不恢复提交能力。
@@ -2117,7 +2118,7 @@ Projects 页通过“添加 Project”抽屉切换登记已有目录和创建空
 切离管理员时卸载 Selector 浮层、忽略晚到回调，保留已选人员及原操作授权；返回后可确认
 添加或显式重新加载选人组件。子 Tab 不新增地址参数或持久草稿。
 
-Project 添加、Worktree 创建与配置、会话配置、默认会话配置和定时任务编辑抽屉按当前字段与初始值判断未保存修改。
+Project 添加、worktree 创建与配置、会话配置、默认会话配置和定时任务编辑抽屉按当前字段与初始值判断未保存修改。
 关闭、取消、Escape、离开编辑视图或退出登录前可确认放弃，取消则保留原表单与授权；
 整页离开或刷新仅在有修改时请求浏览器原生提醒。不存储持久草稿；还原初始值、
 异步默认值／模型目录回填与成功保存不触发放弃提醒。提交中继续保持原有关闭和重复提交
@@ -2401,10 +2402,10 @@ Sessions 列表和配置表单共用完整 `sessionSettings` 投影，不并列�
 按 [ADR 0073](adr/0073-create-sessions-from-chat-defaults.md)，Admin 可逐条管理精确聊天
 默认配置，以及创建、修改、删除和调整群名规则顺序。它与飞书 `/defaults` 共用同一
 management service 和持久数据，修改沿用 revision 及 action/CSRF 检查；不支持精确配置
-批量设置、类别默认值或禁用自动创建的覆盖项。工作区策略支持项目目录、指定已有受管
-Worktree、每个新会话创建 detached Worktree，后者可选起点 revision，留空使用创建时 HEAD。
-工作区选择复用共享服务，失效的已存选择继续显示其身份及原因，须明确重新选择。
-保存默认值只修改配置，不创建 Binding 或 Worktree，
+批量设置、类别默认值或禁用自动创建的覆盖项。“worktree 使用方式”提供“项目目录（不使用 worktree）”、
+“使用已有 worktree”和“每个新会话新建 worktree”；新建为 detached，可选起点 revision，留空使用创建时 HEAD。
+worktree 选择复用共享服务，失效的已存选择继续显示其身份及原因，须明确重新选择。
+保存默认值只修改配置，不创建 Binding 或 worktree，
 也不从 Admin 发送即时 Prompt。群聊 catch-up 默认值在真实消息触发创建时才取得初始边界。
 默认会话配置页以“指定聊天”和“群名匹配”两个二级 Tab 分别展示列表，前者包含单聊与
 群聊精确配置，名称解析复用现有 best-effort 聊天展示，失败时显示 chat ID。两类列表均不
@@ -2455,10 +2456,10 @@ Project，不能提前把 route 标成终态；发布/补偿完成后的清理�
 交接尚未结束时同样保留停用 Project、本次报告未完成；收尾后重新预览确认，不增加后台
 续删或持久创建状态。最终绑定复核 Project，不能晚到挂接已停用/删除条目。
 
-勾选级联工作区后，清单纳入本 Project 登记代次的受管资源；仅在相关会话/Side 清理与
-工作区安全删除全部确认后才完成 Project 删除。工作区失败也作为剩余项报告。不勾选则
+勾选级联 worktree 后，清单纳入本 Project 登记代次的受管资源；仅在相关会话/Side 清理与
+worktree 安全删除全部确认后才完成 Project 删除。worktree 失败也作为剩余项报告。不勾选则
 保留目录和登记，Admin 标示原 Project 已删除；本版不重新关联，不能在 `/new` 选用，
-同 alias 重建也不自动接管。原 Project 目录和外部工作区始终不属于级联目标。
+同 alias 重建也不自动接管。原 Project 目录和外部 worktree 始终不属于级联目标。
 
 ## 飞书命令与控制卡片
 
@@ -2489,7 +2490,7 @@ SDK safety 层被当成旧投递。Netizen 因此只在可重复动作的公共�
 两类删除确认页导航、exact Turn 重新检查、Goal 暂停/恢复、Side 关闭重试和文件分页均走
 这一出口。`/status` 命令别名按钮也复用同一出口；处理后只重绘 callback 携带的只读展示
 快照以更新 nonce，不重新查询状态或重复命令。新增 Project 的 submit 没有 callback value，因此把同一类 nonce 编入必填的
-Project mode option value；`/new` 只读“加载项目目录选项”在其 submit 按钮的公开 callback value 中携带 nonce，
+Project mode option value；`/new` 只读“加载 worktree 选项”在其 submit 按钮的公开 callback value 中携带 nonce，
 不改写 Project option。
 decoder 只移除 transport nonce，不要求它存在，也不校验其格式；
 Project mode 同样先恢复业务 mode，再忽略可选 transport 后缀。因此 nonce 不进入 typed
@@ -2506,10 +2507,10 @@ UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改�
 
 `/new`、`/defaults`、`/config` 共享分组和列布局：模型配置、消息上下文、任务反馈
 保持相同顺序，组标题加粗；模型整行、Effort/Speed 并排，反馈说明与选择并排。
-`/new` 与 `/defaults` 在公共配置前放项目选择，之后放各自的工作区选项或策略；
-`/config` 在卡头标明当前会话与项目，不提供项目或工作区切换。创建／保存按钮位于表单
+`/new` 与 `/defaults` 在公共配置前放项目选择，之后放各自的 worktree 选项或策略；
+`/config` 在卡头标明当前会话与项目，不提供项目或 worktree 切换。创建／保存按钮位于表单
 底部，默认配置的删除操作与表单分开。公共布局只负责展示，各入口仍维护自己的选项值、
-默认值、提交字段、身份及 revision 校验；工作区加载的草稿先回填再分组，模型目录失效
+默认值、提交字段、身份及 revision 校验；worktree 加载的草稿先回填再分组，模型目录失效
 时保留各入口原有行为。P2P 的消息上下文和非 Git 项目的 worktree/分支选择继续按既有
 条件不显示。定时任务表单继续使用共享字段生成器的平铺布局。
 
@@ -2528,27 +2529,27 @@ inherit 的 minimal form，不要求用户改走命令。提交后创建 lazy Bi
 避免已提交的 Binding 没有反馈。完整决定见
 [ADR 0040](adr/0040-make-new-card-only-and-show-all-projects.md)。
 
-已预选 Project 时按需加载工作区；没有预选或更换 Project 时先显式加载其目录选项，
-不依赖 SDK 未透传的 select change 回调。“加载项目目录选项”按钮及状态/错误说明放在
-底部工作区分组，使用同一 form 的 Project 选择；通过公开 callback value 区分只读加载
-与创建，不凭按钮 name 路由。加载只替换工作区选项并重置为项目目录，不校验旧工作区的
+已预选 Project 时按需加载 worktree 选项；没有预选或更换 Project 时先显式加载其 worktree 选项，
+不依赖 SDK 未透传的 select change 回调。“加载 worktree 选项”按钮及状态/错误说明放在
+底部“worktree”分组，使用同一 form 的 Project 选择；通过公开 callback value 区分只读加载
+与创建，不凭按钮 name 路由。加载只替换 worktree 选项并重置为项目目录，不校验旧 worktree 的
 创建参数；本次提交的 Model/Effort/Speed、上下文和反馈选择随卡片回填，不写持久状态。
 模型目录变化或暂不可用时保留已选值，由实际创建时的原有校验判断，不静默改成默认模型。
-目录查询失败在工作区内提示并保留配置表单，不创建会话；非 Git 或尚未加载时仍保留加载
+worktree 选项查询失败在该分组内提示并保留配置表单，不创建会话；非 Git 或尚未加载时仍保留加载
 入口，便于换项目后查询。非 Git 项目不显示 worktree/分支控件；Git 项目
-默认“项目目录”，可选当前可用受管 worktree 或新建。新建分支配置只对新建生效，复用
-既有目录不 checkout。选项携带 Project alias/revision 与资源 ID，提交再次校验；跨项目
+默认“项目目录（不使用 worktree）”，可选“新建 worktree”或已有可用受管资源；
+已有选项按“已有 worktree · 分支 · 路径”展示。新建分支配置只对新建生效，复用既有目录不 checkout。选项携带 Project alias/revision 与资源 ID，提交再次校验；跨项目
 旧选项拒绝，不接受任意 cwd。保持旧默认目录表单兼容。读取失败不冒充空目录；创建
-工作区后会话失败说明保留资源。成功卡及文本 fallback 显示选定实际工作目录；无卡片
-session、无额外原生 Thread 或 Prompt。工作区细则见 ADR 0085。
+worktree 后会话失败说明保留资源。成功卡及文本 fallback 显示选定实际工作目录；无卡片
+session、无额外原生 Thread 或 Prompt。worktree 细则见 ADR 0085。
 
 `/defaults` 使用一张表单查看和配置当前 App/chat 的会话默认值；不要求当前 Scope 已有
 Binding，在普通话题中操作也作用于所属聊天。表单明确显示作用范围与配置来源：有精确
 配置时回填它；没有精确配置但命中群名规则时回填该规则，并说明保存会创建本聊天的精确
 配置；均未命中时显示未配置，Project 保持待选，其余取现有创建默认值。字段复用 Project、
 Model/Effort/Speed、Task Feedback 和群聊 Context Mode 的已有选择语义，另有独立的
-工作区策略：项目目录、指定已有受管 Worktree、每个新会话创建 detached Worktree（可选 ref）。
-工作区选项使用所选 Project 的受管资源；加载与保存不创建目录，保存时和实际使用时均
+“worktree 使用方式”：项目目录（不使用 worktree）、使用已有 worktree、每个新会话新建 worktree（detached，可选 ref）。
+worktree 选项使用所选 Project 的受管资源；加载与保存不创建目录，保存时和实际使用时均
 校验选择。失效资源保持可见，不通过回填悄悄改成项目目录。
 保存只写当前聊天的一份精确配置，不修改匹配到的群名规则；删除只移除精确配置，之后
 重新匹配群名规则。没有精确配置时不提供可删除继承规则的动作。保存、删除后重绘同一
