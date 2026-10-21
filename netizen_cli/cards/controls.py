@@ -34,6 +34,7 @@ from ..domain import (
 )
 from ..model_settings import ModelCatalog, TurnModelSettings
 from ..projects import Project
+from ..progress_card_settings import ProgressCardSettings
 from ..session_settings import SessionSettings
 from ..sdk_gap_adapter import GoalSnapshot
 from .callbacks import (
@@ -85,6 +86,11 @@ from .session_ids import session_identity_lines
 SESSIONS_PAGE_SIZE = 10
 MAX_THREAD_NAME_CHARS = 120
 MAX_SETTING_ID_CHARS = 128
+_PROGRESS_CARD_FIELDS = (
+    "show_commentary", "show_operations", "show_plan", "commentary_limit",
+    "operation_limit", "commentary_max_chars", "operation_max_chars", "organization",
+)
+_PROGRESS_CARD_REFERENCE_PREFIX = "progress-card:v1:"
 _RENAME_NAME_FIELD = re.compile(
     r"rename_name_v1__([A-Za-z0-9][A-Za-z0-9-]{0,127})"
 )
@@ -443,6 +449,14 @@ def _restore_settings_draft(
         if not value:
             element.pop("initial_option", None)
             continue
+        if element["name"].endswith("_progress_card"):
+            # /new redraws start from defaults; both toggle choices must keep
+            # the presentation settings already carried by this draft.
+            _, settings = _decode_progress_card_reference(value, element["name"])
+            if settings is not None:
+                for option in element["options"]:
+                    enabled, _ = _decode_progress_card_reference(option["value"], element["name"])
+                    option["value"] = _progress_card_reference(enabled, settings)
         if not any(option["value"] == value for option in element["options"]):
             label = "保留已选值（当前不可用）"
             if element["name"].endswith("_model"):
@@ -767,11 +781,11 @@ def _task_feedback_form_elements(
             name=f"{prefix}_progress_card",
             placeholder="选择是否使用进度卡",
             options=(
-                ("关闭", _task_feedback_reference(False)),
-                ("开启（默认）", _task_feedback_reference(True)),
+                ("关闭", _progress_card_reference(False, initial.progress_card_settings)),
+                ("开启（默认）", _progress_card_reference(True, initial.progress_card_settings)),
             ),
-            initial_option=_task_feedback_reference(
-                initial.progress_card_enabled
+            initial_option=_progress_card_reference(
+                initial.progress_card_enabled, initial.progress_card_settings,
             ),
         ),
         _form_hint(
@@ -790,6 +804,38 @@ def _task_feedback_form_elements(
         ),
         _form_hint("任务完成或失败时 @ 本轮发起人；主动停止不提醒。定时任务自动首轮不提醒。"),
     ]
+
+
+def _progress_card_reference(enabled: bool, settings: ProgressCardSettings) -> str:
+    # Ordinary Feishu forms only edit the existing toggle. Carry the Admin
+    # presentation choices with both options, without a card session or new UI.
+    values = [enabled, *(getattr(settings, name) for name in _PROGRESS_CARD_FIELDS)]
+    return _PROGRESS_CARD_REFERENCE_PREFIX + json.dumps(values, separators=(",", ":"))
+
+
+def _decode_progress_card_reference(value: Any, field: str) -> tuple[bool, ProgressCardSettings | None]:
+    value = _bounded_string(value, field, max_chars=128)
+    if not value.startswith(_PROGRESS_CARD_REFERENCE_PREFIX):
+        return _decode_task_feedback_reference(value, field), None
+    try:
+        values = json.loads(value[len(_PROGRESS_CARD_REFERENCE_PREFIX):])
+        if not isinstance(values, list) or len(values) != len(_PROGRESS_CARD_FIELDS) + 1 or type(values[0]) is not bool:
+            raise ValueError("invalid progress card reference")
+        settings = ProgressCardSettings.from_dict(dict(zip(_PROGRESS_CARD_FIELDS, values[1:], strict=True)))
+    except (ValueError, TypeError) as error:
+        raise CardActionError("过程卡设置无效，请重新打开配置卡片。") from error
+    return values[0], settings
+
+
+def _decode_task_feedback_fields(payload: Mapping[str, Any], *, prefix: str) -> BindingTaskFeedback:
+    progress_field = f"{prefix}_progress_card"
+    progress_enabled, settings = _decode_progress_card_reference(payload[progress_field], progress_field)
+    return BindingTaskFeedback(
+        _decode_task_feedback_reference(payload[f"{prefix}_task_reactions"], f"{prefix}_task_reactions"),
+        progress_enabled,
+        _decode_task_feedback_reference(payload[f"{prefix}_completion_mention"], f"{prefix}_completion_mention"),
+        settings or ProgressCardSettings(),
+    )
 
 
 def session_settings_form_elements(
@@ -876,11 +922,7 @@ def decode_session_settings_fields(
     context_mode = _decode_context_mode_reference(_required_string(
         payload.get(context_field, _context_mode_reference(MentionContextMode.CURRENT_ONLY)), context_field,
     ))
-    feedback = BindingTaskFeedback(
-        _decode_task_feedback_reference(payload[f"{prefix}_task_reactions"], f"{prefix}_task_reactions"),
-        _decode_task_feedback_reference(payload[f"{prefix}_progress_card"], f"{prefix}_progress_card"),
-        _decode_task_feedback_reference(payload[f"{prefix}_completion_mention"], f"{prefix}_completion_mention"),
-    )
+    feedback = _decode_task_feedback_fields(payload, prefix=prefix)
     catalog_fields = {f"{prefix}_effort", f"{prefix}_speed"}
     has_catalog_fields = catalog_fields.issubset(payload)
     turn = None
@@ -2323,6 +2365,7 @@ def _decode_new_binding_form(
         reaction_pulse_enabled=settings.task_feedback.reaction_pulse_enabled,
         progress_card_enabled=settings.task_feedback.progress_card_enabled,
         completion_mention_enabled=settings.task_feedback.completion_mention_enabled,
+        progress_card_settings=settings.task_feedback.progress_card_settings,
         worktree_id=worktree_id,
         worktree_create=worktree_create,
         new_settings_draft=(

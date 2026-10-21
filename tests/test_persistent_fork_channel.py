@@ -15,6 +15,7 @@ from netizen_cli.codex_runtime import NativeThreadMetadata, RuntimeClosed, Submi
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.feishu_links import topic_open_url
 from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from tests.support.channel_cards import callback, elements, form_values
 from tests.support.channel_fixtures import channel_fixture, side_channel_fixture
@@ -34,7 +35,9 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.source = self.store.create_channel_binding(
             scope=self.scope, project_alias="test", creator_id="ou_source",
             turn_settings=BindingTurnSettings("future-model", "ultra", "priority-v2"),
-            task_feedback=BindingTaskFeedback(True, True, False),
+            task_feedback=BindingTaskFeedback(True, True, False, ProgressCardSettings(
+                organization="time", operation_limit=16, show_plan=False,
+            )),
             message_context_mode=MentionContextMode.CATCH_UP,
             context_anchor=MessageContextAnchor("om_source_anchor", 1000),
         )

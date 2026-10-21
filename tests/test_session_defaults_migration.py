@@ -13,6 +13,7 @@ from netizen_cli.bindings import BindingStore, validate_channel_database
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.migrations import v16
 from netizen_cli.migrations.schema import require_schema
+from netizen_cli.progress_card_settings import ProgressCardSettings
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -37,8 +38,9 @@ class SessionDefaultsMigrationTest(unittest.TestCase):
             )]
             before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
         self.assertEqual(migrations.plan_channel_database(self.path), {
-            "source_version": 15, "target_version": 17, "steps": [
+            "source_version": 15, "target_version": 18, "steps": [
                 {"from_version": 15, "to_version": 16}, {"from_version": 16, "to_version": 17},
+                {"from_version": 17, "to_version": 18},
             ],
         })
         migrations.migrate_channel_database(self.path, expected_source_version=15)
@@ -48,7 +50,17 @@ class SessionDefaultsMigrationTest(unittest.TestCase):
                 actual = connection.execute(f"SELECT * FROM {table}").fetchall()
                 if rows:
                     actual = [row[:len(rows[0])] for row in actual]
-                self.assertEqual(actual, rows, table)
+                if table in {"session_defaults", "schedule_plans"}:
+                    columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+                    index = columns.index("session_settings_json")
+                    for old, new in zip(rows, actual, strict=True):
+                        if old[index] is not None:
+                            settings = json.loads(new[index])
+                            self.assertEqual(settings.pop("progress_card_settings"), ProgressCardSettings().to_dict())
+                            self.assertEqual(settings, json.loads(old[index]))
+                        self.assertEqual(new[:index] + new[index + 1:], old[:index] + old[index + 1:], table)
+                else:
+                    self.assertEqual(actual, rows, table)
             self.assertEqual(
                 [json.loads(row[0]) for row in connection.execute("SELECT workspace_json FROM session_defaults")],
                 [{"mode": "project"}, {"mode": "project"}],
@@ -58,7 +70,7 @@ class SessionDefaultsMigrationTest(unittest.TestCase):
             self.assertEqual(store.worktrees.get("worktree-shared").identity_token, "root:1:2/gitdir:3:4")
             self.assertEqual(store.get("binding").worktree_id, "worktree-shared")
         before_noop = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=17)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=18)["steps"], [])
         self.assertEqual(self.contents(), before_noop)
 
     def test_fresh_and_upgraded_schema_have_identical_constraints(self):

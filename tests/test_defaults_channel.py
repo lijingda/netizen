@@ -188,7 +188,7 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(card, OutboundCard)
         values = new_form_values(card)
         self.assertEqual(values["new_task_reactions"], "task-feedback:v2:off")
-        self.assertEqual(values["new_progress_card"], "task-feedback:v2:on")
+        self.assertTrue(values["new_progress_card"].startswith("progress-card:v1:[true,"))
         self.assertEqual(values["new_completion_mention"], "task-feedback:v2:on")
 
     async def test_first_catchup_input_is_origin_and_subsequent_input_reads_window(self):

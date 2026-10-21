@@ -3,11 +3,15 @@ status: accepted
 date: 2026-09-01
 amends: 0020, 0047, 0048, 0049
 related: 0021, 0046, 0051
-amended_by: 0071, 0072, 0079
+amended_by: 0071, 0072, 0079, 0086
 ---
 
 # 用单一消费链投影安全的 Turn Activity
 
+> [ADR 0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md) 将固定的
+> 进展/操作容量改为会话展示设置，并增加按进展分段的时间组织与自包含分页快照。本文的
+> 四条/160 字符、八条/120 字符保留为默认值；内容、时间、聚合与唯一消费边界不变。
+>
 > [ADR 0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) 在原观察链提取
 > completed `partial_answer`，作为独立稳定正文交付，不进入 Activity 的摘要/折叠规则。
 > Progress 开关不关闭该观察；Goal 自动 rollover 只重置 Activity，保留同次连续执行的

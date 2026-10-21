@@ -40,6 +40,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 
 from .partial_answers import PartialAnswer, project_partial_answer
+from .progress_card_settings import ProgressCardSettings
 from .user_questions import QuestionRequest, UserQuestion
 
 
@@ -48,6 +49,8 @@ ACTIVITY_OPERATION_LIMIT = 8
 ACTIVITY_PLAN_LIMIT = 12
 ACTIVITY_TEXT_LIMIT = 160
 ACTIVITY_OPERATION_TEXT_LIMIT = 120
+ACTIVITY_TEXT_HARD_LIMIT = 320
+ACTIVITY_OPERATION_TEXT_HARD_LIMIT = 240
 ACTIVITY_TAB_SPACES = 4
 SIDE_ACTIVITY_QUEUE_HIGH_WATER = 4_096
 
@@ -169,12 +172,17 @@ class TurnActivityEntrySnapshot:
     event_timestamp_ms: int
     text: str | None = None
     count: int = 1
+    sequence: int = 0
+    segment: int = 0
 
     def __post_init__(self) -> None:
         _validate_timestamp_ms(self.event_timestamp_ms)
         _validate_activity_text(self.kind, self.text)
         if isinstance(self.count, bool) or not isinstance(self.count, int) or self.count < 0:
             raise ValueError("activity count must be a non-negative integer")
+        for value in (self.sequence, self.segment):
+            if type(value) is not int or value < 0:
+                raise ValueError("activity order must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +217,7 @@ def project_turn_activity_notification(
     *,
     expected_thread_id: str,
     expected_turn_id: str | None,
+    progress_card_settings: ProgressCardSettings = ProgressCardSettings(),
 ) -> TurnActivityNotificationProjection:
     """Project one raw notification into a safe internal control event.
 
@@ -289,6 +298,7 @@ def project_turn_activity_notification(
         payload.item.root,
         completed=completed,
         event_timestamp_ms=event_timestamp_ms,
+        progress_card_settings=progress_card_settings,
     )
     try:
         partial_answer = (
@@ -366,7 +376,9 @@ def project_plan_steps(items: object) -> tuple[TurnPlanStepSnapshot, ...]:
     return tuple(steps)
 
 
-def sanitize_activity_text(value: str) -> str | None:
+def sanitize_activity_text(
+    value: str, *, limit: int = ACTIVITY_TEXT_LIMIT,
+) -> str | None:
     """Retain useful commentary/checklist text while filtering credentials and estimates."""
 
     normalized = normalize_activity_text_layout(value)
@@ -376,7 +388,7 @@ def sanitize_activity_text(value: str) -> str | None:
     redacted = _ELAPSED.sub("[时间信息已隐藏]", redacted)
     redacted = _PERCENT.sub("[百分比已隐藏]", redacted)
     redacted = _ETA.sub("[时间估算已隐藏]", redacted)
-    return _bounded_activity_text(redacted)
+    return _bounded_activity_text(redacted, limit)
 
 
 def sanitize_activity_operation_text(
@@ -434,6 +446,7 @@ def _project_item(
     *,
     completed: bool,
     event_timestamp_ms: int,
+    progress_card_settings: ProgressCardSettings,
 ) -> TurnActivityEvent | None:
     lifecycle_status = (
         TurnActivityStatus.COMPLETED
@@ -443,7 +456,9 @@ def _project_item(
     if type(item) is AgentMessageThreadItem:
         if not completed or item.phase is not MessagePhase.commentary:
             return None
-        text = sanitize_activity_text(item.text)
+        text = sanitize_activity_text(
+            item.text, limit=progress_card_settings.commentary_max_chars,
+        )
         if text is None:
             return None
         return TurnActivityEvent(
@@ -460,7 +475,9 @@ def _project_item(
             item.status,
             lifecycle_status,
             event_timestamp_ms=event_timestamp_ms,
-            text=_command_activity_summary(item),
+            text=_command_activity_summary(
+                item, limit=progress_card_settings.operation_max_chars,
+            ),
         )
     if type(item) is McpToolCallThreadItem:
         return _status_event(
@@ -492,7 +509,9 @@ def _project_item(
             item.status,
             lifecycle_status,
             event_timestamp_ms=event_timestamp_ms,
-            text=_file_change_activity_summary(item),
+            text=_file_change_activity_summary(
+                item, limit=progress_card_settings.operation_max_chars,
+            ),
             count=len(item.changes),
         )
     if type(item) is WebSearchThreadItem:
@@ -501,7 +520,9 @@ def _project_item(
             TurnActivityKind.WEB_SEARCH,
             lifecycle_status,
             event_timestamp_ms,
-            text=_web_search_activity_summary(item),
+            text=_web_search_activity_summary(
+                item, limit=progress_card_settings.operation_max_chars,
+            ),
         )
     if type(item) in {ImageViewThreadItem, ImageGenerationThreadItem}:
         status = item.status if type(item) is ImageGenerationThreadItem else None
@@ -578,47 +599,47 @@ def _status_event(
     )
 
 
-def _operation_summary(label: str, *details: str | None) -> str:
+def _operation_summary(label: str, *details: str | None, limit: int) -> str:
     # Sanitize each native field before combining it with display labels.
     parts = [label]
     for detail in details:
         if detail is not None:
-            safe = sanitize_activity_operation_text(detail)
+            safe = sanitize_activity_operation_text(detail, limit=limit)
             if safe:
                 parts.append(safe)
-    return _bounded_activity_text(" · ".join(parts), ACTIVITY_OPERATION_TEXT_LIMIT)
+    return _bounded_activity_text(" · ".join(parts), limit)
 
 
-def _command_activity_summary(item: CommandExecutionThreadItem) -> str:
+def _command_activity_summary(item: CommandExecutionThreadItem, *, limit: int) -> str:
     summary = None
     # commandActions is Codex's best-effort classification. Do not build a
     # second shell parser, infer purposes, or summarize composite commands.
     if len(item.command_actions) == 1:
         action = item.command_actions[0].root
         if type(action) is ReadCommandAction and action.path.root.strip():
-            summary = _operation_summary("读取文件", action.path.root)
+            summary = _operation_summary("读取文件", action.path.root, limit=limit)
         elif (
             type(action) is ListFilesCommandAction
             and action.path
             and action.path.strip()
         ):
-            summary = _operation_summary("列出文件", action.path)
+            summary = _operation_summary("列出文件", action.path, limit=limit)
         elif type(action) is SearchCommandAction and (
             (action.query and action.query.strip()) or (action.path and action.path.strip())
         ):
-            summary = _operation_summary("搜索内容", action.query, action.path)
+            summary = _operation_summary("搜索内容", action.query, action.path, limit=limit)
     if summary is None:
-        summary = _operation_summary("执行命令", item.command)
+        summary = _operation_summary("执行命令", item.command, limit=limit)
     if item.exit_code is not None and item.exit_code != 0:
         suffix = f" · 退出码 {item.exit_code}"
         summary = (
-            _bounded_activity_text(summary, ACTIVITY_OPERATION_TEXT_LIMIT - len(suffix))
+            _bounded_activity_text(summary, max(1, limit - len(suffix)))
             + suffix
         )
     return summary
 
 
-def _file_change_activity_summary(item: FileChangeThreadItem) -> str | None:
+def _file_change_activity_summary(item: FileChangeThreadItem, *, limit: int) -> str | None:
     if not item.changes:
         return None
     labels = {"add": "新增", "delete": "删除", "update": "更新"}
@@ -629,29 +650,30 @@ def _file_change_activity_summary(item: FileChangeThreadItem) -> str | None:
         path = change.path
         if kind.type == "update" and kind.move_path:
             path += f" → {kind.move_path}"
-        safe_path = sanitize_activity_operation_text(path)
+        safe_path = sanitize_activity_operation_text(path, limit=limit)
         changes.append(f"{label} {safe_path}" if safe_path else label)
     detail = "、".join(changes) + ("、…" if len(item.changes) > 3 else "")
-    return _operation_summary("修改文件", detail)
+    return _operation_summary("修改文件", detail, limit=limit)
 
 
-def _web_search_activity_summary(item: WebSearchThreadItem) -> str:
+def _web_search_activity_summary(item: WebSearchThreadItem, *, limit: int) -> str:
     action = item.action.root if item.action is not None else None
     if type(action) is OpenPageWebSearchAction:
-        return _operation_summary("打开网页", action.url or item.query)
+        return _operation_summary("打开网页", action.url or item.query, limit=limit)
     if type(action) is FindInPageWebSearchAction:
         return _operation_summary(
-            "查找网页内容", action.pattern, action.url or item.query
+            "查找网页内容", action.pattern, action.url or item.query, limit=limit,
         )
     if type(action) is SearchWebSearchAction:
         queries = [query for query in (action.queries or ()) if query.strip()]
         if queries:
             detail = "、".join(
-                sanitize_activity_operation_text(query) or "" for query in queries[:3]
+                sanitize_activity_operation_text(query, limit=limit) or ""
+                for query in queries[:3]
             ) + ("、…" if len(queries) > 3 else "")
-            return _operation_summary("搜索网页", detail)
-        return _operation_summary("搜索网页", action.query or item.query)
-    return _operation_summary("搜索网页", item.query)
+            return _operation_summary("搜索网页", detail, limit=limit)
+        return _operation_summary("搜索网页", action.query or item.query, limit=limit)
+    return _operation_summary("搜索网页", item.query, limit=limit)
 
 
 def _tool_name(value: object) -> str:
@@ -673,9 +695,9 @@ def _validate_activity_text(
         return
     if not isinstance(value, str) or not value:
         raise ValueError("activity text must be a non-empty string")
-    if kind == TurnActivityKind.COMMENTARY and len(value) > ACTIVITY_TEXT_LIMIT:
+    if kind == TurnActivityKind.COMMENTARY and len(value) > ACTIVITY_TEXT_HARD_LIMIT:
         raise ValueError("activity text must be bounded")
-    if kind in ACTIVITY_DETAIL_KINDS and len(value) > ACTIVITY_OPERATION_TEXT_LIMIT:
+    if kind in ACTIVITY_DETAIL_KINDS and len(value) > ACTIVITY_OPERATION_TEXT_HARD_LIMIT:
         raise ValueError("activity text must be bounded")
     if kind not in {
         TurnActivityKind.COMMENTARY,

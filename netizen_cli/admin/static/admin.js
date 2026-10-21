@@ -2335,7 +2335,8 @@ function renderSessionSettingsEditor() {
   }
   sessionSettingsInput("note").textContent = notes.filter(Boolean).join(" ");
   sessionSettingsInput("note").classList.toggle("error", Boolean(editor.error));
-  sessionSettingsInput("save").disabled = editor.loading || editor.saving || !editor.action;
+  sessionSettingsInput("save").disabled = editor.loading || editor.saving || !editor.action
+    || Boolean(progressCardSettingsError(editor.settings));
   sessionSettingsInput("save").textContent = editor.saving ? "保存中…" : "保存";
   sessionSettingsInput("cancel").disabled = editor.saving;
   sessionSettingsInput("close").disabled = editor.saving;
@@ -2423,7 +2424,7 @@ function changeSessionSettings(field) {
 async function saveSessionSettings(event) {
   event.preventDefault();
   const editor = sessionSettingsEditor;
-  if (!editor || editor.loading || editor.saving || !editor.action) return;
+  if (!editor || editor.loading || editor.saving || !editor.action || progressCardSettingsError(editor.settings)) return;
   const action = editor.action;
   editor.action = null;
   editor.session.actions.configure = null;
@@ -2703,7 +2704,8 @@ function renderDefaultSettings() {
   if (editor.contextAvailable === false) notes.push("单聊不支持补齐未读上下文，请使用当前消息。");
   defaultsInput("note").textContent = notes.filter(Boolean).join(" ");
   defaultsInput("note").classList.toggle("error", Boolean(editor.error));
-  defaultsInput("save").disabled = defaultsBusy || editor.loading || !editor.action || !defaultWorkspaceAvailable();
+  defaultsInput("save").disabled = defaultsBusy || editor.loading || !editor.action || !defaultWorkspaceAvailable()
+    || Boolean(progressCardSettingsError(editor.settings));
   defaultsInput("save").textContent = defaultsBusy ? "保存中…" : "保存";
   defaultsInput("editor").setAttribute("aria-busy", String(defaultsBusy || editor.loading));
 }
@@ -2921,7 +2923,8 @@ async function defaultMutation(mode, action, extra = {}) {
 async function saveDefault(event) {
   event.preventDefault();
   const editor = defaultsEditor;
-  if (!editor || editor.loading || !editor.action || defaultsBusy || !defaultWorkspaceAvailable()) return;
+  if (!editor || editor.loading || !editor.action || defaultsBusy || !defaultWorkspaceAvailable()
+      || progressCardSettingsError(editor.settings)) return;
   if (editor.kind === "chat") {
     editor.loading = true;
     renderDefaultSettings();
@@ -3084,7 +3087,8 @@ function sessionSettingsFingerprint(settings) {
   const turn = settings.turn_settings;
   return JSON.stringify([turn ? [turn.model_id, turn.effort_id, turn.service_tier_id] : null,
     settings.message_context_mode, settings.reaction_pulse_enabled,
-    settings.progress_card_enabled, settings.completion_mention_enabled]);
+    settings.progress_card_enabled, settings.completion_mention_enabled,
+    progressCardFields.map((field) => progressCardSettings(settings)[field.replaceAll("-", "_")])]);
 }
 
 function confirmDiscardChanges(changed) {
@@ -3546,7 +3550,54 @@ function resetScheduleEndOffset() {
 
 function defaultScheduleSessionSettings() {
   return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true,
-    message_context_mode: "current-only" };
+    message_context_mode: "current-only", progress_card_settings: {
+      show_commentary: true, show_operations: true, show_plan: true,
+      commentary_limit: 4, operation_limit: 8, commentary_max_chars: 160, operation_max_chars: 120,
+      organization: "content",
+    } };
+}
+
+const progressCardFields = ["show-commentary", "show-operations", "show-plan", "commentary-limit",
+  "operation-limit", "commentary-max-chars", "operation-max-chars", "organization"];
+
+function progressCardSettings(settings) {
+  return settings.progress_card_settings || defaultScheduleSessionSettings().progress_card_settings;
+}
+
+function progressCardSettingsError(settings) {
+  const progress = progressCardSettings(settings);
+  for (const [key, label, maximum] of [
+    ["commentary_limit", "进展条数", 8], ["operation_limit", "操作条数", 16],
+    ["commentary_max_chars", "进展摘要长度", 320], ["operation_max_chars", "操作摘要长度", 240],
+  ]) {
+    if (!Number.isInteger(progress[key]) || progress[key] < 1 || progress[key] > maximum) {
+      return `${label}必须是 1 到 ${maximum} 之间的整数。`;
+    }
+  }
+  return "";
+}
+
+function renderProgressCardSettings(input, settings) {
+  const container = input("progress-settings");
+  if (!container) return;
+  const progress = progressCardSettings(settings);
+  container.hidden = !settings.progress_card_enabled;
+  for (const node of container.querySelectorAll("input, select")) {
+    const field = node.id.split("-progress-").at(-1);
+    const key = field.replaceAll("-", "_");
+    if (field.startsWith("show-")) node.checked = progress[key];
+    else node.value = progress[key];
+    node.disabled = !settings.progress_card_enabled
+      || (field.startsWith("commentary-") && !progress.show_commentary)
+      || (field.startsWith("operation-") && !progress.show_operations);
+  }
+  for (const [kind, shown] of [["commentary", progress.show_commentary], ["operation", progress.show_operations]]) {
+    input(`progress-${kind}-capacity`).hidden = !shown;
+  }
+  const error = progressCardSettingsError(settings);
+  const note = input("progress-error");
+  note.textContent = error;
+  note.hidden = !error;
 }
 
 function scheduleSessionSummary(settings) {
@@ -3592,6 +3643,7 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   input("reactions").checked = settings.reaction_pulse_enabled;
   input("progress").checked = settings.progress_card_enabled;
   input("completion-mention").checked = settings.completion_mention_enabled;
+  renderProgressCardSettings(input, settings);
   return model;
 }
 
@@ -3609,6 +3661,13 @@ function changeSessionSettingsField(input, settings, models, field, baseTurn = n
   else if (field === "reactions") settings.reaction_pulse_enabled = input("reactions").checked;
   else if (field === "progress") settings.progress_card_enabled = input("progress").checked;
   else if (field === "completion-mention") settings.completion_mention_enabled = input("completion-mention").checked;
+  else if (field.startsWith("progress-") && progressCardFields.includes(field.slice(9))) {
+    const key = field.slice(9).replaceAll("-", "_");
+    const node = input(field);
+    const value = key.startsWith("show_") ? node.checked
+      : key === "organization" || node.value === "" ? node.value : Number(node.value);
+    settings.progress_card_settings = { ...progressCardSettings(settings), [key]: value };
+  }
 }
 
 function renderScheduleSessionSettings() {
@@ -4709,7 +4768,8 @@ sessionSettingsInput("drawer").addEventListener("cancel", (event) => {
   closeSessionSettingsEditor();
 });
 sessionSettingsInput("editor").addEventListener("submit", saveSessionSettings);
-for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
+for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention",
+  ...progressCardFields.map((name) => `progress-${name}`)]) {
   sessionSettingsInput(field).addEventListener("change", () => changeSessionSettings(field));
 }
 defaultsInput("new").addEventListener("click", () => openDefaultEditor(defaultsTab));
@@ -4736,7 +4796,8 @@ for (const field of ["workspace", "worktree"]) {
   defaultsInput(field).addEventListener("change", () => changeDefaultWorkspace(field));
 }
 defaultsInput("workspace-ref").addEventListener("input", () => changeDefaultWorkspace("workspace-ref"));
-for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
+for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention",
+  ...progressCardFields.map((name) => `progress-${name}`)]) {
   defaultsInput(field).addEventListener("change", () => changeDefaultSettings(field));
 }
 for (const [name, delta] of [["previous", -50], ["next", 50]]) {

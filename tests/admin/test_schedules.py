@@ -67,6 +67,12 @@ class FakeSchedules:
             return {"ok": True, "models": self.models, "session_settings": {
                 "turn_settings": None, "reaction_pulse_enabled": False,
                 "progress_card_enabled": False, "completion_mention_enabled": True, "message_context_mode": "current-only",
+                "progress_card_settings": {
+                    "show_commentary": True, "show_operations": True, "show_plan": True,
+                    "commentary_limit": 4, "operation_limit": 8,
+                    "commentary_max_chars": 160, "operation_max_chars": 120,
+                    "organization": "content",
+                },
             }, "context_mode_available": None if self.chat_info_error else False,
                 "chat_info_error": self.chat_info_error, "model_catalog_error": self.model_catalog_error,
                 "workspace_options": self.workspace_options, "workspace_options_error": self.workspace_options_error}
@@ -689,6 +695,12 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(defaults, {
             "turn_settings": {"model_id": "native-model", "effort_id": "medium", "service_tier_id": "default"},
             "reaction_pulse_enabled": False, "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "current-only",
+            "progress_card_settings": {
+                "show_commentary": True, "show_operations": True, "show_plan": True,
+                "commentary_limit": 4, "operation_limit": 8,
+                "commentary_max_chars": 160, "operation_max_chars": 120,
+                "organization": "content",
+            },
         })
         plan = (await self.page(session))["plans"][0]
         status, _, updated = await self.json_post("/api/v1/schedules/update", session, {

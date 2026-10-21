@@ -252,7 +252,7 @@ Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认�
 模型目录失效或读取失败时保留；running Turn 的 steer 不解析也不应用。
 
 **Binding Task Feedback / 会话任务反馈**：Binding 上对 Reaction Pulse、Progress Card
-与 Completion Mention 的独立展示选择。Side 创建时冻结 Parent 当时的选择；
+与 Completion Mention 的独立展示选择，包括过程卡展示设置。Side 创建时冻结 Parent 当时的选择；
 它们不是 Codex 原生设置或 Turn/Goal 状态事实。
 
 **Completion Mention / 结束提及**：任务结束时对本轮任务发起人的一次真实 @，与进度
@@ -369,6 +369,14 @@ Goal 执行中展开有界活动投影；Side Turn 使用 Side 创建时冻结�
 Card 折叠过程；最近进展和操作的原生事件时间由 Card 2.0 客户端按查看者时区与语言本地化。
 commentary、plan step 等自由文本及随分页携带的过程 manifest 经过同一套有界敏感模式过滤；
 工具名按原值显示并在 Markdown 边界转义。它不保存执行历史，也不是终态事实源。
+
+**Progress Card Settings / 过程卡展示设置**：会话对过程卡已有进展、操作与任务清单的
+显隐、组织方式、展示数量和摘要长度的选择。聊天默认配置供自动创建时复制，已有会话
+独立维护；同一张共享卡片使用同一份选择，不属于查看者个人偏好。
+
+**Activity Operation Segment / 活动操作段**：按时间组织时，两次进展之间的一组操作，
+首次进展之前的操作也构成一段。段内沿用已有操作合并方式，段与段之间不合并；
+进展文字不可见也不改变分界。分段只表达展示顺序，不表示操作属于某项任务。
 
 **Standard CODEX_HOME**：服务 effective user 的原生 Codex 状态根；显式
 `CODEX_HOME` 优先，否则为该账号的 `$HOME/.codex`。Netizen 不修改其内部

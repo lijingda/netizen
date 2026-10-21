@@ -13,6 +13,7 @@ from netizen_cli.chat_targets import ChatTargetError
 from netizen_cli.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
 from netizen_cli.model_settings import ModelCatalog, ModelOption, EffortOption, ServiceTierOption
 from netizen_cli.session_settings import SessionSettings
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.schedules.scheduler import Scheduler
 from netizen_cli.schedules.service import ScheduleService
 from tests.support.chat_targets import FakeChatTargetDirectory
@@ -375,7 +376,9 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         binding = self.store.create_channel_binding(
             scope=FeishuScope("app", chat_id, ScopeKind.GROUP), project_alias="p", creator_id="person",
             turn_settings=BindingTurnSettings("model-a", "low", "default"),
-            task_feedback=BindingTaskFeedback(True, True), message_context_mode=MentionContextMode.CATCH_UP,
+            task_feedback=BindingTaskFeedback(True, True, progress_card_settings=ProgressCardSettings(
+                organization="time", commentary_limit=8, operation_max_chars=240,
+            )), message_context_mode=MentionContextMode.CATCH_UP,
             context_anchor=MessageContextAnchor("source-anchor", 1000),
         )
         self.store.assign_native_thread_id(binding.id, thread_id)

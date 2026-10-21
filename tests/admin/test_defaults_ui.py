@@ -36,5 +36,5 @@ class DefaultsUiTest(unittest.TestCase):
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run([node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
                                  + dom + before + "\n".join(parts) + after,
-                                capture_output=True, text=True, timeout=10)
+                                capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

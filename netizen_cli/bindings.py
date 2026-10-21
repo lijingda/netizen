@@ -34,12 +34,13 @@ from .schedules.models import Run, ScheduleConflict
 from .schedules.store import (
     ScheduleStore, create_schema, require_schema,
 )
+from .progress_card_settings import ProgressCardSettings
 from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from .worktrees.models import WorktreeRecord
 from .worktrees.store import WorktreeStore, create_schema as create_worktree_schema
 
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Includes the running query and all submitted queries waiting for the reader.
 _ADMIN_QUERY_CAPACITY = 32
@@ -466,7 +467,7 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
     _require_project_metadata_schema(connection)
     require_schema(connection)
     require_defaults_schema(connection)
-    from .migrations.v17 import validate
+    from .migrations.v18 import validate
     validate(connection)
 
 
@@ -526,6 +527,7 @@ def _require_binding_columns(connection: sqlite3.Connection) -> None:
         "task_reactions_enabled",
         "progress_card_enabled",
         "completion_mention_enabled",
+        "progress_card_settings_json",
         "feedback_revision",
         "ever_activated",
     }
@@ -690,6 +692,8 @@ class BindingStore:
                             typeof(completion_mention_enabled) = 'integer'
                             AND completion_mention_enabled IN (0, 1)
                         ),
+                    progress_card_settings_json TEXT NOT NULL DEFAULT '{"show_commentary":true,"show_operations":true,"show_plan":true,"commentary_limit":4,"operation_limit":8,"commentary_max_chars":160,"operation_max_chars":120,"organization":"content"}'
+                        CHECK(typeof(progress_card_settings_json) = 'text'),
                     feedback_revision INTEGER NOT NULL DEFAULT 1
                         CHECK(
                             typeof(feedback_revision) = 'integer'
@@ -1111,12 +1115,12 @@ class BindingStore:
                     message_context_mode, context_anchor_message_id,
                     context_anchor_create_time_ms, context_revision,
                     task_reactions_enabled, progress_card_enabled,
-                    completion_mention_enabled,
+                    completion_mention_enabled, progress_card_settings_json,
                     feedback_revision,
                     creator_id, created_at, activated_at, ever_activated,
                     working_cwd, worktree_id
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1280,7 +1284,7 @@ class BindingStore:
                     b.context_anchor_message_id,
                     b.context_anchor_create_time_ms, b.context_revision,
                     b.task_reactions_enabled, b.progress_card_enabled,
-                    b.completion_mention_enabled,
+                    b.completion_mention_enabled, b.progress_card_settings_json,
                     b.feedback_revision,
                     s.kind AS scope_kind
                 FROM bindings b
@@ -1330,9 +1334,10 @@ class BindingStore:
                 row["task_reactions_enabled"],
                 row["progress_card_enabled"],
                 row["completion_mention_enabled"],
+                _progress_card_settings(row["progress_card_settings_json"]).to_dict(),
             )
-            feedback_changed = current_feedback != tuple(
-                int(value) for value in feedback_values
+            feedback_changed = current_feedback != (
+                *feedback_values[:3], task_feedback.progress_card_settings.to_dict(),
             )
             if (
                 not settings_changed
@@ -1353,6 +1358,7 @@ class BindingStore:
                     task_reactions_enabled = ?,
                     progress_card_enabled = ?,
                     completion_mention_enabled = ?,
+                    progress_card_settings_json = ?,
                     feedback_revision = feedback_revision + ?
                 WHERE binding_id = ?
                   AND settings_revision = ?
@@ -1365,7 +1371,7 @@ class BindingStore:
                     message_context_mode.value,
                     *anchor_values,
                     int(context_changed),
-                    *(int(value) for value in feedback_values),
+                    *feedback_values,
                     int(feedback_changed),
                     binding_id,
                     expected_settings_revision,
@@ -2791,7 +2797,7 @@ _BINDING_SELECT = """
         b.context_revision,
         b.task_reactions_enabled,
         b.progress_card_enabled,
-        b.completion_mention_enabled,
+        b.completion_mention_enabled, b.progress_card_settings_json,
         b.feedback_revision,
         b.creator_id,
         b.created_at,
@@ -2835,7 +2841,7 @@ _BINDING_INVENTORY_SELECT = """
         b.context_revision,
         b.task_reactions_enabled,
         b.progress_card_enabled,
-        b.completion_mention_enabled,
+        b.completion_mention_enabled, b.progress_card_settings_json,
         b.feedback_revision,
         b.creator_id,
         b.created_at,
@@ -2937,6 +2943,7 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
         reaction_pulse_enabled=bool(feedback_values[0]),
         progress_card_enabled=bool(feedback_values[1]),
         completion_mention_enabled=bool(feedback_values[2]),
+        progress_card_settings=_progress_card_settings(row["progress_card_settings_json"]),
     )
     feedback_revision = row["feedback_revision"]
     if not isinstance(feedback_revision, int) or feedback_revision < 1:
@@ -2994,14 +3001,22 @@ def _settings_values(
 
 def _feedback_values(
     feedback: BindingTaskFeedback,
-) -> tuple[bool, bool, bool]:
+) -> tuple[int, int, int, str]:
     if not isinstance(feedback, BindingTaskFeedback):
         raise ValueError("task feedback must be a BindingTaskFeedback")
     return (
-        feedback.reaction_pulse_enabled,
-        feedback.progress_card_enabled,
-        feedback.completion_mention_enabled,
+        int(feedback.reaction_pulse_enabled),
+        int(feedback.progress_card_enabled),
+        int(feedback.completion_mention_enabled),
+        json.dumps(feedback.progress_card_settings.to_dict(), separators=(",", ":")),
     )
+
+
+def _progress_card_settings(raw: str) -> ProgressCardSettings:
+    try:
+        return ProgressCardSettings.from_dict(json.loads(raw))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Binding contains invalid progress card settings") from error
 
 
 def _mention_context_mode(value: object) -> MentionContextMode:

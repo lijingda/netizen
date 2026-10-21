@@ -267,6 +267,7 @@ from .prompt_projection import (
     project_current_message,
 )
 from .projects import ProjectError, ProjectRegistry, UnknownProject
+from .progress_card_settings import ProgressCardSettings
 from .task_text import project_task_text
 from .result_images import prepare_result_images
 from .quoted_context import (
@@ -865,7 +866,8 @@ class ChannelApplication:
                         creator_id="session_agent:" + source.id,
                         expected_project_revision=project.revision,
                         turn_settings=settings,
-                        task_feedback=BindingTaskFeedback(False, source.task_feedback.progress_card_enabled, False),
+                        task_feedback=replace(source.task_feedback,
+                            reaction_pulse_enabled=False, completion_mention_enabled=False),
                         message_context_mode=context_mode, context_anchor=anchor,
                         empty_topic_root_message_id=root.message_id,
                         working_cwd=str(cwd),
@@ -5142,6 +5144,7 @@ class ChannelApplication:
                 reaction_pulse_enabled=bool(intent.reaction_pulse_enabled),
                 progress_card_enabled=bool(intent.progress_card_enabled),
                 completion_mention_enabled=bool(intent.completion_mention_enabled),
+                progress_card_settings=intent.progress_card_settings or ProgressCardSettings(),
             )
             project, binding = await self._create_binding(
                 scope=intent.scope,
@@ -5198,12 +5201,13 @@ class ChannelApplication:
             assert intent.progress_card_enabled is not None
             assert intent.completion_mention_enabled is not None
             settings = await self._resolve_card_model_settings(intent)
-            task_feedback = BindingTaskFeedback(
+            before = self._bindings.get(intent.binding_id)
+            task_feedback = replace(
+                before.task_feedback,
                 reaction_pulse_enabled=bool(intent.reaction_pulse_enabled),
                 progress_card_enabled=bool(intent.progress_card_enabled),
                 completion_mention_enabled=bool(intent.completion_mention_enabled),
             )
-            before = self._bindings.get(intent.binding_id)
             context_anchor = None
             if (
                 before.message_context_mode is MentionContextMode.CURRENT_ONLY
@@ -6824,6 +6828,7 @@ def _goal_reply_activity(snapshot: GoalActivitySnapshot) -> TurnActivitySnapshot
         plan_generated=snapshot.plan_generated, plan_may_be_stale=False,
         steps=snapshot.steps, commentary=snapshot.commentary,
         operations=snapshot.operations, partial_answers=snapshot.partial_answers,
+        progress_card_settings=snapshot.progress_card_settings,
     )
 
 

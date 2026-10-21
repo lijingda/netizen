@@ -1829,6 +1829,7 @@ class CardRendererTest(unittest.TestCase):
             self.assertIn(f"millisecond='{item.event_timestamp_ms}'", serialized)
 
         legacy_value = json.loads(json.dumps(page_value))
+        legacy_value["progress"].pop("progress_card_settings")
         legacy_value["progress"]["commentary"] = ["finished review"]
         legacy_value["progress"]["operations"][0].pop("event_timestamp_ms")
         legacy_intent = decode_turn_file_action(
@@ -1977,7 +1978,9 @@ class CardRendererTest(unittest.TestCase):
             assert intent.reply.activity is not None
             return intent.reply.activity.progress
 
-        for version, card in zip((4, 5), cards, strict=True):
+        # The fresh snapshot uses the new bound; the explicit old manifest
+        # retains its frozen bound when read from an existing card.
+        for version, detail_limit, card in zip((4, 5), (240, 160), cards, strict=True):
             self.assertNotIn("do-not-leak", json.dumps(card.card))
             page_value = next(
                 behavior["value"]
@@ -1993,9 +1996,9 @@ class CardRendererTest(unittest.TestCase):
                         "执行命令 · printf '50%'\n\tmake check",
                         "执行命令 · printf '50%' make check",
                     ),
-                    ("x" * 160, "x" * 160),
+                    ("x" * detail_limit, "x" * detail_limit),
                     ("x" * 150 + " · 退出码 1", "x" * 150 + " · 退出码 1"),
-                    ("x" * 161, None),
+                    ("x" * (detail_limit + 1), None),
                 ):
                     with self.subTest(version=version, kind=kind, text=text):
                         value = json.loads(json.dumps(page_value))
@@ -2722,7 +2725,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(
             fields["new_progress_card"]["initial_option"],
-            "task-feedback:v2:on",
+            "progress-card:v1:[true,true,true,true,4,8,160,120,\"content\"]",
         )
         self.assertNotIn("new_prompt", fields)
         self.assertEqual(len(_elements(outbound.card, "form")), 1)
@@ -3002,7 +3005,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(
             fields["config_progress_card"]["initial_option"],
-            "task-feedback:v2:off",
+            "progress-card:v1:[false,true,true,true,4,8,160,120,\"content\"]",
         )
         self.assertEqual(fields["config_completion_mention"]["initial_option"], "task-feedback:v2:off")
         self.assertNotIn("config_prompt", fields)

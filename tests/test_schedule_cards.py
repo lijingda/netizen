@@ -753,7 +753,7 @@ class ScheduleCardsTest(unittest.TestCase):
     def test_retry_form_renews_transport_identity_but_keeps_all_business_fields(self):
         self.plan["schedule"] = {"kind": "interval", "timezone": "America/New_York", "every_minutes": 45,
             "anchor": 1900000000.123456, "end_at": "2030-11-03T01:30-05:00"}
-        self.plan["session_settings"] = SessionSettings.from_dict({"turn_settings": {"model_id": "missing-model", "effort_id": "high", "service_tier_id": "default"},
+        self.plan["session_settings"] = SessionSettings().merge({"turn_settings": {"model_id": "missing-model", "effort_id": "high", "service_tier_id": "default"},
             "reaction_pulse_enabled": True, "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "catch-up"}).to_dict()
         navigation = {"filter": "all", "plan_id": self.plan["id"], "cursor": "page-two"}
         original = form_values(schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan,
@@ -861,7 +861,7 @@ class ScheduleCardsTest(unittest.TestCase):
                 self.assertEqual(action, original)
 
     def test_session_settings_copy_current_and_edit_keeps_all_settings_on_frequency_change(self):
-        copied = SessionSettings.from_dict({"turn_settings": {"model_id": "future-model", "effort_id": "low", "service_tier_id": "default"},
+        copied = SessionSettings().merge({"turn_settings": {"model_id": "future-model", "effort_id": "low", "service_tier_id": "default"},
             "reaction_pulse_enabled": True, "progress_card_enabled": True, "completion_mention_enabled": False, "message_context_mode": "catch-up"})
         card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC",
             session_settings=copied, catalog=self.catalog, allow_context_mode=True)
@@ -883,7 +883,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertEqual((edited_payload["plan_id"], edited_payload["expected_revision"]), (self.plan["id"], self.plan["revision"]))
 
     def test_explicit_settings_survive_catalog_failure_or_removal_until_inherit_selected(self):
-        original = SessionSettings.from_dict({"turn_settings": {"model_id": "removed-model", "effort_id": "removed-effort", "service_tier_id": "removed-tier"},
+        original = SessionSettings().merge({"turn_settings": {"model_id": "removed-model", "effort_id": "removed-effort", "service_tier_id": "removed-tier"},
             "reaction_pulse_enabled": True, "progress_card_enabled": False, "completion_mention_enabled": True, "message_context_mode": "current-only"})
         self.plan["session_settings"] = original.to_dict()
         for catalog in (None, self.catalog):
@@ -901,7 +901,7 @@ class ScheduleCardsTest(unittest.TestCase):
                 self.assertIn("removed-model", str(card.card))
 
     def test_private_form_hides_context_choice_and_explicit_inherit_is_not_catalog_default(self):
-        inherited = SessionSettings.from_dict({"turn_settings": None, "reaction_pulse_enabled": False,
+        inherited = SessionSettings().merge({"turn_settings": None, "reaction_pulse_enabled": False,
             "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "current-only"})
         self.plan["session_settings"] = inherited.to_dict()
         private = FeishuScope("app", "oc_private", ScopeKind.TOPIC, "omt_private")
@@ -1201,7 +1201,7 @@ class ScheduleCardCapacityTest(unittest.IsolatedAsyncioTestCase):
         sender = OutboundSender(SimpleNamespace(create_message=capture, reply_message=capture))
         scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_topic")
         project = Project("work", Path("/tmp"), True, 1)
-        settings = SessionSettings.from_dict({"turn_settings": {"model_id": "m" * 128, "effort_id": "e" * 128, "service_tier_id": "s" * 128},
+        settings = SessionSettings().merge({"turn_settings": {"model_id": "m" * 128, "effort_id": "e" * 128, "service_tier_id": "s" * 128},
             "reaction_pulse_enabled": True, "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "catch-up"}).to_dict()
         for instructions in ("a" * 1000, "汉" * 1000, "😀" * 1000, "\x01" * 1000):
             with self.subTest(utf8_bytes=len(instructions.encode("utf-8"))):

@@ -22,6 +22,7 @@ from openai_codex import (
 )
 from openai_codex.errors import InvalidRequestError
 
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.sdk_gap_adapter import (
     AppServerGoalControl,
     AppServerSideBoundaryControl,
@@ -771,6 +772,30 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.next_goal_notification.await_count, len(notifications))
         answers = [p.partial_answer for p in projected if p.partial_answer is not None]
         self.assertEqual([(a.turn_id, a.item_id) for a in answers], [("first", "a"), ("second", "b")])
+
+    async def test_goal_tap_projects_frozen_lengths_without_another_consumer(self) -> None:
+        from openai_codex.generated.v2_all import ItemCompletedNotification, ThreadItem
+        from openai_codex.models import Notification
+        from netizen_cli.sdk_gap_adapter import _GoalActivityTap
+
+        notification = Notification(
+            method="item/completed", payload=ItemCompletedNotification(
+                threadId="thread-goal", turnId="physical-one", completedAtMs=23,
+                item=ThreadItem.model_validate({
+                    "type": "agentMessage", "id": "commentary", "phase": "commentary",
+                    "text": "正文" * 200,
+                }),
+            ),
+        )
+        client = AsyncMock()
+        client.next_goal_notification.return_value = notification
+        tap = _GoalActivityTap("thread-goal")
+        projected = []
+        tap.bind(projected.append, progress_card_settings=ProgressCardSettings(commentary_max_chars=320))
+        self.assertIs(await tap.next_notification(client, object()), notification)
+        self.assertEqual(client.next_goal_notification.await_count, 1)
+        self.assertEqual(len(projected[0].event.text), 320)
+        self.assertEqual(projected[0].event.event_timestamp_ms, 23)
 
     async def test_goal_activity_sink_failure_does_not_break_unique_stream(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

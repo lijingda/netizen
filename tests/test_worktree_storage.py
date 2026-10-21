@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from netizen_cli.bindings import BindingConflict, BindingStore, ProjectConflict,
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.migrations import v15
 from netizen_cli.migrations.schema import require_schema
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.worktrees.models import WorktreeConflict, WorktreeNotFound
 from netizen_cli.worktrees.store import WorktreeStore
 
@@ -403,7 +405,20 @@ class WorktreeMigrationTest(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as connection:
             for name, rows in before.items():
                 actual = connection.execute(f"SELECT * FROM {name}").fetchall()
-                self.assertEqual([row[:len(rows[0])] for row in actual], rows)
+                actual = [row[:len(rows[0])] for row in actual]
+                if name in {"schedule_plans", "session_defaults"}:
+                    columns = [row[1] for row in connection.execute(f"PRAGMA table_info({name})")]
+                    index = columns.index("session_settings_json")
+                    for old, new in zip(rows, actual, strict=True):
+                        if old[index] is None:
+                            self.assertIsNone(new[index])
+                        else:
+                            settings = json.loads(new[index])
+                            self.assertEqual(settings.pop("progress_card_settings"), ProgressCardSettings().to_dict())
+                            self.assertEqual(settings, json.loads(old[index]))
+                        self.assertEqual(new[:index] + new[index + 1:], old[:index] + old[index + 1:], name)
+                else:
+                    self.assertEqual(actual, rows, name)
             self.assertEqual(connection.execute("SELECT working_cwd,worktree_id FROM bindings").fetchall(), [(None, None)])
             self.assertEqual(connection.execute("SELECT generation FROM projects").fetchall(), [(1,)])
             connection.executescript((FIXTURES / "channel_v15_worktrees.sql").read_text())

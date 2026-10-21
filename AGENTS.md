@@ -47,6 +47,9 @@ their cited ADRs before changing that boundary.
   [presentation](docs/design.md#回复与活动展示), including
   [ADR 0079](docs/adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)
   for stable answers during execution and Goal rollover retention.
+  Progress Card settings and time organization follow
+  [ADR 0086](docs/adr/0086-configure-progress-card-presentation-with-bounded-activity-segments.md):
+  independent bounded windows, preserved segment boundaries and self-contained pagination.
   Controls and form callbacks: [commands and cards](docs/design.md#飞书命令与控制卡片).
   Preserve the referenced
   ADRs' exact identity, context, display, and file-evidence contracts.

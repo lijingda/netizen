@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -166,8 +166,6 @@ from .sdk_gap_adapter import (
 )
 from .terminal_cleanup import BackgroundTerminalInspector, TerminalCleanup
 from .turn_activity import (
-    ACTIVITY_COMMENTARY_LIMIT,
-    ACTIVITY_OPERATION_LIMIT,
     SIDE_ACTIVITY_QUEUE_HIGH_WATER,
     TurnActivityEntrySnapshot,
     TurnActivityEvent,
@@ -267,9 +265,11 @@ class _ActiveTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_commentary: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_sequence: int = 0
+    activity_segment: int = 0
+    activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
     activity_commentary_order: list[str] = field(default_factory=list)
-    activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_operations: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
     partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
@@ -325,9 +325,11 @@ class _ActiveGoal:
     plan_generated: bool = False
     plan_available: bool = True
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_commentary: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_sequence: int = 0
+    activity_segment: int = 0
+    activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
     activity_commentary_order: list[str] = field(default_factory=list)
-    activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_operations: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
     partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
@@ -408,9 +410,11 @@ class _ActiveSideTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_commentary: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_sequence: int = 0
+    activity_segment: int = 0
+    activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
     activity_commentary_order: list[str] = field(default_factory=list)
-    activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_operations: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
     partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
@@ -3994,6 +3998,7 @@ class CodexRuntime:
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
+            progress_card_settings=active.task_feedback.progress_card_settings,
         )
 
     def side_turn_activity(
@@ -4039,21 +4044,23 @@ class CodexRuntime:
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
+            progress_card_settings=active.task_feedback.progress_card_settings,
         )
 
     def _turn_activity_visible_state(
         self,
         active: _ActiveTurn | _ActiveSideTurn,
     ) -> tuple[object, ...]:
+        settings = active.task_feedback.progress_card_settings
         return (
             active.state,
             active.steer_count,
             active.plan_available,
-            active.plan_generated,
-            active.plan_may_be_stale,
-            active.plan_steps,
-            self._activity_commentary(active),
-            self._activity_operations(active),
+            (
+                active.plan_generated, active.plan_may_be_stale, active.plan_steps,
+            ) if settings.show_plan and active.plan_available else (),
+            self._activity_commentary(active) if settings.show_commentary else (),
+            self._activity_operations(active) if settings.show_operations else (),
             tuple(active.partial_answers.values()),
         )
 
@@ -4076,6 +4083,7 @@ class CodexRuntime:
                 thread_id=active.handle.thread_id,
                 turn_id=active.handle.id,
                 after_cursor=active.plan_cursor,
+                progress_card_settings=active.task_feedback.progress_card_settings,
             )
         except Exception as error:
             active.plan_available = False
@@ -4123,15 +4131,8 @@ class CodexRuntime:
         active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
     ) -> tuple[TurnActivityEntrySnapshot, ...]:
         return tuple(
-            TurnActivityEntrySnapshot(
-                kind=event.kind,
-                status=event.status,
-                event_timestamp_ms=event.event_timestamp_ms,
-                text=event.text,
-                count=event.count,
-            )
+            active.activity_commentary[item_id]
             for item_id in active.activity_commentary_order
-            if (event := active.activity_commentary.get(item_id)) is not None
         )
 
     @staticmethod
@@ -4139,46 +4140,22 @@ class CodexRuntime:
         active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
     ) -> tuple[TurnActivityEntrySnapshot, ...]:
         ordered: list[tuple[int, TurnActivityEntrySnapshot]] = []
-        subagents: dict[TurnActivityStatus, tuple[int, int, int]] = {}
+        subagents: dict[
+            tuple[int, TurnActivityStatus], tuple[int, TurnActivityEntrySnapshot]
+        ] = {}
+        by_time = active.task_feedback.progress_card_settings.organization == "time"
         for position, item_id in enumerate(active.activity_operation_order):
-            event = active.activity_operations.get(item_id)
-            if event is None:
+            entry = active.activity_operations[item_id]
+            if entry.kind is TurnActivityKind.SUBAGENT:
+                # Hidden/evicted commentary still separates operation segments.
+                # Within each segment keep the existing status-based grouping.
+                key = (entry.segment if by_time else 0, entry.status)
+                previous = subagents.get(key)
+                count = entry.count + (previous[1].count if previous else 0)
+                subagents[key] = (position, replace(entry, count=count))
                 continue
-            if event.kind is TurnActivityKind.SUBAGENT:
-                _previous_position, previous_count, _previous_timestamp = subagents.get(
-                    event.status,
-                    (position, 0, event.event_timestamp_ms),
-                )
-                subagents[event.status] = (
-                    position,
-                    previous_count + event.count,
-                    event.event_timestamp_ms,
-                )
-                continue
-            ordered.append(
-                (
-                    position,
-                    TurnActivityEntrySnapshot(
-                        kind=event.kind,
-                        status=event.status,
-                        event_timestamp_ms=event.event_timestamp_ms,
-                        text=event.text,
-                        count=event.count,
-                    ),
-                )
-            )
-        ordered.extend(
-            (
-                position,
-                TurnActivityEntrySnapshot(
-                    kind=TurnActivityKind.SUBAGENT,
-                    status=status,
-                    event_timestamp_ms=event_timestamp_ms,
-                    count=count,
-                ),
-            )
-            for status, (position, count, event_timestamp_ms) in subagents.items()
-        )
+            ordered.append((position, entry))
+        ordered.extend(subagents.values())
         ordered.sort(key=lambda item: item[0])
         return tuple(item for _position, item in ordered)
 
@@ -4187,26 +4164,39 @@ class CodexRuntime:
         active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
         events: tuple[TurnActivityEvent, ...],
     ) -> None:
+        settings = active.task_feedback.progress_card_settings
         for event in events:
-            item_id = event.item_id
-            if event.kind is TurnActivityKind.COMMENTARY:
-                if event.text is None:
-                    continue
-                active.activity_commentary[item_id] = event
-                if item_id in active.activity_commentary_order:
-                    active.activity_commentary_order.remove(item_id)
-                active.activity_commentary_order.append(item_id)
-                while len(active.activity_commentary_order) > ACTIVITY_COMMENTARY_LIMIT:
-                    discarded = active.activity_commentary_order.pop(0)
-                    active.activity_commentary.pop(discarded, None)
+            commentary = event.kind is TurnActivityKind.COMMENTARY
+            if commentary and event.text is None:
                 continue
-            active.activity_operations[item_id] = event
-            if item_id in active.activity_operation_order:
-                active.activity_operation_order.remove(item_id)
-            active.activity_operation_order.append(item_id)
-            while len(active.activity_operation_order) > ACTIVITY_OPERATION_LIMIT:
-                discarded = active.activity_operation_order.pop(0)
-                active.activity_operations.pop(discarded, None)
+            active.activity_sequence += 1
+            if commentary:
+                active.activity_segment += 1
+            entry = TurnActivityEntrySnapshot(
+                kind=event.kind,
+                status=event.status,
+                event_timestamp_ms=event.event_timestamp_ms,
+                text=event.text,
+                count=event.count,
+                sequence=active.activity_sequence,
+                segment=active.activity_segment,
+            )
+            if commentary:
+                entries = active.activity_commentary
+                order = active.activity_commentary_order
+                limit = settings.commentary_limit
+            else:
+                entries = active.activity_operations
+                order = active.activity_operation_order
+                limit = settings.operation_limit
+            item_id = event.item_id
+            entries[item_id] = entry
+            if item_id in order:
+                order.remove(item_id)
+            order.append(item_id)
+            while len(order) > limit:
+                discarded = order.pop(0)
+                entries.pop(discarded, None)
 
     @staticmethod
     def _apply_partial_answers(
@@ -4251,6 +4241,8 @@ class CodexRuntime:
     @staticmethod
     def _reset_activity(active: _ActiveGoal) -> None:
         active.plan_cursor = 0
+        active.activity_sequence = 0
+        active.activity_segment = 0
         active.plan_generated = False
         active.plan_steps = ()
         active.activity_commentary.clear()
@@ -4311,17 +4303,19 @@ class CodexRuntime:
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
+            progress_card_settings=active.task_feedback.progress_card_settings,
         )
 
     def _goal_activity_visible_state(self, active: _ActiveGoal) -> tuple[object, ...]:
+        settings = active.task_feedback.progress_card_settings
         return (
             active.state,
             active.activity_turn_id,
             active.plan_available,
-            active.plan_generated,
-            active.plan_steps,
-            self._activity_commentary(active),
-            self._activity_operations(active),
+            (active.plan_generated, active.plan_steps)
+            if settings.show_plan and active.plan_available else (),
+            self._activity_commentary(active) if settings.show_commentary else (),
+            self._activity_operations(active) if settings.show_operations else (),
             tuple(active.partial_answers.values()),
         )
 
@@ -7352,7 +7346,8 @@ class CodexRuntime:
         assert handle is not None
         try:
             active.stream_terminal = await handle.wait_terminal(
-                lambda projection: self._apply_goal_activity_projection(active, projection)
+                lambda projection: self._apply_goal_activity_projection(active, projection),
+                progress_card_settings=active.task_feedback.progress_card_settings,
             )
             if active.stream_terminal.logical_turn_id != handle.id:
                 raise RuntimeError("Goal stream terminal identity mismatch")

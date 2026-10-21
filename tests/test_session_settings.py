@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from netizen_cli.bindings import BindingStore, BindingTaskFeedback, BindingTurnSettings
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.model_settings import ModelCatalog, ModelCatalogError
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.session_settings import SessionSettings, SessionSettingsError
 from tests.test_model_settings import Effort, effort, model, tier
 
@@ -52,6 +53,53 @@ class SessionSettingsTest(unittest.TestCase):
         del legacy["completion_mention_enabled"]
         with self.assertRaises(SessionSettingsError):
             SessionSettings.from_dict(legacy)
+
+    def test_progress_card_settings_roundtrip_and_unrelated_updates_preserve_preferences(self):
+        card = ProgressCardSettings(
+            show_commentary=False, show_operations=False, show_plan=False,
+            commentary_limit=8, operation_limit=16, commentary_max_chars=320,
+            operation_max_chars=240, organization="time",
+        )
+        settings = SessionSettings(task_feedback=BindingTaskFeedback(True, True, False, card))
+        self.assertEqual(SessionSettings.from_dict(settings.to_dict()), settings)
+        updated = settings.merge({"turn_settings": None, "completion_mention_enabled": True,
+                                  "progress_card_enabled": False})
+        self.assertEqual(updated.task_feedback.progress_card_settings, card)
+        self.assertEqual(updated.merge({"progress_card_enabled": True}).task_feedback.progress_card_settings, card)
+        self.assertEqual(updated.merge({"progress_card_settings": ProgressCardSettings().to_dict()})
+                         .task_feedback.progress_card_settings, ProgressCardSettings())
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            card.organization = "content"
+
+    def test_progress_card_settings_validate_complete_shape_boolean_types_and_bounds(self):
+        valid = ProgressCardSettings().to_dict()
+        for field in ("show_commentary", "show_operations", "show_plan"):
+            for invalid in (0, 1, None, "true"):
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                    ProgressCardSettings.from_dict({**valid, field: invalid})
+        for field, maximum in (("commentary_limit", 8), ("operation_limit", 16),
+                               ("commentary_max_chars", 320), ("operation_max_chars", 240)):
+            for accepted in (1, maximum):
+                self.assertEqual(getattr(ProgressCardSettings.from_dict({**valid, field: accepted}), field), accepted)
+            for invalid in (0, -1, maximum + 1, True, 2.0, "2", None):
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                    ProgressCardSettings.from_dict({**valid, field: invalid})
+        for invalid in (None, [], {}, {**valid, "extra": False},
+                        {**valid, "organization": "timeline"}, {**valid, "organization": False}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                ProgressCardSettings.from_dict(invalid)
+        for field in valid:
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                ProgressCardSettings.from_dict({key: value for key, value in valid.items() if key != field})
+        missing = SessionSettings().to_dict()
+        del missing["progress_card_settings"]
+        with self.assertRaises(SessionSettingsError):
+            SessionSettings.from_dict(missing)
+        for invalid in (None, {}, {**valid, "commentary_limit": True}):
+            with self.assertRaises(SessionSettingsError):
+                SessionSettings().merge({"progress_card_settings": invalid})
+        with self.assertRaises(ValueError):
+            BindingTaskFeedback(progress_card_settings={})
 
     def test_new_defaults_resolve_catalog_but_source_inherit_remains_inherit(self):
         catalog = self.catalog()

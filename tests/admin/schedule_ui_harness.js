@@ -29,7 +29,10 @@ let runRecords = null;
 let unavailableProject = null;
 let openTimeRangeFilter = null;
 const defaultSessionSettings = { turn_settings: { model_id: "native-default", effort_id: "medium", service_tier_id: "default" },
-  reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true, message_context_mode: "current-only" };
+  reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true, message_context_mode: "current-only",
+  progress_card_settings: { show_commentary: false, show_operations: true, show_plan: true,
+    commentary_limit: 8, operation_limit: 16, commentary_max_chars: 320, operation_max_chars: 240,
+    organization: "time" } };
 const models = [{ id: "native-default", display_name: "Native default", default_effort_id: "medium", default_service_tier_id: "default",
   efforts: [{ id: "medium", description: "Medium" }, { id: "high", description: "High" }],
   service_tiers: [{ id: "default", name: "Standard" }, { id: "priority", name: "Fast" }] }];
@@ -546,7 +549,8 @@ async function chooseScheduleTarget(value) {
   await previewSchedule();
   const previewQuery = new URL(gets.at(-1), "http://localhost").searchParams;
   const selectedSettings = { turn_settings: { model_id: "native-default", effort_id: "high", service_tier_id: "priority" },
-    reaction_pulse_enabled: true, progress_card_enabled: true, completion_mention_enabled: false, message_context_mode: "catch-up" };
+    reaction_pulse_enabled: true, progress_card_enabled: true, completion_mention_enabled: false, message_context_mode: "catch-up",
+    progress_card_settings: defaultSessionSettings.progress_card_settings };
   assert.deepEqual(JSON.parse(previewQuery.get("session_settings")), selectedSettings);
   await saveSchedule({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.session_settings, selectedSettings);
@@ -593,6 +597,7 @@ async function chooseScheduleTarget(value) {
   scheduleInput("progress").checked = true;
   changeScheduleSessionSettings("progress");
   assert.deepEqual(scheduleSessionPatch(), { progress_card_enabled: true });
+  assert.deepEqual(scheduleEditor.sessionDraft.progress_card_settings, retired.session_settings.progress_card_settings);
   await previewSchedule();
   await saveSchedule({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.session_settings, { progress_card_enabled: true });

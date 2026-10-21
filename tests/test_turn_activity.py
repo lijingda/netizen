@@ -11,6 +11,7 @@ from openai_codex.generated.v2_all import (
 )
 from openai_codex.models import Notification, UnknownNotification
 
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.turn_activity import (
     ACTIVITY_OPERATION_TEXT_LIMIT,
     ACTIVITY_TEXT_LIMIT,
@@ -20,6 +21,7 @@ from netizen_cli.turn_activity import (
     project_plan_steps,
     project_turn_activity_notification,
     sanitize_activity_text,
+    sanitize_activity_operation_text,
 )
 
 
@@ -29,6 +31,7 @@ def _project_item(
     completed: bool = False,
     started_at_ms: int = 1,
     completed_at_ms: int = 2,
+    settings: ProgressCardSettings = ProgressCardSettings(),
 ):
     item = ThreadItem.model_validate(value)
     if completed:
@@ -51,6 +54,7 @@ def _project_item(
         Notification(method=method, payload=payload),
         expected_thread_id="thread-one",
         expected_turn_id="turn-one",
+        progress_card_settings=settings,
     ).event
 
 
@@ -428,6 +432,59 @@ class TurnActivityProjectionTest(unittest.TestCase):
                 self.assertEqual(event.event_timestamp_ms, 1234)
                 self.assertIs(event.status, TurnActivityStatus.COMPLETED)
                 self.assertNotIn("FAILURE", repr(event))
+
+    def test_custom_summary_lengths_preserve_content_rules_and_plan_limit(self) -> None:
+        settings = ProgressCardSettings(commentary_max_chars=320, operation_max_chars=240)
+        commentary = _project_item(
+            {"type": "agentMessage", "id": "long-commentary", "phase": "commentary",
+             "text": "正文" * 250}, completed=True, settings=settings,
+        )
+        self.assertEqual(len(commentary.text), 320)
+        self.assertTrue(commentary.text.endswith("…"))
+        for kind, extra in (
+            ("commandExecution", {"command": "pytest " + "测试" * 200, "commandActions": [],
+                                  "cwd": "/tmp", "status": "completed", "exitCode": 9}),
+            ("fileChange", {"changes": [{"path": "文件" * 200, "kind": {"type": "add"},
+                                         "diff": "not shown"}], "status": "completed"}),
+            ("webSearch", {"query": "查询" * 200}),
+        ):
+            with self.subTest(kind=kind):
+                event = _project_item({"type": kind, "id": "long-operation", **extra},
+                                      completed=True, settings=settings)
+                self.assertEqual(len(event.text), 240)
+                if kind == "commandExecution":
+                    self.assertTrue(event.text.endswith(" · 退出码 9"))
+        step = project_plan_steps([TurnPlanStep(step="清单" * 200, status="pending")])[0]
+        self.assertEqual(len(step.step), 160)
+        # Filtering still precedes truncation even when the marker is beyond
+        # the selected display length.
+        secret = _project_item(
+            {"type": "agentMessage", "id": "secret", "phase": "commentary",
+             "text": "正常内容" * 100 + " password=do-not-show"},
+            completed=True, settings=settings,
+        )
+        self.assertEqual(secret.text, "[敏感内容已隐藏]")
+        tool_name = "unchanged.namespace_tool_" * 30
+        tool = _project_item(
+            {"type": "dynamicToolCall", "id": "tool", "tool": tool_name,
+             "arguments": {}, "status": "completed"},
+            completed=True, settings=ProgressCardSettings(operation_max_chars=1),
+        )
+        self.assertEqual(tool.text, tool_name)
+
+    def test_error_text_sanitizer_retains_non_activity_callers_larger_budget(self) -> None:
+        # Error receipts share the sanitizer but have their own display budget.
+        message = sanitize_activity_operation_text("原生错误说明" * 100, limit=400)
+        self.assertEqual(len(message), 400)
+        self.assertTrue(message.endswith("…"))
+
+    def test_short_operation_preview_still_preserves_exit_code_suffix(self) -> None:
+        event = _project_item(
+            {"type": "commandExecution", "id": "short", "command": "pytest tests",
+             "commandActions": [], "cwd": "/tmp", "status": "completed", "exitCode": -9},
+            completed=True, settings=ProgressCardSettings(operation_max_chars=1),
+        )
+        self.assertEqual(event.text, "… · 退出码 -9")
 
     def test_command_details_preserve_literal_time_and_progress_terms(self) -> None:
         command = "rg 'ETA|elapsed|73%' tests/test_timing.py"
