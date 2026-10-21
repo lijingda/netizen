@@ -23,7 +23,10 @@ class UpdateUiTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         source = (root / "netizen_cli/admin/static/admin.js").read_text(encoding="utf-8")
         # Exercise the shipped controller with deterministic HTTP and timers.
-        core = source[source.index("async function api("):source.index("async function mutate(")]
+        core = (
+            source[source.index("let pendingSessionChatLabels ="):source.index("async function loadSessionChatLabels(")]
+            + source[source.index("async function api("):source.index("async function mutate(")]
+        )
         refresh = source[source.index("async function refresh("):source.index("function renderSessionTabs(")]
         harness = Path(__file__).with_name("update_ui_harness.js").read_text(encoding="utf-8")
         before, after = harness.split("// SHIPPED_UPDATE_CONTROLLER\n")

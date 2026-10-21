@@ -55,6 +55,7 @@ async function api(path, options = {}) {
 function expireAdminSession() {
   if (state.authExpired) return;
   state.authExpired = true;
+  invalidateSessionListRequest();
   stopUpdatePolling();
   window.NetizenSelect?.close();
   // Release these modal drawers so the page's login link remains reachable.
@@ -1824,22 +1825,31 @@ function locationFallback(session) {
 
 function sessionLocationCell(row, session, { showIdentity = true } = {}) {
   const td = document.createElement("td");
+  td.className = "session-location";
   const link = document.createElement("a");
   link.className = "chat-link";
-  link.href = session.topicOpenUrl || session.chatOpenUrl;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  link.textContent = session.chatLabelResolved
-    ? session.chatLabel
-    : showIdentity ? locationFallback(session) : `${chatModeLabel(session.chatMode, session.scopeKind)}（名称暂不可用）`;
-  link.title = session.topicOpenUrl
-    ? "打开飞书话题"
-    : "打开飞书会话";
   const mode = document.createElement("div");
   mode.className = "meta-line";
   mode.append(badge(chatModeLabel(session.chatMode, session.scopeKind)));
   td.append(link, mode);
+  updateSessionLocationCell(td, session, { showIdentity });
   row.append(td);
+}
+
+function updateSessionLocationCell(td, session, { showIdentity = true, loading = false } = {}) {
+  const link = td.querySelector(".chat-link");
+  link.href = session.topicOpenUrl || session.chatOpenUrl;
+  link.textContent = session.chatLabelResolved
+    ? session.chatLabel
+    : loading ? `${chatModeLabel(session.chatMode, session.scopeKind)}（名称加载中）`
+      : showIdentity ? locationFallback(session) : `${chatModeLabel(session.chatMode, session.scopeKind)}（名称暂不可用）`;
+  link.title = session.topicOpenUrl
+    ? "打开飞书话题"
+    : "打开飞书会话";
+  td.querySelector(".badge").textContent = chatModeLabel(session.chatMode, session.scopeKind);
+  td.setAttribute("aria-busy", String(loading));
 }
 
 function sessionIdentityCell(row, session) {
@@ -2039,12 +2049,58 @@ function resetSessionFilters(kind = "session") {
   return refresh("sessions", page);
 }
 
+let pendingSessionChatLabels = null;
+
 function invalidateSessionListRequest() {
   state.sessionListRequest = (state.sessionListRequest || 0) + 1;
+  // A failed replacement read can leave these same rows on screen. Their old
+  // enrichment must stop showing a loading placeholder when it is invalidated.
+  pendingSessionChatLabels?.();
+  pendingSessionChatLabels = null;
+}
+
+async function loadSessionChatLabels(kind, data, page, request) {
+  const name = kind === "side" ? "sides" : "sessions";
+  const isCurrent = () => !state.authExpired && request === state.sessionListRequest
+    && state.tab === "sessions" && state.sessionTab === (kind === "side" ? "temporary" : "ordinary")
+    && state[name] === data && state[`${kind}Page`] === page;
+  if (!isCurrent()) return;
+  const body = document.querySelector(`#${name}-body`);
+  const targets = data.items.flatMap((item, index) => item.chatLabelResolved || !item.chatId
+    ? [] : [{ item, cell: body.children[index].querySelector(".session-location") }]);
+  if (!targets.length) return;
+  const showIdentity = kind !== "side";
+  const finish = () => {
+    for (const { item, cell } of targets) updateSessionLocationCell(cell, item, { showIdentity });
+  };
+  pendingSessionChatLabels = finish;
+  for (const { item, cell } of targets) updateSessionLocationCell(cell, item, { showIdentity, loading: true });
+  try {
+    const query = new URLSearchParams({ chatIds: [...new Set(targets.map(({ item }) => item.chatId))].join(",") });
+    const labels = await api(`/api/v1/chat-labels?${query}`);
+    if (!isCurrent()) return;
+    const byChat = new Map(labels.items.map((label) => [label.chatId, label]));
+    for (const { item } of targets) {
+      const label = byChat.get(item.chatId);
+      if (!label) continue;
+      // Enrichment changes display facts only; retain exact identities, topic
+      // links, runtime and action grants from the successful list response.
+      for (const field of ["chatLabel", "chatLabelResolved", "chatMode", "chatType", "chatOpenUrl"]) {
+        if (Object.hasOwn(label, field)) item[field] = label[field];
+      }
+    }
+  } catch {
+    // Name failures are local to the location cells. Authentication expiry is
+    // already handled by api(), and list status/freshness stay unchanged.
+  } finally {
+    if (isCurrent()) finish();
+    if (pendingSessionChatLabels === finish) pendingSessionChatLabels = null;
+  }
 }
 
 async function loadSessionPage(kind, page, render) {
-  const request = state.sessionListRequest = (state.sessionListRequest || 0) + 1;
+  invalidateSessionListRequest();
+  const request = state.sessionListRequest;
   const isCurrent = () => request === state.sessionListRequest;
   const name = kind === "side" ? "sides" : "sessions";
   setStatus("正在读取服务端事实…");
@@ -2075,6 +2131,7 @@ async function loadSessionPage(kind, page, render) {
     }
     syncPageUrl();
     setStatus("已更新。");
+    void loadSessionChatLabels(kind, data, state[`${kind}Page`], request);
     return true;
   } catch (error) {
     if (isCurrent()) setStatus(error.message + (state[name] ? " 当前仍显示上次成功读取的结果。" : ""), true);

@@ -1253,8 +1253,8 @@ class InstanceManagementService:
                 query=local, cursor=cursor, limit=limit,
                 deadline_seconds=self._query_seconds(deadline),
             )
-            return await self._session_page(
-                page.items, native={}, next_cursor=page.next_cursor, deadline=deadline,
+            return self._session_page(
+                page.items, native={}, next_cursor=page.next_cursor,
             )
 
         if cursor is not None and not isinstance(cursor, SessionNativeCursor):
@@ -1268,10 +1268,10 @@ class InstanceManagementService:
             updated_from=query.updated_from, updated_before=query.updated_before,
         )
         native_state = NativeThreadCatalogState(query.inventory_state.value)
-        return await self._session_page(
+        return self._session_page(
             tuple(item.record for item in page.items),
             native={item.metadata.thread_id: NativeThreadView(native_state, item.metadata) for item in page.items},
-            next_cursor=page.next_cursor, deadline=deadline,
+            next_cursor=page.next_cursor,
         )
 
     async def query_scope_sessions(
@@ -1375,11 +1375,11 @@ class InstanceManagementService:
                 parents[parent_id] = self._bindings.get(parent_id)
             except BindingNotFound:
                 pass
-        views, labels = await asyncio.gather(
-            self._session_native_views(tuple(parents.values()), native=None, deadline=deadline),
-            self.resolve_chat_labels(
-                (item.side_topic.chat_id for item in page.items), deadline=deadline,
-            ),
+        views = await self._session_native_views(
+            tuple(parents.values()), native=None, deadline=deadline,
+        )
+        labels = self.cached_chat_labels(
+            item.side_topic.chat_id for item in page.items
         )
         items = []
         for item in page.items:
@@ -2127,16 +2127,15 @@ class InstanceManagementService:
             outcome=outcome,
         )
 
-    async def _session_page(
+    def _session_page(
         self,
         records: Sequence[BindingInventoryRecord],
         *,
         native: dict[str, NativeThreadView],
         next_cursor: BindingCursor | SessionNativeCursor | None,
-        deadline: float,
     ) -> SessionInventoryPage:
-        labels = await self.resolve_chat_labels(
-            (record.scope.chat_id for record in records), deadline=deadline,
+        labels = self.cached_chat_labels(
+            record.scope.chat_id for record in records
         )
         return SessionInventoryPage(
             items=tuple(
@@ -2225,11 +2224,18 @@ class InstanceManagementService:
             raise ChatDirectoryError("chat_query_unavailable", "飞书聊天校验暂不可用，请稍后重试。")
         return await self._chat_directory.validate_target(chat_id)
 
+    def cached_chat_labels(self, chat_ids: Iterable[str]) -> dict[str, ChatLabel]:
+        """Project a list immediately without starting Feishu name lookups."""
+        if self._chat_labels is None:
+            return {chat_id: ChatLabelResolver.fallback(chat_id) for chat_id in chat_ids}
+        return self._chat_labels.cached_many(chat_ids)
+
     async def resolve_chat_labels(
         self,
         chat_ids: Iterable[str],
         *,
         deadline: float,
+        lookup_budget_seconds: float | None = None,
     ) -> dict[str, ChatLabel]:
         """Enrich a bounded management result page using the shared label cache."""
         unique = tuple(dict.fromkeys(chat_ids))
@@ -2239,7 +2245,9 @@ class InstanceManagementService:
                 chat_id: ChatLabelResolver.fallback(chat_id)
                 for chat_id in unique
             }
-        return await resolver.resolve_many(unique, deadline=deadline)
+        return await resolver.resolve_many(
+            unique, deadline=deadline, lookup_budget_seconds=lookup_budget_seconds,
+        )
 
     @staticmethod
     def _query_seconds(deadline: float, *, maximum: float = 0.5) -> float:

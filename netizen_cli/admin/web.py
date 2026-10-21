@@ -45,6 +45,7 @@ from .users import (
 )
 from .presentation import (
     _binding_result,
+    _chat_label_json,
     _chat_open_url,
     _jsonable,
     _project_result,
@@ -176,6 +177,7 @@ _PREAUTH_COOKIE = "netizen_admin_preauth"
 _JSON_TYPE = "application/json"
 _QUERY_DEADLINE_SECONDS = 5.0
 _SESSION_QUERY_DEADLINE_SECONDS = 10.0
+_CHAT_LABEL_QUERY_DEADLINE_SECONDS = 8.0
 _MUTATION_DEADLINE_SECONDS = 15.0
 _MAX_QUERY_FIELDS = 256
 _MAX_JSON_FIELDS = 20
@@ -608,6 +610,8 @@ class AdminWebApplication:
             return self._worktree_settings(context)
         if route == ("GET", "/api/v1/chats"):
             return await self._chats(context)
+        if route == ("GET", "/api/v1/chat-labels"):
+            return await self._chat_labels(context)
         if route == ("GET", "/api/v1/chats/validate"):
             _require_query_keys(context.query, {"chatId"})
             chat_id = _optional_text_query(context.query, "chatId", maximum=256)
@@ -1239,6 +1243,26 @@ class AdminWebApplication:
             },
         )
 
+    async def _chat_labels(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, {"chatIds"})
+        chat_ids = _id_query(context.query, "chatIds")
+        if not 1 <= len(chat_ids) <= 100 or any(
+            not chat_id.startswith("oc_") or len(chat_id) <= 3
+            or not all(character.isascii() and (character.isalnum() or character in "_-")
+                       for character in chat_id)
+            for chat_id in chat_ids
+        ):
+            raise AdminWebError(400, "invalid_chat_ids", "请提供 1 到 100 个有效的飞书聊天 ID。")
+        labels = await self._management.resolve_chat_labels(
+            tuple(dict.fromkeys(chat_ids)),
+            deadline=asyncio.get_running_loop().time() + _CHAT_LABEL_QUERY_DEADLINE_SECONDS,
+            lookup_budget_seconds=_CHAT_LABEL_QUERY_DEADLINE_SECONDS,
+        )
+        return _json_response(200, {
+            "requestId": context.request.request_id,
+            "items": [_chat_label_json(label) for label in labels.values()],
+        })
+
     async def _sessions(self, context: _RequestContext) -> Response:
         allowed = {
             "cursor",
@@ -1435,12 +1459,7 @@ class AdminWebApplication:
             "scopeKey": binding.scope_key,
             "scopeKind": scope.kind.value,
             "appId": scope.app_id,
-            "chatId": scope.chat_id,
-            "chatLabel": item.chat.display_name,
-            "chatLabelResolved": item.chat.resolved,
-            "chatMode": item.chat.chat_mode,
-            "chatType": item.chat.chat_type,
-            "chatOpenUrl": _chat_open_url(item.chat),
+            **_chat_label_json(item.chat),
             "topicOpenUrl": (
                 _topic_open_url(scope.chat_id, scope.topic_id)
                 if scope.kind is ScopeKind.TOPIC and scope.topic_id
@@ -1604,12 +1623,7 @@ class AdminWebApplication:
                     "parentSession": _side_parent_json(item),
                     "projectAlias": item.record.project_alias,
                     "appId": side.app_id,
-                    "chatId": side.chat_id,
-                    "chatLabel": item.chat.display_name,
-                    "chatLabelResolved": item.chat.resolved,
-                    "chatMode": item.chat.chat_mode,
-                    "chatType": item.chat.chat_type,
-                    "chatOpenUrl": _chat_open_url(item.chat),
+                    **_chat_label_json(item.chat),
                     "topicOpenUrl": (
                         _topic_open_url(side.chat_id, side.topic_id) if side.topic_id else None
                     ),

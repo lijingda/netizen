@@ -36,6 +36,7 @@ class IdentityUiTest(unittest.TestCase):
         static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         source = (static / "admin.js").read_text(encoding="utf-8")
         core = "\n".join(source[source.index(start):source.index(end)] for start, end in (
+            ("let pendingSessionChatLabels =", "async function loadSessionChatLabels("),
             ("async function api(", "const updateTerminalPhases ="),
             ("function actionPayload(", "async function mutate("),
             ("function actionButton(", "function actionsCell("),

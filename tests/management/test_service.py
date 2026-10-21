@@ -1257,7 +1257,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             await self.service.query_sessions(deadline=asyncio.get_running_loop().time() - 1)
         self.assertEqual(self.runtime.calls, [])
 
-    async def test_session_pages_resolve_only_page_cache_misses(self) -> None:
+    async def test_session_pages_use_only_cached_names_until_explicit_enrichment(self) -> None:
         for index in range(3):
             await self._create(
                 FeishuScope(
@@ -1281,13 +1281,21 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 deadline=asyncio.get_running_loop().time() + 1,
             )
             first_chat_ids = tuple(item.record.scope.chat_id for item in first.items)
+            self.assertEqual(labels.info_calls, [])
+            self.assertTrue(all(not item.chat.resolved for item in first.items))
+
+            await service.resolve_chat_labels(
+                first_chat_ids, deadline=asyncio.get_running_loop().time() + 1,
+                lookup_budget_seconds=8,
+            )
             self.assertEqual(tuple(labels.info_calls), first_chat_ids)
 
-            await service.query_sessions(
+            refreshed = await service.query_sessions(
                 query=SessionQuery(inventory_state=SessionInventoryState.LAZY),
                 limit=2,
                 deadline=asyncio.get_running_loop().time() + 1,
             )
+            self.assertTrue(all(item.chat.resolved for item in refreshed.items))
             self.assertEqual(tuple(labels.info_calls), first_chat_ids)
 
             second = await service.query_sessions(
@@ -1299,12 +1307,73 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             second_chat_ids = tuple(
                 item.record.scope.chat_id for item in second.items
             )
-            self.assertEqual(
-                tuple(labels.info_calls),
-                first_chat_ids + second_chat_ids,
-            )
+            self.assertTrue(second_chat_ids)
+            self.assertTrue(all(not item.chat.resolved for item in second.items))
+            self.assertEqual(tuple(labels.info_calls), first_chat_ids)
         finally:
             await service.close()
+
+    async def test_all_session_lists_return_while_chat_names_are_pending(self) -> None:
+        active, archived, _lazy = [await self._create() for _ in range(3)]
+        for binding, thread_id, catalog in (
+            (active, "active", self.runtime.active_metadata),
+            (archived, "archived", self.runtime.archived_metadata),
+        ):
+            self.store.assign_native_thread_id(binding.id, thread_id)
+            catalog[thread_id] = NativeThreadMetadata(thread_id, "Title", "preview")
+        self._side_record(active)
+        provider = FakeChatLabels()
+        service = InstanceManagementService(
+            bindings=self.store, projects=self.projects, runtime=self.runtime,
+            scope_coordinator=self.coordinator, chat_labels=provider,
+        )
+        self.addAsyncCleanup(service.close)
+
+        async def pages():
+            result = []
+            for state in (SessionInventoryState.ACTIVE, SessionInventoryState.ARCHIVED,
+                          SessionInventoryState.LAZY):
+                page = await asyncio.wait_for(service.query_sessions(
+                    query=SessionQuery(inventory_state=state),
+                    deadline=asyncio.get_running_loop().time() + 1,
+                ), timeout=1)
+                self.assertEqual(len(page.items), 1)
+                result.append(page)
+            side_page = await asyncio.wait_for(service.query_side_topics(
+                deadline=asyncio.get_running_loop().time() + 1,
+            ), timeout=1)
+            self.assertEqual(len(side_page.items), 1)
+            return [*result, side_page]
+
+        for page in await pages():
+            self.assertFalse(page.items[0].chat.resolved)
+        self.assertEqual(provider.info_calls, [])
+
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = provider.get_chat_info
+
+        async def held(chat_id):
+            entered.set()
+            await release.wait()
+            return await original(chat_id)
+
+        with patch.object(provider, "get_chat_info", side_effect=held):
+            enrichment = asyncio.create_task(service.resolve_chat_labels(
+                (self.scope.chat_id,), deadline=asyncio.get_running_loop().time() + 8,
+                lookup_budget_seconds=8,
+            ))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                for page in await pages():
+                    self.assertFalse(page.items[0].chat.resolved)
+                self.assertFalse(enrichment.done())
+            finally:
+                release.set()
+                await asyncio.wait_for(enrichment, timeout=1)
+        for page in await pages():
+            self.assertEqual(page.items[0].chat.display_name, "Name oc_direct")
+            self.assertTrue(page.items[0].chat.resolved)
+        self.assertEqual(provider.info_calls, [self.scope.chat_id])
 
     async def test_scope_native_pages_preserve_scope_order_and_current_entry(self) -> None:
         self.store._id_factory = lambda: str(uuid.uuid4())
