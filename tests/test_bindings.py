@@ -1315,11 +1315,19 @@ os._exit(0)
             creator = BindingStore(path, id_factory=lambda: "binding")
             scope = FeishuScope("cli_test", "oc_race", ScopeKind.DIRECT)
             project = writer.bootstrap_project(alias="race", cwd="/tmp/race")
-            started = threading.Event()
+            # This tests transaction ordering, not the production lock timeout.
+            # Leave room for slow CI scheduling while the writer holds its lock.
+            creator._connection.execute("PRAGMA busy_timeout = 5000")
+            attempting_transaction = threading.Event()
             result: list[BaseException | object] = []
 
+            def trace(statement: str) -> None:
+                if statement == "BEGIN IMMEDIATE":
+                    attempting_transaction.set()
+
+            creator._connection.set_trace_callback(trace)
+
             def create() -> None:
-                started.set()
                 try:
                     result.append(
                         creator.create_channel_binding(
@@ -1343,11 +1351,13 @@ os._exit(0)
                         ("2030-01-01T00:00:00+00:00", project.alias),
                     )
                     thread.start()
-                    self.assertTrue(started.wait(0.2))
-                    time.sleep(0.03)
+                    self.assertTrue(
+                        attempting_transaction.wait(5),
+                        "binding creation did not attempt its transaction",
+                    )
                     self.assertTrue(thread.is_alive())
-                thread.join(0.5)
-                self.assertFalse(thread.is_alive())
+                thread.join(10)
+                self.assertFalse(thread.is_alive(), "binding creation did not finish")
                 self.assertEqual(len(result), 1)
                 self.assertIsInstance(result[0], ProjectDisabled)
                 self.assertEqual(
@@ -1360,7 +1370,8 @@ os._exit(0)
                     writer.get_scope(scope.key)
             finally:
                 if thread.is_alive():
-                    thread.join(0.5)
+                    thread.join(10)
+                creator._connection.set_trace_callback(None)
                 creator.close()
                 writer.close()
 
