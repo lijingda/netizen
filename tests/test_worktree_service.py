@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from netizen_cli.admin.port_config import ConfigFileSnapshot
 from netizen_cli.bindings import BindingNotFound, BindingStore, ProjectNotFound
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import InstanceManagementService, ScopeCoordinator
@@ -111,6 +112,30 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page["items"][0]["associatedSessionCount"], 2)
         self.assertTrue(page["items"][0]["available"])
         self.assertIsNone(page["items"][0]["branch"])
+
+    async def test_create_keeps_root_and_fetch_from_one_settings_snapshot(self):
+        self.git("remote", "add", "origin", str(self.repo))
+        config = self.root / "config.yaml"
+        config.write_text("{}\n")
+        settings = WorktreeSettingsService(default_root=self.root / "managed",
+            config_snapshot=ConfigFileSnapshot.read(config))
+        self.service._settings = settings
+        newer = WorktreeSettings(self.root / "updated", True)
+        snapshot = settings.snapshot
+
+        def capture_then_update():
+            captured = snapshot()
+            settings.update(newer, expected_revision=captured[1])
+            return captured
+
+        with patch.object(self.service._git, "create", wraps=self.service._git.create) as create:
+            with patch.object(settings, "snapshot", side_effect=capture_then_update):
+                first = await self.resource()
+            second = await self.resource()
+
+        self.assertEqual(Path(first["root"]).parent, self.root / "managed")
+        self.assertEqual(Path(second["root"]).parent, newer.root)
+        self.assertEqual([call.kwargs["fetch"] for call in create.await_args_list], [False, True])
 
     async def test_new_binding_failure_keeps_ready_resource_with_receipt(self):
         with patch.object(self.store, "create_channel_binding", side_effect=RuntimeError("binding failed")):

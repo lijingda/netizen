@@ -30,7 +30,6 @@ class WorktreeToolIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.git("add", ".")
         self.git("commit", "-m", "initial")
         self.initial_head = self.git("rev-parse", "HEAD")
-        self.policy = SessionPolicyService()
         self.worktrees = self.fixture.management.enable_worktrees(settings=WorktreeSettingsService(
             default_root=self.fixture.project_root / "managed",
         ))
@@ -41,9 +40,12 @@ class WorktreeToolIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(self.source.id, "source-native")
         self.fixture.runtime.native_cwds["source-native"] = self.repo
         self.create_thread = AsyncMock()
-        self.service = SessionService(
+        self.service = self.session_service()
+
+    def session_service(self, policy: SessionAccessPolicy = SessionAccessPolicy()) -> SessionService:
+        return SessionService(
             bindings=self.store, runtime=self.fixture.runtime, codex=None, app_id="cli_test",
-            policy=self.policy, create_thread=self.create_thread, send_message=AsyncMock(),
+            policy=SessionPolicyService(policy), create_thread=self.create_thread, send_message=AsyncMock(),
             worktrees=self.worktrees,
         )
 
@@ -102,7 +104,7 @@ class WorktreeToolIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.runtime.native_cwds["source-native"], self.repo / "sub")
 
     async def test_denied_mutation_does_not_create_registration_or_checkout(self):
-        self.policy._policy = SessionAccessPolicy(read_send=SessionAccessRule("disabled"))
+        self.service = self.session_service(SessionAccessPolicy(read_send=SessionAccessRule("disabled")))
         denied = await self.call("create_worktree")
         self.assertEqual(denied["error"]["code"], "access_denied")
         self.assertEqual(self.store.worktrees.list_for_project("test"), ())

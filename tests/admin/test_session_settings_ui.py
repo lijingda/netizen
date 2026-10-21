@@ -24,6 +24,7 @@ class SessionSettingsUiTest(unittest.TestCase):
         source = (static / "admin.js").read_text(encoding="utf-8")
         parts = [
             (static / "chat-picker.js").read_text(encoding="utf-8"),
+            (static / "progress-card.js").read_text(encoding="utf-8"),
             source[source.index("function actionPayload("):source.index("async function mutate(")],
             source[source.index("function cell("):source.index("function showProjectDeleteResult(")],
             source[source.index("function runtimeLabel("):source.index("async function loadSides(")],
@@ -41,6 +42,9 @@ class SessionSettingsUiTest(unittest.TestCase):
         for case in (
             "entry_and_complete_save",
             "progress_card_configuration",
+            "global_progress_fallback",
+            "unavailable_global_preview",
+            "global_preview_without_models",
             "inheritance_and_explicit_defaults",
             "context_and_private_chat",
             "unavailable_catalog",

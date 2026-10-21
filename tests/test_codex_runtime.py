@@ -1034,6 +1034,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.cleanup = FakeTerminalCleanup(self.codex.events)
         self.side_control = FakeSideThreadControl()
         self.outcomes: list[object] = []
+        self.progress_card_defaults = ProgressCardSettings()
 
         async def capture(outcome: object) -> None:
             self.outcomes.append(outcome)
@@ -1044,6 +1045,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             terminal_cleanup=self.cleanup,
             side_boundary_control=self.side_control,
             thread_subscription_control=self.side_control,
+            progress_card_defaults=lambda: self.progress_card_defaults,
             on_completion=capture,
             poll_interval_seconds=0,
             side_idle_seconds=60,
@@ -1945,6 +1947,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         feedback = BindingTaskFeedback(
             reaction_pulse_enabled=True,
             progress_card_enabled=True,
+            progress_card_settings=ProgressCardSettings(),
         )
         binding = self.store.create_channel_binding(
             scope=self.scope,
@@ -1999,6 +2002,32 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             item for item in self.outcomes if isinstance(item, SideTurnOutcome)
         ]
         self.assertEqual([item.task_feedback for item in outcomes], [feedback, feedback])
+
+    async def test_side_freezes_global_progress_defaults_at_creation(self) -> None:
+        first_settings = ProgressCardSettings(organization="time", operation_limit=16)
+        self.progress_card_defaults = first_settings
+        binding = self.materialized_binding()
+        _, first_record, _ = await self.open_side_for_binding(binding, source="first-side")
+        second_settings = ProgressCardSettings(commentary_limit=8)
+        self.progress_card_defaults = second_settings
+        for prompt in ("first turn", "second turn"):
+            submission = await self.runtime.submit_side(
+                side_id=first_record.id, input=prompt, owner_id="ou_owner", origin=object(),
+            )
+            self.assertEqual(submission.task_feedback.progress_card_settings, first_settings)
+            self.assertEqual(
+                self.runtime.side_turn_activity(first_record.id).progress_card_settings,
+                first_settings,
+            )
+            await self.finish_side_turn(submission)
+
+        _, second_record, _ = await self.open_side_for_binding(binding, source="second-side")
+        submission = await self.runtime.submit_side(
+            side_id=second_record.id, input="new side", owner_id="ou_owner", origin=object(),
+        )
+        self.assertEqual(submission.task_feedback.progress_card_settings, second_settings)
+        self.assertIsNone(self.store.get(binding.id).task_feedback.progress_card_settings)
+        await self.finish_side_turn(submission)
 
     async def test_side_creation_rejects_feedback_change_during_resolution(self) -> None:
         self.install_model_catalog()
@@ -2477,7 +2506,9 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             for item in reversed(self.outcomes)
             if isinstance(item, SideTurnOutcome)
         )
-        self.assertEqual(outcome.task_feedback, BindingTaskFeedback())
+        self.assertEqual(outcome.task_feedback, BindingTaskFeedback(
+            progress_card_settings=ProgressCardSettings(),
+        ))
         self.assertIsNone(outcome.activity)
 
     async def test_side_questions_share_observer_with_or_without_progress(self) -> None:
@@ -3958,6 +3989,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex = FakeCodex()
         self.cleanup = FakeTerminalCleanup(self.codex.events)
         self.delete_control = FakeThreadDeleteControl()
+        self.progress_card_defaults = ProgressCardSettings()
         self.outcomes: list[
             TurnOutcome
             | TurnObservationUnavailableOutcome
@@ -3978,6 +4010,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             bindings=self.store,
             terminal_cleanup=self.cleanup,
             thread_delete_control=self.delete_control,
+            progress_card_defaults=lambda: self.progress_card_defaults,
             on_completion=capture,
             poll_interval_seconds=0,
         )
@@ -5389,6 +5422,100 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.outcomes[0].final_response, "done:turn-1")
         self.assertIn(("native-1", False), self.codex.read_calls)
         self.assertIn(("native-1", True), self.codex.read_calls)
+
+    async def test_global_progress_defaults_are_captured_per_new_turn(self) -> None:
+        first_settings = ProgressCardSettings(organization="time", operation_limit=16)
+        self.progress_card_defaults = first_settings
+        binding = self.binding()
+        first = await self.submit(binding)
+        self.assertEqual(first.task_feedback.progress_card_settings, first_settings)
+        second_settings = ProgressCardSettings(commentary_limit=8)
+        self.progress_card_defaults = second_settings
+        steered = await self.submit(binding, "adjust current turn")
+        self.assertEqual(steered.task_feedback.progress_card_settings, first_settings)
+        self.assertEqual(self.runtime.turn_activity(binding.id).progress_card_settings, first_settings)
+        await self.finish(self.codex.handles[-1], first)
+        self.assertEqual(self.outcomes[-1].activity.progress_card_settings, first_settings)
+
+        second = await self.submit(binding, "next turn")
+        self.assertEqual(second.task_feedback.progress_card_settings, second_settings)
+        self.assertIsNone(self.store.get(binding.id).task_feedback.progress_card_settings)
+        await self.finish(self.codex.handles[-1], second)
+
+    async def test_global_progress_defaults_freeze_before_native_turn_start_returns(self) -> None:
+        first_settings = ProgressCardSettings(organization="time")
+        self.progress_card_defaults = first_settings
+        binding = self.binding()
+        accepted, release_response = asyncio.Event(), asyncio.Event()
+        native_turn = FakeThread.turn
+
+        async def turn_with_delayed_response(thread, input, **kwargs):
+            handle = await native_turn(thread, input, **kwargs)
+            accepted.set()
+            await release_response.wait()
+            return handle
+
+        with patch.object(FakeThread, "turn", turn_with_delayed_response):
+            pending = asyncio.create_task(self.submit(binding))
+            try:
+                await asyncio.wait_for(accepted.wait(), timeout=1)
+                self.assertEqual(len(self.codex.handles), 1)
+                self.progress_card_defaults = ProgressCardSettings(operation_limit=16)
+            finally:
+                release_response.set()
+            started = await asyncio.wait_for(pending, timeout=1)
+
+        self.assertEqual(started.task_feedback.progress_card_settings, first_settings)
+        self.assertEqual(self.runtime.turn_activity(binding.id).progress_card_settings, first_settings)
+        await self.finish(self.codex.handles[-1], started)
+        following = await self.submit(binding, "next turn")
+        self.assertEqual(following.task_feedback.progress_card_settings, self.progress_card_defaults)
+        await self.finish(self.codex.handles[-1], following)
+
+    async def test_explicit_progress_settings_override_global_even_at_factory_defaults(self) -> None:
+        self.progress_card_defaults = ProgressCardSettings(organization="time", commentary_limit=8)
+        for settings in (ProgressCardSettings(), ProgressCardSettings(operation_limit=16)):
+            with self.subTest(settings=settings):
+                feedback = BindingTaskFeedback(progress_card_settings=settings)
+                binding = self.store.create_channel_binding(
+                    scope=self.scope, project_alias="test", creator_id="ou_user",
+                    task_feedback=feedback,
+                )
+                started = await self.submit(binding)
+                self.assertEqual(started.task_feedback, feedback)
+                self.assertEqual(self.runtime.turn_activity(binding.id).progress_card_settings, settings)
+                await self.finish(self.codex.handles[-1], started)
+
+    async def test_global_progress_defaults_are_local_to_runtime_instance(self) -> None:
+        self.progress_card_defaults = ProgressCardSettings(organization="time")
+        second_settings = ProgressCardSettings(operation_limit=16)
+        other_store = BindingStore()
+        other_codex = FakeCodex()
+        other_store.bootstrap_project(alias="test", cwd=str(self.cwd))
+        other_runtime = CodexRuntime(
+            codex=other_codex, bindings=other_store,
+            terminal_cleanup=FakeTerminalCleanup(other_codex.events),
+            progress_card_defaults=lambda: second_settings,
+            poll_interval_seconds=0,
+        )
+        try:
+            other_binding = other_store.create_channel_binding(
+                scope=self.scope, project_alias="test", creator_id="ou_user",
+            )
+            other_started = await other_runtime.submit(
+                binding=other_binding, cwd=self.cwd, input="other instance",
+                owner_id="ou_user", origin=object(),
+            )
+            started = await self.submit(self.binding())
+            self.assertEqual(started.task_feedback.progress_card_settings, self.progress_card_defaults)
+            self.assertEqual(other_started.task_feedback.progress_card_settings, second_settings)
+            other_codex.handles[-1].complete()
+            other_started.release_receipt_attempt()
+            self.assertTrue(await other_runtime.wait_idle(timeout=2))
+            await self.finish(self.codex.handles[-1], started)
+        finally:
+            await other_runtime.cancel_tasks()
+            other_store.close()
 
     async def test_catch_up_start_commits_boundary_after_native_acceptance(
         self,
@@ -7949,6 +8076,42 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.turn_diff, "final physical aggregate diff")
         self.assertEqual(outcome.activity.commentary, ())
 
+    async def test_goal_global_defaults_survive_rollover_and_refresh_on_manual_resume(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        first_settings = ProgressCardSettings(organization="time", commentary_limit=8)
+        self.progress_card_defaults = first_settings
+        binding = self.binding()
+        started = await self.runtime.start_goal(
+            binding=binding, cwd=self.cwd, objective="work across turns",
+            owner_id="ou_user", origin=object(),
+        )
+        started.release_receipt_attempt()
+        handle = control.handles[-1]
+        async with asyncio.timeout(1):
+            while handle.activity_sink is None:
+                await asyncio.sleep(0)
+        self.assertEqual(started.task_feedback.progress_card_settings, first_settings)
+        second_settings = ProgressCardSettings(operation_limit=16)
+        self.progress_card_defaults = second_settings
+        handle.rollover("next-physical-turn")
+        handle.emit_activity(TurnActivityNotificationProjection(
+            turn_id="next-physical-turn", turn_started=True,
+        ))
+        self.assertEqual(self.runtime.goal_activity(binding.id).progress_card_settings, first_settings)
+        self.assertEqual(handle.progress_card_settings, first_settings)
+        handle.finish(goal_status=GoalStatus.PAUSED)
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+
+        resumed = await self.runtime.resume_goal(
+            binding=self.store.get(binding.id), owner_id="ou_user", origin=object(),
+        )
+        self.assertEqual(resumed.task_feedback.progress_card_settings, second_settings)
+        self.assertIsNone(self.store.get(binding.id).task_feedback.progress_card_settings)
+        resumed.release_receipt_attempt()
+        control.handles[-1].finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+
     async def test_goal_cleanup_failure_keeps_slot_and_repeat_stop_retries(self) -> None:
         control = FakeGoalControl(self.codex)
         self.runtime._goal_control = control
@@ -9422,7 +9585,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unchanged.revision, with_plan.revision)
 
         steered = await self.submit(binding, "change direction")
-        self.assertEqual(steered.task_feedback, BindingTaskFeedback())
+        self.assertEqual(steered.task_feedback, BindingTaskFeedback(
+            progress_card_settings=ProgressCardSettings(),
+        ))
         after_steer = self.runtime.turn_activity(
             binding.id,
             thread_id=first.thread_id,
@@ -9681,7 +9846,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(observer.calls)
         outcome = self.outcomes[-1]
         assert isinstance(outcome, TurnOutcome)
-        self.assertEqual(outcome.task_feedback, BindingTaskFeedback())
+        self.assertEqual(outcome.task_feedback, BindingTaskFeedback(
+            progress_card_settings=ProgressCardSettings(),
+        ))
         self.assertEqual(outcome.feedback_revision, 1)
         assert outcome.activity is not None
         self.assertTrue(outcome.activity.plan_generated)

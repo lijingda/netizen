@@ -1486,7 +1486,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             {"sessionSettings": {**settings, "context_anchor": "om_forged"}},
             {"sessionSettings": {**settings, "progress_card_settings": {"organization": "time"}}},
             {"sessionSettings": {**settings, "progress_card_settings": {
-                **settings["progress_card_settings"], "operation_limit": 17,
+                **ProgressCardSettings().to_dict(), "operation_limit": 17,
             }}},
             {"sessionSettings": settings, "expectedFeedbackRevision": 1},
         )
@@ -2730,7 +2730,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         parser.feed(html)
 
         self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js",
-                                          "/static/session-access.js", "/static/worktrees.js", "/static/admin.js"])
+                                          "/static/session-access.js", "/static/progress-card.js", "/static/worktrees.js", "/static/admin.js"])
         self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates"} <= parser.ids)

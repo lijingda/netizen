@@ -53,15 +53,15 @@ class WorktreeSettingsService:
                  config_editor: ConfigFileEditor | None = None) -> None:
         if not default_root.is_absolute():
             raise WorktreeSettingsError("default worktree root must be absolute")
-        self._settings = settings
+        self._snapshot = (settings, uuid.uuid4().hex)
         self._default_root = default_root
         self._editor = config_editor or (ConfigFileEditor(config_snapshot) if config_snapshot else None)
-        self._revision = uuid.uuid4().hex
-        self._lock = threading.RLock()
+        # Readers use the last published snapshot without waiting for file I/O.
+        self._write_lock = threading.Lock()
 
     @property
     def revision(self) -> str:
-        return self._revision
+        return self._snapshot[1]
 
     @property
     def editable(self) -> bool:
@@ -69,25 +69,25 @@ class WorktreeSettingsService:
 
     @property
     def root(self) -> Path:
-        with self._lock:
-            return self._settings.root or self._default_root
+        return self.resolve_root(self._snapshot[0])
+
+    def resolve_root(self, settings: WorktreeSettings) -> Path:
+        return settings.root or self._default_root
 
     def snapshot(self) -> tuple[WorktreeSettings, str]:
-        with self._lock:
-            return self._settings, self._revision
+        return self._snapshot
 
     def view(self) -> dict[str, Any]:
-        with self._lock:
-            return {"revision": self._revision, "root": str(self._settings.root) if self._settings.root else "",
-                    "effectiveRoot": str(self.root), "fetchBeforeCreate": self._settings.fetch_before_create,
-                    "editable": self.editable}
+        settings, revision = self._snapshot
+        return {"revision": revision, "root": str(settings.root) if settings.root else "",
+                "effectiveRoot": str(self.resolve_root(settings)),
+                "fetchBeforeCreate": settings.fetch_before_create, "editable": self.editable}
 
     def update(self, settings: WorktreeSettings, *, expected_revision: str) -> None:
-        with self._lock:
-            if expected_revision != self._revision:
+        with self._write_lock:
+            if expected_revision != self._snapshot[1]:
                 raise WorktreeSettingsConflict("worktree settings changed; refresh before saving")
             if self._editor is None:
                 raise WorktreeSettingsError("instance configuration is unavailable")
             self._editor.update_section("worktrees", settings.to_dict())
-            self._settings = settings
-            self._revision = uuid.uuid4().hex
+            self._snapshot = (settings, uuid.uuid4().hex)

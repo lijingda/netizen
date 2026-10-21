@@ -10,6 +10,7 @@ const settings = { turn_settings: { model_id: "retired", effort_id: "high", serv
   progress_card_settings: { show_commentary: false, show_operations: true, show_plan: false,
     commentary_limit: 6, operation_limit: 15, commentary_max_chars: 280, operation_max_chars: 210,
     organization: "time" } };
+const globalProgress = { ...settings.progress_card_settings, show_commentary: true, commentary_limit: 7 };
 const envelope = (mode, id) => ({ csrfToken: `${id}-${mode}-csrf`, actionToken: `${id}-${mode}-once`,
   target: { resource: "default-rule", targetId: id } });
 const rule = (id, kind = "group_name") => ({ id, kind, chat_id: kind === "chat" ? "oc_exact" : null,
@@ -53,6 +54,7 @@ async function api(path, options = {}) {
     return {};
   }
   gets.push(path);
+  if (path === "/api/v1/progress-card/settings") return { settings: structuredClone(globalProgress) };
   if (path.startsWith("/api/v1/chats/validate?")) {
     const result = { chat: { chatId: new URL(path, "http://localhost").searchParams.get("chatId"),
       name: "最新群名称", avatarUrl: "https://example.feishucdn.com/saved.jpg" } };
@@ -841,4 +843,25 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await loadDefaults();
   assert(defaultsInput("rules-body").textContent.includes("使用已有 worktree：managed-one"));
   assert(defaultsInput("rules-body").textContent.includes("每个新会话新建 worktree · release"));
+
+  const unsetRule = { ...rules[0], project: "available", workspace: { mode: "project" },
+    session_settings: { ...settings, progress_card_settings: null } };
+  openDefaultEditor("group_name", unsetRule);
+  await flush();
+  assert.equal(defaultsInput("progress-commentary-limit").value, 7);
+  assert.equal(defaultEditorHasChanges(), false);
+  defaultsInput("model").value = "available-model"; changeDefaultSettings("model");
+  defaultsInput("progress").checked = false; changeDefaultSettings("progress");
+  await saveDefault({ preventDefault() {} });
+  assert.equal(posts.at(-1).body.definition.session_settings.progress_card_settings, null);
+
+  openDefaultEditor("group_name", unsetRule);
+  await flush();
+  defaultsInput("progress-organization").value = "content";
+  changeDefaultSettings("progress-organization");
+  assert.deepEqual(defaultsEditor.settings.progress_card_settings, { ...globalProgress, organization: "content" });
+  await saveDefault({ preventDefault() {} });
+  assert.deepEqual(posts.at(-1).body.definition.session_settings.progress_card_settings,
+    { ...globalProgress, organization: "content" });
+  assert.equal(defaultScheduleSessionSettings().progress_card_settings, null);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

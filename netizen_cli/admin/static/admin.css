@@ -429,8 +429,9 @@ body.schedule-detail-open { overflow: hidden; }
 .tab-unsaved[hidden] { display: none; }
 .admin-users { padding: 0; margin: 0; list-style: none; }
 .admin-users > li { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-top: 1px solid var(--line); padding: 16px 0; }
-.session-access-form { border: 0; padding: 0; }
-#session-access-fields { min-width: 0; margin: 0; border: 0; padding: 0; }
+.session-access-form, .global-card-form { border: 0; padding: 0; }
+.global-card-form { max-width: 800px; }
+#session-access-fields, #global-card-fields { min-width: 0; margin: 0; border: 0; padding: 0; }
 .session-access-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); align-items: start; gap: 16px; }
 .session-access-rule { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
 .session-access-rule h4 { margin: 0; font-size: 16px; }

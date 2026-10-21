@@ -53,6 +53,7 @@ from .domain import (
 )
 from .model_settings import ModelCatalog, ModelCatalogError, TurnModelSettings
 from .partial_answers import PartialAnswer, partial_answers_from_items
+from .progress_card_settings import ProgressCardSettings
 from .error_messages import describe_error, native_turn_failure
 from .runtime.name_writes import ThreadNameWrites
 from .runtime.thread_naming import NamingJob, ThreadNamer
@@ -240,6 +241,7 @@ class _ActiveTurn:
     owner_id: str
     origin: object
     receipt_attempted: asyncio.Event
+    task_feedback: BindingTaskFeedback
     cwd: Path | None = None
     state: ActiveState = ActiveState.RUNNING
     interrupt_attempted: bool = False
@@ -253,7 +255,6 @@ class _ActiveTurn:
     recheck_ready: asyncio.Event | None = None
     recheck_revision: int | None = None
     latest_diff: str | None = None
-    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity_revision: int = 1
     activity_observation_enabled: bool = True
@@ -306,6 +307,7 @@ class _ActiveGoal:
     objective: str
     receipt_attempted: asyncio.Event
     state: GoalOperationState
+    task_feedback: BindingTaskFeedback
     cwd: Path | None = None
     persisted: GoalSnapshot | None = None
     goal_cleared: bool = False
@@ -315,7 +317,6 @@ class _ActiveGoal:
     final_turn_status: str | None = None
     final_items: tuple[object, ...] = ()
     final_response: str | None = None
-    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity_revision: int = 1
     activity_observation_enabled: bool = True
@@ -390,6 +391,7 @@ class _ActiveSideTurn:
     owner_id: str
     origin: object
     receipt_attempted: asyncio.Event
+    task_feedback: BindingTaskFeedback
     state: ActiveState = ActiveState.RUNNING
     interrupt_attempted: bool = False
     interrupt_succeeded: bool = False
@@ -398,7 +400,6 @@ class _ActiveSideTurn:
     terminal_observed: bool = False
     completion_notification_seen: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
-    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity_revision: int = 1
     activity_observation_enabled: bool = True
@@ -463,6 +464,7 @@ class CodexRuntime:
         background_terminal_inspector: BackgroundTerminalInspector | None = None,
         thread_delete_control: ThreadDeleteControl | None = None,
         turn_plan_observer: TurnActivityObserver | None = None,
+        progress_card_defaults: Callable[[], ProgressCardSettings] = ProgressCardSettings,
         on_completion: CompletionHandler = _ignore_completion,
         poll_interval_seconds: float = 0.5,
         compaction_timeout_seconds: float = _COMPACTION_TERMINAL_TIMEOUT_SECONDS,
@@ -487,6 +489,7 @@ class CodexRuntime:
         self._background_terminal_inspector = background_terminal_inspector
         self._thread_delete_control = thread_delete_control
         self._turn_plan_observer = turn_plan_observer
+        self._progress_card_defaults = progress_card_defaults
         self._on_completion = on_completion
         self._on_question: QuestionHandler | None = None
         self._poll_interval_seconds = poll_interval_seconds
@@ -524,6 +527,12 @@ class CodexRuntime:
             if automatic_thread_naming and thread_subscription_control is not None
             else None
         )
+
+    def _capture_task_feedback(self, feedback: BindingTaskFeedback) -> BindingTaskFeedback:
+        """Freeze presentation defaults without changing the Binding's intent."""
+        if feedback.progress_card_settings is not None:
+            return feedback
+        return replace(feedback, progress_card_settings=self._progress_card_defaults())
 
     def set_completion_handler(self, handler: CompletionHandler) -> None:
         self._on_completion = handler
@@ -1138,7 +1147,7 @@ class CodexRuntime:
             )
         prepared_revision = prepared.settings_revision
         prepared_feedback_revision = prepared.feedback_revision
-        prepared_feedback = prepared.task_feedback
+        prepared_feedback = self._capture_task_feedback(prepared.task_feedback)
         configured = prepared.turn_settings
         resolved_settings = None
         if configured is not None:
@@ -3707,6 +3716,7 @@ class CodexRuntime:
             if external and not self._bindings.get(binding.id).active:
                 raise SteerRace("目标会话已切到后台，跨会话消息未发送。")
             assert execution_cwd is not None
+            task_feedback = self._capture_task_feedback(binding.task_feedback)
             try:
                 turn_kwargs: dict[str, object] = {}
                 if resolved_settings is not None:
@@ -3769,7 +3779,7 @@ class CodexRuntime:
                 origin=origin,
                 receipt_attempted=receipt_attempted,
                 cwd=execution_cwd,
-                task_feedback=binding.task_feedback,
+                task_feedback=task_feedback,
                 feedback_revision=binding.feedback_revision,
                 plan_available=self._turn_plan_observer is not None,
             )
@@ -4494,7 +4504,7 @@ class CodexRuntime:
                 state=GoalOperationState.STARTING,
                 cwd=execution_cwd,
                 persisted=persisted,
-                task_feedback=binding.task_feedback,
+                task_feedback=self._capture_task_feedback(binding.task_feedback),
                 feedback_revision=binding.feedback_revision,
                 plan_available=True,
             )
@@ -4670,7 +4680,7 @@ class CodexRuntime:
                 persisted=persisted,
                 generation_created_at=persisted.created_at,
                 generation_token_budget=persisted.token_budget,
-                task_feedback=binding.task_feedback,
+                task_feedback=self._capture_task_feedback(binding.task_feedback),
                 feedback_revision=binding.feedback_revision,
                 plan_available=True,
             )
@@ -4872,6 +4882,7 @@ class CodexRuntime:
                     objective=persisted.objective,
                     receipt_attempted=asyncio.Event(),
                     state=GoalOperationState.STARTING,
+                    task_feedback=self._capture_task_feedback(binding.task_feedback),
                     persisted=persisted,
                     generation_created_at=persisted.created_at,
                     generation_token_budget=persisted.token_budget,
@@ -5158,6 +5169,7 @@ class CodexRuntime:
             objective=persisted.objective,
             receipt_attempted=receipt_attempted,
             state=GoalOperationState.EXTERNAL_ACTIVE,
+            task_feedback=self._capture_task_feedback(binding.task_feedback),
             persisted=persisted,
             generation_created_at=persisted.created_at,
             generation_token_budget=persisted.token_budget,

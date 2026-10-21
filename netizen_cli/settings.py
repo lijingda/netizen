@@ -16,6 +16,7 @@ from .lark_app import LARK_APP_RELATIVE_PATH, LarkAppConfigError, load_lark_app
 from .admin.port_config import ConfigFileSnapshot
 from .sessions.policy import SessionAccessPolicy, SessionPolicyError
 from .worktrees.settings import WorktreeSettings, WorktreeSettingsError
+from .progress_card_settings import ProgressCardSettings
 
 
 class SettingsError(ValueError):
@@ -40,6 +41,7 @@ class Settings:
     admin_web: AdminWebSettings = AdminWebSettings()
     session_tools: SessionAccessPolicy = SessionAccessPolicy()
     worktrees: WorktreeSettings = WorktreeSettings()
+    progress_card: ProgressCardSettings = ProgressCardSettings()
     config_path: Path | None = None
     config_snapshot: ConfigFileSnapshot | None = field(default=None, repr=False)
 
@@ -74,6 +76,11 @@ class Settings:
         try:
             worktrees = WorktreeSettings.from_mapping(loaded.get("worktrees", {}))
         except WorktreeSettingsError as error:
+            raise SettingsError(str(error)) from error
+        try:
+            progress_card = (ProgressCardSettings.from_dict(loaded["progressCard"])
+                             if "progressCard" in loaded else ProgressCardSettings())
+        except ValueError as error:
             raise SettingsError(str(error)) from error
         raw_projects = loaded.get("projects", {})
         if not isinstance(raw_projects, dict):
@@ -120,6 +127,7 @@ class Settings:
             admin_web=admin_web,
             session_tools=session_tools,
             worktrees=worktrees,
+            progress_card=progress_card,
             config_path=config_path,
             config_snapshot=config_snapshot,
         )

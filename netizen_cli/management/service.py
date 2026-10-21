@@ -96,6 +96,9 @@ from ..worktrees.errors import WorktreeError
 from ..worktrees.models import WorktreeConflict, WorktreeNotFound
 from ..worktrees.service import WorktreeService
 from ..worktrees.settings import WorktreeSettingsService
+from ..progress_card_config import ProgressCardConfigService
+from ..progress_card_settings import ProgressCardSettings
+from ..sessions.policy import SessionAccessPolicy, SessionPolicyService
 
 
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
@@ -794,12 +797,14 @@ class InstanceManagementService:
         chat_directory: ChatDirectory | None = None,
         updates: UpdateService | None = None,
         root: Path | None = None,
+        progress_card_config: ProgressCardConfigService | None = None,
     ) -> None:
         self._bindings = bindings
         self._projects = projects
         self._runtime = runtime
         self._scope_coordinator = scope_coordinator
         self._updates = updates or UpdateService(root=root)
+        self._progress_card_config = progress_card_config or ProgressCardConfigService()
         self._chat_labels = (
             ChatLabelResolver(chat_labels) if chat_labels is not None else None
         )
@@ -826,6 +831,26 @@ class InstanceManagementService:
         if self.worktrees is None:
             self.worktrees = WorktreeService(self, settings=settings)
         return self.worktrees
+
+    def progress_card_settings(self) -> dict[str, Any]:
+        return self._progress_card_config.view()
+
+    async def update_progress_card_settings(
+        self, settings: ProgressCardSettings, *, expected_revision: str,
+    ) -> dict[str, Any]:
+        await self._blocking_io.submit(
+            self._progress_card_config.update, settings, expected_revision=expected_revision,
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
+        return self.progress_card_settings()
+
+    async def update_session_tool_access(
+        self, service: SessionPolicyService, policy: SessionAccessPolicy, *, expected_revision: str,
+    ) -> None:
+        await self._blocking_io.submit(
+            service.update, policy, expected_revision=expected_revision,
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
 
     def enable_schedules(self, *, app_id: str, chat_info: Any = None) -> ScheduleService:
         if self.schedules is None:

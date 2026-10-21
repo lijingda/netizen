@@ -291,7 +291,7 @@ class WorktreeService:
                     if repository.common_dir != original.common_dir:
                         raise WorktreeError("conflict", "来源目录不属于当前 Project 的仓库。")
                 settings, _ = self._settings.snapshot()
-                pool = settings.root or self._settings.root
+                pool = self._settings.resolve_root(settings)
                 def prepare_root() -> Path:
                     resolved = pool.resolve()
                     if resolved == Path(resolved.anchor) or resolved.is_relative_to(repository.common_dir):

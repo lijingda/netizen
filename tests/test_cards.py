@@ -2725,7 +2725,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(
             fields["new_progress_card"]["initial_option"],
-            "progress-card:v1:[true,true,true,true,4,8,160,120,\"content\"]",
+            "progress-card:v1:[true,null]",
         )
         self.assertNotIn("new_prompt", fields)
         self.assertEqual(len(_elements(outbound.card, "form")), 1)
@@ -3005,7 +3005,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(
             fields["config_progress_card"]["initial_option"],
-            "progress-card:v1:[false,true,true,true,4,8,160,120,\"content\"]",
+            "progress-card:v1:[false,null]",
         )
         self.assertEqual(fields["config_completion_mention"]["initial_option"], "task-feedback:v2:off")
         self.assertNotIn("config_prompt", fields)

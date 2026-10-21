@@ -23,6 +23,7 @@ class DefaultsUiTest(unittest.TestCase):
         source = (static / "admin.js").read_text(encoding="utf-8")
         parts = [
             (static / "chat-picker.js").read_text(encoding="utf-8"),
+            (static / "progress-card.js").read_text(encoding="utf-8"),
             source[source.index("async function fetchChatPage("):source.index("let defaultsEditor =")],
             source[source.index("function actionPayload("):source.index("async function mutate(")],
             source[source.index("function cell("):source.index("function confirmMaterializedDelete(")],
