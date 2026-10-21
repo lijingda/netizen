@@ -971,7 +971,7 @@ async function chooseScheduleTarget(value) {
   viewedPlan = boundPlan;
   await showSchedule(boundPlan.id);
   assert(scheduleInput("detail-settings").textContent.includes("已登记工作目录：/managed/original/subproject"));
-  assert(scheduleInput("detail-settings").textContent.includes("Worktree：wt-original"));
+  assert(scheduleInput("detail-settings").textContent.includes("worktree：wt-original"));
   assert(scheduleInput("detail-settings").textContent.includes("实际目录由原会话确定"));
   closeScheduleDetail();
   viewedPlan = previousViewedPlan;
@@ -984,7 +984,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("workspace").disabled, true);
   assert(scheduleInput("target-note").textContent.includes("实际工作目录"));
   assert(scheduleInput("binding-summary").textContent.includes("已登记工作目录：/managed/original/subproject"));
-  assert(scheduleInput("binding-summary").textContent.includes("Worktree：wt-original"));
+  assert(scheduleInput("binding-summary").textContent.includes("worktree：wt-original"));
   assert(scheduleInput("binding-summary").textContent.includes("本次未查询原生目录"));
   assert.equal(scheduleEditorHasChanges(), false);
   assert(scheduleInheritedWorkspace({ effective_workspace: { working_cwd: "/selected/lazy",
@@ -1423,7 +1423,7 @@ async function chooseScheduleTarget(value) {
 
   // Exact unavailable choices are retained and editable without replacing their workspace.
   const unavailable = { ...fixturePlan(), workspace: { mode: "existing", worktree_id: "wt-deleted-exact" },
-    workspace_available: false, workspace_error: { code: "not_found", message: "所选 Worktree 登记已删除" },
+    workspace_available: false, workspace_error: { code: "not_found", message: "所选 worktree 登记已删除" },
     blocked_reason: "workspace_unavailable", suspended_reason: "workspace_unavailable",
     execution: { kind: "latest", status: "workspace_unavailable", is_last: false } };
   unavailable.actions.run_now = null;
@@ -1457,7 +1457,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(posts.at(-1).body.definition.expected_project_revision, 1);
 
   // Failed workspace reads preserve policy and session drafts; unchanged policy still permits editing.
-  workspaceErrors.set("project-one", { code: "unavailable", message: "工作区目录状态读取超时" });
+  workspaceErrors.set("project-one", { code: "unavailable", message: "worktree 目录状态读取超时" });
   const validOptions = workspaceOptions.get("project-one");
   workspaceOptions.delete("project-one");
   await openScheduleEditor(unavailable);
@@ -1540,10 +1540,10 @@ async function chooseScheduleTarget(value) {
   assert(scheduleInput("detail-state").textContent.includes("登记已删除"));
   assert(scheduleInput("detail-state").textContent.includes("/managed/retained/subproject"));
   assert(scheduleInput("detail-settings").textContent.includes("wt-deleted-exact"));
-  assert(scheduleInput("runs-body").textContent.includes("工作区不可用，本次未执行"));
+  assert(scheduleInput("runs-body").textContent.includes("worktree 不可用，本次未执行"));
   assert(scheduleInput("runs-body").textContent.includes("wt-retained-exact"));
-  assert(scheduleInput("runs-body").textContent.includes("工作区已保留"));
-  assert(scheduleInput("runs-body").textContent.includes("工作区创建结果待确认"));
+  assert(scheduleInput("runs-body").textContent.includes("worktree 已保留"));
+  assert(scheduleInput("runs-body").textContent.includes("worktree 创建结果待确认"));
   assert(scheduleInput("runs-body").textContent.includes("根目录：/managed/retained"));
   assert(scheduleInput("runs-body").textContent.includes("/managed/unknown"));
   assert(scheduleInput("runs-body").textContent.includes("wt-removed-exact"));

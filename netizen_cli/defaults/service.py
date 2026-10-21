@@ -116,7 +116,7 @@ class SessionDefaultsService:
     def _worktree_service(self) -> WorktreeService:
         service = self._worktrees() if self._worktrees is not None else None
         if service is None:
-            raise DefaultConfigurationError("工作区服务暂不可用，请稍后重试。", code="workspace_unavailable")
+            raise DefaultConfigurationError("worktree 服务暂不可用，请稍后重试。", code="workspace_unavailable")
         return service
 
     async def _validate_workspace(self, rule: DefaultRule, project: Project) -> None:
@@ -129,11 +129,11 @@ class SessionDefaultsService:
             )
         except WorktreeError as error:
             raise DefaultConfigurationError(
-                f"默认配置的工作区不可用：{error}", code="workspace_unavailable",
+                f"默认配置的 worktree 不可用：{error}", code="workspace_unavailable",
             ) from error
         except TimeoutError as error:
             raise DefaultConfigurationError(
-                "默认配置的工作区校验超时，请稍后重试。", code="workspace_unavailable",
+                "默认配置的 worktree 校验超时，请稍后重试。", code="workspace_unavailable",
             ) from error
 
     async def manage(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -265,7 +265,7 @@ class SessionDefaultsService:
             except (DefaultConfigurationError, WorktreeError) as failure:
                 workspace_error = str(failure)
             except Exception:
-                workspace_error = "工作区选项暂不可用，请稍后刷新。"
+                workspace_error = "worktree 选项暂不可用，请稍后刷新。"
         return {"models": _models(catalog), "session_settings": SessionSettings.new_defaults(catalog).to_dict(),
                 "context_mode_available": kind != "p2p", "model_catalog_error": error,
                 "workspace_options": workspace_options, "workspace_options_error": workspace_error}

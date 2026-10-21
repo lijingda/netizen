@@ -111,7 +111,7 @@ class WorktreeStore:
                                 or run.barrier != "held" or run.phase != "publishing_topic"
                                 or run.worktree_id is not None or run.binding_id is not None
                                 or not run.root_message_id or not run.origin_message_id or not run.topic_id):
-                            raise WorktreeConflict("定时执行工作区创建交接已改变，本次未创建。")
+                            raise WorktreeConflict("定时执行 worktree 创建交接已改变，本次未创建。")
                     self._db.execute(
                         "INSERT INTO managed_worktrees(worktree_id,project_alias,project_generation,"
                         "root,cwd,common_dir,origin_binding_id,creation_state,created_at) "
@@ -124,7 +124,7 @@ class WorktreeStore:
                         self.owner.schedules._set_run(scheduled_run_id, worktree_id=worktree_id)
                 self._creating.add(worktree_id)
             except sqlite3.IntegrityError as error:
-                raise WorktreeConflict("工作区标识或目录已经登记；本次未覆盖。") from error
+                raise WorktreeConflict("worktree 标识或目录已经登记；本次未覆盖。") from error
             return self.get(worktree_id)
 
     def discard_unstarted(self, expected: WorktreeRecord) -> None:
@@ -154,7 +154,7 @@ class WorktreeStore:
             self.require_not_deleting(worktree_id)
             if record.creation_state == "ready":
                 if (record.git_dir, record.identity_token) != (git_dir, identity_token):
-                    raise WorktreeConflict("工作区身份已经登记，本次未覆盖。")
+                    raise WorktreeConflict("worktree 身份已经登记，本次未覆盖。")
                 return record
             self._db.execute(
                 "UPDATE managed_worktrees SET git_dir=?, identity_token=?, creation_state='ready', "
@@ -228,7 +228,7 @@ class WorktreeStore:
                 + " ORDER BY worktree_id LIMIT ?", (*values, limit + 1),
             ).fetchall()
         if len(rows) > limit:
-            raise WorktreeConflict("关联工作区超过单次操作上限，请先分批处理。")
+            raise WorktreeConflict("关联 worktree 超过单次操作上限，请先分批处理。")
         return tuple(_record(row) for row in rows)
 
     def find_by_cwd(
@@ -291,7 +291,7 @@ class WorktreeStore:
     def require_not_deleting(self, worktree_id: str) -> None:
         with self.owner._lock:
             if worktree_id in self._delete_intents:
-                raise WorktreeConflict("工作区正在删除，请稍后刷新。")
+                raise WorktreeConflict("worktree 正在删除，请稍后刷新。")
 
     def require_cwd_not_deleting(self, cwd: str | Path) -> None:
         """Protect known native/lazy paths without adopting their Worktree identity."""
@@ -299,7 +299,7 @@ class WorktreeStore:
         with self.owner._lock:
             if any(candidate.is_relative_to(Path(intent.record.root))
                    for intent in self._delete_intents.values()):
-                raise WorktreeConflict("会话工作目录位于正在删除的工作区内，请稍后重试。")
+                raise WorktreeConflict("会话工作目录位于正在删除的 worktree 内，请稍后重试。")
 
     def require_project_path_not_deleting(self, canonical_cwd: Path) -> None:
         """The caller resolves cwd before locking; this check does no filesystem I/O."""
@@ -308,7 +308,7 @@ class WorktreeStore:
         with self.owner._lock:
             if any(canonical_cwd.is_relative_to(Path(intent.record.root))
                    for intent in self._delete_intents.values()):
-                raise ProjectConflict("Project 目录位于正在删除的工作区内，请稍后重试。")
+                raise ProjectConflict("Project 目录位于正在删除的 worktree 内，请稍后重试。")
 
     def require_binding_not_deleting(self, binding_id: str) -> None:
         """Short admission check, including a creator known to be using its result."""
@@ -319,22 +319,22 @@ class WorktreeStore:
             if binding.working_cwd is not None:
                 self.require_cwd_not_deleting(binding.working_cwd)
             if any(intent.record.origin_binding_id == binding_id for intent in self._delete_intents.values()):
-                raise WorktreeConflict("该会话创建的工作区正在删除，请稍后重试。")
+                raise WorktreeConflict("该会话创建的 worktree 正在删除，请稍后重试。")
 
     def require_bindable(self, worktree_id: str, *, project: ProjectRecord, cwd: str | None) -> WorktreeRecord:
         with self.owner._lock:
             self.require_not_deleting(worktree_id)
             record = self.get(worktree_id)
             if (record.project_alias, record.project_generation) != (project.alias, project.generation):
-                raise WorktreeConflict("工作区不属于当前 Project 登记；本次未重新关联。")
+                raise WorktreeConflict("worktree 不属于当前 Project 登记；本次未重新关联。")
             if record.creation_state != "ready" or record.cwd != cwd:
-                raise WorktreeConflict("工作区尚未完成创建或选择目录不匹配。")
+                raise WorktreeConflict("worktree 尚未完成创建或选择目录不匹配。")
             return record
 
     def require_no_creation(self, alias: str, generation: int) -> None:
         with self.owner._lock:
             if any(item.id in self._creating for item in self.list_for_project(alias, generation=generation)):
-                raise WorktreeConflict("Project 仍有在途工作区创建，请完成后重试。")
+                raise WorktreeConflict("Project 仍有在途 worktree 创建，请完成后重试。")
 
     def preview_delete(self, worktree_id: str) -> WorktreeDeleteSnapshot:
         with self.owner._lock:
@@ -344,7 +344,7 @@ class WorktreeStore:
     def _delete_snapshot(self, worktree_id: str) -> WorktreeDeleteSnapshot:
         record = self.get(worktree_id)
         if worktree_id in self._creating:
-            raise WorktreeConflict("工作区仍在创建，请完成后重试。")
+            raise WorktreeConflict("worktree 仍在创建，请完成后重试。")
         bindings = self.bindings(worktree_id)
         identity = {
             "record": asdict(record),
@@ -359,7 +359,7 @@ class WorktreeStore:
             self.require_not_deleting(worktree_id)
             snapshot = self._delete_snapshot(worktree_id)
             if snapshot.fingerprint != expected_fingerprint:
-                raise WorktreeConflict("工作区或关联会话已改变，请重新预览并确认。")
+                raise WorktreeConflict("worktree 或关联会话已改变，请重新预览并确认。")
             self._delete_intents[worktree_id] = snapshot
             return snapshot
 
@@ -372,9 +372,9 @@ class WorktreeStore:
         with self.owner._transaction():
             intent = self._delete_intents.get(worktree_id)
             if intent is None or intent.fingerprint != expected_fingerprint:
-                raise WorktreeConflict("工作区删除确认已经失效。")
+                raise WorktreeConflict("worktree 删除确认已经失效。")
             if self.get(worktree_id) != intent.record:
-                raise WorktreeConflict("工作区身份已改变，本次未删除登记。")
+                raise WorktreeConflict("worktree 身份已改变，本次未删除登记。")
             # Keep the selected cwd even when the directory no longer exists.
             self._db.execute("UPDATE bindings SET worktree_id=NULL WHERE worktree_id=?", (worktree_id,))
             self._db.execute("DELETE FROM managed_worktrees WHERE worktree_id=?", (worktree_id,))

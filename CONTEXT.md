@@ -67,14 +67,14 @@ Mention Context Mode、对应 revision、creator 和时间。它不复制 Codex 
 工具来源输入。飞书中的机器人消息是它的展示，不代表真人用户发言或新增用户授权。
 
 **Session Defaults / 会话默认配置**：聊天中缺少当前会话时用于自动创建普通 Binding 的
-Project、工作区策略与显式会话配置意图。配置属于聊天，生成的会话属于真实消息所在的 Scope。
+Project、worktree 使用方式与显式会话配置意图。配置属于聊天，生成的会话属于真实消息所在的 Scope。
 
 **Session Default Rule / 会话默认规则**：选择会话默认配置的精确聊天记录或有序群名
 关键词规则。精确聊天优先，群名规则采用第一条命中，生成的会话不持续继承规则变更。
 
-**Default Workspace Policy / 默认工作区策略**：自动创建会话时使用项目目录、指定已有
-受管工作树，或为该新会话创建受管工作树的选择。它只决定新会话的起始目录，不改变已有
-会话的目录，也不让创建的工作树成为会话私有资源。
+**Default Workspace Policy / 默认 worktree 使用方式**：自动创建会话时使用项目目录、指定已有
+受管 worktree，或为该新会话创建受管 worktree 的选择。它只决定新会话的起始目录，不改变已有
+会话的目录，也不让创建的 worktree 成为会话私有资源。
 
 **Question Card / 问题卡片**：Codex 向普通会话或 Side 话题参与者提出的结构化问题及其建议选项。
 卡片始终属于原回答目标，不要求原提问任务仍在运行。
@@ -135,9 +135,9 @@ _Avoid_：Goal、原生 plan/checklist（它们不是按时间触发的计划）
 **Scheduled Target / 定时执行目标**：计划触发后接收工作的目的地。新话题目标使用计划的
 独立配置；原会话目标固定一条 Binding，并沿用该会话的上下文、配置、实际工作目录和消息消费行为。
 
-**Scheduled Workspace Policy / 定时工作区策略**：新话题计划为每次实际执行选择项目目录、
-指定已有受管工作树，或新建受管工作树的意图。它属于计划，独立于聊天默认配置与来源会话；
-原会话计划直接使用目标会话的工作目录，不拥有另一份工作区策略。
+**Scheduled Workspace Policy / 定时 worktree 使用方式**：新话题计划为每次实际执行选择项目目录、
+指定已有受管 worktree，或新建受管 worktree 的意图。它属于计划，独立于聊天默认配置与来源会话；
+原会话计划直接使用目标会话的工作目录，不拥有另一份 worktree 使用方式。
 
 **Scheduled Plan Enablement / 计划启停状态**：用户是否允许计划继续自动触发的选择，分为已启用和已暂停。
 暂停不停止已经触发的执行，也不意味着计划已结束。
@@ -377,7 +377,7 @@ JSONL/SQLite 格式。
 **Channel Database**：`channel.sqlite3`，只保存 Scope、Binding、Project Registry、
 schema version、Channel SDK dedup TTL key、Binding 上可选的 Binding Turn Settings
 目录 ID、Binding Task Feedback、Mention Context Mode 与 exact Context Boundary
-metadata、受管 Worktree 身份与创建回执、Project 登记代次和会话工作区选择/关联，
+metadata、受管 Worktree 身份与创建回执、Project 登记代次和会话 worktree 选择/关联，
 以及不含 native ID/content 的 Side Topic Route/墓碑；不保存补充消息正文、
 解析后的 wire value、Codex 已生效配置、Turn Activity Projection、Progress Card session、
 普通 Thread 订阅状态或空闲 timer。
@@ -387,29 +387,33 @@ metadata、受管 Worktree 身份与创建回执、Project 登记代次和会话
 Binding 控制能力，同一 Side Topic 的参与者共享 stop/close 能力，不限创建者；这不会
 授予 Admin Control Plane 的实例级 authority。
 
-## Worktree 词汇
+## worktree 词汇
 
 以下为 [ADR 0085](docs/adr/0085-manage-worktrees-independently-of-sessions.md)
 规定的独立资源与会话目录关系；实现和验收边界见工程设计与部署文档。
 
-**Managed Worktree / 受管工作树**：经 Netizen worktree 能力创建并登记、具有独立身份的
-Git 工作区，可供多个会话共享；它不是某个会话的私有副本。
+产品界面和用户文档统一用小写 `worktree` 指代该资源，不使用“工作区”“工作树”或
+“工作区（worktree）”作为别名。选择策略展示为“worktree 使用方式”；项目目录、实际
+工作目录和 worktree 根目录各自保留原义。“受管”只说明本实例创建并登记的管理范围。
+
+**Managed Worktree / 受管 worktree**：经 Netizen worktree 能力创建并登记、具有独立身份的
+Git checkout，可供多个会话共享；它不是某个会话的私有副本。
 _Avoid_：会话私有目录、会话快照。
 
-**External Worktree / 外部工作树**：不是由本实例 worktree 能力创建并登记的工作区。
+**External Worktree / 外部 worktree**：不是由本实例 worktree 能力创建并登记的 worktree。
 目录可被访问或被某个会话使用，不等于本实例拥有其管理和删除权。
 
 **Session Working Directory / 会话工作目录**：会话实际使用的目录，区别于所属 Project
 登记的默认目录；它可以是 worktree 中的项目子目录，而不一定是 checkout 根目录。
 
-**Worktree Session Association / 工作树会话关联**：会话以某个受管工作区作为实际 cwd 的关系。
-多个会话可以关联同一工作区，创建该工作区的会话不因此成为它的唯一使用者或所有者。
+**Worktree Session Association / worktree 会话关联**：会话以某个受管 worktree 作为实际 cwd 的关系。
+多个会话可以关联同一 worktree，创建该 worktree 的会话不因此成为它的唯一使用者或所有者。
 
-**Worktree Creation Origin / 工作树创建来源**：发起受管工作区创建的入口或会话来源，
-区别于以该工作区作为 cwd 的会话关联；创建来源本身不赋予工作区私有所有权。
+**Worktree Creation Origin / worktree 创建来源**：发起受管 worktree 创建的入口或会话来源，
+区别于以该 worktree 作为 cwd 的会话关联；创建来源本身不赋予 worktree 私有所有权。
 
-**Orphaned Managed Worktree / 项目已删除的受管工作树**：所属 Project 登记已删除、但被
-显式保留的受管工作区；它不同于目录已经从磁盘消失的工作区。
+**Orphaned Managed Worktree / 项目已删除的受管 worktree**：所属 Project 登记已删除、但被
+显式保留的受管 worktree；它不同于目录已经从磁盘消失的 worktree。
 
-**Missing Worktree Directory / 工作树目录缺失**：受管登记指向的原目录已确认不存在，
+**Missing Worktree Directory / worktree 目录缺失**：受管登记指向的原目录已确认不存在，
 不代表关联会话历史或原生 Thread 已被删除，也不同于状态查询失败或超时。

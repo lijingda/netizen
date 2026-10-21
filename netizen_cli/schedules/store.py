@@ -279,7 +279,7 @@ class ScheduleStore:
             record = self.owner.worktrees.get(plan.workspace.worktree_id)
             self.owner.worktrees.require_bindable(record.id, project=project, cwd=record.cwd)
         except (WorktreeConflict, WorktreeNotFound) as cause:
-            error = ScheduleConflict("计划的工作区已不可用，请刷新并重新选择。")
+            error = ScheduleConflict("计划的 worktree 已不可用，请刷新并重新选择。")
             error.code = "workspace_unavailable"
             raise error from cause
 
@@ -343,7 +343,7 @@ class ScheduleStore:
         if plan.target_kind == "new_topic":
             if (plan.target_binding_id is not None or not isinstance(plan.session_settings, SessionSettings)
                     or not isinstance(plan.workspace, WorkspacePolicy)):
-                raise ScheduleError("新话题计划需要独立会话设置与工作区策略，不能指定原会话。")
+                raise ScheduleError("新话题计划需要独立会话设置与 worktree 使用方式，不能指定原会话。")
         elif plan.target_kind == "binding":
             if (not isinstance(plan.target_binding_id, str) or not plan.target_binding_id
                     or plan.session_settings is not None or plan.workspace is not None):
@@ -364,7 +364,7 @@ class ScheduleStore:
         if session_settings is not None and not isinstance(session_settings, SessionSettings):
             raise ScheduleError("计划需要有效的会话设置。")
         if workspace is not None and not isinstance(workspace, WorkspacePolicy):
-            raise ScheduleError("计划需要有效的工作区策略。")
+            raise ScheduleError("计划需要有效的 worktree 使用方式。")
         payload = dict(name=name, instructions=instructions, project_alias=project_alias, app_id=app_id, chat_id=chat_id, schedule=schedule.to_dict(), enabled=enabled, source=source, target_kind=target_kind, target_binding_id=target_binding_id)
         payload["session_settings"] = session_settings.to_dict() if session_settings is not None else None
         payload["workspace"] = workspace.to_dict() if workspace is not None else None
@@ -396,7 +396,7 @@ class ScheduleStore:
         if "session_settings" in changes and changes["session_settings"] is not None and not isinstance(changes["session_settings"], SessionSettings):
             raise ScheduleError("更新需要完整的会话设置，原会话目标使用 null。")
         if "workspace" in changes and changes["workspace"] is not None and not isinstance(changes["workspace"], WorkspacePolicy):
-            raise ScheduleError("更新需要完整的工作区策略，原会话目标使用 null。")
+            raise ScheduleError("更新需要完整的 worktree 使用方式，原会话目标使用 null。")
         changes = dict(changes)
         payload_changes = {key: value.to_dict() if isinstance(value, (ScheduleRule, SessionSettings, WorkspacePolicy)) else value for key, value in changes.items()}
         payload = dict(plan_id=plan_id, expected_revision=expected_revision, changes=payload_changes)
@@ -420,7 +420,7 @@ class ScheduleStore:
                 # metadata edits may retain an unavailable saved workspace.
                 project = self.owner.get_project(changed.project_alias)
                 if type(expected_project_revision) is not int or project.revision != expected_project_revision:
-                    error = ScheduleConflict("Project 已改变，请重新加载工作区选项。")
+                    error = ScheduleConflict("Project 已改变，请重新加载 worktree 选项。")
                     error.code = "project_changed"
                     raise error
             schedule_changed = changed.schedule != current.schedule
@@ -679,7 +679,7 @@ class ScheduleStore:
                 if not isinstance(value, str) or not value or (previous is not None and previous != value):
                     raise ScheduleConflict(f"{field} 是不可替换的 exact identity。")
         if "worktree_id" in changes and current.target_kind != "new_topic":
-            raise ScheduleConflict("原会话执行不能保存独立工作区回执。")
+            raise ScheduleConflict("原会话执行不能保存独立 worktree 回执。")
         if "binding_removed" in changes and (type(changes["binding_removed"]) is not bool or (current.binding_removed and not changes["binding_removed"])):
             raise ScheduleConflict("会话移除事实不可撤销。")
         if "disposition" in changes and (

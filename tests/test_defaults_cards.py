@@ -253,7 +253,7 @@ class DefaultsCardsTest(unittest.TestCase):
                 self.assertEqual(request["workspace"], workspace)
                 self.assertEqual(request["session_settings"], self.settings.to_dict())
                 self.assertNotIn("wt-missing", str(card.card))
-                self.assertIn("加载项目目录选项", str(card.card))
+                self.assertIn("加载 worktree 选项", str(card.card))
         card = self.workspace_card({"mode": "new", "ref": "abc123"}, workspace_options=self.workspace_options())
         self.assertEqual(decode_defaults_action(self.scope, {}, form_values(card))["workspace"]["ref"], "abc123")
 
@@ -277,7 +277,7 @@ class DefaultsCardsTest(unittest.TestCase):
                     defaults_session_completion_mention="task-feedback:v2:on",
                     defaults_session_context_mode="context-mode:v1:current-only",
                     defaults_worktree_ref="refs/heads/main")
-        request = decode_defaults_action(self.scope, callback(card, "加载项目目录选项"), form)
+        request = decode_defaults_action(self.scope, callback(card, "加载 worktree 选项"), form)
         self.assertEqual(request["mode"], "load_workspace")
         self.assertEqual(request["workspace"], {"mode": "new", "ref": "refs/heads/main"})
         updated = {**self.record, "revision": 6}
@@ -297,7 +297,7 @@ class DefaultsCardsTest(unittest.TestCase):
         form[project["name"]] = project["options"][1]["value"]
         with self.assertRaisesRegex(CardActionError, "重新加载"):
             decode_defaults_action(self.scope, {}, form)
-        request = decode_defaults_action(self.scope, callback(card, "加载项目目录选项"), form)
+        request = decode_defaults_action(self.scope, callback(card, "加载 worktree 选项"), form)
         self.assertEqual(request["project"], "other")
         self.assertEqual(request["workspace"], {"mode": "project"})
         refreshed = self.card(draft=request, projects=[*self.projects, other], allow_workspace_selection=True,
@@ -322,7 +322,7 @@ class DefaultsCardsTest(unittest.TestCase):
                 with self.assertRaises(CardActionError):
                     decode_defaults_action(self.scope, {}, fields)
                 self.assertEqual(
-                    decode_defaults_action(self.scope, callback(card, "加载项目目录选项"), fields)["mode"],
+                    decode_defaults_action(self.scope, callback(card, "加载 worktree 选项"), fields)["mode"],
                     "load_workspace",
                 )
 
@@ -333,9 +333,9 @@ class DefaultsCardsTest(unittest.TestCase):
         ):
             with self.subTest(view=view):
                 card = self.card(view=view, workspace_options=options, allow_workspace_selection=True)
-                self.assertIn("加载项目目录选项", str(card.card))
+                self.assertIn("加载 worktree 选项", str(card.card))
                 self.assertNotIn("defaults_worktree_ref", str(card.card))
-                self.assertNotIn("每个新会话新建 Worktree", str(card.card))
+                self.assertNotIn("每个新会话新建 worktree", str(card.card))
 
     def test_grouped_form_keeps_workspace_last_and_delete_outside_form(self):
         card = self.workspace_card({"mode": "new", "ref": "refs/heads/main"},

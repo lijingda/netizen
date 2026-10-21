@@ -47,7 +47,7 @@ Netizen 复用原生 Codex Thread、历史、配置和工具，但飞书不是 C
   到话题。飞书不会自动上传整个工作区或保存 Turn 完成时文件版本。
 - Netizen 提供自己的[受管 worktree](sessions.md#选择受管-worktree) 创建、选择与 Admin
   管理；会话通过实际 cwd 使用目录，Git 管理由 Netizen 应用层完成。它不读取或写入
-  App/CLI 私有托管索引，不承诺工作区管理、删除或自动回收互认；本版不做环境初始化、
+  App/CLI 私有托管索引，不承诺 worktree 管理、删除或自动回收互认；本版不做环境初始化、
   文件自动复制、快照恢复、自动回收或 Handoff。
 - `/copy`、`/vim`、`/theme`、`/exit` 和 `/quit` 属于宿主界面或生命周期命令，在飞书中不可用。
 - `/plan` 和 `/apps` 当前没有安全、公开的高层 SDK 控制面，在飞书中不可用。

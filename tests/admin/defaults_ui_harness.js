@@ -814,6 +814,6 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
   groupItems = [existingRule, { ...rules[1], workspace: { mode: "new", ref: "release" } }];
   await loadDefaults();
-  assert(defaultsInput("rules-body").textContent.includes("指定 Worktree：managed-one"));
-  assert(defaultsInput("rules-body").textContent.includes("每个新会话创建 Worktree · release"));
+  assert(defaultsInput("rules-body").textContent.includes("使用已有 worktree：managed-one"));
+  assert(defaultsInput("rules-body").textContent.includes("每个新会话新建 worktree · release"));
 })().catch((error) => { console.error(error); process.exitCode = 1; });

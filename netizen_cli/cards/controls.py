@@ -404,7 +404,7 @@ def _new_binding_form(
     ))
     if allow_workspace_selection:
         workspace_elements = [
-            _form_hint("使用上方选择的项目加载目录选项；不会创建会话。切换项目后请重新加载。"),
+            _form_hint("默认使用项目目录，Git 项目可选择或新建 worktree。加载选项不会创建会话；切换项目后请重新加载。"),
             _new_workspace_load_button(),
         ]
         if workspace_error:
@@ -412,13 +412,13 @@ def _new_binding_form(
         if workspace_options is not None:
             workspace_elements.append(_form_hint(
                 "已加载项目 " + _md_code(str(workspace_options["projectAlias"]))
-                + (" 的工作区；新建 worktree 只检出提交内容，不复制本地改动或运行环境初始化。"
+                + (" 的 worktree 选项；新建 worktree 只检出提交内容，不复制本地改动或初始化运行环境。"
                    if workspace_options.get("isGit") is True
                    else " 不是 Git 仓库，本次仅使用项目目录。")
             ))
         if workspace_options is not None and workspace_options.get("isGit") is True:
             workspace_elements.extend(_new_workspace_elements(workspace_options))
-        elements.append(_form_section("工作区", workspace_elements))
+        elements.append(_form_section("worktree", workspace_elements))
     elements.append(
         _form_submit_button(name="new_binding_submit_v6", label="新建会话")
     )
@@ -530,7 +530,7 @@ def _new_workspace_elements(options: Mapping[str, Any]) -> list[dict[str, Any]]:
             continue
         branch = item.get("branch") or "detached"
         choices.append((
-            f"{item['id']} · {branch} · {item['cwd']}",
+            f"已有 worktree · {branch} · {item['cwd']}",
             _workspace_reference(options, "id:" + item["id"]),
         ))
     refs = [("当前 HEAD", "HEAD")]
@@ -539,12 +539,12 @@ def _new_workspace_elements(options: Mapping[str, Any]) -> list[dict[str, Any]]:
         remote = "远端 · " if branch.get("remote") else "本地 · "
         refs.append((remote + branch["name"] + occupied, branch["ref"]))
     return [
-        _form_label("工作区（切换项目后请重新加载目录选项）"),
+        _form_label("worktree（切换项目后请重新加载选项）"),
         _static_select(
-            name="new_workspace", placeholder="选择工作区", options=tuple(choices),
+            name="new_workspace", placeholder="选择 worktree", options=tuple(choices),
             initial_option=_workspace_reference(options, "project"),
         ),
-        _form_label("以下分支配置仅在“新建 worktree”时生效；已有工作区不会切换分支"),
+        _form_label("以下分支配置仅在“新建 worktree”时生效；已有 worktree 不会切换分支"),
         _static_select(
             name="new_worktree_mode", placeholder="选择检出方式",
             options=(("Detached（不绑定命名分支）", "detached"),
@@ -564,7 +564,7 @@ def _new_workspace_elements(options: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _new_workspace_load_button() -> dict[str, Any]:
-    button = _form_submit_button(name="new_workspace_load_v1", label="加载项目目录选项")
+    button = _form_submit_button(name="new_workspace_load_v1", label="加载 worktree 选项")
     button["type"] = "default"
     button["behaviors"] = [{"type": "callback", "value": {
         "v": ACTION_VERSION, "intent": CardControlName.PREPARE_NEW_WORKSPACE.value,
@@ -971,7 +971,7 @@ def new_binding_card(
 ) -> OutboundCard:
     builder = _builder("新建会话", "选择项目，开始一次对话")
     builder.markdown(
-        "默认在项目目录工作，也可为 Git 项目选择受管 worktree。创建会话后，直接发送任务即可开始。"
+        "默认在项目目录工作，也可为 Git 项目选择或新建 worktree。创建会话后，直接发送任务即可开始。"
         "创建会话本身不会启动任务。"
     )
     if not projects:
@@ -2279,7 +2279,7 @@ def _decode_new_binding_form(
     }
     if workspace_fields & set(payload):
         if not load_workspace and not workspace_fields - {"new_worktree_branch"} <= set(payload):
-            raise CardActionError("工作区表单不完整，请重新加载项目目录选项。")
+            raise CardActionError("worktree 表单不完整，请重新加载 worktree 选项。")
         workspace = {name: payload.pop(name) for name in workspace_fields if name in payload}
     base_fields = {
         "new_project",
@@ -2343,7 +2343,7 @@ def _decode_new_workspace(
         reference,
     )
     if match is None:
-        raise CardActionError("工作区选择无效，请重新加载项目目录选项。")
+        raise CardActionError("worktree 选择无效，请重新加载 worktree 选项。")
     mode = _required_string(payload["new_worktree_mode"], "new_worktree_mode")
     ref = _bounded_string(payload["new_worktree_ref"], "new_worktree_ref", max_chars=1000)
     branch_value = payload.get("new_worktree_branch")
@@ -2357,7 +2357,7 @@ def _decode_new_workspace(
     if choice == "project":
         return None, None
     if (match.group(1), int(match.group(2))) != (project_alias, project_revision):
-        raise CardActionError("项目已切换，请先重新加载该项目的目录选项。")
+        raise CardActionError("项目已切换，请先重新加载该项目的 worktree 选项。")
     if choice.startswith("id:"):
         # Creation settings cannot change an existing workspace's branch.
         return match.group(4), None

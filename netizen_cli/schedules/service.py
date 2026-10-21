@@ -374,7 +374,7 @@ class ScheduleService:
     def _worktree_service(self) -> WorktreeService:
         service = self._worktrees() if self._worktrees is not None else None
         if service is None:
-            raise WorktreeError("unavailable", "工作区服务暂不可用，请稍后重试。")
+            raise WorktreeError("unavailable", "worktree 服务暂不可用，请稍后重试。")
         return service
 
     @staticmethod
@@ -392,7 +392,7 @@ class ScheduleService:
         if not record.enabled:
             raise ProjectDisabled(project)
         if expected_revision is not None and record.revision != expected_revision:
-            raise _InputError("project_changed", "Project 已改变，请重新加载工作区选项。")
+            raise _InputError("project_changed", "Project 已改变，请重新加载 worktree 选项。")
         if workspace.mode != "project":
             try:
                 async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
@@ -402,7 +402,7 @@ class ScheduleService:
             except WorktreeError as error:
                 raise _InputError("workspace_unavailable", str(error)) from error
             except TimeoutError as error:
-                raise _InputError("workspace_unavailable", "工作区状态读取超时，请稍后重试；本次未创建工作区。") from error
+                raise _InputError("workspace_unavailable", "worktree 状态读取超时，请稍后重试；本次未创建 worktree。") from error
         return record.revision
 
     def _binding_target(self, request: Mapping[str, Any], *, binding: Any = None) -> tuple[Any, Any]:
@@ -486,10 +486,10 @@ class ScheduleService:
         except WorktreeError as failure:
             return None, {"code": failure.code, "message": str(failure)}
         except TimeoutError:
-            return None, {"code": "workspace_unavailable", "message": "工作区选项读取超时，请稍后刷新。"}
+            return None, {"code": "workspace_unavailable", "message": "worktree 选项读取超时，请稍后刷新。"}
         except Exception as error:
             logger.error("Scheduled workspace options read failed type=%s", type(error).__name__)
-            return None, {"code": "internal_error", "message": "工作区选项读取发生内部错误，请检查服务日志。"}
+            return None, {"code": "internal_error", "message": "worktree 选项读取发生内部错误，请检查服务日志。"}
 
     async def form_options(self, *, native_thread_id: str | None = None, scope_key: str | None = None,
                            chat_id: str | None = None, binding_query: str | None = None,
@@ -741,10 +741,10 @@ class ScheduleService:
             except WorktreeError as error:
                 return key, {"code": error.code, "message": str(error)}
             except TimeoutError:
-                return key, {"code": "workspace_unavailable", "message": "工作区状态读取超时，请稍后刷新；不会切回项目目录。"}
+                return key, {"code": "workspace_unavailable", "message": "worktree 状态读取超时，请稍后刷新；不会切回项目目录。"}
             except Exception as error:
                 logger.error("Scheduled workspace state read failed type=%s", type(error).__name__)
-                return key, {"code": "internal_error", "message": "工作区状态读取发生内部错误，请检查服务日志。"}
+                return key, {"code": "internal_error", "message": "worktree 状态读取发生内部错误，请检查服务日志。"}
 
         return dict(await asyncio.gather(*(read(key) for key in keys)))
 

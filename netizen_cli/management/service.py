@@ -999,13 +999,13 @@ class InstanceManagementService:
         self._require_project_delete_capability(snapshot)
         if delete_worktrees and snapshot.worktrees:
             if self.worktrees is None:
-                raise WorktreeError("unavailable", "工作区管理不可用，未开始删除。")
+                raise WorktreeError("unavailable", "worktree 管理不可用，未开始删除。")
             for record in snapshot.worktrees:
                 async with asyncio.timeout_at(deadline):
                     preview = await self.worktrees.preview_delete(record.id, delete_sessions=True,
                         _project_deletion_bindings=frozenset(item.binding.id for item in snapshot.bindings))
                 if not preview["safe"]:
-                    raise WorktreeError("unsafe_delete", "工作区尚不可删除：" + "；".join(preview["reasons"]))
+                    raise WorktreeError("unsafe_delete", "worktree 尚不可删除：" + "；".join(preview["reasons"]))
         return snapshot
 
     def _require_project_delete_capability(self, snapshot: ProjectDeleteSnapshot) -> None:
@@ -1138,18 +1138,18 @@ class InstanceManagementService:
                 raise SideCloseFailed("Project 仍有未完成关闭的 Side。")
             if delete_worktrees and snapshot.worktrees:
                 if self.worktrees is None:
-                    raise WorktreeError("unavailable", "工作区管理不可用，剩余目录保留。")
+                    raise WorktreeError("unavailable", "worktree 管理不可用，剩余目录保留。")
                 for record in snapshot.worktrees:
                     current = self._bindings.worktrees.get(record.id)
                     if current != record:
-                        raise WorktreeError("inventory_changed", "工作区身份已经改变，剩余目录保留。")
+                        raise WorktreeError("inventory_changed", "worktree 身份已经改变，剩余目录保留。")
                     preview = await self.worktrees.preview_delete(record.id, delete_sessions=False)
                     if not preview["safe"]:
-                        raise WorktreeError("unsafe_delete", "剩余工作区未通过安全检查。")
+                        raise WorktreeError("unsafe_delete", "剩余 worktree 未通过安全检查。")
                     result = await self.worktrees.delete(record.id, delete_sessions=False,
                         expected_fingerprint=preview["fingerprint"], deadline=deadline)
                     if not result["deleted"]:
-                        raise WorktreeError(result["code"], "部分工作区删除未确认完成。")
+                        raise WorktreeError(result["code"], "部分 worktree 删除未确认完成。")
                     deleted_worktree_count += 1
             self._projects.finish_delete(
                 alias=alias,
@@ -1581,7 +1581,7 @@ class InstanceManagementService:
         except BaseException as error:
             pending.set_exception(
                 WorktreeError("creation_interrupted",
-                    "自动创建已中断；请检查当前会话和受管工作区的实际结果，勿自动重试。")
+                    "自动创建已中断；请检查当前会话和受管 worktree 的实际结果，勿自动重试。")
                 if isinstance(error, asyncio.CancelledError) else error
             )
             raise
@@ -1618,10 +1618,10 @@ class InstanceManagementService:
         resource = None
         if worktree_id is not None or worktree_create is not None:
             if self.worktrees is None or (worktree_id is not None and worktree_create is not None):
-                raise WorktreeError("invalid_arguments", "无效的工作区创建选择。")
+                raise WorktreeError("invalid_arguments", "无效的 worktree 创建选择。")
             if worktree_create is not None:
                 if not isinstance(worktree_create, dict) or worktree_create.keys() - {"mode", "ref", "branch"}:
-                    raise WorktreeError("invalid_arguments", "工作区创建参数无效。")
+                    raise WorktreeError("invalid_arguments", "worktree 创建参数无效。")
                 resource = await self.worktrees.create(project_alias=project.alias,
                     expected_project_revision=project.revision, **worktree_create)
                 worktree_id = resource["id"]
@@ -1631,7 +1631,7 @@ class InstanceManagementService:
             except Exception as error:
                 if resource is not None:
                     raise WorktreeError("session_creation_failed",
-                        f"工作区已创建并保留：{resource['cwd']}；会话未创建，可在 Admin 检查后通过 /new 复用。",
+                        f"worktree 已创建并保留：{resource['cwd']}；会话未创建，可在 Admin 检查后通过 /new 复用。",
                         details={"worktree": resource}) from error
                 raise
         async with self._scope_coordinator.hold(scope.key):
@@ -1663,23 +1663,23 @@ class InstanceManagementService:
             ) as error:
                 if resource is not None:
                     raise WorktreeError("session_creation_failed",
-                        f"工作区已创建并保留：{resource['cwd']}；会话创建失败，可在 Admin 管理或通过 /new 复用。",
+                        f"worktree 已创建并保留：{resource['cwd']}；会话创建失败，可在 Admin 管理或通过 /new 复用。",
                         details={"worktree": resource}) from error
                 self._raise_project_create_error(project_alias, error)
             except Exception as error:
                 if resource is not None:
                     raise WorktreeError("session_creation_failed",
-                        f"工作区已创建并保留：{resource['cwd']}；会话创建未完成，请在 Admin 检查后通过 /new 复用。",
+                        f"worktree 已创建并保留：{resource['cwd']}；会话创建未完成，请在 Admin 检查后通过 /new 复用。",
                         details={"worktree": resource}) from error
                 if isinstance(error, (WorktreeConflict, WorktreeNotFound)):
-                    raise WorktreeError("unavailable", f"所选工作区已不可用：{error}") from error
+                    raise WorktreeError("unavailable", f"所选 worktree 已不可用：{error}") from error
                 raise
             try:
                 await self._runtime.binding_pointer_changed(previous_id, binding.id)
             except Exception as error:
                 if resource is not None:
                     raise WorktreeError("session_handoff_failed",
-                        f"工作区和会话已建立，但运行时交接失败；工作区 {resource['cwd']} 已保留，请检查会话状态，勿重复创建。",
+                        f"worktree 和会话已建立，但运行时交接失败；worktree {resource['cwd']} 已保留，请检查会话状态，勿重复创建。",
                         details={"worktree": resource, "bindingId": binding.id}) from error
                 raise
         return CreatedBinding(project=project, binding=binding)

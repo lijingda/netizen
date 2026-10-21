@@ -974,7 +974,7 @@ class ChannelApplication:
             worktrees = self._management.worktrees
             if plan.workspace.mode != "project":
                 if worktrees is None:
-                    raise WorktreeError("unavailable", "工作区服务暂不可用，本次未启动。")
+                    raise WorktreeError("unavailable", "worktree 服务暂不可用，本次未启动。")
                 # An unavailable selected checkout must reject before any Feishu send.
                 workspace = await worktrees.validate_policy(
                     plan.workspace, project_alias=project.alias,
@@ -1092,7 +1092,7 @@ class ChannelApplication:
                 try:
                     async with asyncio.timeout(5):
                         receipt = store.get_run(run.id)
-                        resource_note = (f" 关联工作区：{receipt.worktree_id}，请在 Admin 检查；不会自动删除或重建。"
+                        resource_note = (f" 关联 worktree：{receipt.worktree_id}，请在 Admin 检查；不会自动删除或重建。"
                                          if receipt.worktree_id else "")
                         await self._reply(origin, f"定时任务未完成启动：{str(error)[:400]}。请通过 /cron 查看本次记录。" + resource_note)
                 except Exception:
@@ -2933,7 +2933,7 @@ class ChannelApplication:
             try:
                 await self._reply(
                     message,
-                    f"已有会话先完成创建，将沿用该会话；本次新建的工作区 "
+                    f"已有会话先完成创建，将沿用该会话；本次新建的 worktree "
                     f"{created.retained_worktree_cwd} 已保留，可在 Admin 管理或通过 /new 复用。",
                 )
             except Exception:
@@ -2968,7 +2968,7 @@ class ChannelApplication:
                     expected_project_revision=draft["expected_project_revision"] if draft is not None else None,
                 )
             except WorktreeError as error:
-                workspace_error = str(error) + " 原工作区策略已保留，请重新加载或选择有效策略。"
+                workspace_error = str(error) + " 原 worktree 使用方式已保留，请重新加载或选择有效策略。"
         return defaults_card(
             scope, view, self._projects.list(), catalog,
             notice=notice, notice_is_error=notice_is_error,
@@ -5118,7 +5118,7 @@ class ChannelApplication:
             )
             if not await self._safe_update_card(intent.source_id, card):
                 await self._safe_reply_to_card(
-                    intent, "项目目录选项已查询，但卡片更新失败；未创建会话。请重新发送 /new。",
+                    intent, "worktree 选项已查询，但卡片更新失败；未创建会话。请重新发送 /new。",
                 )
             return
         if intent.name is CardControlName.CREATE_BINDING:
@@ -6194,7 +6194,7 @@ class ChannelApplication:
                     expected_project_revision=expected_project_revision,
                 )
             except WorktreeError as error:
-                workspace_error = str(error) + " 可直接在项目目录创建会话，或重新加载目录选项。"
+                workspace_error = str(error) + " 可直接在项目目录创建会话，或重新加载 worktree 选项。"
         return new_binding_card(
             scope=scope, projects=projects, initial_project_alias=initial_project_alias,
             catalog=catalog, catalog_error=catalog_error,

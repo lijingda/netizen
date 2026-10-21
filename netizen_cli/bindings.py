@@ -1561,7 +1561,7 @@ class BindingStore:
         with self._transaction():
             binding = self.get(binding_id)
             if binding.native_thread_id != expected_native_thread_id:
-                raise BindingConflict("原生会话身份已变化，本次未同步工作区关联。")
+                raise BindingConflict("原生会话身份已变化，本次未同步 worktree 关联。")
             self.worktrees.require_binding_not_deleting(binding_id)
             self.worktrees.require_cwd_not_deleting(working_cwd)
             project = self.get_project(binding.project_alias)
