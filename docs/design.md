@@ -1281,10 +1281,24 @@ Progress Card 在现有总开关下增加八项展示设置：最近进展、最
 全关仍显示状态、失败/中断、观测不可用等必要提示；不影响其他回复模块。
 
 Admin 在“会话配置 → 任务反馈 → 过程卡”和默认会话配置中复用同一组控件，无预设、
-排版、操作类别筛选或预览。聊天默认规则在自动创建时复制该值，之后会话独立维护；
-更改默认规则不改变已有 Binding 或手动 `/new` 的选择语义。设置属于 Task Feedback，
-沿用普通 Turn 准入、Goal 新 logical run 和 Side 创建时的捕获边界。其他完整配置入口，
-包括飞书 `/config`、`/defaults` 和定时计划编辑，保留已有展示选项而不新增这些控件。
+排版、操作类别筛选或卡片预览。完整 SessionSettings 的 `progress_card_settings` 为显式
+八字段对象或 null；null 表示未配置。聊天默认规则在自动创建时复制该意图，之后会话
+独立维护；更改默认规则不改变已有 Binding，手动 `/new` 不套用聊天规则且默认未配置。
+普通新 Turn、Goal 新 logical run 和 Side 创建时优先使用会话显式值，否则读取本实例
+全局值并随 Task Feedback 冻结；steer、Goal 换物理 Turn 和已有 Side 后续输入不重新解析。
+有效值不回写 Binding、默认规则或定时计划，既有终态卡片继续使用自身 manifest。
+
+“系统管理 → 过程卡”的“全局过程卡配置”提供同样八项控件、保存与放弃修改，说明
+仅用于未配置的会话。实例 `config.yaml` 的 `progressCard` 保存完整八项，缺节时取上述
+工厂默认值；由共享 `ConfigFileEditor` 原子写入，成功后切换进程内值，不增加配置文件。
+`GET/POST /api/v1/progress-card/settings` 复用 Admin 登录、同源与一次性 action grant，
+用 revision 拒绝陈旧提交，外部 YAML 修改沿既有文件冲突规则拒绝覆盖。
+
+Admin 会话及默认配置表单未配置时显示全局值供编辑参考；只在编辑过程卡细项时生成
+显式对象，改模型、反馈总开关或其他选项仍保留 null。飞书 `/new`、`/config`、`/defaults`
+和定时计划表单不增加细项控件，保存与重绘保留完整对象或 null。本轮不增加重置或跟随开关。
+历史值全部保留为显式选择，包括与旧默认值相同的配置，不追溯来源；全局兜底边界见
+[ADR 0087](adr/0087-use-instance-progress-card-settings-for-missing-session-intent.md)。
 
 按内容保持最近进展、最近操作、任务清单的顺序。按时间按唯一观察链收到事件的顺序，
 从早到晚交错进展与操作段，任务清单仍在底部。进展划分操作段，首条进展前也有一段；
@@ -1911,9 +1925,14 @@ MCP 连接；来源只能是可信 `_meta.threadId` 映射的普通 Binding，Pr
 
 ## 数据与配置
 
+实例内可编辑的过程卡、Worktree 与会话协作权限配置共用 `ConfigFileEditor` 和有界
+blocking-I/O executor 写入既有 YAML。每个配置服务仅串行化写操作，将配置与 revision
+作为一个不可变快照发布；写入期间读取继续取得旧快照，不等待文件 I/O。持久化成功后
+一次替换整个快照，失败时不发布新值；同 revision 的竞争写入仍只有一次可成功。
+
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v18 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v19 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
 `schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
 v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
@@ -1924,8 +1943,11 @@ v17 为 `schedule_plans` 增加独立 `workspace_json`：有效新话题计划�
 最小资源回执。不保存 Git 状态、额外 cwd 权威或工作区健康缓存，删除资源不级联删除计划。
 v18 为 Binding 增加 `progress_card_settings_json`，并为默认规则与有效新话题计划的完整
 SessionSettings JSON 增加 `progress_card_settings`；旧记录回填当前展示默认值，保留
-已有总开关与其他设置，原会话计划和删除墓碑的空配置不变。只存展示选项，不存过程正文、
-原生事件、分段历史或卡片 session。
+已有总开关与其他设置，原会话计划和删除墓碑的空配置不变。
+v19 保留 v18 表结构和全部已有值，仅允许 `progress_card_settings_json` 的 TEXT 内容为
+JSON null，以及完整 SessionSettings 的 `progress_card_settings` 为 null，以保存未配置意图。
+历史完整值均为显式设置，不按是否等于旧默认值转换；全局兜底保存在实例 YAML，解析后的
+有效值不落库。只存展示意图，不存过程正文、原生事件、分段历史或卡片 session。
 受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
 创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
 不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
@@ -2155,9 +2177,10 @@ Projects 页通过“添加 Project”抽屉切换登记已有目录和创建空
 独立，创建及配置草稿互不覆盖；核对结果只读查询，不重发写请求。Project 明确拒绝后
 可显式刷新授权、保留输入再提交；结果未知时仅核对，不恢复提交能力。
 
-系统管理使用同一套横向子 Tab 展示“管理员”和“跨会话工具权限”，整页加载默认进入管理员。
-子 Tab 切换仅改变可见内容，不发请求、不保存、不重置表单；权限有修改时在 Tab 标记
-“未保存”，隐藏后仍参与页面离开与退出登录保护。刷新仍读取两部分原有事实并保护权限草稿。
+系统管理使用同一套横向子 Tab 展示“管理员”“跨会话工具权限”和“过程卡”，整页加载默认进入管理员。
+子 Tab 切换仅改变可见内容，不发请求、不保存、不重置表单；权限或全局过程卡有修改时
+在对应 Tab 标记“未保存”，隐藏后仍参与页面离开与退出登录保护。刷新读取三部分当前值，
+并在放弃未保存修改前确认。
 切离管理员时卸载 Selector 浮层、忽略晚到回调，保留已选人员及原操作授权；返回后可确认
 添加或显式重新加载选人组件。子 Tab 不新增地址参数或持久草稿。
 
@@ -2445,7 +2468,8 @@ action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact
 Admin 专属生命周期、恢复、归档或删除 Side 墓碑操作。
 
 Sessions 的“配置”使用完整会话设置抽屉，回填 Model/Effort/Speed、Reaction Pulse、
-Progress Card 及其展示设置、Completion Mention 和消息上下文；单聊不显示上下文选择。它与飞书
+Progress Card 及其展示设置、Completion Mention 和消息上下文；未配置的过程卡细项读取全局值
+供编辑参考，未编辑细项则仍保存 null。单聊不显示上下文选择。它与飞书
 `/config` 复用同一个 Runtime/Store 原子保存入口，grant 同时固定 settings、feedback、
 context 三类 revision；陈旧页面、Scope 或 pointer 变化、运行中 Turn/Goal、compaction
 和未知 lifecycle 均不能部分保存或改投其他 Binding。配置 inactive Binding 不改变 current。

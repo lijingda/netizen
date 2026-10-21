@@ -34,6 +34,7 @@ class NavigationUiTest(unittest.TestCase):
         script += (static / "identity.js").read_text(encoding="utf-8")
         script += (static / "worktrees.js").read_text(encoding="utf-8")
         script += (static / "session-access.js").read_text(encoding="utf-8")
+        script += (static / "progress-card.js").read_text(encoding="utf-8")
         script += (static / "admin.js").read_text(encoding="utf-8") + after
         cases = [(url, None) for url in (
             "/projects",

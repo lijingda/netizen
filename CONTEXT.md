@@ -252,7 +252,7 @@ Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认�
 模型目录失效或读取失败时保留；running Turn 的 steer 不解析也不应用。
 
 **Binding Task Feedback / 会话任务反馈**：Binding 上对 Reaction Pulse、Progress Card
-与 Completion Mention 的独立展示选择，包括过程卡展示设置。Side 创建时冻结 Parent 当时的选择；
+与 Completion Mention 的独立展示选择，包括可选的过程卡展示设置。Side 创建时冻结 Parent 当时的有效选择；
 它们不是 Codex 原生设置或 Turn/Goal 状态事实。
 
 **Completion Mention / 结束提及**：任务结束时对本轮任务发起人的一次真实 @，与进度
@@ -372,7 +372,10 @@ commentary、plan step 等自由文本及随分页携带的过程 manifest 经�
 
 **Progress Card Settings / 过程卡展示设置**：会话对过程卡已有进展、操作与任务清单的
 显隐、组织方式、展示数量和摘要长度的选择。聊天默认配置供自动创建时复制，已有会话
-独立维护；同一张共享卡片使用同一份选择，不属于查看者个人偏好。
+独立维护；未配置时使用全局过程卡配置。同一张共享卡片使用同一份选择，不属于查看者个人偏好。
+
+**Global Progress Card Settings / 全局过程卡配置**：本 Netizen 实例内未单独配置过程卡的
+会话使用的展示默认值。它不覆盖已有显式选择，也不改变已经开始的执行或已有 Side 的展示设置。
 
 **Activity Operation Segment / 活动操作段**：按时间组织时，两次进展之间的一组操作，
 首次进展之前的操作也构成一段。段内沿用已有操作合并方式，段与段之间不合并；

@@ -68,6 +68,11 @@ class SessionSettingsTest(unittest.TestCase):
         self.assertEqual(updated.merge({"progress_card_enabled": True}).task_feedback.progress_card_settings, card)
         self.assertEqual(updated.merge({"progress_card_settings": ProgressCardSettings().to_dict()})
                          .task_feedback.progress_card_settings, ProgressCardSettings())
+        inherited = updated.merge({"progress_card_settings": None})
+        self.assertIsNone(inherited.task_feedback.progress_card_settings)
+        self.assertEqual(inherited.task_feedback.progress_card_enabled, updated.task_feedback.progress_card_enabled)
+        self.assertEqual(SessionSettings.from_dict(inherited.to_dict()), inherited)
+        self.assertIsNone(inherited.merge({"completion_mention_enabled": False}).task_feedback.progress_card_settings)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             card.organization = "content"
 
@@ -95,7 +100,7 @@ class SessionSettingsTest(unittest.TestCase):
         del missing["progress_card_settings"]
         with self.assertRaises(SessionSettingsError):
             SessionSettings.from_dict(missing)
-        for invalid in (None, {}, {**valid, "commentary_limit": True}):
+        for invalid in (False, {}, {**valid, "commentary_limit": True}):
             with self.assertRaises(SessionSettingsError):
                 SessionSettings().merge({"progress_card_settings": invalid})
         with self.assertRaises(ValueError):
@@ -104,6 +109,8 @@ class SessionSettingsTest(unittest.TestCase):
     def test_new_defaults_resolve_catalog_but_source_inherit_remains_inherit(self):
         catalog = self.catalog()
         defaults = SessionSettings.new_defaults(catalog)
+        self.assertIsNone(defaults.task_feedback.progress_card_settings)
+        self.assertIsNone(defaults.to_dict()["progress_card_settings"])
         self.assertEqual(defaults.turn_settings, BindingTurnSettings("model-a", "low", "priority"))
         self.assertEqual(defaults.task_feedback, BindingTaskFeedback(False, True))
         self.assertTrue(defaults.task_feedback.completion_mention_enabled)

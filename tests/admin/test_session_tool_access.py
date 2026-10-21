@@ -1,32 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 import json
-import tempfile
+import threading
 import unittest
-from pathlib import Path
+from unittest.mock import patch
 
 from netizen_cli.admin.auth import AdminAuth
-from netizen_cli.admin.port_config import ConfigFileSnapshot
+from netizen_cli.admin.port_config import ConfigFileSnapshot, write_configuration
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.admin.web import AdminWebApplication
 from netizen_cli.instance import instance_digest
 from netizen_cli.sessions.policy import SessionPolicyService
 from tests.admin.test_instance_admin import _request
-from tests.admin.test_web import FakeManagement, _action_payload
+from tests.admin.test_web import _action_payload
+from tests.support.channel_fixtures import channel_fixture
 
 
 class SessionToolAccessWebTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        fixture = await self.enterAsyncContext(channel_fixture())
+        self.root = fixture.project_root
         self.path = self.root / "config.yaml"
         self.path.write_text("projects: {}\n")
         self.policy = SessionPolicyService(config_snapshot=ConfigFileSnapshot.read(self.path))
         self.users = AdminUsers(self.root, "cli_test")
         self.member = self.users.add_initial("ou_admin")
         self.auth = AdminAuth(self.users)
-        self.app = AdminWebApplication(auth=self.auth, management=FakeManagement(self.root),
+        self.app = AdminWebApplication(auth=self.auth, management=fixture.management,
             instance_root=self.root, session_policy=self.policy)
         self.app.configure_authorities(("127.0.0.1:8787",))
         self.app.open_admission()
@@ -67,6 +68,38 @@ class SessionToolAccessWebTest(unittest.IsolatedAsyncioTestCase):
             stale["saveAction"], discovery={"mode": "all"}, readSend={"mode": "all"}))
         self.assertEqual(status, 409)
         self.assertEqual(result["code"], "stale_session_tool_access")
+        self.assertFalse(self.policy.allows_read_send("oc_any"))
+
+    async def test_pending_save_keeps_event_loop_and_configuration_reads_available(self) -> None:
+        _, before = await self.request()
+        payload = _action_payload(before["saveAction"],
+                                  discovery={"mode": "disabled"}, readSend={"mode": "disabled"})
+        entered = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def slow_write(snapshot, loaded):
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(timeout=5):
+                raise AssertionError("test did not release the configuration writer")
+            return write_configuration(snapshot, loaded)
+
+        with patch("netizen_cli.admin.port_config.write_configuration", side_effect=slow_write):
+            saving = asyncio.create_task(self.request("POST", payload=payload))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=2)
+                status, during = await asyncio.wait_for(self.request(), timeout=2)
+                self.assertEqual(status, 200)
+                self.assertFalse(saving.done())
+                for key in ("revision", "discovery", "readSend"):
+                    self.assertEqual(during[key], before[key])
+                self.assertTrue(self.policy.allows_read_send("oc_any"))
+            finally:
+                release.set()
+                status, saved = await asyncio.wait_for(saving, timeout=2)
+
+        self.assertEqual(status, 200, saved)
+        self.assertNotEqual(saved["revision"], before["revision"])
         self.assertFalse(self.policy.allows_read_send("oc_any"))
 
     async def test_requires_identity_same_origin_and_browser_bound_grant(self) -> None:

@@ -267,7 +267,6 @@ from .prompt_projection import (
     project_current_message,
 )
 from .projects import ProjectError, ProjectRegistry, UnknownProject
-from .progress_card_settings import ProgressCardSettings
 from .task_text import project_task_text
 from .result_images import prepare_result_images
 from .quoted_context import (
@@ -5144,7 +5143,7 @@ class ChannelApplication:
                 reaction_pulse_enabled=bool(intent.reaction_pulse_enabled),
                 progress_card_enabled=bool(intent.progress_card_enabled),
                 completion_mention_enabled=bool(intent.completion_mention_enabled),
-                progress_card_settings=intent.progress_card_settings or ProgressCardSettings(),
+                progress_card_settings=intent.progress_card_settings,
             )
             project, binding = await self._create_binding(
                 scope=intent.scope,

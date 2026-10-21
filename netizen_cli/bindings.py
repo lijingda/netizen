@@ -40,7 +40,7 @@ from .worktrees.models import WorktreeRecord
 from .worktrees.store import WorktreeStore, create_schema as create_worktree_schema
 
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Includes the running query and all submitted queries waiting for the reader.
 _ADMIN_QUERY_CAPACITY = 32
@@ -467,7 +467,7 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
     _require_project_metadata_schema(connection)
     require_schema(connection)
     require_defaults_schema(connection)
-    from .migrations.v18 import validate
+    from .migrations.v19 import validate
     validate(connection)
 
 
@@ -1334,10 +1334,10 @@ class BindingStore:
                 row["task_reactions_enabled"],
                 row["progress_card_enabled"],
                 row["completion_mention_enabled"],
-                _progress_card_settings(row["progress_card_settings_json"]).to_dict(),
+                _progress_card_settings(row["progress_card_settings_json"]),
             )
             feedback_changed = current_feedback != (
-                *feedback_values[:3], task_feedback.progress_card_settings.to_dict(),
+                *feedback_values[:3], task_feedback.progress_card_settings,
             )
             if (
                 not settings_changed
@@ -3008,13 +3008,17 @@ def _feedback_values(
         int(feedback.reaction_pulse_enabled),
         int(feedback.progress_card_enabled),
         int(feedback.completion_mention_enabled),
-        json.dumps(feedback.progress_card_settings.to_dict(), separators=(",", ":")),
+        json.dumps(
+            feedback.progress_card_settings.to_dict() if feedback.progress_card_settings is not None else None,
+            separators=(",", ":"),
+        ),
     )
 
 
-def _progress_card_settings(raw: str) -> ProgressCardSettings:
+def _progress_card_settings(raw: str) -> ProgressCardSettings | None:
     try:
-        return ProgressCardSettings.from_dict(json.loads(raw))
+        value = json.loads(raw)
+        return ProgressCardSettings.from_dict(value) if value is not None else None
     except (TypeError, ValueError) as error:
         raise RuntimeError("Binding contains invalid progress card settings") from error
 

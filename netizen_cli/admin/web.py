@@ -167,6 +167,8 @@ from ..sessions.policy import (
     SessionAccessPolicy, SessionPolicyConflict, SessionPolicyError, SessionPolicyService,
 )
 from ..worktrees.errors import WorktreeError
+from ..progress_card_config import ProgressCardConfigConflict, ProgressCardConfigError
+from ..progress_card_settings import ProgressCardSettings
 
 
 logger = logging.getLogger(__name__)
@@ -255,6 +257,7 @@ class AdminActionPreconditions:
     session_policy_revision: ExpectedValue[str] = ExpectedValue.dont_check()
     cascade_delete: ExpectedValue[bool] = ExpectedValue.dont_check()
     worktree_settings_revision: ExpectedValue[str] = ExpectedValue.dont_check()
+    progress_card_settings_revision: ExpectedValue[str] = ExpectedValue.dont_check()
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,6 +580,8 @@ class AdminWebApplication:
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["session-access.js"])
         if route == ("GET", "/static/worktrees.js"):
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["worktrees.js"])
+        if route == ("GET", "/static/progress-card.js"):
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["progress-card.js"])
         if route == ("GET", "/api/v1/identity"):
             _require_query_keys(context.query, set())
             session = self._authenticate(context)
@@ -608,6 +613,8 @@ class AdminWebApplication:
             return await self._worktree_branches(context)
         if route == ("GET", "/api/v1/worktrees/settings"):
             return self._worktree_settings(context)
+        if route == ("GET", "/api/v1/progress-card/settings"):
+            return self._progress_card_settings(context)
         if route == ("GET", "/api/v1/chats"):
             return await self._chats(context)
         if route == ("GET", "/api/v1/chat-labels"):
@@ -656,6 +663,7 @@ class AdminWebApplication:
         mutations: dict[str, Callable[[_RequestContext], Awaitable[Response]]] = {
             "/api/v1/worktrees/create": self._worktree_create,
             "/api/v1/worktrees/settings": self._worktree_save_settings,
+            "/api/v1/progress-card/settings": self._progress_card_save_settings,
             "/api/v1/worktrees/delete-preview": self._worktree_delete_preview,
             "/api/v1/worktrees/delete": self._worktree_delete,
             "/api/v1/session-tool-access/save": self._save_session_tool_access,
@@ -1103,6 +1111,46 @@ class AdminWebApplication:
             ),
         )
         return _json_response(200, {**result, "requestId": context.request.request_id})
+
+    def _progress_card_settings(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        view = self._management.progress_card_settings()
+        actions = {}
+        if view["editable"]:
+            actions["save"] = self._grant(
+                context, "progress-card.settings", AdminActionTarget("progress-card-settings", "instance"),
+                _empty_preconditions(progress_card_settings_revision=ExpectedValue.expect(view["revision"])),
+            )
+        return _json_response(200, {**view, "actions": actions, "requestId": context.request.request_id})
+
+    async def _progress_card_save_settings(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload, grant = self._redeem(
+            context, "progress-card.settings", expected_resource="progress-card-settings",
+            allowed_extra={"settings"},
+        )
+        if grant.target.target_id != "instance":
+            raise StaleActionGrant()
+        try:
+            settings = ProgressCardSettings.from_dict(payload["settings"])
+        except ValueError as error:
+            raise AdminWebError(400, "invalid_progress_card_settings", str(error)) from None
+        revision = _expected_value(
+            _grant_preconditions(grant).progress_card_settings_revision, "progress card settings revision",
+        )
+
+        async def apply() -> dict[str, Any]:
+            try:
+                return await self._management.update_progress_card_settings(settings, expected_revision=revision)
+            except ProgressCardConfigConflict:
+                raise AdminWebError(409, "stale_progress_card_settings", "过程卡配置已被修改，请刷新后再保存。") from None
+            except AdminPortConfigurationError:
+                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
+            except (ProgressCardConfigError, OSError):
+                raise AdminWebError(503, "configuration_unavailable", "无法保存过程卡配置，当前配置未更新。") from None
+
+        await self._mutation(context, "progress-card.settings", "instance", apply())
+        return self._progress_card_settings(context)
 
     async def _worktree_delete_preview(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
@@ -2164,7 +2212,7 @@ class AdminWebApplication:
 
         async def apply() -> None:
             try:
-                service.update(policy, expected_revision=revision)
+                await self._management.update_session_tool_access(service, policy, expected_revision=revision)
             except SessionPolicyConflict:
                 raise AdminWebError(409, "stale_session_tool_access", "权限已被修改，请刷新后再保存。") from None
             except AdminPortConfigurationError:
@@ -2713,7 +2761,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js"):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js"):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 
@@ -3015,6 +3063,7 @@ def _empty_preconditions(
     session_policy_revision: ExpectedValue[str] | None = None,
     cascade_delete: ExpectedValue[bool] | None = None,
     worktree_settings_revision: ExpectedValue[str] | None = None,
+    progress_card_settings_revision: ExpectedValue[str] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -3037,6 +3086,7 @@ def _empty_preconditions(
         session_policy_revision or ExpectedValue.dont_check(),
         cascade_delete or ExpectedValue.dont_check(),
         worktree_settings_revision or ExpectedValue.dont_check(),
+        progress_card_settings_revision or ExpectedValue.dont_check(),
     )
 
 

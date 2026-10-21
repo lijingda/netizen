@@ -37,8 +37,8 @@ class ProgressCardSettingsMigrationTest(unittest.TestCase):
             )]
             before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
         plan = migrations.plan_channel_database(self.path)
-        self.assertEqual(plan, {"source_version": 17, "target_version": 18,
-                                "steps": [{"from_version": 17, "to_version": 18}]})
+        self.assertEqual(plan, {"source_version": 17, "target_version": 19,
+                                "steps": [{"from_version": 17, "to_version": 18}, {"from_version": 18, "to_version": 19}]})
         self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=17), plan)
         with closing(sqlite3.connect(self.path)) as connection:
             for table, rows in before.items():
@@ -69,7 +69,7 @@ class ProgressCardSettingsMigrationTest(unittest.TestCase):
                 self.assertIsNone(store.schedules.get(identifier, include_deleted=True).session_settings)
             self.assertEqual(store.schedules.get("deleted-new_topic", include_deleted=True).session_settings, SessionSettings())
         unchanged = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=18)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=19)["steps"], [])
         self.assertEqual(self.contents(), unchanged)
 
     def test_fresh_and_migrated_constraints_are_equivalent(self):
@@ -89,7 +89,7 @@ class ProgressCardSettingsMigrationTest(unittest.TestCase):
 
         before = self.contents()
         step = migrations.Migration(17, 18, fail, v18.validate)
-        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:3], step)):
+        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:3], step, *migrations.MIGRATIONS[4:])):
             with self.assertRaisesRegex(RuntimeError, "after progress card conversion"):
                 migrations.migrate_channel_database(self.path, expected_source_version=17)
         self.assertEqual(self.contents(), before)
@@ -98,7 +98,7 @@ class ProgressCardSettingsMigrationTest(unittest.TestCase):
     def test_current_validation_rejects_invalid_settings_without_repair(self):
         migrations.migrate_channel_database(self.path, expected_source_version=17)
         valid = ProgressCardSettings().to_dict()
-        invalid_values = (None, {}, {**valid, "extra": True}, {**valid, "show_plan": 1},
+        invalid_values = (False, {}, {**valid, "extra": True}, {**valid, "show_plan": 1},
                           {**valid, "operation_limit": True}, {**valid, "commentary_limit": 9},
                           {**valid, "operation_max_chars": 241}, {**valid, "organization": "other"})
         for table, column, key, identifier in (

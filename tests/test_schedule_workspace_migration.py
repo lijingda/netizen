@@ -39,7 +39,7 @@ class ScheduleWorkspaceMigrationTest(unittest.TestCase):
             before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
         plan = migrations.plan_channel_database(self.path)
         self.assertEqual(plan, {
-            "source_version": 16, "target_version": 18, "steps": [{"from_version": 16, "to_version": 17}, {"from_version": 17, "to_version": 18}],
+            "source_version": 16, "target_version": 19, "steps": [{"from_version": 16, "to_version": 17}, {"from_version": 17, "to_version": 18}, {"from_version": 18, "to_version": 19}],
         })
         self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=16), plan)
         with closing(sqlite3.connect(self.path)) as connection:
@@ -77,7 +77,7 @@ class ScheduleWorkspaceMigrationTest(unittest.TestCase):
             self.assertEqual(store.defaults.get("app", "default-group").workspace,
                              WorkspacePolicy("new", ref="refs/heads/main"))
         before_noop = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=18)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=19)["steps"], [])
         self.assertEqual(self.contents(), before_noop)
 
     def test_fresh_and_migrated_databases_have_equivalent_constraints_without_worktree_fk(self):

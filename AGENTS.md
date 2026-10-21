@@ -50,6 +50,9 @@ their cited ADRs before changing that boundary.
   Progress Card settings and time organization follow
   [ADR 0086](docs/adr/0086-configure-progress-card-presentation-with-bounded-activity-segments.md):
   independent bounded windows, preserved segment boundaries and self-contained pagination.
+  Missing session presentation intent uses the instance fallback only when captured for execution
+  ([ADR 0087](docs/adr/0087-use-instance-progress-card-settings-for-missing-session-intent.md));
+  preserve explicit historical values and never persist the resolved fallback as session intent.
   Controls and form callbacks: [commands and cards](docs/design.md#飞书命令与控制卡片).
   Preserve the referenced
   ADRs' exact identity, context, display, and file-evidence contracts.

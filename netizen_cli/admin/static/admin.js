@@ -70,6 +70,7 @@ function expireAdminSession() {
   if (notice) notice.hidden = false;
   window.NetizenIdentity?.expire();
   window.NetizenSessionAccess?.expire();
+  window.NetizenProgressCard?.expire();
   window.NetizenWorktrees?.expire();
   setStatus("登录已过期，请重新登录。", true);
 }
@@ -2349,6 +2350,7 @@ async function loadSessionSettingsOptions() {
   const serial = ++editor.optionsSerial;
   editor.loading = true;
   renderSessionSettingsEditor();
+  const progressRead = editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
   try {
     const data = await api("/api/v1/sessions/options");
     if (sessionSettingsEditor !== editor || serial !== editor.optionsSerial) return;
@@ -2359,6 +2361,7 @@ async function loadSessionSettingsOptions() {
     editor.models = [];
     editor.catalogError = `${error.message} 模型目录暂未读取，原选择保持不变。`;
   } finally {
+    await progressRead;
     if (sessionSettingsEditor === editor && serial === editor.optionsSerial) {
       editor.loading = false;
       renderSessionSettingsEditor();
@@ -2768,6 +2771,7 @@ async function loadDefaultOptions(resolveChat = false) {
   editor.workspaceOptions = null;
   editor.workspaceError = "";
   renderDefaultSettings();
+  let progressRead = editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
   try {
     let view = null;
     if (resolveChat && chatId) {
@@ -2810,6 +2814,11 @@ async function loadDefaultOptions(resolveChat = false) {
     editor.error = `${error.message} 请重新打开表单后操作。`;
     if (resolveChat) editor.action = null;
   } finally {
+    if (defaultsEditor === editor && serial === editor.serial
+        && editor.settings.progress_card_settings === null && !progressRead) {
+      progressRead = window.NetizenProgressCard.read();
+    }
+    await progressRead;
     if (defaultsEditor === editor && serial === editor.serial) {
       // Initial catalog/defaults hydration is not a user edit. Later target
       // resolution must not erase the original values used for discard checks.
@@ -3088,7 +3097,8 @@ function sessionSettingsFingerprint(settings) {
   return JSON.stringify([turn ? [turn.model_id, turn.effort_id, turn.service_tier_id] : null,
     settings.message_context_mode, settings.reaction_pulse_enabled,
     settings.progress_card_enabled, settings.completion_mention_enabled,
-    progressCardFields.map((field) => progressCardSettings(settings)[field.replaceAll("-", "_")])]);
+    settings.progress_card_settings === null ? null
+      : progressCardFields.map((field) => settings.progress_card_settings[field.replaceAll("-", "_")])]);
 }
 
 function confirmDiscardChanges(changed) {
@@ -3098,6 +3108,7 @@ function confirmDiscardChanges(changed) {
 function hasUnsavedEditors() {
   return projectEditorHasChanges() || sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
     || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty())
+    || Boolean(window.NetizenProgressCard?.dirty())
     || Boolean(window.NetizenWorktrees?.dirty());
 }
 
@@ -3105,7 +3116,8 @@ function hasUnsavedEditors() {
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
 function confirmDiscardEditors() {
   if (projectEditor?.saving || sessionSettingsEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
-      || window.NetizenSessionAccess?.busy() || window.NetizenWorktrees?.busy()) return false;
+      || window.NetizenSessionAccess?.busy() || window.NetizenProgressCard?.busy()
+      || window.NetizenWorktrees?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
   closeProjectEditor({ confirmed: true });
   closeSessionSettingsEditor({ confirmed: true });
@@ -3113,6 +3125,7 @@ function confirmDiscardEditors() {
   if (scheduleEditor) closeScheduleEditor({ confirmed: true });
   cancelScheduleSelection({ confirmed: true });
   window.NetizenSessionAccess?.discard();
+  window.NetizenProgressCard?.discard();
   window.NetizenWorktrees?.discard();
   return true;
 }
@@ -3550,22 +3563,19 @@ function resetScheduleEndOffset() {
 
 function defaultScheduleSessionSettings() {
   return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true,
-    message_context_mode: "current-only", progress_card_settings: {
-      show_commentary: true, show_operations: true, show_plan: true,
-      commentary_limit: 4, operation_limit: 8, commentary_max_chars: 160, operation_max_chars: 120,
-      organization: "content",
-    } };
+    message_context_mode: "current-only", progress_card_settings: null };
 }
 
 const progressCardFields = ["show-commentary", "show-operations", "show-plan", "commentary-limit",
   "operation-limit", "commentary-max-chars", "operation-max-chars", "organization"];
 
 function progressCardSettings(settings) {
-  return settings.progress_card_settings || defaultScheduleSessionSettings().progress_card_settings;
+  return settings.progress_card_settings || window.NetizenProgressCard?.current();
 }
 
 function progressCardSettingsError(settings) {
   const progress = progressCardSettings(settings);
+  if (!progress) return "";
   for (const [key, label, maximum] of [
     ["commentary_limit", "进展条数", 8], ["operation_limit", "操作条数", 16],
     ["commentary_max_chars", "进展摘要长度", 320], ["operation_max_chars", "操作摘要长度", 240],
@@ -3582,19 +3592,21 @@ function renderProgressCardSettings(input, settings) {
   if (!container) return;
   const progress = progressCardSettings(settings);
   container.hidden = !settings.progress_card_enabled;
+  const source = input("progress-source");
+  if (source) source.hidden = settings.progress_card_settings !== null;
   for (const node of container.querySelectorAll("input, select")) {
     const field = node.id.split("-progress-").at(-1);
     const key = field.replaceAll("-", "_");
-    if (field.startsWith("show-")) node.checked = progress[key];
-    else node.value = progress[key];
-    node.disabled = !settings.progress_card_enabled
+    if (field.startsWith("show-")) node.checked = progress?.[key] || false;
+    else node.value = progress?.[key] ?? "";
+    node.disabled = !progress || !settings.progress_card_enabled
       || (field.startsWith("commentary-") && !progress.show_commentary)
       || (field.startsWith("operation-") && !progress.show_operations);
   }
-  for (const [kind, shown] of [["commentary", progress.show_commentary], ["operation", progress.show_operations]]) {
+  for (const [kind, shown] of [["commentary", progress?.show_commentary], ["operation", progress?.show_operations]]) {
     input(`progress-${kind}-capacity`).hidden = !shown;
   }
-  const error = progressCardSettingsError(settings);
+  const error = progress ? progressCardSettingsError(settings) : "读取全局配置后可编辑过程卡细项。";
   const note = input("progress-error");
   note.textContent = error;
   note.hidden = !error;
@@ -3662,11 +3674,13 @@ function changeSessionSettingsField(input, settings, models, field, baseTurn = n
   else if (field === "progress") settings.progress_card_enabled = input("progress").checked;
   else if (field === "completion-mention") settings.completion_mention_enabled = input("completion-mention").checked;
   else if (field.startsWith("progress-") && progressCardFields.includes(field.slice(9))) {
+    const progress = progressCardSettings(settings);
+    if (!progress) return;
     const key = field.slice(9).replaceAll("-", "_");
     const node = input(field);
     const value = key.startsWith("show_") ? node.checked
       : key === "organization" || node.value === "" ? node.value : Number(node.value);
-    settings.progress_card_settings = { ...progressCardSettings(settings), [key]: value };
+    settings.progress_card_settings = { ...progress, [key]: value };
   }
 }
 
@@ -4604,8 +4618,9 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "schedules" && await loadSchedules(cursor) === false) return false;
     if (tab === "defaults") await loadDefaults();
     if (tab === "system") {
-      const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load()]);
-      if (results[1] === false) return false;
+      const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load(),
+        window.NetizenProgressCard?.load()]);
+      if (results.includes(false)) return false;
     }
     if (state.authExpired) return false;
     if (isCurrentView()) setStatus("已更新。");
@@ -4643,7 +4658,7 @@ function selectSystemTab(name) {
   if (state.authExpired || state.systemTab === name) return;
   window.NetizenSelect?.close();
   if (state.systemTab === "admins") window.NetizenIdentity?.suspendSelector();
-  else window.NetizenSessionAccess?.closePickers();
+  else if (state.systemTab === "access") window.NetizenSessionAccess?.closePickers();
   state.systemTab = name;
   for (const button of document.querySelectorAll("[data-system-tab]")) {
     const selected = button.dataset.systemTab === name;
@@ -4710,8 +4725,10 @@ for (const tab of document.querySelectorAll("[data-system-tab]")) {
   tab.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const name = event.key === "Home" ? "admins" : event.key === "End" ? "access"
-      : tab.dataset.systemTab === "admins" ? "access" : "admins";
+    const names = [...document.querySelectorAll("[data-system-tab]")].map((button) => button.dataset.systemTab);
+    const index = names.indexOf(tab.dataset.systemTab);
+    const name = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
+      : names[(index + (event.key === "ArrowRight" ? 1 : names.length - 1)) % names.length];
     selectSystemTab(name);
     document.querySelector(`#system-tab-${name}`).focus();
   });

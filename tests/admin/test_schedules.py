@@ -695,12 +695,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(defaults, {
             "turn_settings": {"model_id": "native-model", "effort_id": "medium", "service_tier_id": "default"},
             "reaction_pulse_enabled": False, "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "current-only",
-            "progress_card_settings": {
-                "show_commentary": True, "show_operations": True, "show_plan": True,
-                "commentary_limit": 4, "operation_limit": 8,
-                "commentary_max_chars": 160, "operation_max_chars": 120,
-                "organization": "content",
-            },
+            "progress_card_settings": None,
         })
         plan = (await self.page(session))["plans"][0]
         status, _, updated = await self.json_post("/api/v1/schedules/update", session, {

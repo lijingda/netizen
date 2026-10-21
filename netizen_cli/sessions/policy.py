@@ -82,14 +82,14 @@ class SessionPolicyService:
     def __init__(self, policy: SessionAccessPolicy = SessionAccessPolicy(), *,
                  config_snapshot: ConfigFileSnapshot | None = None,
                  config_editor: ConfigFileEditor | None = None) -> None:
-        self._policy = policy
+        self._snapshot = (policy, uuid.uuid4().hex)
         self._editor = config_editor or (ConfigFileEditor(config_snapshot) if config_snapshot else None)
-        self._revision = uuid.uuid4().hex
-        self._lock = threading.RLock()
+        # Readers use the last published snapshot without waiting for file I/O.
+        self._write_lock = threading.Lock()
 
     @property
     def revision(self) -> str:
-        return self._revision
+        return self._snapshot[1]
 
     @property
     def editable(self) -> bool:
@@ -97,26 +97,24 @@ class SessionPolicyService:
 
     def snapshot(self) -> tuple[SessionAccessPolicy, str]:
         """Capture immutable rules for one tool call and its discovery cursor."""
-        with self._lock:
-            return self._policy, self._revision
+        return self._snapshot
 
     def allows_discovery(self, chat_id: str) -> bool:
-        return self._policy.discovery.allows(chat_id)
+        return self._snapshot[0].discovery.allows(chat_id)
 
     def allows_read_send(self, chat_id: str) -> bool:
-        return self._policy.read_send.allows(chat_id)
+        return self._snapshot[0].read_send.allows(chat_id)
 
     def view(self) -> dict[str, Any]:
-        with self._lock:
-            return {"revision": self._revision, **self._policy.to_dict()}
+        policy, revision = self._snapshot
+        return {"revision": revision, **policy.to_dict()}
 
     def update(self, policy: SessionAccessPolicy, *, expected_revision: str) -> None:
-        with self._lock:
-            if expected_revision != self._revision:
+        with self._write_lock:
+            if expected_revision != self._snapshot[1]:
                 raise SessionPolicyConflict("session tool access changed; refresh before saving")
             if self._editor is None:
                 raise SessionPolicyError("instance configuration is unavailable")
             self._editor.update_section("sessionTools", policy.to_dict())
-            self._policy = policy
             # Invalidate old action grants/cursors even when a rule changes back.
-            self._revision = uuid.uuid4().hex
+            self._snapshot = (policy, uuid.uuid4().hex)

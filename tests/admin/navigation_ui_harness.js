@@ -57,7 +57,7 @@ fetch = async (path, options = {}) => {
   const url = new URL(path, "https://admin");
   if (!["/api/v1/projects", "/api/v1/schedules", "/api/v1/defaults", "/logout", "/api/v1/identity",
     "/api/v1/admin-users", "/api/v1/admin-users/selector-config", "/api/v1/worktrees", "/api/v1/worktrees/settings",
-    "/api/v1/session-tool-access", "/api/v1/session-tool-access/save"].includes(url.pathname)) return baseFetch(path, options);
+    "/api/v1/session-tool-access", "/api/v1/session-tool-access/save", "/api/v1/progress-card/settings"].includes(url.pathname)) return baseFetch(path, options);
   requests.push({ path: url.pathname, query: url.searchParams, options });
   if (expireResponse) return { ok: false, status: 401, json: async () => ({}) };
   if (failPage) throw new Error("本页读取失败");
@@ -74,6 +74,10 @@ fetch = async (path, options = {}) => {
   else if (url.pathname === "/api/v1/defaults") data = { items: [], has_more: false, actions: {} };
   else if (url.pathname === "/api/v1/worktrees") data = { items: [], nextCursor: null };
   else if (url.pathname === "/api/v1/worktrees/settings") data = { root: "", effectiveRoot: "/instance/worktrees", editable: true, fetchBeforeCreate: false, actions: { save: adminGrant } };
+  else if (url.pathname === "/api/v1/progress-card/settings") data = { editable: true, revision: "global-first",
+    settings: { show_commentary: true, show_operations: true, show_plan: true, commentary_limit: 7,
+      operation_limit: 12, commentary_max_chars: 280, operation_max_chars: 210, organization: "time" },
+    actions: { save: adminGrant } };
   else if (url.pathname === "/api/v1/identity") data = { openId: "fixture-admin", name: "管理员" };
   else if (url.pathname === "/api/v1/admin-users") data = {
     users: [], revision: 1, addAction: adminGrant, selectorAction: adminGrant,
@@ -135,6 +139,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   if (initialUrl === "/system") {
     const admins = document.querySelector("#system-tab-admins");
     const access = document.querySelector("#system-tab-access");
+    const progress = document.querySelector("#system-tab-progress");
     const badge = document.querySelector("#session-access-unsaved");
     const mode = document.querySelector("#session-access-discovery-mode");
     const chats = document.querySelector("#session-access-discovery-chats");
@@ -150,6 +155,13 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     assert.equal(badge.hidden, true);
     const beforeSwitch = requests.length;
     admins.dispatch("keydown", { key: "End" });
+    assert.equal(document.activeElement, progress);
+    assert.equal(document.querySelector("#system-progress").hidden, false);
+    progress.dispatch("keydown", { key: "ArrowRight" });
+    assert.equal(document.activeElement, admins);
+    admins.dispatch("keydown", { key: "ArrowLeft" });
+    assert.equal(document.activeElement, progress);
+    progress.dispatch("keydown", { key: "ArrowLeft" });
     assert.equal(document.activeElement, access);
     assert.equal(access.getAttribute("tabindex"), "0");
     assert.equal(admins.getAttribute("tabindex"), "-1");
@@ -221,6 +233,20 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     assert.equal(document.querySelector("#admin-selector-retry").hidden, false);
     assert.equal(requests.length, beforeSelectorSwitch, "selector reload stays explicit");
 
+    progress.click();
+    const globalOrganization = document.querySelector("#global-card-progress-organization");
+    globalOrganization.value = "content"; globalOrganization.dispatch("change");
+    admins.click();
+    assert.equal(document.querySelector("#global-card-unsaved").hidden, false);
+    assert.equal(unload(), true);
+    window.confirm = () => false;
+    await selectTab("projects");
+    assert.equal(state.tab, "system", "hidden global edits also guard navigation");
+    document.querySelector("#logout").click(); await flush();
+    assert(!requests.some((request) => request.path === "/logout"));
+    assert.equal(await refresh("system"), false);
+    assert.equal(globalOrganization.value, "content");
+
     access.click();
     mode.value = "all"; mode.dispatch("change");
     admins.click();
@@ -228,6 +254,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     await selectTab("projects");
     assert.equal(state.tab, "projects");
     assert.equal(badge.hidden, true);
+    assert.equal(document.querySelector("#global-card-unsaved").hidden, true);
     assert.equal(unload(), false);
     return;
   }

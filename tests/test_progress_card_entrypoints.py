@@ -17,7 +17,7 @@ from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.projects import Project
 from netizen_cli.runtime.contracts import GoalActivitySnapshot
 from netizen_cli.session_settings import BindingTaskFeedback, SessionSettings
-from tests.support.channel_cards import direct_card_event, elements, form_values
+from tests.support.channel_cards import direct_card_event, elements, form_values, new_form_values
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 
@@ -88,7 +88,7 @@ class ProgressCardFormPreservationTest(unittest.TestCase):
                 self.assertFalse(actual.task_feedback.progress_card_enabled)
 
     def test_new_form_decodes_complete_feedback_without_new_visible_controls(self):
-        for settings in (ProgressCardSettings(), CUSTOM):
+        for settings in (None, ProgressCardSettings(), CUSTOM):
             with self.subTest(settings=settings):
                 card = new_binding_card(scope=self.scope, projects=self.projects, initial_project_alias="work",
                     task_feedback=replace(self.settings.task_feedback, progress_card_settings=settings))
@@ -117,6 +117,27 @@ class ProgressCardFormPreservationTest(unittest.TestCase):
         intent = decode_card_form(scope=self.scope, message_id="om_form", sender_id="ou_user",
             tag="button", form_value=fields)
         self.assertEqual(intent.progress_card_settings, ProgressCardSettings())
+
+    def test_defaults_and_schedule_forms_keep_unspecified_settings(self):
+        self.settings = SessionSettings(task_feedback=BindingTaskFeedback(progress_card_enabled=True))
+        card = self.defaults_card()
+        fields = form_values(card)
+        fields["defaults_session_progress_card"] = self.toggle(card, "defaults_session_progress_card", enabled=False)
+        result = decode_defaults_action(self.scope, {}, fields)
+        self.assertIsNone(result["session_settings"]["progress_card_settings"])
+
+        card = schedule_form_card(self.scope, projects=self.projects, default_timezone="UTC",
+            session_settings=self.settings)
+        fields = form_values(card)
+        fields[next(name for name in fields if name.startswith("cron_name"))] = "日报"
+        fields["cron_kind"] = "daily"
+        fields[next(name for name in fields if name.startswith("cron_instructions"))] = "检查项目"
+        draft = read_schedule_form(self.scope, fields)
+        redrawn = schedule_draft_card(draft, projects=self.projects)
+        fields = form_values(redrawn)
+        fields["cron_session_progress_card"] = self.toggle(redrawn, "cron_session_progress_card", enabled=False)
+        result = decode_schedule_action(scope=self.scope, value=None, form=fields)
+        self.assertIsNone(result.payload["session_settings"]["progress_card_settings"])
 
     def test_invalid_or_oversize_carried_settings_are_rejected(self):
         card = self.defaults_card()
@@ -148,6 +169,16 @@ class ProgressCardFormPreservationTest(unittest.TestCase):
 
 
 class ProgressCardConfigurationChannelTest(unittest.IsolatedAsyncioTestCase):
+    async def test_new_command_keeps_settings_unspecified(self):
+        fixture = await self.enterAsyncContext(channel_fixture())
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        await fixture.app.handle_message(FakeMessage("/new", message_id="om_new"))
+        card = fixture.channel.replies[-1][1]
+        fields = new_form_values(card)
+        await fixture.app.handle_card_action(direct_card_event(fixture.channel, fields))
+        self.assertIsNone(fixture.store.active_binding(scope.key).task_feedback.progress_card_settings)
+        self.assertEqual(fixture.runtime.submit_calls, [])
+
     async def test_new_form_saves_complete_feedback_without_starting_turn(self):
         fixture = await self.enterAsyncContext(channel_fixture())
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)

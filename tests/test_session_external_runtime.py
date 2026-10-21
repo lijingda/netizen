@@ -16,6 +16,7 @@ from netizen_cli.codex_runtime import (
 )
 from netizen_cli.domain import FeishuScope, GoalOperationState, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.model_settings import ModelCatalogError
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.sdk_gap_adapter import GoalControlError, GoalStatus
 from tests import test_codex_runtime as fixtures
 from tests.test_model_settings import Effort, effort, model
@@ -77,6 +78,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex = ExternalCodex()
         self.outcomes = []
         self.completion = asyncio.Event()
+        self.progress_card_defaults = ProgressCardSettings()
 
         async def complete(outcome):
             self.outcomes.append(outcome)
@@ -86,6 +88,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
             codex=self.codex, bindings=self.store,
             terminal_cleanup=fixtures.FakeTerminalCleanup(self.codex.events),
             on_completion=complete, automatic_thread_naming=False,
+            progress_card_defaults=lambda: self.progress_card_defaults,
             poll_interval_seconds=0,
         )
 
@@ -121,7 +124,10 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_join_keeps_original_consumer_owner_and_origin(self):
         origin = object()
+        first_settings = ProgressCardSettings(organization="time")
+        self.progress_card_defaults = first_settings
         first = await self.send(owner="original", origin=origin)
+        self.progress_card_defaults = ProgressCardSettings(operation_limit=16)
         active = self.runtime._active[self.binding.id]
         task = active.task
         read_count = len(self.codex.read_calls)
@@ -133,6 +139,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.disposition, SubmitDisposition.JOINED)
         self.assertEqual((second.thread_id, second.turn_id), (first.thread_id, first.turn_id))
         self.assertIsNone(second.release_receipt_attempt)
+        self.assertEqual(second.task_feedback.progress_card_settings, first_settings)
         self.assertIs(self.runtime._active[self.binding.id].task, task)
         self.assertEqual(self.codex.handles[0].steers, [])
         self.assertEqual(self.codex.resume_calls, [])
@@ -152,6 +159,8 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
             owner_id="agent", origin=first_origin,
         )
         first.release_receipt_attempt()
+        first_settings = first.task_feedback.progress_card_settings
+        self.progress_card_defaults = ProgressCardSettings(organization="time")
         self.codex.advance_on_external = True
         read_count = len(self.codex.read_calls)
         # The helper passes the stale Project cwd, which is not an execution
@@ -159,6 +168,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         second = await self.send(origin=second_origin)
         second.release_receipt_attempt()
         self.assertEqual(second.disposition, SubmitDisposition.STARTED)
+        self.assertEqual(second.task_feedback.progress_card_settings, self.progress_card_defaults)
         self.assertNotEqual(second.turn_id, first.turn_id)
         self.assertEqual(self.runtime._active[self.binding.id].cwd, worktree)
         self.assertEqual(len(self.codex.read_calls), read_count)
@@ -176,6 +186,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.completion.wait(), timeout=1)
         self.assertEqual(self.outcomes[0].turn_id, first.turn_id)
         self.assertEqual(self.outcomes[0].final_response, "first result")
+        self.assertEqual(self.outcomes[0].task_feedback.progress_card_settings, first_settings)
         self.assertIs(self.outcomes[0].origin, first_origin)
         self.assertEqual(self.runtime.active_turn(self.binding.id).turn_id, second.turn_id)
         await self.finish(second, "second result")
@@ -183,6 +194,8 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.outcomes[1].origin, second_origin)
         self.assertEqual([item.cwd for item in self.outcomes], [worktree, worktree])
         self.assertEqual(self.runtime._retiring_turns, {})
+        self.assertEqual(self.outcomes[1].task_feedback.progress_card_settings, self.progress_card_defaults)
+        self.assertIsNone(self.store.get(self.binding.id).task_feedback.progress_card_settings)
 
     async def test_active_external_input_never_falls_back_when_accepted_cwd_is_missing(self):
         first = await self.send()

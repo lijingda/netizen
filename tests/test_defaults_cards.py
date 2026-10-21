@@ -76,10 +76,13 @@ class DefaultsCardsTest(unittest.TestCase):
         self.assertIn("oncall", str(card.card))
 
     def test_editing_any_setting_and_explicitly_choosing_inherit(self):
-        form = form_values(self.card())
+        card = self.card()
+        form = form_values(card)
+        progress = next(item for item in form_controls(card.card) if item["name"] == "defaults_session_progress_card")
+        enabled = next(option["value"] for option in progress["options"] if option["text"]["content"] == "开启（默认）")
         form.update(defaults_session_model="new-model:v1:inherit",
             defaults_session_task_reactions="task-feedback:v2:off",
-            defaults_session_progress_card="task-feedback:v2:on",
+            defaults_session_progress_card=enabled,
             defaults_session_completion_mention="task-feedback:v2:on",
             defaults_session_context_mode="context-mode:v1:current-only")
         request = decode_defaults_action(self.scope, {}, form)

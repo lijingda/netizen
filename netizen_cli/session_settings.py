@@ -33,19 +33,19 @@ class BindingTurnSettings:
 
 @dataclass(frozen=True, slots=True)
 class BindingTaskFeedback:
-    """Binding-scoped pulse/card/completion feedback choices for Turns."""
+    """Binding feedback intent; absent card settings use the instance default."""
 
     reaction_pulse_enabled: bool = False
     progress_card_enabled: bool = False
     completion_mention_enabled: bool = True
-    progress_card_settings: ProgressCardSettings = ProgressCardSettings()
+    progress_card_settings: ProgressCardSettings | None = None
 
     def __post_init__(self) -> None:
         values = (self.reaction_pulse_enabled, self.progress_card_enabled, self.completion_mention_enabled)
         if not all(type(value) is bool for value in values):
             raise ValueError("Binding task feedback values must be booleans")
-        if not isinstance(self.progress_card_settings, ProgressCardSettings):
-            raise ValueError("Binding progress card settings must be ProgressCardSettings")
+        if self.progress_card_settings is not None and not isinstance(self.progress_card_settings, ProgressCardSettings):
+            raise ValueError("Binding progress card settings must be ProgressCardSettings or None")
 
 
 _FIELDS = frozenset({"turn_settings", "reaction_pulse_enabled", "progress_card_enabled", "completion_mention_enabled", "message_context_mode", "progress_card_settings"})
@@ -72,7 +72,10 @@ class SessionSettings:
             "reaction_pulse_enabled": self.task_feedback.reaction_pulse_enabled,
             "progress_card_enabled": self.task_feedback.progress_card_enabled,
             "completion_mention_enabled": self.task_feedback.completion_mention_enabled,
-            "progress_card_settings": self.task_feedback.progress_card_settings.to_dict(),
+            "progress_card_settings": (
+                self.task_feedback.progress_card_settings.to_dict()
+                if self.task_feedback.progress_card_settings is not None else None
+            ),
             "message_context_mode": self.message_context_mode.value,
         }
 
@@ -90,7 +93,8 @@ class SessionSettings:
             except ValueError as error:
                 raise SessionSettingsError("模型、思考强度和速度 ID 必须是非空字符串。") from error
         try:
-            progress_card_settings = ProgressCardSettings.from_dict(value["progress_card_settings"])
+            raw_progress = value["progress_card_settings"]
+            progress_card_settings = ProgressCardSettings.from_dict(raw_progress) if raw_progress is not None else None
         except ValueError as error:
             raise SessionSettingsError(str(error)) from error
         try:

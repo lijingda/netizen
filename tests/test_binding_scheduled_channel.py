@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -33,6 +34,7 @@ from netizen_cli.message_history import (
     MessageHistoryWindow,
 )
 from netizen_cli.projects import ProjectRegistry
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.schedules.models import ScheduleRule
 from tests.support.channel_messages import FakeChannel, FakeMessage, FakeMessageHistory
 from tests.support.channel_results import sent_result
@@ -268,7 +270,10 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
 
         await self.finish()
 
-        self.assertEqual(self.outcomes[0].task_feedback, feedback)
+        self.assertEqual(self.outcomes[0].task_feedback, replace(
+            feedback, progress_card_settings=ProgressCardSettings(),
+        ))
+        self.assertIsNone(self.store.get(binding.id).task_feedback.progress_card_settings)
         self.assertEqual(self.channel.updates[-1][0], "om_progress")
         self.assertIn("检查完成", str(self.channel.updates[-1][1]))
         self.assertNotIn("<at ", str(self.channel.updates[-1][1]))

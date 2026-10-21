@@ -9,6 +9,7 @@
   <script src="/static/chat-picker.js" defer></script>
   <script src="/static/identity.js" defer></script>
   <script src="/static/session-access.js" defer></script>
+  <script src="/static/progress-card.js" defer></script>
   <script src="/static/worktrees.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
@@ -222,6 +223,7 @@
               <label><input id="session-settings-completion-mention" type="checkbox">结束时 @ 提醒</label>
             </div>
             <div id="session-settings-progress-settings" class="progress-settings" hidden>
+              <p id="session-settings-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局过程卡配置。修改细项后将保存为独立配置。</p>
               <label>过程卡组织方式<select id="session-settings-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
               <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
               <div class="defaults-feedback"><label><input id="session-settings-progress-show-commentary" type="checkbox">最近进展</label></div>
@@ -305,6 +307,7 @@
               <label><input id="defaults-completion-mention" type="checkbox">结束时 @ 提醒</label>
             </div>
             <div id="defaults-progress-settings" class="progress-settings" hidden>
+              <p id="defaults-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局过程卡配置。修改细项后将保存为独立配置。</p>
               <label>过程卡组织方式<select id="defaults-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
               <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
               <div class="defaults-feedback"><label><input id="defaults-progress-show-commentary" type="checkbox">最近进展</label></div>
@@ -488,6 +491,7 @@
       <div class="session-tabs system-tabs" role="tablist" aria-label="系统管理">
         <button id="system-tab-admins" class="session-tab" role="tab" data-system-tab="admins" aria-selected="true" aria-controls="system-admins" tabindex="0">管理员</button>
         <button id="system-tab-access" class="session-tab" role="tab" data-system-tab="access" aria-selected="false" aria-controls="system-access" tabindex="-1">跨会话工具权限<span id="session-access-unsaved" class="tab-unsaved" hidden>未保存</span></button>
+        <button id="system-tab-progress" class="session-tab" role="tab" data-system-tab="progress" aria-selected="false" aria-controls="system-progress" tabindex="-1">过程卡<span id="global-card-unsaved" class="tab-unsaved" hidden>未保存</span></button>
       </div>
       <div id="system-admins" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-admins">
         <div class="section-head"><h3>管理员</h3><button id="admin-user-add" class="action" aria-expanded="false" aria-controls="admin-user-panel" disabled>添加管理员</button></div>
@@ -538,6 +542,34 @@
           <div class="session-access-footer">
             <p id="session-access-note" class="defaults-field-help" role="status"></p>
             <div class="actions"><button id="session-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="session-access-save" class="action" type="submit" disabled>保存权限</button></div>
+          </div>
+        </form>
+      </div>
+      <div id="system-progress" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-progress" hidden>
+        <h3>全局过程卡配置</h3>
+        <p class="defaults-help">仅在本实例的会话未单独配置过程卡时使用，不覆盖会话及聊天默认配置中已有的过程卡设置。</p>
+        <form id="global-card-form" class="card-form global-card-form">
+          <fieldset id="global-card-fields" disabled>
+            <div id="global-card-progress-settings" class="progress-settings" hidden>
+              <label>过程卡组织方式<select id="global-card-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
+              <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
+              <div class="defaults-feedback"><label><input id="global-card-progress-show-commentary" type="checkbox">最近进展</label></div>
+              <div id="global-card-progress-commentary-capacity" class="schedule-form-grid">
+                <label>进展条数（1–8）<input id="global-card-progress-commentary-limit" type="number" min="1" max="8" step="1" required></label>
+                <label>进展摘要长度（1–320 字符）<input id="global-card-progress-commentary-max-chars" type="number" min="1" max="320" step="1" required></label>
+              </div>
+              <div class="defaults-feedback"><label><input id="global-card-progress-show-operations" type="checkbox">最近操作</label></div>
+              <div id="global-card-progress-operation-capacity" class="schedule-form-grid">
+                <label>操作条数（1–16）<input id="global-card-progress-operation-limit" type="number" min="1" max="16" step="1" required></label>
+                <label>操作摘要长度（1–240 字符）<input id="global-card-progress-operation-max-chars" type="number" min="1" max="240" step="1" required></label>
+              </div>
+              <div class="defaults-feedback"><label><input id="global-card-progress-show-plan" type="checkbox">任务清单</label></div>
+            </div>
+            <p id="global-card-progress-error" class="progress-settings-error" role="status" hidden></p>
+          </fieldset>
+          <div class="session-access-footer">
+            <p id="global-card-note" class="defaults-field-help" role="status"></p>
+            <div class="actions"><button id="global-card-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="global-card-save" class="action" type="submit" disabled>保存配置</button></div>
           </div>
         </form>
       </div>

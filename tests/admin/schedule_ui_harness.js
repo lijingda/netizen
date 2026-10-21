@@ -1554,4 +1554,16 @@ async function chooseScheduleTarget(value) {
   assert(scheduleInput("runs-body").textContent.includes("wt-removed-exact"));
   assert(scheduleInput("runs-body").textContent.includes("资源登记已不可用"));
   assert.equal(scheduleInput("runs-body").querySelectorAll("a").length, 0);
+
+  closeScheduleDetail();
+  defaultSessionSettings.progress_card_settings = null;
+  await openNewScheduleEditor();
+  scheduleInput("progress").checked = !defaultSessionSettings.progress_card_enabled;
+  changeScheduleSessionSettings("progress");
+  await previewSchedule();
+  assert.equal(JSON.parse(new URL(gets.at(-1), "http://localhost").searchParams.get("session_settings"))
+    .progress_card_settings, null);
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.at(-1).body.definition.session_settings.progress_card_settings, null,
+    "changing the original schedule feedback switch must not freeze global details");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

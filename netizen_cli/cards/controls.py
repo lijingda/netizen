@@ -453,10 +453,9 @@ def _restore_settings_draft(
             # /new redraws start from defaults; both toggle choices must keep
             # the presentation settings already carried by this draft.
             _, settings = _decode_progress_card_reference(value, element["name"])
-            if settings is not None:
-                for option in element["options"]:
-                    enabled, _ = _decode_progress_card_reference(option["value"], element["name"])
-                    option["value"] = _progress_card_reference(enabled, settings)
+            for option in element["options"]:
+                enabled, _ = _decode_progress_card_reference(option["value"], element["name"])
+                option["value"] = _progress_card_reference(enabled, settings)
         if not any(option["value"] == value for option in element["options"]):
             label = "保留已选值（当前不可用）"
             if element["name"].endswith("_model"):
@@ -806,22 +805,28 @@ def _task_feedback_form_elements(
     ]
 
 
-def _progress_card_reference(enabled: bool, settings: ProgressCardSettings) -> str:
+def _progress_card_reference(enabled: bool, settings: ProgressCardSettings | None) -> str:
     # Ordinary Feishu forms only edit the existing toggle. Carry the Admin
     # presentation choices with both options, without a card session or new UI.
-    values = [enabled, *(getattr(settings, name) for name in _PROGRESS_CARD_FIELDS)]
+    values = (
+        [enabled, None] if settings is None else
+        [enabled, *(getattr(settings, name) for name in _PROGRESS_CARD_FIELDS)]
+    )
     return _PROGRESS_CARD_REFERENCE_PREFIX + json.dumps(values, separators=(",", ":"))
 
 
 def _decode_progress_card_reference(value: Any, field: str) -> tuple[bool, ProgressCardSettings | None]:
     value = _bounded_string(value, field, max_chars=128)
     if not value.startswith(_PROGRESS_CARD_REFERENCE_PREFIX):
-        return _decode_task_feedback_reference(value, field), None
+        return _decode_task_feedback_reference(value, field), ProgressCardSettings()
     try:
         values = json.loads(value[len(_PROGRESS_CARD_REFERENCE_PREFIX):])
-        if not isinstance(values, list) or len(values) != len(_PROGRESS_CARD_FIELDS) + 1 or type(values[0]) is not bool:
+        if not isinstance(values, list) or not values or type(values[0]) is not bool:
             raise ValueError("invalid progress card reference")
-        settings = ProgressCardSettings.from_dict(dict(zip(_PROGRESS_CARD_FIELDS, values[1:], strict=True)))
+        settings = (
+            None if values[1:] == [None] else
+            ProgressCardSettings.from_dict(dict(zip(_PROGRESS_CARD_FIELDS, values[1:], strict=True)))
+        )
     except (ValueError, TypeError) as error:
         raise CardActionError("过程卡设置无效，请重新打开配置卡片。") from error
     return values[0], settings
@@ -834,7 +839,7 @@ def _decode_task_feedback_fields(payload: Mapping[str, Any], *, prefix: str) -> 
         _decode_task_feedback_reference(payload[f"{prefix}_task_reactions"], f"{prefix}_task_reactions"),
         progress_enabled,
         _decode_task_feedback_reference(payload[f"{prefix}_completion_mention"], f"{prefix}_completion_mention"),
-        settings or ProgressCardSettings(),
+        settings,
     )
 
 

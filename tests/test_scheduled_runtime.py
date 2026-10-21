@@ -21,6 +21,7 @@ from netizen_cli.codex_runtime import (
 )
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.model_settings import ModelCatalogError
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.runtime.contracts import ContextCursorCommit
 from netizen_cli.schedules.models import ScheduleConflict, ScheduleRule
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
@@ -49,6 +50,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.cleanup = FakeTerminalCleanup(self.codex.events)
         self.delete = FakeThreadDeleteControl()
         self.outcomes = []
+        self.progress_card_defaults = ProgressCardSettings()
 
         async def capture(outcome):
             self.outcomes.append(outcome)
@@ -57,6 +59,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
             codex=self.codex, bindings=self.store,
             terminal_cleanup=self.cleanup, thread_delete_control=self.delete,
             on_completion=capture, poll_interval_seconds=0,
+            progress_card_defaults=lambda: self.progress_card_defaults,
             skill_catalog=FakeSkillCatalog(fake_skills()),
         )
         self.sequence = 0
@@ -158,13 +161,16 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )], next_cursor=None)
         settings = BindingTurnSettings("catalog-model", "dynamic-effort", "priority-v2")
         feedback = BindingTaskFeedback(reaction_pulse_enabled=True, progress_card_enabled=True)
+        self.progress_card_defaults = ProgressCardSettings(organization="time")
+        captured_feedback = BindingTaskFeedback(True, True, True, self.progress_card_defaults)
         run_id, binding = self.occurrence(session_settings=SessionSettings(settings, feedback))
         initial = await self.start(run_id, binding)
         initial.release_receipt_attempt()
         native_settings = {"model": "wire-model", "effort": effort, "service_tier": "priority-v2"}
         self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd), "model": "wire-model"}])
         self.assertEqual(self.codex.turn_calls[-1][2], native_settings)
-        self.assertEqual(initial.task_feedback, feedback)
+        self.assertEqual(initial.task_feedback, captured_feedback)
+        self.assertIsNone(self.store.get(binding.id).task_feedback.progress_card_settings)
         # The running Turn owns its feedback snapshot, even if the persistent
         # Binding is subsequently configured for ordinary follow-up Turns.
         current = self.store.set_configuration(binding_id=binding.id,
@@ -175,13 +181,16 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
             context_anchor=None)
         self.codex.handles[0].complete()
         self.assertTrue(await self.runtime.wait_idle(timeout=1))
-        self.assertEqual(self.outcomes[0].task_feedback, feedback)
+        self.assertEqual(self.outcomes[0].task_feedback, captured_feedback)
         self.assertIsNotNone(self.outcomes[0].activity)
+        self.progress_card_defaults = ProgressCardSettings(operation_limit=16)
         followup = await self.runtime.submit(binding=current, cwd=self.cwd, input="Follow-up",
             owner_id="person", origin=object())
         followup.release_receipt_attempt()
         self.assertEqual(self.codex.turn_calls[-1][2], native_settings)
-        self.assertEqual(followup.task_feedback, BindingTaskFeedback())
+        self.assertEqual(followup.task_feedback, BindingTaskFeedback(
+            progress_card_settings=self.progress_card_defaults,
+        ))
         self.assertEqual(self.codex.model_calls, 2)
         self.assertEqual(self.codex.resume_calls, [(initial.thread_id, {"include_turns": False})])
         self.assertEqual(self.store.schedules.get_run(run_id).barrier, "released")

@@ -33,6 +33,8 @@ const baseSettings = {
     commentary_limit: 4, operation_limit: 8, commentary_max_chars: 160, operation_max_chars: 120,
     organization: "content" },
 };
+const globalProgress = { ...baseSettings.progress_card_settings, commentary_limit: 7,
+  operation_limit: 15, organization: "time" };
 const catalog = [
   { id: "model-one", display_name: "<b>Model one</b>", default_effort_id: "medium",
     default_service_tier_id: "default", is_default: true,
@@ -46,6 +48,7 @@ const catalog = [
 let models = structuredClone(catalog);
 let catalogError = null;
 let optionsFailure = false;
+let globalFailure = false;
 let listFailure = false;
 let postFailure = false;
 let optionsGate = null;
@@ -87,6 +90,10 @@ async function api(path, options = {}) {
     return { message: "已保存 exact 会话配置" };
   }
   gets.push(path);
+  if (path === "/api/v1/progress-card/settings") {
+    if (globalFailure) throw new Error("全局配置读取失败");
+    return { settings: structuredClone(globalProgress) };
+  }
   if (path === "/api/v1/sessions/options") {
     if (optionsFailure) throw new Error("目录读取失败");
     const result = { models: catalogError ? [] : structuredClone(models), model_catalog_error: catalogError };
@@ -235,6 +242,62 @@ const cases = {
     change("model", "model-two");
     await submit();
     assert.deepEqual(posts[1].body.sessionSettings.progress_card_settings, posts[0].body.sessionSettings.progress_card_settings);
+  },
+  async global_progress_fallback() {
+    serverSessions[0].sessionSettings.progress_card_settings = null;
+    await loadSessions();
+    await openFromList();
+    assert.equal(sessionSettingsEditor.settings.progress_card_settings, null);
+    assert.equal(field("progress-organization").value, "time");
+    assert.equal(field("progress-commentary-limit").value, 7);
+    assert.equal(field("progress-source").hidden, false);
+    assert.equal(hasUnsavedEditors(), false);
+    change("progress", true);
+    change("model", "model-two");
+    await submit();
+    assert.equal(posts[0].body.sessionSettings.progress_card_settings, null);
+    await openFromList();
+    change("progress-organization", "content");
+    change("progress-organization", "time");
+    assert.equal(hasUnsavedEditors(), true, "an explicit value differs from an unset value, even when equal to global");
+    assert.deepEqual(sessionSettingsEditor.settings.progress_card_settings, globalProgress);
+    await submit();
+    assert.deepEqual(posts[1].body.sessionSettings.progress_card_settings, globalProgress);
+    globalProgress.commentary_limit = 3;
+    await openFromList();
+    assert.equal(field("progress-commentary-limit").value, 7, "saved explicit settings do not follow global changes");
+    assert.equal(field("progress-source").hidden, true);
+  },
+  async unavailable_global_preview() {
+    globalFailure = true;
+    await loadSessions();
+    await openFromList();
+    assert(!gets.includes("/api/v1/progress-card/settings"), "explicit settings are independent of global availability");
+    change("model", "model-two");
+    await submit();
+    assert.deepEqual(posts[0].body.sessionSettings.progress_card_settings, baseSettings.progress_card_settings);
+    serverSessions[0].sessionSettings.progress_card_settings = null;
+    serverSessions[0].sessionSettings.progress_card_enabled = true;
+    await loadSessions();
+    await openFromList();
+    assert.equal(field("progress-commentary-limit").value, "", "an unavailable global value is not replaced by factory defaults");
+    assert.equal(field("progress-commentary-limit").disabled, true);
+    assert.equal(sessionSettingsEditor.models.length, catalog.length, "independent model options remain usable");
+    change("model", "model-one");
+    await submit();
+    assert.equal(posts[1].body.sessionSettings.progress_card_settings, null);
+  },
+  async global_preview_without_models() {
+    optionsFailure = true;
+    serverSessions[0].sessionSettings.progress_card_settings = null;
+    serverSessions[0].sessionSettings.progress_card_enabled = true;
+    await loadSessions();
+    await openFromList();
+    assert.equal(field("progress-commentary-limit").value, 7);
+    assert.equal(field("progress-commentary-limit").disabled, false);
+    change("progress-show-plan", false);
+    await submit();
+    assert.deepEqual(posts[0].body.sessionSettings.progress_card_settings, { ...globalProgress, show_plan: false });
   },
   async inheritance_and_explicit_defaults() {
     serverSessions[0].sessionSettings.turn_settings = null;

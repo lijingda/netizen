@@ -51,6 +51,7 @@ from openai_codex import AsyncCodex, CodexConfig
 
 from .admin.web import AdminWebRunner
 from .admin.port_config import ConfigFileEditor
+from .progress_card_config import ProgressCardConfigService
 from .worktrees.settings import WorktreeSettingsService
 from .admin.users import AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
@@ -221,6 +222,9 @@ class ServiceCore:
                 self._settings.session_tools,
                 config_editor=config_editor,
             )
+            progress_card_config = ProgressCardConfigService(
+                self._settings.progress_card, config_editor=config_editor,
+            )
             stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
 
             # Bind the native MCP transport before App Server initializes its
@@ -303,6 +307,7 @@ class ServiceCore:
                 background_terminal_inspector=terminal_cleanup,
                 thread_delete_control=thread_delete_control,
                 turn_plan_observer=turn_plan_observer,
+                progress_card_defaults=lambda: progress_card_config.current,
             )
             scope_coordinator = ScopeCoordinator()
             self._feishu_read_client = (
@@ -321,6 +326,7 @@ class ServiceCore:
                 chat_labels=self._channel,
                 chat_directory=FeishuChatDirectory(self._feishu_read_client),
                 root=self._instance_root,
+                progress_card_config=progress_card_config,
             )
             worktrees = self._management.enable_worktrees(settings=WorktreeSettingsService(
                 self._settings.worktrees, default_root=self._instance_root / "worktrees",
