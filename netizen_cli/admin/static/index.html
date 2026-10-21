@@ -221,6 +221,22 @@
               <label><input id="session-settings-progress" type="checkbox">进度卡片</label>
               <label><input id="session-settings-completion-mention" type="checkbox">结束时 @ 提醒</label>
             </div>
+            <div id="session-settings-progress-settings" class="progress-settings" hidden>
+              <label>过程卡组织方式<select id="session-settings-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
+              <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
+              <div class="defaults-feedback"><label><input id="session-settings-progress-show-commentary" type="checkbox">最近进展</label></div>
+              <div id="session-settings-progress-commentary-capacity" class="schedule-form-grid">
+                <label>进展条数（1–8）<input id="session-settings-progress-commentary-limit" type="number" min="1" max="8" step="1" required></label>
+                <label>进展摘要长度（1–320 字符）<input id="session-settings-progress-commentary-max-chars" type="number" min="1" max="320" step="1" required></label>
+              </div>
+              <div class="defaults-feedback"><label><input id="session-settings-progress-show-operations" type="checkbox">最近操作</label></div>
+              <div id="session-settings-progress-operation-capacity" class="schedule-form-grid">
+                <label>操作条数（1–16）<input id="session-settings-progress-operation-limit" type="number" min="1" max="16" step="1" required></label>
+                <label>操作摘要长度（1–240 字符）<input id="session-settings-progress-operation-max-chars" type="number" min="1" max="240" step="1" required></label>
+              </div>
+              <div class="defaults-feedback"><label><input id="session-settings-progress-show-plan" type="checkbox">任务清单</label></div>
+            </div>
+            <p id="session-settings-progress-error" class="progress-settings-error" role="status" hidden></p>
           </fieldset>
           <p id="session-settings-note" class="session-settings-help" role="status" aria-live="polite"></p>
         </div>
@@ -288,6 +304,22 @@
               <label><input id="defaults-progress" type="checkbox">进度卡片</label>
               <label><input id="defaults-completion-mention" type="checkbox">结束时 @ 提醒</label>
             </div>
+            <div id="defaults-progress-settings" class="progress-settings" hidden>
+              <label>过程卡组织方式<select id="defaults-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
+              <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
+              <div class="defaults-feedback"><label><input id="defaults-progress-show-commentary" type="checkbox">最近进展</label></div>
+              <div id="defaults-progress-commentary-capacity" class="schedule-form-grid">
+                <label>进展条数（1–8）<input id="defaults-progress-commentary-limit" type="number" min="1" max="8" step="1" required></label>
+                <label>进展摘要长度（1–320 字符）<input id="defaults-progress-commentary-max-chars" type="number" min="1" max="320" step="1" required></label>
+              </div>
+              <div class="defaults-feedback"><label><input id="defaults-progress-show-operations" type="checkbox">最近操作</label></div>
+              <div id="defaults-progress-operation-capacity" class="schedule-form-grid">
+                <label>操作条数（1–16）<input id="defaults-progress-operation-limit" type="number" min="1" max="16" step="1" required></label>
+                <label>操作摘要长度（1–240 字符）<input id="defaults-progress-operation-max-chars" type="number" min="1" max="240" step="1" required></label>
+              </div>
+              <div class="defaults-feedback"><label><input id="defaults-progress-show-plan" type="checkbox">任务清单</label></div>
+            </div>
+            <p id="defaults-progress-error" class="progress-settings-error" role="status" hidden></p>
           </fieldset>
           <p id="defaults-note" class="defaults-field-help" role="status"></p>
         </div>

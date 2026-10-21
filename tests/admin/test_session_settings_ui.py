@@ -40,6 +40,7 @@ class SessionSettingsUiTest(unittest.TestCase):
                    + dom + before + "\n".join(parts) + after)
         for case in (
             "entry_and_complete_save",
+            "progress_card_configuration",
             "inheritance_and_explicit_defaults",
             "context_and_private_chat",
             "unavailable_catalog",

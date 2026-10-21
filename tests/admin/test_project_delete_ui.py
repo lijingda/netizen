@@ -41,8 +41,8 @@ class ProjectDeleteUiTest(unittest.TestCase):
         )
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run(
-            [node, "-e", "const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + payload + pagination + controller + after],
+            [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
+             + dom + before + payload + pagination + controller + after,
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

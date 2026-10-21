@@ -29,6 +29,9 @@ const baseSettings = {
   turn_settings: { model_id: "model-one", effort_id: "high", service_tier_id: "priority" },
   reaction_pulse_enabled: true, progress_card_enabled: false, completion_mention_enabled: true,
   message_context_mode: "catch-up",
+  progress_card_settings: { show_commentary: true, show_operations: true, show_plan: true,
+    commentary_limit: 4, operation_limit: 8, commentary_max_chars: 160, operation_max_chars: 120,
+    organization: "content" },
 };
 const catalog = [
   { id: "model-one", display_name: "<b>Model one</b>", default_effort_id: "medium",
@@ -112,7 +115,7 @@ async function openFromList(id = "binding-exact") {
   return button;
 }
 function change(name, value) {
-  if (["reactions", "progress", "completion-mention"].includes(name)) field(name).checked = value;
+  if (["reactions", "progress", "completion-mention"].includes(name) || name.startsWith("progress-show-")) field(name).checked = value;
   else field(name).value = value;
   field(name).dispatch("change");
 }
@@ -169,7 +172,7 @@ const cases = {
     assert.deepEqual(posts[0].body, actionPayload(action, { sessionSettings: {
       turn_settings: { model_id: "model-two", effort_id: "high", service_tier_id: "default" },
       reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: false,
-      message_context_mode: "current-only",
+      message_context_mode: "current-only", progress_card_settings: baseSettings.progress_card_settings,
     } }));
     assert.equal(field("drawer").open, false);
     assert.equal(field("editor").hidden, true);
@@ -180,6 +183,58 @@ const cases = {
     assert.match(document.querySelector("#sessions-body").textContent,
       /current-only · model-two \/ high \/ default/);
     assertPageRetained(page);
+  },
+  async progress_card_configuration() {
+    serverSessions[0].sessionSettings.progress_card_enabled = true;
+    await loadSessions();
+    await openFromList();
+    assert.equal(field("progress-settings").hidden, false);
+    assert.equal(field("progress-organization").value, "content");
+    assert.equal(hasUnsavedEditors(), false);
+    change("progress-organization", "time");
+    assert.equal(hasUnsavedEditors(), true);
+    change("progress-organization", "content");
+    assert.equal(hasUnsavedEditors(), false);
+    change("progress-organization", "time");
+    for (const [name, maximum] of [["commentary-limit", 8], ["operation-limit", 16],
+      ["commentary-max-chars", 320], ["operation-max-chars", 240]]) {
+      const node = field(`progress-${name}`);
+      assert.equal(node.getAttribute("min"), "1");
+      assert.equal(node.getAttribute("max"), String(maximum));
+      assert.equal(node.getAttribute("step"), "1");
+      for (const invalid of ["", "0", "1.5", String(maximum + 1)]) {
+        change(`progress-${name}`, invalid);
+        assert.equal(field("save").disabled, true);
+        assert.equal(field("progress-error").hidden, false);
+        await submit();
+        assert.equal(posts.length, 0, "invalid capacity never consumes the save action");
+      }
+      change(`progress-${name}`, String(maximum));
+      assert.equal(field("save").disabled, false);
+      assert.equal(field("progress-error").hidden, true);
+    }
+    for (const [name, capacity] of [["commentary", "commentary"], ["operations", "operation"], ["plan", null]]) {
+      change(`progress-show-${name}`, false);
+      if (capacity) assert.equal(field(`progress-${capacity}-capacity`).hidden, true);
+    }
+    const configured = structuredClone(sessionSettingsEditor.settings.progress_card_settings);
+    assert.equal(sessionSettingsEditor.settings.progress_card_enabled, true);
+    change("progress", false);
+    assert.equal(field("progress-settings").hidden, true);
+    assert.equal(field("progress-commentary-limit").disabled, true);
+    change("progress", true);
+    assert.equal(field("progress-settings").hidden, false);
+    assert.deepEqual(sessionSettingsEditor.settings.progress_card_settings, configured);
+    change("progress-show-commentary", true);
+    assert.equal(field("progress-commentary-capacity").hidden, false);
+    assert.equal(field("progress-commentary-limit").value, 8);
+    assert.equal(field("progress-commentary-limit").disabled, false);
+    await submit();
+    assert.deepEqual(posts[0].body.sessionSettings.progress_card_settings, { ...configured, show_commentary: true });
+    await openFromList();
+    change("model", "model-two");
+    await submit();
+    assert.deepEqual(posts[1].body.sessionSettings.progress_card_settings, posts[0].body.sessionSettings.progress_card_settings);
   },
   async inheritance_and_explicit_defaults() {
     serverSessions[0].sessionSettings.turn_settings = null;

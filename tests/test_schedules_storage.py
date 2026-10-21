@@ -15,6 +15,7 @@ from netizen_cli.bindings import (
     ScopeConflict, ScopeNotFound, SideTopicState, validate_channel_database,
 )
 from netizen_cli.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.session_settings import SessionSettings, BindingTurnSettings, BindingTaskFeedback
 from netizen_cli.schedules.models import (
     ScheduleConflict, ScheduleError, ScheduleNotFound, ScheduleRequestConflict,
@@ -816,7 +817,9 @@ class ScheduleStorageTest(unittest.TestCase):
     def test_claimed_session_settings_are_independent_of_later_plan_and_binding_edits(self):
         copied = SessionSettings(
             BindingTurnSettings("model-a", "high", "priority"),
-            BindingTaskFeedback(True, True, False), MentionContextMode.CATCH_UP,
+            BindingTaskFeedback(True, True, False, ProgressCardSettings(
+                show_plan=False, commentary_limit=8, operation_max_chars=240, organization="time",
+            )), MentionContextMode.CATCH_UP,
         )
         plan = self.create(session_settings=copied)
         claim = self.claim(plan.plan_id)

@@ -125,6 +125,7 @@ from netizen_cli.turn_plan_observer import (
     TurnPlanStepSnapshot,
     TurnPlanStepState,
 )
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.turn_activity import (
     SIDE_ACTIVITY_QUEUE_HIGH_WATER,
     TurnActivityEvent,
@@ -763,7 +764,10 @@ class FakeGoalHandle:
             raise InvalidRequestError(-32600, "active Turn changed")
         return SimpleNamespace(turn_id=expected_turn_id)
 
-    async def wait_terminal(self, activity_sink=None) -> GoalStreamTerminal:
+    async def wait_terminal(
+        self, activity_sink=None, *, progress_card_settings=ProgressCardSettings(),
+    ) -> GoalStreamTerminal:
+        self.progress_card_settings = progress_card_settings
         self.wait_terminal_calls += 1
         self.activity_sink = activity_sink
         if activity_sink is not None:
@@ -930,6 +934,7 @@ class FakeTurnPlanObserver:
     def __init__(self) -> None:
         self.events: dict[str, list[tuple[str, str, object]]] = {}
         self.calls: list[tuple[str, str, int]] = []
+        self.settings_calls: list[ProgressCardSettings] = []
         self.error: BaseException | None = None
         self.next_cursor_override: int | None = None
         self.retained_count_override: int | None = None
@@ -967,7 +972,9 @@ class FakeTurnPlanObserver:
         thread_id: str,
         turn_id: str,
         after_cursor: int,
+        progress_card_settings: ProgressCardSettings = ProgressCardSettings(),
     ) -> TurnActivityObservation:
+        self.settings_calls.append(progress_card_settings)
         self.calls.append((thread_id, turn_id, after_cursor))
         if self.error is not None:
             raise self.error
@@ -2047,7 +2054,8 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_side_progress_tracks_plan_steer_and_terminal_snapshot(self) -> None:
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
-        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        settings = ProgressCardSettings(organization="time", operation_limit=16)
+        feedback = BindingTaskFeedback(progress_card_enabled=True, progress_card_settings=settings)
         binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
@@ -2058,6 +2066,15 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.store.get(binding.id)
         _binding, record, snapshot = await self.open_side_for_binding(binding)
 
+        current = self.store.get(binding.id)
+        self.store.set_configuration(
+            binding_id=current.id,
+            expected_settings_revision=current.settings_revision,
+            expected_context_revision=current.context_revision,
+            expected_feedback_revision=current.feedback_revision,
+            settings=current.turn_settings, task_feedback=BindingTaskFeedback(),
+            message_context_mode=current.message_context_mode, context_anchor=None,
+        )
         started = await self.runtime.submit_side(
             side_id=record.id,
             input="first",
@@ -2145,10 +2162,45 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.cwd, self.cwd)
         self.assertEqual(outcome.task_feedback, feedback)
         assert outcome.activity is not None
+        self.assertEqual(outcome.activity.progress_card_settings, settings)
+        self.assertTrue(all(call == settings for call in observer.settings_calls))
         self.assertEqual(outcome.activity.side_id, record.id)
         self.assertEqual(outcome.activity.steer_count, 1)
         self.assertFalse(outcome.activity.plan_may_be_stale)
         self.assertEqual(outcome.activity.steps[0].status, TurnPlanStepState.COMPLETED)
+
+    async def test_hidden_side_activity_does_not_advance_revision(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        settings = ProgressCardSettings(show_commentary=False, show_operations=False, show_plan=False)
+        binding = self.materialized_binding(task_feedback=BindingTaskFeedback(
+            progress_card_enabled=True, progress_card_settings=settings,
+        ))
+        _, record, _ = await self.open_side_for_binding(binding)
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="work", owner_id="ou_owner", origin=object(),
+        )
+        initial = self.runtime.side_turn_activity(record.id, refresh_plan=True)
+        observer.append(
+            thread_id=started.thread_id, turn_id=started.turn_id,
+            steps=(TurnPlanStepSnapshot("hidden plan", TurnPlanStepState.IN_PROGRESS),),
+        )
+        for kind in (TurnActivityKind.COMMENTARY, TurnActivityKind.COMMAND):
+            observer.append_activity(
+                thread_id=started.thread_id, turn_id=started.turn_id,
+                event=TurnActivityEvent(kind.value, kind, TurnActivityStatus.COMPLETED, 1,
+                                        text="hidden progress" if kind is TurnActivityKind.COMMENTARY else None),
+            )
+        hidden = self.runtime.side_turn_activity(record.id, refresh_plan=True)
+        self.assertEqual(hidden.revision, initial.revision)
+        self.assertTrue(hidden.plan_generated)
+        self.assertEqual(len(hidden.commentary), 1)
+        self.assertEqual(len(hidden.operations), 1)
+        observer.error = RuntimeError("activity unavailable")
+        unavailable = self.runtime.side_turn_activity(record.id, refresh_plan=True)
+        self.assertFalse(unavailable.plan_available)
+        self.assertEqual(unavailable.revision, hidden.revision + 1)
+        await self.finish_side_turn(started)
 
     async def test_side_completion_seen_before_rejected_steer_still_delivers_once(self) -> None:
         observer = FakeTurnPlanObserver()
@@ -7529,6 +7581,50 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ["inspect"],
         )
 
+    async def test_hidden_goal_activity_does_not_advance_revision_but_answers_and_errors_do(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        settings = ProgressCardSettings(show_commentary=False, show_operations=False, show_plan=False)
+        binding = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="ou_user",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True, progress_card_settings=settings),
+        )
+        started = await self.runtime.start_goal(
+            binding=binding, cwd=self.cwd, objective="work", owner_id="ou_user", origin=object(),
+        )
+        started.release_receipt_attempt()
+        handle = control.handles[-1]
+        async with asyncio.timeout(0.5):
+            while handle.activity_sink is None:
+                await asyncio.sleep(0)
+        initial = self.runtime.goal_activity(binding.id)
+        handle.emit_activity(TurnActivityNotificationProjection(
+            turn_id=handle.id, plan_updated=True,
+            steps=(TurnPlanStepSnapshot("hidden plan", TurnPlanStepState.IN_PROGRESS),),
+        ))
+        for kind in (TurnActivityKind.COMMENTARY, TurnActivityKind.COMMAND):
+            handle.emit_activity(TurnActivityNotificationProjection(
+                turn_id=handle.id,
+                event=TurnActivityEvent(kind.value, kind, TurnActivityStatus.COMPLETED, 1,
+                                        text="hidden progress" if kind is TurnActivityKind.COMMENTARY else None),
+            ))
+        hidden = self.runtime.goal_activity(binding.id)
+        self.assertEqual(hidden.revision, initial.revision)
+        self.assertTrue(hidden.plan_generated)
+        self.assertEqual(len(hidden.commentary), 1)
+        self.assertEqual(len(hidden.operations), 1)
+        answer = PartialAnswer(handle.thread_id, handle.id, "answer", "visible answer")
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, partial_answer=answer))
+        answered = self.runtime.goal_activity(binding.id)
+        self.assertEqual(answered.revision, hidden.revision + 1)
+        self.assertEqual(answered.partial_answers, (answer,))
+        handle.activity_sink(None)
+        unavailable = self.runtime.goal_activity(binding.id)
+        self.assertFalse(unavailable.plan_available)
+        self.assertEqual(unavailable.revision, answered.revision + 1)
+        handle.finish(response="done")
+        await self.runtime.wait_idle()
+
     async def test_goal_partial_answers_cross_rollover_but_not_manual_resume(self) -> None:
         control = FakeGoalControl(self.codex)
         self.runtime._goal_control = control
@@ -7753,11 +7849,12 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_goal_activity_resets_on_physical_turn_rollover(self) -> None:
         control = FakeGoalControl(self.codex)
         self.runtime._goal_control = control
+        settings = ProgressCardSettings(organization="time", commentary_max_chars=320)
         binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
-            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True, progress_card_settings=settings),
         )
         submission = await self.runtime.start_goal(
             binding=binding,
@@ -7791,6 +7888,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        current = self.store.get(binding.id)
+        self.store.set_configuration(
+            binding_id=current.id,
+            expected_settings_revision=current.settings_revision,
+            expected_context_revision=current.context_revision,
+            expected_feedback_revision=current.feedback_revision,
+            settings=current.turn_settings, task_feedback=BindingTaskFeedback(),
+            message_context_mode=current.message_context_mode, context_anchor=None,
+        )
         handle.rollover("physical-turn-2")
         handle.turn_diff = "final physical aggregate diff"
         handle.emit_activity(
@@ -7830,6 +7936,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activity.commentary, ())
         self.assertEqual(len(activity.operations), 1)
         self.assertEqual(activity.operations[0].event_timestamp_ms, 2)
+        self.assertEqual((activity.operations[0].sequence, activity.operations[0].segment), (1, 0))
+        self.assertEqual(activity.progress_card_settings, settings)
+        self.assertEqual(handle.progress_card_settings, settings)
 
         handle.finish(response="final physical result")
         await self.runtime.wait_idle()
@@ -9614,6 +9723,138 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         await self.finish(self.codex.handles[0], submission)
 
+    async def test_activity_time_segments_survive_windows_and_hidden_commentary(self) -> None:
+        for organization, show_commentary in (("content", True), ("time", True), ("time", False)):
+            with self.subTest(organization=organization, show_commentary=show_commentary):
+                observer = FakeTurnPlanObserver()
+                self.runtime._turn_plan_observer = observer
+                settings = ProgressCardSettings(
+                    organization=organization, show_commentary=show_commentary,
+                    commentary_limit=1, operation_limit=4,
+                )
+                binding = self.store.create_channel_binding(
+                    scope=self.scope, project_alias="test", creator_id="ou_user",
+                    task_feedback=BindingTaskFeedback(progress_card_enabled=True, progress_card_settings=settings),
+                )
+                submission = await self.submit(binding)
+
+                def append(item_id, kind, *, count=1, status=TurnActivityStatus.COMPLETED):
+                    observer.append_activity(
+                        thread_id=submission.thread_id, turn_id=submission.turn_id,
+                        event=TurnActivityEvent(
+                            item_id, kind, status, 42,
+                            text=item_id if kind is TurnActivityKind.COMMENTARY else None,
+                            count=count,
+                        ),
+                    )
+
+                append("before-first-progress", TurnActivityKind.SUBAGENT, count=10)
+                append("progress-a", TurnActivityKind.COMMENTARY)
+                append("subtask-a", TurnActivityKind.SUBAGENT, count=2)
+                append("file", TurnActivityKind.FILE_CHANGE)
+                first = self.runtime.turn_activity(binding.id, refresh_plan=True)
+                self.assertEqual([e.sequence for e in first.commentary], [2])
+                self.assertEqual(
+                    [e.segment for e in first.operations],
+                    [0, 1, 1] if organization == "time" else [1, 1],
+                )
+                # The next observer batch continues the same segment until commentary B.
+                append("subtask-b", TurnActivityKind.SUBAGENT, count=3)
+                append("progress-b", TurnActivityKind.COMMENTARY)
+                append("subtask-c", TurnActivityKind.SUBAGENT)
+                current = self.runtime.turn_activity(binding.id, refresh_plan=True)
+                self.assertEqual(current.progress_card_settings, settings)
+                self.assertEqual([e.text for e in current.commentary], ["progress-b"])
+                self.assertEqual([e.sequence for e in current.commentary], [6])
+                rows = [(e.kind, e.count, e.sequence, e.segment) for e in current.operations]
+                expected = [(TurnActivityKind.FILE_CHANGE, 1, 4, 1)]
+                if organization == "time":
+                    expected += [
+                        (TurnActivityKind.SUBAGENT, 5, 5, 1),
+                        (TurnActivityKind.SUBAGENT, 1, 7, 2),
+                    ]
+                else:
+                    expected += [(TurnActivityKind.SUBAGENT, 6, 7, 2)]
+                self.assertEqual(rows, expected)
+                # Updating A removes its earlier slot and joins B's segment, with
+                # the same operation quota and last-member aggregation semantics.
+                append("subtask-a", TurnActivityKind.SUBAGENT, count=2)
+                updated = self.runtime.turn_activity(binding.id, refresh_plan=True)
+                if organization == "time":
+                    self.assertGreater(updated.revision, current.revision)
+                    self.assertEqual(
+                        [(e.count, e.sequence, e.segment) for e in updated.operations],
+                        [(1, 4, 1), (3, 5, 1), (3, 8, 2)],
+                    )
+                else:
+                    self.assertEqual(
+                        [(e.count, e.sequence) for e in updated.operations], [(1, 4), (6, 8)],
+                    )
+                self.assertEqual(sum(e.count for e in updated.operations), 7)
+                self.assertEqual(observer.settings_calls[-1], settings)
+                await self.finish(self.codex.handles[-1], submission)
+
+    async def test_hidden_activity_does_not_advance_revision_but_answers_and_errors_do(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        settings = ProgressCardSettings(show_commentary=False, show_operations=False, show_plan=False)
+        binding = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="ou_user",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True, progress_card_settings=settings),
+        )
+        started = await self.submit(binding)
+        initial = self.runtime.turn_activity(binding.id, refresh_plan=True)
+        observer.append(
+            thread_id=started.thread_id, turn_id=started.turn_id,
+            steps=(TurnPlanStepSnapshot("hidden plan", TurnPlanStepState.IN_PROGRESS),),
+        )
+        for kind in (TurnActivityKind.COMMENTARY, TurnActivityKind.COMMAND):
+            observer.append_activity(
+                thread_id=started.thread_id, turn_id=started.turn_id,
+                event=TurnActivityEvent(kind.value, kind, TurnActivityStatus.COMPLETED, 1,
+                                        text="hidden progress" if kind is TurnActivityKind.COMMENTARY else None),
+            )
+        hidden = self.runtime.turn_activity(binding.id, refresh_plan=True)
+        self.assertEqual(hidden.revision, initial.revision)
+        self.assertTrue(hidden.plan_generated)
+        self.assertEqual(len(hidden.commentary), 1)
+        self.assertEqual(len(hidden.operations), 1)
+        answer = PartialAnswer(started.thread_id, started.turn_id, "answer", "visible answer")
+        observer.append_partial(answer)
+        answered = self.runtime.turn_activity(binding.id, refresh_plan=True)
+        self.assertEqual(answered.revision, hidden.revision + 1)
+        self.assertEqual(answered.partial_answers, (answer,))
+        observer.error = RuntimeError("activity unavailable")
+        unavailable = self.runtime.turn_activity(binding.id, refresh_plan=True)
+        self.assertFalse(unavailable.plan_available)
+        self.assertEqual(unavailable.revision, answered.revision + 1)
+        await self.finish(self.codex.handles[-1], started)
+
+    async def test_activity_maximum_config_keeps_independent_bounded_windows(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        settings = ProgressCardSettings(commentary_limit=8, operation_limit=16)
+        binding = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="ou_user",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True, progress_card_settings=settings),
+        )
+        submission = await self.submit(binding)
+        for kind, size in ((TurnActivityKind.COMMENTARY, 9), (TurnActivityKind.COMMAND, 17)):
+            for index in range(size):
+                observer.append_activity(
+                    thread_id=submission.thread_id, turn_id=submission.turn_id,
+                    event=TurnActivityEvent(
+                        f"{kind.value}-{index}", kind, TurnActivityStatus.COMPLETED, index,
+                        text=f"progress {index}" if kind is TurnActivityKind.COMMENTARY else None,
+                    ),
+                )
+        activity = self.runtime.turn_activity(binding.id, refresh_plan=True)
+        self.assertEqual(len(activity.commentary), 8)
+        self.assertEqual(len(activity.operations), 16)
+        self.assertEqual([e.event_timestamp_ms for e in activity.commentary], list(range(1, 9)))
+        self.assertEqual([e.event_timestamp_ms for e in activity.operations], list(range(1, 17)))
+        await self.finish(self.codex.handles[-1], submission)
+
     async def test_activity_operation_completion_replaces_status_and_event_time(
         self,
     ) -> None:
@@ -9651,7 +9892,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
-        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        settings = ProgressCardSettings(organization="time", commentary_limit=8)
+        feedback = BindingTaskFeedback(progress_card_enabled=True, progress_card_settings=settings)
         binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
@@ -9659,6 +9901,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             task_feedback=feedback,
         )
         submission = await self.submit(binding, "visible progress")
+        current = self.store.get(binding.id)
+        self.store.set_configuration(
+            binding_id=current.id,
+            expected_settings_revision=current.settings_revision,
+            expected_context_revision=current.context_revision,
+            expected_feedback_revision=current.feedback_revision,
+            settings=current.turn_settings, task_feedback=BindingTaskFeedback(),
+            message_context_mode=current.message_context_mode, context_anchor=None,
+        )
         observer.append(
             thread_id=submission.thread_id,
             turn_id=submission.turn_id,
@@ -9681,6 +9932,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.task_feedback, feedback)
         self.assertEqual(outcome.feedback_revision, 1)
         assert outcome.activity is not None
+        self.assertEqual(outcome.activity.progress_card_settings, settings)
+        self.assertTrue(all(call == settings for call in observer.settings_calls))
         self.assertEqual(outcome.activity.binding_id, binding.id)
         self.assertEqual(outcome.activity.thread_id, submission.thread_id)
         self.assertEqual(outcome.activity.turn_id, submission.turn_id)

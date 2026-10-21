@@ -25,6 +25,7 @@ from openai_codex.generated import v2_all as _generated
 from openai_codex.models import Notification
 
 from .domain import GoalStatus
+from .progress_card_settings import ProgressCardSettings
 from .turn_activity import (
     TurnActivityNotificationProjection,
     TurnActivityProjectionUnavailable,
@@ -168,6 +169,8 @@ class GoalHandle(Protocol):
             [TurnActivityNotificationProjection | None], None
         ]
         | None = None,
+        *,
+        progress_card_settings: ProgressCardSettings = ProgressCardSettings(),
     ) -> GoalStreamTerminal: ...
 
     async def pause(self) -> GoalPauseAck: ...
@@ -774,6 +777,7 @@ class _GoalActivityTap:
         "_turn_diff",
         "_diff_enabled",
         "_sink",
+        "_progress_card_settings",
     )
 
     def __init__(self, thread_id: str) -> None:
@@ -783,6 +787,7 @@ class _GoalActivityTap:
         self._started_turn_ids: set[str] = set()
         self._turn_diff: str | None = None
         self._diff_enabled = True
+        self._progress_card_settings = ProgressCardSettings()
         self._sink: Callable[
             [TurnActivityNotificationProjection | None], None
         ] | None = None
@@ -790,8 +795,11 @@ class _GoalActivityTap:
     def bind(
         self,
         sink: Callable[[TurnActivityNotificationProjection | None], None] | None,
+        *,
+        progress_card_settings: ProgressCardSettings = ProgressCardSettings(),
     ) -> None:
         self._sink = sink
+        self._progress_card_settings = progress_card_settings
 
     async def next_notification(self, client: Any, state: Any) -> Any:
         notification = await client.next_goal_notification(state)
@@ -816,6 +824,7 @@ class _GoalActivityTap:
                 notification,
                 expected_thread_id=self._thread_id,
                 expected_turn_id=self._turn_id,
+                progress_card_settings=self._progress_card_settings,
             )
         except TurnActivityProjectionUnavailable:
             self._sink = None
@@ -987,11 +996,15 @@ class _AppServerGoalHandle:
             [TurnActivityNotificationProjection | None], None
         ]
         | None = None,
+        *,
+        progress_card_settings: ProgressCardSettings = ProgressCardSettings(),
     ) -> GoalStreamTerminal:
         logical_turn_id = self._logical_turn_id
         if logical_turn_id is None:
             raise GoalControlError("Goal logical Turn 尚未建立。")
-        self._activity_tap.bind(activity_sink)
+        self._activity_tap.bind(
+            activity_sink, progress_card_settings=progress_card_settings,
+        )
         try:
             async for _notification in self._stream:
                 pass

@@ -21,7 +21,7 @@ from ..domain import FeishuScope, MentionContextMode, ScopeKind
 from ..model_settings import ModelCatalog
 from ..management.chat_directory import AvailableChat
 from ..projects import Project
-from ..session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
+from ..session_settings import BindingTurnSettings, SessionSettings
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 from .callbacks import CardActionError, _builder, _notice, _plain, _plain_text
 from .chat_target import (
@@ -33,7 +33,7 @@ from .pagination import decode_page_selection, pagination_controls
 from .controls import (
     MAX_SETTING_ID_CHARS,
     _form_columns, _form_hint, _form_section,
-    _decode_context_mode_reference, _decode_new_model_reference, _decode_task_feedback_reference,
+    _decode_context_mode_reference, _decode_new_model_reference, _decode_task_feedback_fields,
     decode_session_settings_form, session_settings_form_elements, session_settings_summary,
 )
 from .reply import TURN_FILE_CARD_JSON_LIMIT_BYTES
@@ -982,8 +982,7 @@ def _read_draft_settings(fields: dict[str, str]) -> SessionSettings:
     if not core <= fields.keys() or fields.keys() - core - context - tuning:
         raise CardActionError("会话配置表单字段不完整或包含未知字段。")
     model = _decode_new_model_reference(fields["cron_session_model"])
-    feedback = BindingTaskFeedback(*(_decode_task_feedback_reference(fields["cron_session_" + field], field)
-        for field in ("task_reactions", "progress_card", "completion_mention")))
+    feedback = _decode_task_feedback_fields(fields, prefix="cron_session")
     mode = _decode_context_mode_reference(fields["cron_session_context_mode"]) if context else MentionContextMode.CURRENT_ONLY
     turn = None
     if model is not None or tuning & fields.keys():

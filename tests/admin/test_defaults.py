@@ -24,7 +24,13 @@ class FakeDefaults:
         self.order_revision = 4
         settings = {"turn_settings": None, "reaction_pulse_enabled": False,
                     "progress_card_enabled": True, "completion_mention_enabled": True,
-                    "message_context_mode": "current-only"}
+                    "message_context_mode": "current-only",
+                    "progress_card_settings": {
+                        "show_commentary": True, "show_operations": True, "show_plan": True,
+                        "commentary_limit": 4, "operation_limit": 8,
+                        "commentary_max_chars": 160, "operation_max_chars": 120,
+                        "organization": "content",
+                    }}
         self.records = [
             {"id": "exact-one", "kind": "chat", "chat_id": "oc_one", "keyword": None,
              "project": "test", "session_settings": settings, "revision": 3, "position": None},

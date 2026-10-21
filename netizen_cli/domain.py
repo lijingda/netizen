@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import quote
 
+from .progress_card_settings import ProgressCardSettings
+
 
 class ScopeKind(str, Enum):
     DIRECT = "direct"
@@ -291,6 +293,7 @@ class CardControlIntent:
     reaction_pulse_enabled: bool | None = None
     progress_card_enabled: bool | None = None
     completion_mention_enabled: bool | None = None
+    progress_card_settings: ProgressCardSettings | None = None
     message_context_mode: MentionContextMode | None = None
     side_id: str | None = None
     page: int | None = None
@@ -329,12 +332,14 @@ class TurnActivityManifestEntry:
     event_timestamp_ms: int | None = None
     text: str | None = None
     count: int = 1
+    sequence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class TurnCommentaryManifestEntry:
     text: str
     event_timestamp_ms: int | None = None
+    sequence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +354,8 @@ class TurnProgressManifest:
     steps: tuple[TurnProgressManifestStep, ...] = ()
     commentary: tuple[TurnCommentaryManifestEntry, ...] = ()
     operations: tuple[TurnActivityManifestEntry, ...] = ()
+    # None identifies legacy cards with the original frozen capacity rules.
+    progress_card_settings: ProgressCardSettings | None = None
 
 
 @dataclass(frozen=True, slots=True)

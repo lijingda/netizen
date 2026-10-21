@@ -61,7 +61,7 @@ class MigrationSchemaValidationTest(unittest.TestCase):
                     "side_topics_state_updated": (("state", 0), ("updated_at", 1), ("side_id", 1)),
                 })
             self.assertEqual(plan_channel_database(self.database), {
-                "source_version": 17, "target_version": 17, "steps": [],
+                "source_version": 18, "target_version": 18, "steps": [],
             })
 
     def test_failed_compatible_index_creation_rolls_back_without_changing_data(self) -> None:

@@ -268,6 +268,13 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 只运行受影响的 phase。没有触及这些边界的迭代无需
 运行 live probe。
 
+过程卡展示设置与时间组织（ADR 0086）调整，需在本地覆盖默认兼容、独立窗口/分段、
+配置捕获、旧卡及新 manifest 往返，并实测最大配置组合的中文、转义和 callback 编码容量，
+回归既有超限处理。只改展示而未改变 SDK adapter、原生消费/生命周期或租户能力时，
+不因此触发整套账号 live phases。Admin 表单的真实浏览器操作、飞书桌面/移动端的两种组织、
+终态折叠与服务重启后文件分页仍须单独验收；本地序列化或 API ACK 不证明客户端显示。
+真实卡片测试仅使用用户明确授权的测试群/话题，未执行的项明确记录为未验证。
+
 账号额度适配（ADR 0077）变更时，在目标服务账号环境运行
 `.venv/bin/python scripts/probe_account_rate_limits.py --live`，并按下文方式加外部
 进程 deadline。它只读一次原生额度，不创建 Thread 或请求模型，输出精确 SDK/CLI
@@ -1000,9 +1007,9 @@ read/resume，Goal 保留既有 readiness read。这是请求次数证据，不�
 ### 数据库迁移与中断恢复验收
 
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移移到每次实际
-启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v17，冻结转换为
+启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v18，冻结转换为
 v14 → v15 Worktree 元数据、v15 → v16 默认工作区策略与 v16 → v17 定时工作区策略/Run
-资源回执；v13 及更早 schema／旧布局不因此自动得到支持。
+资源回执、v17 → v18 过程卡展示设置；v13 及更早 schema／旧布局不因此自动得到支持。
 以下为新 CLI 的验收要求，不是通过记录：
 
 - setup 才创建新库；start、自动重启及恢复启动都校验已有库，缺库不能重新初始化。

@@ -29,6 +29,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 
 from .partial_answers import PartialAnswer
+from .progress_card_settings import ProgressCardSettings
 from .terminal_cleanup import _source_tree_fingerprint
 from .user_questions import QuestionRequest
 from .turn_activity import (
@@ -84,6 +85,7 @@ class TurnActivityObserver(Protocol):
         thread_id: str,
         turn_id: str,
         after_cursor: int,
+        progress_card_settings: ProgressCardSettings = ProgressCardSettings(),
     ) -> TurnActivityObservation: ...
 
 
@@ -101,6 +103,7 @@ class PinnedTurnActivityObserver:
         thread_id: str,
         turn_id: str,
         after_cursor: int,
+        progress_card_settings: ProgressCardSettings = ProgressCardSettings(),
     ) -> TurnActivityObservation:
         _validate_exact_id(thread_id, label="Thread")
         _validate_exact_id(turn_id, label="Turn")
@@ -132,6 +135,7 @@ class PinnedTurnActivityObserver:
                     item,
                     expected_thread_id=thread_id,
                     expected_turn_id=turn_id,
+                    progress_card_settings=progress_card_settings,
                 )
             except TurnActivityProjectionUnavailable as error:
                 raise TurnActivityObservationUnavailable(str(error)) from error

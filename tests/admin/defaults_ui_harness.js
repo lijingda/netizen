@@ -6,7 +6,10 @@ let discardConfirmed = true;
 const discardPrompts = [];
 window.confirm = (message) => { discardPrompts.push(message); return discardConfirmed; };
 const settings = { turn_settings: { model_id: "retired", effort_id: "high", service_tier_id: "priority" },
-  reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true, message_context_mode: "catch-up" };
+  reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true, message_context_mode: "catch-up",
+  progress_card_settings: { show_commentary: false, show_operations: true, show_plan: false,
+    commentary_limit: 6, operation_limit: 15, commentary_max_chars: 280, operation_max_chars: 210,
+    organization: "time" } };
 const envelope = (mode, id) => ({ csrfToken: `${id}-${mode}-csrf`, actionToken: `${id}-${mode}-once`,
   target: { resource: "default-rule", targetId: id } });
 const rule = (id, kind = "group_name") => ({ id, kind, chat_id: kind === "chat" ? "oc_exact" : null,
@@ -134,6 +137,26 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(defaultsInput("tier").value, "priority");
   assert(defaultsInput("note").textContent.includes("模型当前不可用"));
   assert(defaultsInput("chat").disabled);
+  assert.equal(defaultsInput("progress-organization").value, "time");
+  assert.equal(defaultsInput("progress-show-commentary").checked, false);
+  assert.equal(defaultsInput("progress-commentary-capacity").hidden, true);
+  assert.equal(defaultEditorHasChanges(), false);
+  defaultsInput("progress-organization").value = "content";
+  defaultsInput("progress-organization").dispatch("change");
+  assert.equal(defaultEditorHasChanges(), true);
+  defaultsInput("progress-operation-limit").value = "17";
+  defaultsInput("progress-operation-limit").dispatch("change");
+  assert.equal(defaultsInput("save").disabled, true);
+  const priorPosts = posts.length;
+  await saveDefault({ preventDefault() {} });
+  assert.equal(posts.length, priorPosts);
+  defaultsInput("progress-operation-limit").value = "16";
+  defaultsInput("progress-operation-limit").dispatch("change");
+  assert.equal(defaultsInput("save").disabled, false);
+  defaultsInput("progress-show-commentary").checked = true;
+  defaultsInput("progress-show-commentary").dispatch("change");
+  assert.equal(defaultsInput("progress-commentary-capacity").hidden, false);
+  assert.equal(defaultsInput("progress-commentary-limit").value, 6);
   defaultsInput("progress").checked = false;
   changeDefaultSettings("progress");
   await saveDefault({ preventDefault() {} });
@@ -143,6 +166,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(saved.body.definition.chat_id, "oc_exact");
   assert.deepEqual(saved.body.definition.session_settings.turn_settings, settings.turn_settings);
   assert.equal(saved.body.definition.session_settings.progress_card_enabled, false);
+  assert.deepEqual(saved.body.definition.session_settings.progress_card_settings,
+    { ...settings.progress_card_settings, organization: "content", operation_limit: 16, show_commentary: true });
   assert.equal(saved.body.target.targetId, "exact");
   assert.equal(saved.body.definition.expected_revision, undefined);
 

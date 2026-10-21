@@ -380,6 +380,11 @@ body.schedule-detail-open { overflow: hidden; }
 .defaults-feedback { display: flex; flex-wrap: wrap; gap: 18px; }
 .defaults-feedback label { display: flex; align-items: center; gap: 7px; }
 .drawer-form .defaults-feedback input { width: 16px; height: 16px; margin: 0; accent-color: var(--blue); }
+.progress-settings { margin-top: 18px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+.progress-settings > .defaults-feedback { margin-top: 16px; }
+.progress-settings > .schedule-form-grid { margin-top: 10px; }
+.progress-settings > .session-settings-help { margin-bottom: 0; }
+.progress-settings-error { color: var(--danger); font-size: 13px; line-height: 1.6; }
 #defaults-note.error { color: var(--danger); }
 #defaults-workspace-help.error, #schedule-editor #schedule-workspace-help.error { color: var(--danger); }
 #session-settings-editor[hidden], #session-settings-editor [hidden] { display: none; }

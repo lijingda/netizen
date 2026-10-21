@@ -24,6 +24,7 @@ from netizen_cli.runtime.contracts import (
 )
 from netizen_cli.sdk_gap_adapter import GoalControlError, GoalMutationStateUnknown
 from netizen_cli.sessions.errors import SessionToolError
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_results import sent_result
 
@@ -38,7 +39,9 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.source = self.store.create_channel_binding(
             scope=self.scope, project_alias="test", creator_id="ou_source",
             turn_settings=BindingTurnSettings("future-model", "low", "priority-v2"),
-            task_feedback=BindingTaskFeedback(True, True, True),
+            task_feedback=BindingTaskFeedback(True, True, True, ProgressCardSettings(
+                organization="time", commentary_limit=8, show_operations=False,
+            )),
         )
         self.store.assign_native_thread_id(self.source.id, "native-source")
         self.source = self.store.get(self.source.id)
@@ -131,7 +134,9 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.active_binding(self.scope.key).id, self.source.id)
         self.assertEqual(binding.project_alias, self.source.project_alias)
         self.assertEqual(binding.turn_settings, self.source.turn_settings)
-        self.assertEqual(binding.task_feedback, BindingTaskFeedback(False, True, False))
+        self.assertEqual(binding.task_feedback, BindingTaskFeedback(
+            False, True, False, self.source.task_feedback.progress_card_settings,
+        ))
         self.assertEqual(result["threadId"], "native-created")
         self.assertTrue(result["netizen"]["accepted"])
         self.assertEqual(result["netizen"]["topicId"], "omt_created")

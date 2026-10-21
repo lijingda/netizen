@@ -85,6 +85,7 @@ from netizen_cli.codex_runtime import (
 from netizen_cli.domain import GoalStatus, MentionContextMode, ScopeKind
 from netizen_cli.runtime.contracts import ThreadCatalogError
 from netizen_cli.session_settings import BindingTaskFeedback, SessionSettings
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.management import (
     BindingStatusProjection,
     ChatLabel,
@@ -1445,7 +1446,14 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         item = page["items"][0]
         self.assertEqual(item["sessionSettings"], SessionSettings.from_binding(self.management.lazy).to_dict())
         self.assertNotIn("context_anchor", item["sessionSettings"])
-        settings = SessionSettings(BindingTurnSettings("model", "high", "priority"), BindingTaskFeedback(False, True, True))
+        settings = SessionSettings(
+            BindingTurnSettings("model", "high", "priority"),
+            BindingTaskFeedback(False, True, True, ProgressCardSettings(
+                show_commentary=False, show_plan=False, commentary_limit=8,
+                operation_limit=16, commentary_max_chars=320,
+                operation_max_chars=240, organization="time",
+            )),
+        )
         payload = _action_payload(item["actions"]["configure"], sessionSettings=settings.to_dict())
 
         status, _, result = await self.json_post("/api/v1/sessions/configure", session, payload)
@@ -1472,9 +1480,14 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             {"turnSettings": None},
             {"sessionSettings": None},
             {"sessionSettings": {"turn_settings": None}},
+            {"sessionSettings": {key: value for key, value in settings.items() if key != "progress_card_settings"}},
             {"sessionSettings": {**settings, "reaction_pulse_enabled": 1}},
             {"sessionSettings": {**settings, "turn_settings": {"model_id": "partial"}}},
             {"sessionSettings": {**settings, "context_anchor": "om_forged"}},
+            {"sessionSettings": {**settings, "progress_card_settings": {"organization": "time"}}},
+            {"sessionSettings": {**settings, "progress_card_settings": {
+                **settings["progress_card_settings"], "operation_limit": 17,
+            }}},
             {"sessionSettings": settings, "expectedFeedbackRevision": 1},
         )
         for extra in cases:

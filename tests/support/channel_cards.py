@@ -174,11 +174,11 @@ def config_form_values(
         ("config_completion_mention", completion_mention_enabled),
     ):
         if enabled is not None:
-            suffix = ":on" if enabled else ":off"
+            label = "开启" if enabled else "关闭"
             values[name] = next(
                 option["value"]
                 for option in fields[name]["options"]
-                if option["value"].endswith(suffix)
+                if option["text"]["content"].startswith(label)
             )
     if "config_context_mode" in fields:
         values["config_context_mode"] = fields["config_context_mode"][

@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from ..bindings import BindingTaskFeedback, SideTopicState
 from ..domain import ActiveState, GoalOperationState, MessageContextAnchor
 from ..partial_answers import PartialAnswer
+from ..progress_card_settings import ProgressCardSettings
 from ..sdk_gap_adapter import GoalSnapshot
 from ..turn_activity import TurnActivityEntrySnapshot, TurnPlanStepSnapshot
 from ..turn_patch_children import TaskPatchChildren
@@ -421,6 +422,7 @@ class TurnActivitySnapshot:
     commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
     partial_answers: tuple[PartialAnswer, ...] = ()
+    progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.turn_id:
@@ -448,6 +450,7 @@ class SideTurnActivitySnapshot:
     commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
     partial_answers: tuple[PartialAnswer, ...] = ()
+    progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
     def __post_init__(self) -> None:
         if not self.side_id or not self.thread_id or not self.turn_id:
@@ -476,6 +479,7 @@ class GoalActivitySnapshot:
     commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
     partial_answers: tuple[PartialAnswer, ...] = ()
+    progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.logical_turn_id:

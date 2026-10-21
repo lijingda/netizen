@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from lark_channel import OutboundCard, new_card
 
 from ..completion_mention import valid_completion_mention_user_id
+from ..progress_card_settings import ProgressCardSettings
 from ..domain import (
     ACTIVE_STATE_VALUES,
     ActiveState,
@@ -44,9 +45,8 @@ from ..turn_files import (
     paginate_turn_files,
 )
 from ..turn_activity import (
-    ACTIVITY_COMMENTARY_LIMIT,
     ACTIVITY_DETAIL_KINDS,
-    ACTIVITY_OPERATION_LIMIT,
+    ACTIVITY_OPERATION_TEXT_HARD_LIMIT,
     ACTIVITY_PLAN_LIMIT,
     ACTIVITY_TEXT_LIMIT,
     TurnActivityKind,
@@ -103,11 +103,13 @@ class _TurnActivityEntryLike(Protocol):
     event_timestamp_ms: int | None
     text: str | None
     count: int
+    sequence: int
 
 
 class _TurnCommentaryEntryLike(Protocol):
     event_timestamp_ms: int | None
     text: str | None
+    sequence: int
 
 
 class _PartialAnswerLike(Protocol):
@@ -123,6 +125,7 @@ class _TurnActivitySnapshotLike(Protocol):
     steps: tuple[_TurnPlanStepLike, ...]
     commentary: tuple[_TurnCommentaryEntryLike, ...]
     operations: tuple[_TurnActivityEntryLike, ...]
+    progress_card_settings: ProgressCardSettings | None
 
 
 def reply_card(projection: ReplyCardProjection) -> OutboundCard:
@@ -377,17 +380,19 @@ def _decode_activity_timestamp_ms(value: object, field: str) -> int | None:
         raise CardActionError(f"{field} 无效。") from error
 
 
-def _activity_operation_text(kind: object, value: object) -> str | None:
+def _activity_operation_text(
+    kind: object, value: object, *, limit: int = ACTIVITY_TEXT_LIMIT,
+) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value:
         raise ValueError("activity operation text is invalid")
     if kind in ACTIVITY_DETAIL_KINDS:
-        # Preserve frozen summaries from older 160-character manifests on
-        # pagination, including exit-code suffixes. New native previews use 120.
-        if len(value) > ACTIVITY_TEXT_LIMIT:
+        # Preserve the frozen preview, including its exit-code suffix. The
+        # native projection already applied the chosen summary length.
+        if len(value) > limit:
             raise ValueError("activity operation text must be bounded")
-        return sanitize_activity_operation_text(value, limit=ACTIVITY_TEXT_LIMIT)
+        return sanitize_activity_operation_text(value, limit=limit)
     if kind == TurnActivityKind.TOOL.value:
         return value
     raise ValueError("activity text is unsupported for this operation")
@@ -625,6 +630,7 @@ def turn_progress_card(
 def _turn_progress_manifest(
     snapshot: _TurnActivitySnapshotLike,
 ) -> TurnProgressManifest:
+    settings = getattr(snapshot, "progress_card_settings", None) or ProgressCardSettings()
     state = getattr(snapshot.state, "value", snapshot.state)
     if state not in ACTIVE_STATE_VALUES:
         state = ActiveState.RUNNING.value
@@ -639,6 +645,7 @@ def _turn_progress_manifest(
             ),
         )
         for item in snapshot.steps[:_TURN_PROGRESS_MAX_STEPS]
+        if settings.show_plan
     )
     snapshot_commentary = tuple(getattr(snapshot, "commentary", ()))
     snapshot_operations = tuple(getattr(snapshot, "operations", ()))
@@ -646,10 +653,15 @@ def _turn_progress_manifest(
         TurnCommentaryManifestEntry(
             text=sanitized,
             event_timestamp_ms=_activity_timestamp_ms(item.event_timestamp_ms),
+            sequence=(
+                item.sequence if settings.organization == "time" else 0
+            ),
         )
-        for item in snapshot_commentary[-ACTIVITY_COMMENTARY_LIMIT:]
-        if item.text is not None
-        and (sanitized := sanitize_activity_text(item.text)) is not None
+        for item in snapshot_commentary[-settings.commentary_limit:]
+        if settings.show_commentary and item.text is not None
+        and (sanitized := sanitize_activity_text(
+            item.text, limit=settings.commentary_max_chars,
+        )) is not None
     )
     operations = tuple(
         TurnActivityManifestEntry(
@@ -669,10 +681,15 @@ def _turn_progress_manifest(
             text=_activity_operation_text(
                 getattr(item.kind, "value", item.kind),
                 item.text,
+                limit=ACTIVITY_OPERATION_TEXT_HARD_LIMIT,
             ),
             count=max(0, item.count),
+            sequence=(
+                item.sequence if settings.organization == "time" else 0
+            ),
         )
-        for item in snapshot_operations[-ACTIVITY_OPERATION_LIMIT:]
+        for item in snapshot_operations[-settings.operation_limit:]
+        if settings.show_operations
     )
     return TurnProgressManifest(
         state=state,
@@ -683,6 +700,7 @@ def _turn_progress_manifest(
         steps=steps,
         commentary=commentary,
         operations=operations,
+        progress_card_settings=settings,
     )
 
 
@@ -1095,37 +1113,42 @@ def _turn_activity_elements(
     hidden_steps: int = 0,
     goal: bool = False,
 ) -> list[dict[str, Any]]:
+    settings = getattr(snapshot, "progress_card_settings", None) or ProgressCardSettings()
     elements: list[dict[str, Any]] = []
     if snapshot.steer_count:
         elements.append(_plain(f"已接收调整：{snapshot.steer_count} 次"))
-    commentary = tuple(getattr(snapshot, "commentary", ()))[
-        -ACTIVITY_COMMENTARY_LIMIT:
+    commentary = (
+        tuple(getattr(snapshot, "commentary", ()))[-settings.commentary_limit:]
+        if settings.show_commentary else ()
+    )
+    operations = (
+        tuple(getattr(snapshot, "operations", ()))[-settings.operation_limit:]
+        if settings.show_operations else ()
+    )
+    commentary_rows = [
+        (item, sanitize_activity_text(
+            item.text, limit=settings.commentary_max_chars,
+        ) or "未命名步骤")
+        for item in commentary if item.text is not None
     ]
-    if commentary:
-        elements.append({"tag": "markdown", "content": "**最近进展**"})
-        for item in commentary:
-            if item.text is None:
-                continue
-            elements.append(
-                _activity_markdown_row(
-                    item.event_timestamp_ms,
-                    activity_step_display(item.text),
-                )
-            )
-    operations = tuple(getattr(snapshot, "operations", ()))[
-        -ACTIVITY_OPERATION_LIMIT:
-    ]
-    if operations:
-        elements.append({"tag": "markdown", "content": "**最近操作**"})
-        for item in operations:
-            elements.append(
-                _activity_markdown_row(
-                    item.event_timestamp_ms,
-                    _activity_operation_display(item),
-                )
+    operation_rows = [(item, _activity_operation_display(item)) for item in operations]
+    if settings.organization == "time":
+        groups = [("最近动态", sorted(
+            commentary_rows + operation_rows, key=lambda row: row[0].sequence,
+        ))]
+    else:
+        groups = [("最近进展", commentary_rows), ("最近操作", operation_rows)]
+    for title, rows in groups:
+        if rows:
+            elements.append({"tag": "markdown", "content": f"**{title}**"})
+            elements.extend(
+                _activity_markdown_row(item.event_timestamp_ms, text)
+                for item, text in rows
             )
     if not snapshot.plan_available:
         elements.append(_plain("过程信息：暂不可用"))
+        return elements
+    if not settings.show_plan:
         return elements
     if not snapshot.plan_generated:
         suffix = (
@@ -1560,8 +1583,18 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
         "commentary",
         "operations",
     }
-    if set(payload) != expected:
+    if set(payload) not in (expected, expected | {"progress_card_settings"}):
         raise CardActionError("进度卡过程字段不完整或包含未知字段。")
+    frozen_settings = None
+    if "progress_card_settings" in payload:
+        try:
+            frozen_settings = ProgressCardSettings.from_dict(
+                payload["progress_card_settings"],
+            )
+        except (TypeError, ValueError) as error:
+            raise CardActionError("进度卡展示配置无效。") from error
+    settings = frozen_settings or ProgressCardSettings()
+    chronological = settings.organization == "time"
     state = _required_string(payload["state"], "progress.state")
     if state not in ACTIVE_STATE_VALUES:
         raise CardActionError("进度卡过程状态无效。")
@@ -1606,39 +1639,42 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
     raw_commentary = payload["commentary"]
     if (
         not isinstance(raw_commentary, list)
-        or len(raw_commentary) > ACTIVITY_COMMENTARY_LIMIT
+        or len(raw_commentary) > settings.commentary_limit
     ):
         raise CardActionError("进度卡进展摘要无效。")
     commentary: list[TurnCommentaryManifestEntry] = []
     for raw in raw_commentary:
         event_timestamp_ms: int | None
-        if isinstance(raw, str):
+        sequence = 0
+        if isinstance(raw, str) and not chronological:
             text = _required_string(raw, "progress.commentary")
             event_timestamp_ms = None
-        elif isinstance(raw, Mapping) and set(raw) == {
-            "text",
-            "event_timestamp_ms",
-        }:
+        elif isinstance(raw, Mapping) and set(raw) == (
+            {"text", "event_timestamp_ms"} | ({"sequence"} if chronological else set())
+        ):
             text = _required_string(raw["text"], "progress.commentary.text")
             event_timestamp_ms = _decode_activity_timestamp_ms(
                 raw["event_timestamp_ms"],
                 "progress.commentary.event_timestamp_ms",
             )
+            if chronological:
+                sequence = _decode_activity_sequence(raw["sequence"])
         else:
             raise CardActionError("进度卡进展摘要字段无效。")
-        sanitized = sanitize_activity_text(text)
-        if sanitized is None or len(text) > _TURN_PROGRESS_STEP_MAX_CHARS:
+        sanitized = sanitize_activity_text(text, limit=settings.commentary_max_chars)
+        if sanitized is None or len(text) > settings.commentary_max_chars:
             raise CardActionError("进度卡进展摘要内容无效。")
         commentary.append(
             TurnCommentaryManifestEntry(
                 text=sanitized,
                 event_timestamp_ms=event_timestamp_ms,
+                sequence=sequence,
             )
         )
     raw_operations = payload["operations"]
     if (
         not isinstance(raw_operations, list)
-        or len(raw_operations) > ACTIVITY_OPERATION_LIMIT
+        or len(raw_operations) > settings.operation_limit
     ):
         raise CardActionError("进度卡操作清单无效。")
     operations: list[TurnActivityManifestEntry] = []
@@ -1651,6 +1687,8 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
             raise CardActionError("进度卡操作字段无效。")
         fields = set(raw)
         legacy_fields = {"kind", "status", "text", "count"}
+        if chronological:
+            legacy_fields.add("sequence")
         timestamped_fields = legacy_fields | {"event_timestamp_ms"}
         if frozenset(fields) not in {
             frozenset(legacy_fields),
@@ -1668,7 +1706,13 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
         else:
             text = _required_string(text_value, "progress.operation.text")
             try:
-                text = _activity_operation_text(kind, text)
+                text = _activity_operation_text(
+                    kind, text,
+                    limit=(
+                        ACTIVITY_OPERATION_TEXT_HARD_LIMIT
+                        if frozen_settings is not None else ACTIVITY_TEXT_LIMIT
+                    ),
+                )
             except ValueError as error:
                 raise CardActionError("进度卡操作内容无效。") from error
         event_timestamp_ms = (
@@ -1689,8 +1733,18 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
                 event_timestamp_ms=event_timestamp_ms,
                 text=text,
                 count=count,
+                sequence=(
+                    _decode_activity_sequence(raw["sequence"]) if chronological else 0
+                ),
             )
         )
+    if chronological:
+        sequences = [item.sequence for item in (*commentary, *operations)]
+        if len(sequences) != len(set(sequences)) or any(
+            [item.sequence for item in entries] != sorted(item.sequence for item in entries)
+            for entries in (commentary, operations)
+        ):
+            raise CardActionError("进度卡时间顺序无效。")
     return TurnProgressManifest(
         state=state,
         steer_count=steer_count,
@@ -1700,7 +1754,14 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
         steps=tuple(steps),
         commentary=tuple(commentary),
         operations=tuple(operations),
+        progress_card_settings=frozen_settings,
     )
+
+
+def _decode_activity_sequence(value: Any) -> int:
+    if type(value) is not int or not 1 <= value <= 10**18:
+        raise CardActionError("进度卡时间顺序无效。")
+    return value
 
 
 def _decode_reply_card_manifest(
@@ -2221,6 +2282,8 @@ def _turn_file_envelope(
 def _encode_turn_progress_manifest(
     progress: TurnProgressManifest,
 ) -> dict[str, Any]:
+    settings = progress.progress_card_settings
+    chronological = settings is not None and settings.organization == "time"
     return {
         "state": progress.state,
         "steer_count": progress.steer_count,
@@ -2234,10 +2297,11 @@ def _encode_turn_progress_manifest(
         "commentary": [
             (
                 item.text
-                if item.event_timestamp_ms is None
+                if item.event_timestamp_ms is None and not chronological
                 else {
                     "text": item.text,
                     "event_timestamp_ms": item.event_timestamp_ms,
+                    **({"sequence": item.sequence} if chronological else {}),
                 }
             )
             for item in progress.commentary
@@ -2248,6 +2312,7 @@ def _encode_turn_progress_manifest(
                 "status": item.status,
                 "text": item.text,
                 "count": item.count,
+                **({"sequence": item.sequence} if chronological else {}),
                 **(
                     {}
                     if item.event_timestamp_ms is None
@@ -2256,6 +2321,7 @@ def _encode_turn_progress_manifest(
             }
             for item in progress.operations
         ],
+        **({"progress_card_settings": settings.to_dict()} if settings is not None else {}),
     }
 
 

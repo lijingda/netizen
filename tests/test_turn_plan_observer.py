@@ -23,6 +23,7 @@ from openai_codex.generated.v2_all import (
 )
 from openai_codex.models import Notification, UnknownNotification
 
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli import turn_plan_observer
 from netizen_cli.turn_plan_observer import (
     PinnedTurnActivityObserver,
@@ -109,6 +110,28 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
                 ("verify", TurnPlanStepState.PENDING),
             ),
         )
+
+    def test_custom_lengths_apply_without_changing_retained_events(self) -> None:
+        notification = Notification(
+            method="item/completed", payload=ItemCompletedNotification(
+                threadId="thread-one", turnId="turn-one", completedAtMs=17,
+                item=ThreadItem.model_validate({
+                    "type": "agentMessage", "id": "long-commentary", "phase": "commentary",
+                    "text": "正文" * 200,
+                }),
+            ),
+        )
+        self.router.route_notification(notification)
+        short = self.observer.observe(thread_id="thread-one", turn_id="turn-one", after_cursor=0)
+        longer = self.observer.observe(
+            thread_id="thread-one", turn_id="turn-one", after_cursor=0,
+            progress_card_settings=ProgressCardSettings(commentary_max_chars=320),
+        )
+        self.assertEqual(len(short.events[0].text), 160)
+        self.assertEqual(len(longer.events[0].text), 320)
+        self.assertEqual(longer.events[0].event_timestamp_ms, 17)
+        self.assertEqual(longer.next_cursor, short.next_cursor)
+        self.assertIs(self.state.events[0], notification)
 
     def test_partial_answers_share_the_non_consuming_cursor(self) -> None:
         item = ThreadItem.model_validate({

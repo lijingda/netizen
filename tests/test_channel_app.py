@@ -7041,7 +7041,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_new_can_explicitly_disable_progress_card(self) -> None:
         await self.app.handle_message(FakeMessage("/new", message_id="om_picker"))
         values = new_form_values(self.channel.replies[-1][1])
-        self.assertEqual(values["new_progress_card"], "task-feedback:v2:on")
+        self.assertTrue(values["new_progress_card"].startswith("progress-card:v1:[true,"))
         values["new_progress_card"] = "task-feedback:v2:off"
 
         await self.app.handle_card_action(direct_card_event(self.channel, values))

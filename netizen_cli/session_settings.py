@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
 from .domain import MentionContextMode
+from .progress_card_settings import ProgressCardSettings
 
 if TYPE_CHECKING:
     from .bindings import ThreadBinding
@@ -37,14 +38,17 @@ class BindingTaskFeedback:
     reaction_pulse_enabled: bool = False
     progress_card_enabled: bool = False
     completion_mention_enabled: bool = True
+    progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
     def __post_init__(self) -> None:
         values = (self.reaction_pulse_enabled, self.progress_card_enabled, self.completion_mention_enabled)
         if not all(type(value) is bool for value in values):
             raise ValueError("Binding task feedback values must be booleans")
+        if not isinstance(self.progress_card_settings, ProgressCardSettings):
+            raise ValueError("Binding progress card settings must be ProgressCardSettings")
 
 
-_FIELDS = frozenset({"turn_settings", "reaction_pulse_enabled", "progress_card_enabled", "completion_mention_enabled", "message_context_mode"})
+_FIELDS = frozenset({"turn_settings", "reaction_pulse_enabled", "progress_card_enabled", "completion_mention_enabled", "message_context_mode", "progress_card_settings"})
 _TURN_FIELDS = frozenset({"model_id", "effort_id", "service_tier_id"})
 
 
@@ -68,13 +72,14 @@ class SessionSettings:
             "reaction_pulse_enabled": self.task_feedback.reaction_pulse_enabled,
             "progress_card_enabled": self.task_feedback.progress_card_enabled,
             "completion_mention_enabled": self.task_feedback.completion_mention_enabled,
+            "progress_card_settings": self.task_feedback.progress_card_settings.to_dict(),
             "message_context_mode": self.message_context_mode.value,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> SessionSettings:
         if not isinstance(value, dict) or set(value) != _FIELDS:
-            raise SessionSettingsError("会话设置必须包含全部五个配置字段，且不能包含其他字段。")
+            raise SessionSettingsError("会话设置必须包含全部六个配置字段，且不能包含其他字段。")
         raw_turn = value["turn_settings"]
         turn = None
         if raw_turn is not None:
@@ -85,8 +90,13 @@ class SessionSettings:
             except ValueError as error:
                 raise SessionSettingsError("模型、思考强度和速度 ID 必须是非空字符串。") from error
         try:
+            progress_card_settings = ProgressCardSettings.from_dict(value["progress_card_settings"])
+        except ValueError as error:
+            raise SessionSettingsError(str(error)) from error
+        try:
             feedback = BindingTaskFeedback(
                 value["reaction_pulse_enabled"], value["progress_card_enabled"], value["completion_mention_enabled"],
+                progress_card_settings,
             )
         except ValueError as error:
             raise SessionSettingsError("执行中表情闪烁、进度卡和结束时 @ 提醒必须是布尔值。") from error

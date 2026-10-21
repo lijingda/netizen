@@ -315,7 +315,7 @@ handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 inter
    关键词不得为空，使用 `casefold()` 忽略大小写，不支持正则或类别兜底；仅群聊适用。
 
 一次采用命中规则的完整配置，不跨规则拼字段。配置保存 Project alias、独立工作区策略、
-可选 Model/Effort/Speed、三个 Task Feedback 开关与 Mention Context Mode；Project 必填，
+可选 Model/Effort/Speed、三个 Task Feedback 开关、过程卡展示设置与 Mention Context Mode；Project 必填，
 会话设置沿用现有创建默认值及 inherit Codex 语义，P2P 固定 current-only。它不是 effective Codex
 配置，也不含 Prompt 或业务流程。创建意图应用于新 Binding，后续修改或删除默认值、修改
 规则顺序或群名，都不改变已创建的 Binding，包括尚未物化的 Lazy Binding。
@@ -1272,12 +1272,40 @@ steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal
 安全投影见 [ADR 0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)，阶段性答案见
 [ADR 0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)。
 
+### 过程卡展示设置
+
+Progress Card 在现有总开关下增加八项展示设置：最近进展、最近操作、任务清单分别显隐，
+进展和操作各自的条数与摘要长度，以及 `content`/`time` 组织方式。默认三个内容均显示、
+按内容组织，进展 4 条/160 字符、操作 8 条/120 字符；四个容量值均为正整数，上限分别为
+8/320、16/240。任务清单的 12 项/160 字符限制不变。关闭内容保留其容量值，三个内容
+全关仍显示状态、失败/中断、观测不可用等必要提示；不影响其他回复模块。
+
+Admin 在“会话配置 → 任务反馈 → 过程卡”和默认会话配置中复用同一组控件，无预设、
+排版、操作类别筛选或预览。聊天默认规则在自动创建时复制该值，之后会话独立维护；
+更改默认规则不改变已有 Binding 或手动 `/new` 的选择语义。设置属于 Task Feedback，
+沿用普通 Turn 准入、Goal 新 logical run 和 Side 创建时的捕获边界。其他完整配置入口，
+包括飞书 `/config`、`/defaults` 和定时计划编辑，保留已有展示选项而不新增这些控件。
+
+按内容保持最近进展、最近操作、任务清单的顺序。按时间按唯一观察链收到事件的顺序，
+从早到晚交错进展与操作段，任务清单仍在底部。进展划分操作段，首条进展前也有一段；
+进展因关闭或条数限制不可见时仍保留边界。每段复用现有子任务按状态聚合、最后成员
+位置/时间/数量算法，段内穿插其他操作不打断合并，段间不合并。不按原生时间戳排序，
+也不改变时间来源和显示。
+
+两种组织方式共用各自独立的最近 N 条进展、M 条操作窗口；操作先限量再聚合，合并不
+释放名额或补入更早记录，单事件 count 不改变独立条目计数。超限按最后更新顺序逐条
+淘汰，不按段删除，也不连带删除另一类内容。同一 item 更新只保留最新状态并移到最新
+更新所在段；只在当前有界条目上保留必要的顺序与段标记，不保存被淘汰正文或历史。
+Goal 换物理 Turn 继续重置 Activity。完整取舍见
+[ADR 0086](adr/0086-configure-progress-card-presentation-with-bounded-activity-segments.md)。
+
 ### Activity 安全投影
 
 Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection，并为
 Goal 当前 exact 物理 Turn 与 exact active Side Turn 暴露同样受限的 Activity Snapshot。
 投影包含 accepted 后的 running/stopping/pausing 状态、ADR 0020 的完整 plan/checklist、
-最近四条 completed commentary、最近八个通用操作，以及文件修改和子任务的安全数量聚合。
+按捕获设置保留的 completed commentary、通用操作，以及文件修改和子任务的安全数量聚合；
+默认仍为四条进展、八个操作。安全硬上限与展示容量分开，观察链只保留有界投影。
 steer 次数与动态清单过期提示仅用于普通/Side Turn；Goal 清单固定标明最近一次原生上报，
 可能尚未反映追加消息，不另行累计次数。每条 commentary 和通用操作还携带 exact SDK
 item lifecycle 毫秒时间戳。
@@ -1286,8 +1314,10 @@ commentary 保留内部换行；CRLF/CR 统一为 LF，tab 展开为四个空格
 命令使用 typed `commandActions` 的读取/列举路径或搜索查询和范围；原生分类未知、复合或
 对象字段为空时显示 `command` 预览，不新增本地命令解析。存在非零 `exitCode` 时附加原生
 退出码。文件修改显示 change kind/path，网页操作显示 typed query/queries/url/pattern，
-均为最多 120 字符的单行预览，文件和多查询最多预览前三项。commentary/checklist 仍最多
-160 字符。MCP 显示 exact `tool`，dynamic tool 显示非空 `namespace.tool` 或 `tool`；不解释
+均为受配置限制的单行预览，默认 120 字符、最多 240 字符，文件和多查询最多预览前三项。
+进展默认 160 字符、最多 320 字符；checklist 仍最多 160 字符。操作摘要长度只约束预览，
+保留必要的非零退出码后缀，极短配置值不截去后缀；状态、数量和工具名不受此截断影响。
+MCP 显示 exact `tool`，dynamic tool 显示非空 `namespace.tool` 或 `tool`；不解释
 任意工具参数。工具名不做字符白名单、合规
 判定或单独截断，只在卡片 Markdown 边界转义。commentary 和预览先过滤明确凭据再限长，
 保留普通路径、链接、邮箱、内联代码和长标识符，卡片/manifest 解码再次过滤并转义。
@@ -1308,7 +1338,7 @@ closed，不能扩展成任意通知或私有 RPC gateway。
 
 按 [ADR 0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)，仅把
 completed `agentMessage` 中明确标记 `partial_answer` 的稳定正文作为阶段性答案。
-它独立于 Activity 的四条/160 字摘要限制，不是 reasoning、工具输出或终态。
+它独立于 Activity 的条数/摘要长度配置，不是 reasoning、工具输出或终态。
 普通会话、持久 fork、Side 按实际回复形态共用交付规则：已有运行卡时加入按需出现、
 始终展开的 Partial Answer 模块，按原生已观察顺序追加。该模块使用与 Goal 一致的
 `grey-50` 背景与 `12px` 内边距，最终 Result 保持 `default`，使两种正文有清楚的视觉
@@ -1451,6 +1481,15 @@ execution。Partial Answer 与 Files 同卡使用 v5 callback，
 的回复 Projection 或 card session。崩溃或强制 kill 后不扫描或猜测旧运行卡，之后
 `/goal` 只创建新的状态快照卡。初始展示失败提供可见文字回执；终态 Channel handoff
 整体有界，展示故障不能永久占住非 unknown Runtime slot。
+
+文件分页 manifest 自包含当时的过程卡展示设置与进展/操作段顺序；翻页或重启后继续
+使用该快照，不回读当前 Binding 配置，也不携带原生 item identity。旧卡缺少新字段时
+沿用旧展示与已冻结摘要，不用新配置重新裁剪。保持现有 55,000 bytes 整卡编码检查与
+超限失败路径；通过配置上限控制过程开销，不增加运行时按剩余预算动态缩减策略。
+上限不是整卡容量保证；满长最大过程加文件分页也可能超限（见 ADR 0086 的本地样本）。
+终态本地渲染失败时，原有链路继续交付阶段性正文，并尝试最终正文与 Files 的独立完成卡；
+独立文件卡仍超限时回复正文及文件卡未生成提示。原过程卡可能保留最后成功更新的状态，
+不承诺所有过程内容都出现在最终回复中；定时投递未知后的不补发边界保持不变。
 
 ### 生命周期表情与终态投递
 
@@ -1874,7 +1913,7 @@ MCP 连接；来源只能是可信 `_meta.threadId` 映射的普通 Binding，Pr
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v17 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v18 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
 `schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
 v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
@@ -1883,12 +1922,16 @@ v16 为 `session_defaults` 增加独立的 `workspace_json`，保存 `project`�
 v17 为 `schedule_plans` 增加独立 `workspace_json`：有效新话题计划迁移为 `project`，
 原会话计划与删除墓碑为 null；`schedule_runs` 增加可空 `worktree_id` 作为创建/选择的
 最小资源回执。不保存 Git 状态、额外 cwd 权威或工作区健康缓存，删除资源不级联删除计划。
+v18 为 Binding 增加 `progress_card_settings_json`，并为默认规则与有效新话题计划的完整
+SessionSettings JSON 增加 `progress_card_settings`；旧记录回填当前展示默认值，保留
+已有总开关与其他设置，原会话计划和删除墓碑的空配置不变。只存展示选项，不存过程正文、
+原生事件、分段历史或卡片 session。
 受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
 创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
 不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
-ID、settings revision、三个显式保存的 Binding Task Feedback 布尔值及 feedback revision、
+ID、settings revision、三个显式保存的 Binding Task Feedback 布尔值、过程卡展示设置及 feedback revision、
 `current-only|catch-up`、全空或全有的 exact Context Boundary、context revision，以及
 `ever_activated` 标记；默认值为 1，历史 Admin 仅创建且从未设为
 当前的 Lazy Binding 为 0，第一次 active-pointer 提交由 trigger 原子改为 1。
@@ -1905,7 +1948,7 @@ Codex 配置或卡片 session，也不与 Project 或 Worktree 删除级联。
 Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
 每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
-数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17；基线仍为 v14，沿用
+数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18；基线仍为 v14，沿用
 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
 历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
 在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
@@ -2402,7 +2445,7 @@ action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact
 Admin 专属生命周期、恢复、归档或删除 Side 墓碑操作。
 
 Sessions 的“配置”使用完整会话设置抽屉，回填 Model/Effort/Speed、Reaction Pulse、
-Progress Card、Completion Mention 和消息上下文；单聊不显示上下文选择。它与飞书
+Progress Card 及其展示设置、Completion Mention 和消息上下文；单聊不显示上下文选择。它与飞书
 `/config` 复用同一个 Runtime/Store 原子保存入口，grant 同时固定 settings、feedback、
 context 三类 revision；陈旧页面、Scope 或 pointer 变化、运行中 Turn/Goal、compaction
 和未知 lifecycle 均不能部分保存或改投其他 Binding。配置 inactive Binding 不改变 current。
@@ -2700,7 +2743,7 @@ SDK `0.154.0` 的 `update_plan` 工具默认关闭；需要原生 checklist 时�
 配置中开启 `tools.update_plan.enabled`。Netizen 继续继承工具配置，不自动开启或用提示词
 模拟计划。其他 Activity item 不依赖这一工具。
 
-completed commentary 最多保留最近四条，通用操作最多保留最近八个；同一 item ID 的 started/
+completed commentary 默认保留最近四条，通用操作默认保留最近八个，过程卡容量按捕获设置选择；同一 item ID 的 started/
 completed 只更新一个 identity-free 行，并把 `startedAtMs` 替换为 `completedAtMs`。commentary
 使用 exact `completedAtMs`；checklist 没有 item lifecycle 时间，不显示时间。时间戳不是服务端
 当前时间或 elapsed time，而是原样进入 v4/v5 manifest，并通过 Card 2.0 `local_datetime`
