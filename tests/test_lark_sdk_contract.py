@@ -32,7 +32,6 @@ from lark_channel import (
     OutboundImage,
     PolicyConfig,
     SafetyPipeline,
-    SendError,
     SendOpts,
     SendResult,
     TextBatchConfig,
@@ -487,17 +486,25 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
             resource_type="image",
         )
 
-        lock_error = SendError(
-            code=FeishuChannelErrorCode.FORMAT_ERROR,
-            retryable=False,
-            hint="Failed to create card content, ext=ErrCode: 11310;",
-            raw_code=230099,
-        )
-        self.assertTrue(
-            channel_app._is_feishu_card_action_lock(
-                SendResult.fail(lock_error)
-            )
-        )
+        for reason, is_lock in (
+            ("card action is lock", True),
+            ("element exceeds the limit", False),
+            ("card table number over limit", False),
+        ):
+            with self.subTest(reason=reason):
+                hint = (
+                    "Failed to create card content, ext=ErrCode: 11310; "
+                    f"ErrMsg: {reason};"
+                )
+                patch_result = {"code": 230099, "msg": hint, "data": None}
+                with patch.object(channel, "_patch_card", new=AsyncMock(return_value=patch_result)):
+                    failure = await channel.update_card("om_card", card)
+                self.assertFalse(failure.success)
+                self.assertEqual(failure.error.code, FeishuChannelErrorCode.UNKNOWN)
+                self.assertFalse(failure.error.retryable)
+                self.assertEqual(failure.error.raw_code, 230099)
+                self.assertEqual(failure.error.hint, hint)
+                self.assertEqual(channel_app._is_feishu_card_action_lock(failure), is_lock)
 
     async def test_public_upload_media_returns_image_key_without_sending(self) -> None:
         channel = FeishuChannel(app_id="cli_contract", app_secret="test-secret")

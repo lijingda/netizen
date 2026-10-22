@@ -1474,7 +1474,8 @@ cleanup/unsubscribe、closed 墓碑和 registry 清除；这证明修改后的�
 2026-09-24 SDK/CLI `0.156.1` 的后台命名改用公开 `output_schema` 后，
 `probe_thread_naming.py --runtime-only` 通过：生产入口生成有效标题且无工具调用，
 临时 fork 在四种目录视图中均不可见、取消订阅完成，父会话历史与后续对话不受污染。
-本次局部验证未重跑独立中断场景；模型介绍折叠面板尚未做真实飞书客户端展示验收。
+本次局部验证未重跑独立中断场景；当时的模型介绍折叠面板未做真实飞书客户端展示验收，
+该面板已于 2026-10-22 按产品决定移除。
 
 2026-09-23 SDK/CLI `0.156.1` 已通过 `make check`、固定 SDK synthetic probes、
 `probe_python_sdk.py` 全部 17 个原生 phase、完整 Thread naming 与 Project delete

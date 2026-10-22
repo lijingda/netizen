@@ -186,18 +186,19 @@ def failed_reply_result(
     )
 
 
-def card_action_lock_result(
+def failed_card_update_result(
     *,
     outer_code: int = 230099,
     inner_code: int = 11310,
+    reason: str = "card action is lock",
 ) -> object:
     message = (
         "Failed to create card content, "
-        f"ext=ErrCode: {inner_code}; ErrMsg: 可变平台文案;"
+        f"ext=ErrCode: {inner_code}; ErrMsg: {reason};"
     )
     return SendResult.fail(
         SendError(
-            code=FeishuChannelErrorCode.FORMAT_ERROR,
+            code=FeishuChannelErrorCode.UNKNOWN,
             retryable=False,
             raw_code=outer_code,
             hint=message,
@@ -4079,20 +4080,20 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.active_binding(scope.key).id, lazy.id)
         self.assertIn("已切换到会话", str(self.channel.updates[-1][1]))
 
-    def test_card_action_lock_matcher_uses_numeric_codes_not_platform_text(
+    def test_card_action_lock_requires_codes_and_observed_lock_reason(
         self,
     ) -> None:
         self.assertTrue(
-            channel_app._is_feishu_card_action_lock(card_action_lock_result())
+            channel_app._is_feishu_card_action_lock(failed_card_update_result())
         )
         self.assertFalse(
             channel_app._is_feishu_card_action_lock(
-                card_action_lock_result(outer_code=230098)
+                failed_card_update_result(outer_code=230098)
             )
         )
         self.assertFalse(
             channel_app._is_feishu_card_action_lock(
-                card_action_lock_result(inner_code=11311)
+                failed_card_update_result(inner_code=11311)
             )
         )
         self.assertFalse(
@@ -4103,6 +4104,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
+        for reason in (
+            "element exceeds the limit", "card table number over limit", "",
+            "unknown reason", "card action is lock unknown suffix",
+        ):
+            with self.subTest(reason=reason):
+                self.assertFalse(channel_app._is_feishu_card_action_lock(
+                    failed_card_update_result(reason=reason),
+                ))
 
     async def test_sessions_delete_prepare_exhausts_card_action_lock_retries(
         self,
@@ -4118,7 +4127,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             if button["text"]["content"] == "删除"
         )
         self.channel.card_update_results.extend(
-            card_action_lock_result() for _ in range(3)
+            failed_card_update_result() for _ in range(3)
         )
         delays: list[float] = []
 
@@ -4143,7 +4152,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.channel.replies), replies_before + 1)
         self.assertIn("无法打开删除确认卡", str(self.channel.replies[-1][1]))
 
-    async def test_sessions_delete_prepare_does_not_retry_other_card_error(
+    async def test_sessions_delete_prepare_does_not_retry_card_element_limit(
         self,
     ) -> None:
         await self.fixture.new(message_id="om_new_delete_target")
@@ -4157,7 +4166,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             if button["text"]["content"] == "删除"
         )
         self.channel.card_update_results.append(
-            card_action_lock_result(inner_code=11311)
+            failed_card_update_result(reason="element exceeds the limit")
         )
         delays: list[float] = []
 
@@ -4227,8 +4236,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.channel.card_update_results.extend(
             (
-                card_action_lock_result(),
-                card_action_lock_result(),
+                failed_card_update_result(),
+                failed_card_update_result(),
                 SimpleNamespace(success=True),
             )
         )
@@ -7104,7 +7113,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(binding.short_id, rendered)
         self.assertIn("现在可以直接发送任务", rendered)
 
-    async def test_new_form_replies_when_success_card_cannot_update(
+    async def test_new_form_card_element_limit_replies_without_repeating_creation(
         self,
     ) -> None:
         await self.app.handle_message(
@@ -7117,7 +7126,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         picker = self.channel.replies[-1][1]
-        self.channel.card_update_success = False
+        self.channel.card_update_results.append(
+            failed_card_update_result(reason="element exceeds the limit")
+        )
         self.channel.fetched_messages["om_card"] = {
             "data": {
                 "items": [
@@ -7147,6 +7158,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         binding = self.store.active_binding(scope.key)
         self.assertIsNotNone(binding)
+        self.assertEqual(len(self.store.list_bindings(scope.key)), 1)
+        self.assertEqual(len(self.channel.updates), 1)
+        self.assertEqual(len(self.runtime.active_binding_change_calls), 1)
         fallback = next(
             text
             for message_id, text in self.channel.replies

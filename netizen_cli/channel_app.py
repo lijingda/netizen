@@ -313,7 +313,8 @@ _DONE_REACTION = "DONE"
 _ERROR_REACTION = "ERROR"
 _INTERRUPTED_REACTION = "CrossMark"
 _STEER_REACTION = "OnIt"
-# lark-channel-sdk 1.4.0 exposes the nested transient lock only in SendError.hint.
+# Feishu reuses 230099/11310 for locks and permanent card limits. Only the
+# observed lock reason in the SDK's public SendError.hint permits a retry.
 # Remove this retry after card-action dispatch is ordered behind its Feishu ack.
 _FEISHU_CARD_ACTION_LOCK_OUTER_CODE = 230099
 _FEISHU_CARD_ACTION_LOCK_INNER_CODE = 11310
@@ -6665,7 +6666,8 @@ def _is_feishu_card_action_lock(result: object) -> bool:
         return False
     return (
         re.search(
-            rf"(?<!\d){_FEISHU_CARD_ACTION_LOCK_INNER_CODE}(?!\d)",
+            rf"\bErrCode:\s*{_FEISHU_CARD_ACTION_LOCK_INNER_CODE};"
+            r"\s*ErrMsg:\s*card action is lock(?:;|$)",
             hint,
         )
         is not None
