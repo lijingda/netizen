@@ -43,11 +43,25 @@ Netizen 此前精确锁定 `lark-channel-sdk==1.2.0`。1.3.0 新增会议频道�
 4. 保留话题根 post bot mention 的窄修复，并继续要求 `mentioned_bot`、公开 bot
    open_id、normalized mention key 与首个 post AST 节点同时匹配。上游缺口修复前不按
    显示名猜测。
-5. 卡片瞬时锁仍只按 `SendError.raw_code == 230099` 且 `hint` 中存在独立数字
-   `11310` 识别并有界重试。不得把 1.4.0 升级解释为 Card Action 去重或分页修复。
+5. 卡片瞬时锁保留有界重试；错误分类按下述 2026-10-22 修订执行，不能仅凭
+   `230099/11310` 判定瞬时锁。不得把 1.4.0 升级解释为 Card Action 去重或分页修复。
 6. Netizen 不注册 `meetingInvited` handler，不调用 join/follow/session API，不申请会议
    scopes，也不新增会议状态、配置或事件路由。会议代码在 SDK 内的存在只作为启动、连接、
    dispatcher 和关闭兼容面验证。
+
+### 2026-10-22：区分共用错误码的瞬时锁与卡片容量失败
+
+真实飞书返回证明，`230099/11310` 同时用于 `card action is lock` 和
+`element exceeds the limit`。此前仅按数字判定瞬时锁的结论不成立，容量失败重发
+相同卡片不会修复问题。
+
+公共卡片更新仅在 `SendError.raw_code == 230099` 且公开 `hint` 包含完整的
+`ErrCode: 11310; ErrMsg: card action is lock;` 原因时保留现有两次有界重试。
+容量错误、未知原因以及不完整错误信息直接按更新失败反馈，不猜测其他瞬时锁错误码。
+重试只调用卡片更新，不重放已经提交的会话创建、删除等业务操作；更新失败仍按原有
+Scope 发送结果 fallback。SDK 契约测试向实际 `update_card()` 注入上述响应，并用
+`card table number over limit` 作额外合成非锁样例，后者不作为实测平台证据。
+行为测试同时验证锁重试、容量错误不重试和业务副作用仅执行一次。
 
 ## 验证
 

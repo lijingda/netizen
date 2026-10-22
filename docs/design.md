@@ -2819,11 +2819,8 @@ completed 只更新一个 identity-free 行，并把 `startedAtMs` 替换为 `co
 
 模型、Effort 与加速 Service Tier 不在代码中枚举。卡片可以展示不同模型 Effort/Tier
 的并集，但提交必须用新一轮 live catalog 对所选模型重新验证；不兼容或已过期组合
-明确失败。`/new` 和 `/config` 另附可折叠的模型介绍：只展示本次目录返回的简介、输入能力、
-迁移建议和可选退役时间，不随下拉选择发起回调，不改预选、保存或模型校验逻辑，也不自动迁移。
-目录文案按有界纯文本呈现，不能形成飞书 mention 或交互节点；容量不足时明确省略部分介绍，
-不删模型选项。固定 Channel SDK 不可靠转发独立 select 的 option 和表单按钮名，因此不增加
-同表单“查看介绍”提交按钮。固定高层 `models()` 没有 cursor 参数；若响应带非空 `next_cursor`，目录
+明确失败。`/new` 和 `/config` 保留模型选择与配置表单，不附加模型介绍、输入能力和
+迁移/退役说明面板，也不自动迁移模型。固定高层 `models()` 没有 cursor 参数；若响应带非空 `next_cursor`，目录
 不完整且无法公开翻页，必须整体拒绝而不是把第一页伪装成完整选项。`default` 是 App
 Server 显式回到 Standard 服务层的协议值，其余 Speed
 完全来自模型目录。Fast 仍是同一模型的 Service Tier，不能与独立 Codex Spark Model

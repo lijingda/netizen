@@ -79,7 +79,6 @@ from .callbacks import (
     _turn_reference,
 )
 from .reply import reply_card
-from .model_info import with_model_details
 from .session_ids import session_identity_lines
 
 
@@ -1056,7 +1055,7 @@ def new_binding_card(
                 settings_draft=settings_draft,
             )
         )
-    return OutboundCard(card=with_model_details(builder.to_dict(), catalog if projects else None))
+    return OutboundCard(card=builder.to_dict())
 
 
 def config_card(
@@ -1116,7 +1115,7 @@ def config_card(
             catalog=catalog,
         )
     )
-    return OutboundCard(card=with_model_details(builder.to_dict(), catalog))
+    return OutboundCard(card=builder.to_dict())
 
 
 def rename_binding_card(

@@ -2653,6 +2653,7 @@ class CardRendererTest(unittest.TestCase):
             allow_context_mode=True,
         )
         serialized = str(outbound.card)
+        self.assertEqual(_elements(outbound.card, "collapsible_panel"), [])
         self.assertIn("alpha · /home/user/alpha", serialized)
         self.assertIn("test · /home/user/test", serialized)
         self.assertNotIn("off · /home/user/off", serialized)
@@ -2959,6 +2960,7 @@ class CardRendererTest(unittest.TestCase):
             ),
             allow_context_mode=True,
         )
+        self.assertEqual(_elements(outbound.card, "collapsible_panel"), [])
         form = next(
             item
             for item in _elements(outbound.card, "form")

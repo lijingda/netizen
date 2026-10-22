@@ -15,6 +15,7 @@ from netizen_cli.cards.controls import _new_workspace_elements
 from netizen_cli.cards.callbacks import _new_model_reference
 from netizen_cli.domain import CardControlName, FeishuScope, ScopeKind
 from netizen_cli.management import CreatedBinding
+from netizen_cli.model_settings import ModelCatalog
 from netizen_cli.projects import Project
 from netizen_cli.worktrees.errors import WorktreeError
 from netizen_cli.worktrees.settings import WorktreeSettingsService
@@ -300,6 +301,69 @@ class WorktreeNewChannelTest(unittest.IsolatedAsyncioTestCase):
                 await f.app.handle_message(FakeMessage("/new", message_id="om_new"))
             service.options.assert_awaited_once_with(project_alias="test", expected_project_revision=None)
             self.assertNotIn("new_workspace", fields(f.channel.replies[-1][1]))
+            self.assertEqual(f.runtime.submit_calls, [])
+
+    async def test_load_options_fits_element_budget_with_large_model_catalog_and_keeps_draft(self):
+        async with channel_fixture() as f:
+            model = f.runtime.catalog.models[0]
+            f.runtime.catalog = ModelCatalog(tuple(
+                replace(model, id=f"model-{index}", is_default=index == 0)
+                for index in range(20)
+            ))
+            service = SimpleNamespace(options=AsyncMock(return_value=options()))
+            draft = values(new_model=_new_model_reference("model-19"), new_effort="low",
+                           new_speed="priority-v2", new_progress_card="task-feedback:v2:off",
+                           new_context_mode="context-mode:v1:catch-up")
+            scope = FeishuScope("cli_test", "oc_group", ScopeKind.TOPIC, "omt_exact")
+            event = load_event(f.channel, draft)
+            event.chat_id = scope.chat_id
+            f.channel.chat_types[scope.chat_id] = "group"
+            f.channel.fetched_messages["om_card"] = {
+                "data": {"items": [{"chat_id": scope.chat_id, "thread_id": scope.topic_id}]},
+            }
+            update_card = f.channel.update_card
+
+            def count(value):
+                if isinstance(value, dict):
+                    return int("tag" in value) + sum(count(item) for item in value.values())
+                if isinstance(value, list):
+                    return sum(count(item) for item in value)
+                return 0
+
+            async def bounded_update(message_id, card):
+                self.assertLessEqual(count(card), 200)
+                return await update_card(message_id, card)
+
+            with patch.object(f.app, "_management", SimpleNamespace(worktrees=service)), \
+                 patch.object(f.channel, "update_card", side_effect=bounded_update):
+                await f.app.handle_message(FakeMessage(
+                    "/new", message_id="om_new", chat_id=scope.chat_id,
+                    chat_type="group", thread_id=scope.topic_id,
+                ))
+                service.options.assert_not_awaited()
+                self.assertNotIn("new_workspace", fields(f.channel.replies[-1][1]))
+                await f.app.handle_card_action(event)
+            self.assertEqual(len(f.channel.updates), 1)
+            card = f.channel.updates[-1][1]
+            selected = fields(card)
+            self.assertEqual(len(selected["new_model"]["options"]), 21)
+            self.assertEqual(len(selected["new_workspace"]["options"]), 3)
+            self.assertEqual(len(selected["new_worktree_ref"]["options"]), 4)
+            for name in ("new_model", "new_effort", "new_speed", "new_progress_card", "new_context_mode"):
+                self.assertEqual(selected[name]["initial_option"], draft[name])
+            self.assertIsNone(f.store.active_binding(scope.key))
+            self.assertEqual(f.runtime.submit_calls, [])
+
+    async def test_load_update_failure_reports_no_session_created(self):
+        async with channel_fixture() as f:
+            service = SimpleNamespace(options=AsyncMock(return_value=options()))
+            f.channel.card_update_results.append(SimpleNamespace(success=False))
+            with patch.object(f.app, "_management", SimpleNamespace(worktrees=service)), \
+                 self.assertLogs("netizen_cli.channel_app", level="ERROR"):
+                await f.app.handle_card_action(load_event(f.channel))
+            self.assertEqual(len(f.channel.updates), 1)
+            self.assertIn("卡片更新失败；未创建会话", str(f.channel.replies[-1][1]))
+            self.assertIsNone(f.store.active_binding(SCOPE.key))
             self.assertEqual(f.runtime.submit_calls, [])
 
     async def test_worktree_selection_flows_to_shared_creation_and_displays_actual_cwd(self):
