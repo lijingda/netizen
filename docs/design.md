@@ -125,7 +125,9 @@ Admin、飞书 `/new`、默认会话自动创建、定时新话题和 Agent 工�
 单个会话不会顺带回收目录。
 
 人工入口默认从所选 Project 当前 HEAD 创建 detached checkout，可显式检出未占用的
-本地分支或从选定 revision 建新分支；远端分支仅作为起点。已有工作区只复用，不隐式
+本地分支或从选定 revision 建新分支；远端分支仅作为起点。Admin 与飞书创建表单直接
+填写起点 ref 或本地分支名，不预加载全部分支，也不以分支数量限制已有 worktree 选择。
+创建时仍校验实际 ref、分支占用、资源身份与 Project revision。已有工作区只复用，不隐式
 切换分支。Project 位于仓库子目录时，新目录保留对应相对子目录；目标提交缺少该目录
 就明确失败。只检出提交内容，不搬迁 staged/unstaged、untracked/ignored 文件，不运行
 environment/setup，也不提供快照恢复、自动回收、Handoff 或孤立资源重新关联。
@@ -277,6 +279,9 @@ model、config 或 env override。
 边界生效，不检查异常链或其他操作抛出的同名消息。归档恢复按 ADR 0082 区分后续 resume
 的明确拒绝、部分成功与未知结果，只有未知结果保留 Binding-local lifecycle-unknown；
 已启动 Turn 的观测恢复保留原 exact Turn 与观测状态。
+普通消息（含 Skill 准备）与 Agent 跨会话入口也共用 ADR 0078 已验证的归档、不存在、
+关闭中拒绝分类：保留 Binding，只拒绝本次输入，不关闭其他会话准入。错误返回身份和
+其余未知 resume 结果仍沿用原有保护；不自动重建 Thread、清理绑定或重试。
 `thread.turn()` 若没有返回 handle，其副作用结果无法确认：服务立即关闭全部新
 admission 并要求重启，不能把 Binding 当 idle 再启动第二轮。
 
@@ -896,7 +901,12 @@ release gate，也不让 observer 成为终态权威；这个边界不删除或�
 ### 普通 Turn 停止与压缩
 
 running 时普通消息调用同一 handle 的 `steer()`；stopping 明确拒绝。steer 若恰好
-撞上完成，只提示重发。`/stop` 在 Binding 锁内先 interrupt 当前 active handle，再
+撞上完成，只提示重发。普通、Side、Goal 的一般 steer SDK/RPC 失败共用
+[ADR 0088](adr/0088-align-steer-failures-and-input-resume-rejections.md) 的处理：报告本次
+追加未确认，保留原执行和观察，不自动重试，不登记成功回执、计数或 Context Boundary，
+不额外关闭其他会话准入。取消等待仍关闭全局准入，Side/Goal 保留各自 closing/unknown；
+Goal receipt 畸形或 physical Turn 不匹配也仍保留 unknown 并关闭准入。
+`/stop` 在 Binding 锁内先 interrupt 当前 active handle，再
 通过 ADR 0009 的窄 adapter 请求清理 App Server 为同一 native Thread 登记的后台
 终端。只有两步 RPC 都成功才由原任务回复中断终态；cleanup 请求失败时保持 stopping，
 重复 `/stop` 只重试 cleanup。按 ADR 0010，成功空响应不证明前台工具进程退出，飞书
@@ -929,8 +939,10 @@ RUNNING 的 Goal logical operation；启动、正在停止、收尾、未知与�
 `/config` 和第二个 Goal 仍明确拒绝；其他 Binding 可并发。`/goal pause` 仅确认 persisted
 status 为 paused，当前物理 Turn 继续执行；`/goal clear` 可在执行中移除 Goal，继续观察
 和交付当前 Turn。`/stop` 才先暂停续跑，再中断 SDK route 当时给出的 exact 物理 Turn，
-最后复用 ADR 0009 的 exact-Thread terminal cleanup。pause、interrupt、cleanup 或 mutation 响应未知时槽位不释放，并按副作用范围
-fail closed。只有 SDK logical stream 正常终止、`goal/get` 为非 active、公开 Thread
+最后复用 ADR 0009 的 exact-Thread terminal cleanup。pause、interrupt、cleanup 或控制
+mutation 响应未知时槽位不释放，并按副作用范围 fail closed。一般 steer RPC 失败保持
+原 RUNNING 状态；取消等待、畸形或错误 physical-Turn receipt 仍保留 unknown 并关闭
+准入，详见[共享 steer 失败规则](#普通-turn-停止与压缩)。只有 SDK logical stream 正常终止、`goal/get` 为非 active、公开 Thread
 idle、完整 history 中 exact 最终物理 Turn terminal 四项同时成立，consumer 才冻结并
 投递一个逻辑终态；该 exact Turn 必须是完整 history 的最后一个物理 Turn。流已结束后，
 若公开历史显示其后还有新 Turn，即使 Goal/Thread 仍 active，也按观测失配保留 unknown
@@ -941,7 +953,8 @@ consumer 的有界终态 handoff 结束，再用一次有界 `goal/get` 和完�
 本地 Goal 槽并推进 admission revision。读取失败、notLoaded、仍 active 或身份不符均只
 保留该 Goal；不后台轮询、不自动 pause/clear、不补造遗漏的 Result/Files，也不重新
 打开已关闭的实例 admission。旧 Goal 的 steer admission 仍失效，不能变成新 Turn。
-原生 start/steer/pause/clear 等 mutation 结果未知或 cleanup 未完成不通过这条路径释放。
+原生 start/pause/clear 等控制 mutation 结果未知、steer 身份响应不可验证或取消，
+以及 cleanup 未完成，均不通过这条路径释放。
 单个物理 Turn
 completed 不代表 Goal 完成。四项证据完成后，
 只有 persisted Goal 为 `complete` 且 exact 最终物理 Turn 为 `completed` 时才自动执行一次
@@ -1870,8 +1883,10 @@ read 保留 `turnLimit`（默认 1，上限 10）、`includeOutputs`、每项输
 仅 `read_thread` 超出该预算时采用 CLI `rust-v0.163.0` 的裁剪策略：每轮保留最后一条
 Agent 消息（没有则为空），精简 Thread/Turn 元数据；仍超限时按实际 UTF-8 字节预算
 二分裁短文本。保留消息 phase、轮次状态、原生分页与 `netizen` 扩展信息并标注截断，
-不将过程消息解释为完成；元数据本身无法容纳时沿用明确的超限错误。预算内返回和其他
-工具的裁剪行为不变。
+不将过程消息解释为完成；元数据本身无法容纳时沿用明确的超限错误。预算内返回不变。
+其他结果同样由具体投影指定可缩短的标题、摘要、回答正文和错误说明；默认保留其他字段，
+不按全局字段名名单递归裁剪字符串或任意工具结构。身份、状态/phase、项目标识、完整位置
+链接与游标保持原值；允许省略的内容以整块截断标记表达，预算不足不能改写已接受回执。
 本功能的 `netizen_sessions` create/send 来信在默认读取中单独保留
 `codexDelegation.sourceThreadId/input`，来源与正文按委派摘要展示；它仍是工具来源，
 其他工具输出继续遵循 `includeOutputs`，摘要也受既有输出预算约束。
@@ -2577,6 +2592,13 @@ worktree 安全删除全部确认后才完成 Project 删除。worktree 失败�
 
 ## 飞书命令与控制卡片
 
+普通控制卡动作按经过验证的目标统一选择错误反馈位置。错误类别只决定说明内容和结果
+性质，不通过各异常分支的动作白名单决定是否补文字。Goal、Side、Settings 或普通错误卡
+更新失败时，统一向原卡对应位置尝试一次文字说明；重绘成功不重复发文字，反馈失败不重放
+业务动作。原消息身份验证后即保留反馈位置，表单字段解码失败或 fork 卡片错误也使用同一
+出口。文字回复固定 `reply_target_gone="fail"`：原卡不可回帖时允许反馈失败，不能从话题
+降级到所在群主线。缺少已验证 Scope、原卡或持久 Side 根消息身份时不猜测文字投递位置。
+
 ### Project 设置卡片
 
 `/settings` 和零参数 `/new` 使用 Card 2.0。Settings 是可扩展的分区界面，当前只
@@ -2973,7 +2995,7 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
   权威观测时，只做一次最多 5 秒/三次原生 I/O 的短恢复。exact `active/inProgress` 回到
   普通无时限轮询；仍不可验证则进入无周期 I/O 的 Binding-local
   `turn-observation-unavailable`。用户可在 `/sessions` 有界重检、停止、归档或删除；
-  lifecycle 不依赖观测先恢复。只有 start/steer、Context Boundary
+  lifecycle 不依赖观测先恢复。start、steer 取消或 Goal receipt 身份不可验证、Context Boundary
   提交、Goal/compaction 或已经开始的不可逆 lifecycle 等副作用未知边界，才沿用各自的
   fail-closed 规则；lifecycle unknown 本身只隔离目标 Binding。
 - Python SDK interrupt 后前台工具进程可能继续运行；ADR 0009 的 experimental clean
@@ -2989,7 +3011,10 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
 - `compact()` 的空响应不是终态；若公开 history 无法确认唯一的新
   `contextCompaction` candidate、出现多个 candidate 或 10 分钟内没有终态，运行时
   保持 Binding reserved 并关闭新 admission，不能把可能仍在压缩的 Thread 当作 idle。
-- Goal mutation、通知流、四重终态证据或 complete-only clear 无法确认时保留 Goal slot；
+- 一般 steer SDK/RPC 错误按 [ADR 0088](adr/0088-align-steer-failures-and-input-resume-rejections.md)
+  保留原执行并反馈本次追加未确认；不自动重试、不登记成功，不单独改变 Side/Goal 状态或
+  关闭其他会话准入。取消和 Goal receipt 身份不可验证仍执行原有保护。
+- Goal 控制 mutation、通知流、四重终态证据或 complete-only clear 无法确认时保留 Goal slot；
   可能发生副作用的 start/resume/clear 会关闭进程级 admission，绝不自动重试。paused、
   blocked 与额度限制不自动 clear；权威结果即使在收尾不确定时仍通过普通任务回复展示。重启后发现外部 active
   Goal 只做只读隔离，当前 SDK 不能安全重挂是显式产品限制。

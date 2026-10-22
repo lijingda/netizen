@@ -1,9 +1,10 @@
-const state = { projects: null };
+window.location = { pathname: "/projects", search: "", assign() {} };
+window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
+const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 const requests = [];
-const refreshes = [];
-let status = "";
 let statusError = false;
-function setStatus(message, error = false) { status = message; statusError = error; }
+document.querySelector("#status").classList.toggle = (_name, error) => { statusError = error; };
 const confirmations = [];
 let confirmation = true;
 window.confirm = (message) => { confirmations.push(message); return confirmation; };
@@ -26,7 +27,7 @@ const preview = {
 let projects = [projectFixture()];
 let respond;
 let refreshFailed = false;
-async function api(path, options = {}) {
+async function fixtureResponse(path, options = {}) {
   requests.push({ path, options });
   if (path.startsWith("/api/v1/projects?")) {
     if (refreshFailed) throw new TypeError("offline");
@@ -34,9 +35,9 @@ async function api(path, options = {}) {
   }
   return respond(path, options);
 }
-async function refresh(tab) {
-  refreshes.push(tab);
-  try { await loadProjects(); return true; } catch { return false; }
+async function fetch(path, options = {}) {
+  const data = await fixtureResponse(path, options);
+  return { ok: true, status: 200, json: async () => data };
 }
 const postCount = (path) => requests.filter((request) => request.path === path).length;
 const resultMessage = () => document.querySelector("#project-delete-message").textContent;
@@ -45,6 +46,7 @@ const deletionButton = () => document.querySelector("#projects-body").querySelec
   .find((button) => button.textContent === "删除 Project 及关联 Sessions");
 // SHIPPED_PROJECT_CONTROLLER
 (async () => {
+  await flush();
   // Projects show local counts only; archive browsing belongs to Sessions.
   await loadProjects();
   const localCells = document.querySelector("#projects-body").querySelectorAll("td");
@@ -91,8 +93,7 @@ const deletionButton = () => document.querySelector("#projects-body").querySelec
   await deleteProject(state.projects.items[0]);
   assert.equal(postCount("/api/v1/projects/delete-preview"), 2);
   releasePreview(preview);
-  await Promise.resolve();
-  await Promise.resolve();
+  await flush();
   assert.equal(postCount("/api/v1/projects/delete"), 1);
   assert.deepEqual(JSON.parse(requests.find((request) => request.path.endsWith("/delete")).options.body),
     actionPayload(deleteEnvelope));
@@ -159,5 +160,5 @@ const deletionButton = () => document.querySelector("#projects-body").querySelec
   assert.equal(postCount("/api/v1/projects/delete"), beforePreviewFailure);
   assert.match(resultMessage(), /无法读取.*未提交删除/);
   assert.doesNotMatch(resultMessage(), /sensitive internal/);
-  assert(refreshes.every((tab) => tab === "projects"));
+  assert(requests.every(({ path }) => path.startsWith("/api/v1/projects")));
 })().catch((error) => { console.error(error); process.exitCode = 1; });

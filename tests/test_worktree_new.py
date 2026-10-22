@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from lark_channel import OutboundCard
+from lark_channel import OutboundCard, SendResult
 
 from netizen_cli.cards import ACTION_VERSION, CardActionError, decode_button_action, decode_card_form, new_binding_card
 from netizen_cli.cards.controls import _new_workspace_elements
@@ -19,7 +19,7 @@ from netizen_cli.model_settings import ModelCatalog
 from netizen_cli.projects import Project
 from netizen_cli.worktrees.errors import WorktreeError
 from netizen_cli.worktrees.settings import WorktreeSettingsService
-from tests.support.channel_cards import _card_button_value, _elements, direct_card_event, form_controls
+from tests.support.channel_cards import _card_button_value, _elements, direct_card_event, form_controls, form_values
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 
@@ -33,14 +33,7 @@ def options(*, git: bool = True, revision: int = 1) -> dict:
         "projectAlias": "test", "projectRevision": revision, "isGit": git,
         "items": [{"id": WORKTREE_ID, "cwd": "/worktrees/task", "branch": "task",
                    "head": "1234", "state": "ready", "available": True}],
-        "branches": [
-            {"name": "main", "ref": "refs/heads/main", "remote": False,
-             "occupiedPaths": ["/project"]},
-            {"name": "topic", "ref": "refs/heads/topic", "remote": False,
-             "occupiedPaths": []},
-            {"name": "origin/main", "ref": "refs/remotes/origin/main", "remote": True,
-             "occupiedPaths": []},
-        ],
+
     }
 
 
@@ -102,20 +95,18 @@ class WorktreeNewCardTest(unittest.TestCase):
         selected = fields(self.render(options()))
         self.assertEqual(selected["new_workspace"]["initial_option"], "workspace:v1:test:1:project")
         self.assertEqual(selected["new_worktree_mode"]["initial_option"], "detached")
-        self.assertEqual(selected["new_worktree_ref"]["initial_option"], "HEAD")
+        self.assertEqual(selected["new_worktree_ref"]["default_value"], "HEAD")
         self.assertEqual(len(selected["new_workspace"]["options"]), 3)
-        self.assertIn("已占用", str(selected["new_worktree_ref"]["options"][1]))
+        self.assertEqual(selected["new_worktree_ref"]["tag"], "input")
 
-    def test_all_ready_items_and_branch_options_are_rendered_without_truncation(self):
+    def test_existing_worktree_options_preserve_branch_display_with_free_ref_input(self):
         data = options()
         data["items"] += [{"id": "missing", "cwd": "/missing", "state": "missing", "available": False}]
-        data["branches"] += [
-            {"name": f"topic-{n}", "ref": f"refs/heads/topic-{n}", "remote": False,
-             "occupiedPaths": []} for n in range(120)
-        ]
         selected = fields(self.render(data))
         self.assertEqual(len(selected["new_workspace"]["options"]), 3)
-        self.assertEqual(len(selected["new_worktree_ref"]["options"]), 124)
+        self.assertIn("已有 worktree · task", str(selected["new_workspace"]["options"]))
+        self.assertEqual(selected["new_worktree_ref"]["tag"], "input")
+        self.assertNotIn("options", selected["new_worktree_ref"])
 
     def test_workspace_layout_is_last_and_keeps_original_controls(self):
         data = options()
@@ -151,6 +142,9 @@ class WorktreeNewCardTest(unittest.TestCase):
             ({"new_worktree_mode": "new", "new_worktree_ref": "refs/remotes/origin/main",
               "new_worktree_branch": "feature/task"},
              {"mode": "new", "ref": "refs/remotes/origin/main", "branch": "feature/task"}),
+            ({"new_worktree_ref": ""}, {"mode": "detached", "ref": "HEAD", "branch": None}),
+            ({"new_worktree_mode": "existing", "new_worktree_ref": " topic "},
+             {"mode": "existing", "ref": "refs/heads/topic", "branch": "topic"}),
             ({"new_worktree_mode": "existing", "new_worktree_ref": "refs/heads/topic"},
              {"mode": "existing", "ref": "refs/heads/topic", "branch": "topic"}),
         ):
@@ -165,6 +159,7 @@ class WorktreeNewCardTest(unittest.TestCase):
             values("new", new_worktree_mode="existing", new_worktree_ref="refs/remotes/origin/main"),
             values("new", new_worktree_mode="new"),
             values("new", new_worktree_mode="force"),
+            values("new", new_worktree_ref=False),
             values("new", new_cwd="/arbitrary"),
             {key: value for key, value in values().items() if key != "new_worktree_mode"},
         )
@@ -348,7 +343,7 @@ class WorktreeNewChannelTest(unittest.IsolatedAsyncioTestCase):
             selected = fields(card)
             self.assertEqual(len(selected["new_model"]["options"]), 21)
             self.assertEqual(len(selected["new_workspace"]["options"]), 3)
-            self.assertEqual(len(selected["new_worktree_ref"]["options"]), 4)
+            self.assertEqual(selected["new_worktree_ref"]["default_value"], "HEAD")
             for name in ("new_model", "new_effort", "new_speed", "new_progress_card", "new_context_mode"):
                 self.assertEqual(selected[name]["initial_option"], draft[name])
             self.assertIsNone(f.store.active_binding(scope.key))
@@ -357,7 +352,7 @@ class WorktreeNewChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_load_update_failure_reports_no_session_created(self):
         async with channel_fixture() as f:
             service = SimpleNamespace(options=AsyncMock(return_value=options()))
-            f.channel.card_update_results.append(SimpleNamespace(success=False))
+            f.channel.card_update_results.append(SendResult(success=False))
             with patch.object(f.app, "_management", SimpleNamespace(worktrees=service)), \
                  self.assertLogs("netizen_cli.channel_app", level="ERROR"):
                 await f.app.handle_card_action(load_event(f.channel))
@@ -443,9 +438,7 @@ class WorktreeNewChannelTest(unittest.IsolatedAsyncioTestCase):
                            new_progress_card="task-feedback:v2:off", new_completion_mention="task-feedback:v2:off")
             with patch.object(f.app, "_management", SimpleNamespace(worktrees=service)):
                 await f.app.handle_card_action(load_event(f.channel, draft))
-            refreshed = fields(f.channel.updates[-1][1])
-            submit = {name: item["initial_option"] for name, item in refreshed.items()
-                      if item["tag"] == "select_static"}
+            submit = form_values(OutboundCard(card=f.channel.updates[-1][1]))
             await f.app.handle_card_action(direct_card_event(f.channel, submit))
             binding = f.store.active_binding(SCOPE.key)
             self.assertIsNotNone(binding)

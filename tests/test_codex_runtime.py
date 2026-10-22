@@ -1352,6 +1352,33 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeClosed):
             await self.runtime.capture_side_submission_admission(record.id)
 
+    async def test_side_steer_error_preserves_running_side_and_other_inputs(self) -> None:
+        binding, record, _ = await self.open_side()
+        first = await self.runtime.submit_side(
+            side_id=record.id, input="first", owner_id="ou_owner", origin=object(),
+        )
+        handle = self.codex.handles[-1]
+        failure = TransportClosedError("steer response lost")
+        with patch.object(handle, "steer", side_effect=failure) as steer:
+            with self.assertRaises(TransportClosedError) as caught:
+                await self.runtime.submit_side(
+                    side_id=record.id, input="adjust", owner_id="ou_owner", origin=object(),
+                )
+            self.assertIs(caught.exception, failure)
+            steer.assert_awaited_once_with("adjust")
+        self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
+        self.assertEqual(self.runtime._sides[record.id].active.steer_count, 0)
+        self.assertEqual(self.runtime.side_snapshot(record.id).turn_id, first.turn_id)
+        self.assertTrue(self.runtime._accepting)
+        parent = await self.runtime.submit(
+            binding=binding, cwd=self.cwd, input="independent input",
+            owner_id="ou_owner", origin=object(),
+        )
+        self.assertEqual(parent.disposition, SubmitDisposition.STARTED)
+        self.codex.handles[-1].complete()
+        parent.release_receipt_attempt()
+        await self.finish_side_turn(first)
+
     async def test_exact_side_stop_rejects_replacement_turn_and_idle_aba(self) -> None:
         _binding, record, initial = await self.open_side()
         self.assertEqual(await self.runtime.stop_side(
@@ -6288,9 +6315,32 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsInstance(self.outcomes[-1].error, GoalStateUnknown)
 
+    async def test_goal_steer_rpc_error_preserves_goal_and_context_boundary(self) -> None:
+        binding, handle, goal = await self.start_fake_goal(self.catch_up_binding())
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        failure = TransportClosedError("steer response lost")
+        handle.steer_error = failure
+        with self.assertRaises(TransportClosedError) as caught:
+            await self.submit(
+                binding, "adjust", admission,
+                ContextCursorCommit(admission.context_revision, MessageContextAnchor("om-later", 2_000)),
+            )
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(handle.steers, [(goal.logical_turn_id, "adjust")])
+        self.assertEqual(self.runtime.active_goal(binding.id).state, GoalOperationState.RUNNING)
+        self.assertEqual(self.store.get(binding.id).context_anchor, binding.context_anchor)
+        self.assertTrue(self.runtime._accepting)
+        other = self.binding(FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT))
+        independent = await self.submit(other, "independent input")
+        self.codex.handles[-1].complete()
+        independent.release_receipt_attempt()
+        handle.finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+
     async def test_unconfirmed_goal_steer_retains_unknown_slot_without_retry(self) -> None:
         binding, handle, goal = await self.start_fake_goal()
-        handle.steer_error = GoalMutationStateUnknown("response lost")
+        handle.steer_error = GoalMutationStateUnknown("wrong physical Turn receipt")
         handle.steer_gate = asyncio.Event()
         pending = asyncio.create_task(self.submit(binding, "unknown acceptance"))
         await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
@@ -7062,7 +7112,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_goal_mutation_unknown_is_not_released_after_observation_failure(self) -> None:
         binding, handle, _ = await self.start_fake_goal()
-        handle.steer_error = GoalMutationStateUnknown("steer response lost")
+        handle.steer_error = GoalMutationStateUnknown("wrong physical Turn receipt")
         with self.assertRaises(GoalStateUnknown):
             await self.submit(binding, "uncertain mutation")
         with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
@@ -9149,6 +9199,31 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         await self.finish(handle, first)
 
+    async def test_ordinary_steer_error_preserves_turn_and_context_boundary(self) -> None:
+        binding = self.catch_up_binding()
+        initial_admission = await self.runtime.capture_submission_admission(binding.id)
+        first = await self.submit(
+            binding, "first", initial_admission,
+            ContextCursorCommit(initial_admission.context_revision, MessageContextAnchor("om-first", 1_500)),
+        )
+        binding = self.store.get(binding.id)
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        handle = self.codex.handles[-1]
+        failure = TransportClosedError("steer response lost")
+        with patch.object(handle, "steer", side_effect=failure) as steer:
+            with self.assertRaises(TransportClosedError) as caught:
+                await self.submit(
+                    binding, "adjust", admission,
+                    ContextCursorCommit(admission.context_revision, MessageContextAnchor("om-later", 2_000)),
+                )
+            self.assertIs(caught.exception, failure)
+            steer.assert_awaited_once_with("adjust")
+        self.assertEqual(self.store.get(binding.id).context_anchor, binding.context_anchor)
+        self.assertEqual(self.runtime._active[binding.id].steer_count, 0)
+        self.assertEqual(self.runtime.active_turn(binding.id).turn_id, first.turn_id)
+        self.assertTrue(self.runtime._accepting)
+        await self.finish(handle, first)
+
     async def test_thread_start_response_loss_closes_admission_without_retry(
         self,
     ) -> None:
@@ -9180,6 +9255,44 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "服务正在停止"):
             await self.submit(binding, "must not retry")
         self.assertEqual(len(self.codex.resume_calls), 1)
+
+    async def test_verified_resume_rejections_are_local_with_or_without_skills(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-existing")
+        self.runtime._skill_catalog = FakeSkillCatalog(fake_skills())
+        for skill_names in ((), ("code-review",)):
+            for message in (
+                "session native-existing is archived. Run `codex unarchive native-existing` to unarchive it first.",
+                "no rollout found for thread id native-existing",
+                "thread native-existing is closing; retry thread/resume after the thread is closed",
+            ):
+                with self.subTest(skill_names=skill_names, message=message):
+                    self.codex.resume_errors.append(InvalidRequestError(-32600, message))
+                    with self.assertRaises(ThreadLifecycleError):
+                        await self.runtime.submit(
+                            binding=binding, cwd=self.cwd, input="adjust",
+                            owner_id="ou_user", origin=object(), skill_names=skill_names,
+                        )
+                    self.assertEqual(self.store.get(binding.id).native_thread_id, "native-existing")
+                    self.assertEqual(self.store.active_binding(self.scope.key).id, binding.id)
+                    self.assertIsNone(self.runtime.thread_subscription_snapshot(binding.id))
+                    self.assertTrue(self.runtime._accepting)
+                    self.assertEqual(self.codex.turn_inputs, [])
+        self.assertEqual(len(self.codex.resume_calls), 6)
+        self.assertEqual(self.cleanup.calls, [])
+        other = self.binding(FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT))
+        independent = await self.submit(other, "independent input")
+        await self.finish(self.codex.handles[-1], independent)
+
+    async def test_resume_wrong_identity_closes_admission_before_input(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-existing")
+        self.codex.resume_thread_id_override = "different-thread"
+        with self.assertRaises(TurnStartFailed):
+            await self.submit(binding, "must not send")
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-existing")
+        self.assertEqual(self.codex.turn_inputs, [])
+        self.assertFalse(self.runtime._accepting)
 
     async def test_occupied_thread_preserves_binding_and_other_work_then_resumes_same_id(
         self,

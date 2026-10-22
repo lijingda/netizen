@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _READ_SECONDS = 15.0
 _MUTATION_SECONDS = 120.0
-_INVENTORY_LIMIT = 1000
+_SIDE_INVENTORY_LIMIT = 1000
 
 
 class WorktreeService:
@@ -170,46 +170,34 @@ class WorktreeService:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def branches(self, *, project_alias: str, source_cwd: str | Path | None = None) -> dict[str, Any]:
-        project = self._project(project_alias)
-        source = Path(source_cwd) if source_cwd is not None else Path(project.cwd)
-        try:
-            async with asyncio.timeout(_READ_SECONDS):
-                repository = await self._git.inspect_repository(source)
-                if source_cwd is not None:
-                    owner = await self._git.inspect_repository(Path(project.cwd))
-                    if repository.common_dir != owner.common_dir:
-                        raise WorktreeError("conflict", "来源会话目录不属于所选 Project 的仓库。")
-                values = await self._git.list_branches(source)
-                if len(values) > _INVENTORY_LIMIT:
-                    raise WorktreeError("unavailable", "仓库分支超过当前选项上限，请先缩小仓库分支范围。")
-                return {"projectAlias": project_alias, "projectRevision": project.revision, "isGit": True,
-                        "defaultRef": "HEAD",
-                        "items": [
-                            {"name": value.name, "ref": value.ref, "commit": value.commit,
-                             "remote": value.remote, "occupiedPaths": list(map(str, value.occupied_paths))}
-                            for value in values]}
-        except GitError as error:
-            raise WorktreeError("not_git" if isinstance(error, NotGitRepository) else "unavailable",
-                                "无法读取 Git 仓库或分支信息；未修改目录。") from error
-        except TimeoutError as error:
-            raise WorktreeError("unavailable", "分支信息未在时限内取得；未修改目录，请稍后刷新。") from error
-
-    async def options(self, *, project_alias: str, expected_project_revision: int | None = None) -> dict[str, Any]:
+    async def creation_options(
+        self, *, project_alias: str, expected_project_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Check creation eligibility without enumerating branch candidates."""
         project = self._project(project_alias, expected_project_revision)
         try:
-            branches = await self.branches(project_alias=project_alias)
-        except WorktreeError as error:
-            if error.code == "not_git":
-                return {"projectAlias": project_alias, "projectRevision": project.revision,
-                        "isGit": False, "items": [], "branches": []}
-            raise
+            async with asyncio.timeout(_READ_SECONDS):
+                await self._git.inspect_repository(Path(project.cwd))
+        except NotGitRepository:
+            return {"projectAlias": project_alias, "projectRevision": project.revision, "isGit": False}
+        except GitError as error:
+            raise WorktreeError("unavailable", "无法读取 Project 的 Git 仓库；未修改目录。") from error
+        except TimeoutError as error:
+            raise WorktreeError("unavailable", "Git 仓库状态未在时限内取得；未修改目录，请稍后刷新。") from error
+        return {"projectAlias": project_alias, "projectRevision": project.revision, "isGit": True}
+
+    async def options(self, *, project_alias: str, expected_project_revision: int | None = None) -> dict[str, Any]:
+        eligibility = await self.creation_options(
+            project_alias=project_alias, expected_project_revision=expected_project_revision,
+        )
+        if not eligibility["isGit"]:
+            return {**eligibility, "items": []}
+        project = self._project(project_alias, eligibility["projectRevision"])
         records = self._store.list_for_project(project_alias, generation=project.generation)
         states = await self._states(records, deadline=asyncio.get_running_loop().time() + _READ_SECONDS + 2)
         items = [self._view(record, state) for record, state in zip(records, states, strict=True)
                  if record.creation_state == "ready" and state.status == "ready"]
-        return {"projectAlias": project_alias, "projectRevision": project.revision,
-                "isGit": True, "items": items, "branches": branches["items"]}
+        return {**eligibility, "items": items}
 
     async def select(self, *, project_alias: str, worktree_id: str,
                      expected_project_revision: int | None = None) -> WorktreeRecord:
@@ -351,7 +339,7 @@ class WorktreeService:
                 extra_side_ids=extra, cursor=cursor, limit=100, deadline_seconds=1)
             selected.extend(item.side_topic for item in page.items
                             if item.side_topic.parent_binding_id in parents or item.side_topic.id in extra)
-            if len(selected) > _INVENTORY_LIMIT:
+            if len(selected) > _SIDE_INVENTORY_LIMIT:
                 raise WorktreeError("unavailable", "关联 Side 超过单次清理上限。")
             cursor = page.next_cursor
             if cursor is None:

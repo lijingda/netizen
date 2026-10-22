@@ -9,6 +9,9 @@ intent. If native Codex adds trust metadata, cleanup removes only the exact new
 fixture Project entries, preserving other configuration text and values.
 Wrap the command in the platform's timeout/gtimeout as an additional process
 deadline; ``--timeout`` bounds the asynchronous scenario itself.
+``--phase worktree`` instead uses an isolated bundled App Server and loopback
+mock model, so it needs no --model or real account. Use --output to retain its
+sanitized result together with the checkout commit and dirty-state evidence.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import argparse
 import asyncio
 import copy
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -26,6 +30,7 @@ import tempfile
 import time
 import tomllib
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -33,16 +38,18 @@ from typing import Any
 import openai_codex
 from openai_codex import AsyncCodex, AsyncThread, CodexConfig
 from openai_codex.errors import JsonRpcError
+from lark_channel import SendResult
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from netizen_cli.worktrees.policy import WorkspacePolicy  # noqa: E402
+from netizen_cli.worktrees.settings import WorktreeSettingsService  # noqa: E402
 from netizen_cli.bindings import BindingNotFound, BindingStore  # noqa: E402
 from netizen_cli.channel_app import ChannelApplication  # noqa: E402
 from netizen_cli.chat_targets import ValidatedChatTarget  # noqa: E402
-from netizen_cli.codex_runtime import CodexRuntime, StopDisposition  # noqa: E402
+from netizen_cli.codex_runtime import CodexRuntime, StopDisposition, _native_cwd  # noqa: E402
 from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
 from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
 from netizen_cli.management.service import InstanceManagementService, ManagementRuntimePort  # noqa: E402
@@ -125,7 +132,7 @@ class FakeFeishu:
     bot_identity = SimpleNamespace(open_id="probe-bot", name="Schedule probe")
 
     def __init__(self, *, create_topics: bool = True) -> None:
-        self.sent: dict[str, object] = {}
+        self.sent: dict[str, SendResult] = {}
         self.replies = 0
         self.create_topics = create_topics
 
@@ -136,7 +143,7 @@ class FakeFeishu:
         # This harness deliberately has no real Feishu client or credentials.
         return ValidatedChatTarget(chat_id, "group")
 
-    async def send(self, to: str, content: object, opts: object = None) -> object:
+    async def send(self, to: str, content: object, opts: object = None) -> SendResult:
         key = getattr(opts, "uuid", None)
         _require(isinstance(key, str) and bool(key), "fixture_send_requires_uuid")
         if key not in self.sent:
@@ -144,10 +151,10 @@ class FakeFeishu:
             data = {"message_id": message_id, "chat_id": to}
             if self.create_topics:
                 data.update(thread_id="probe-topic-" + key, root_id=message_id)
-            self.sent[key] = SimpleNamespace(success=True, message_id=message_id, chunk_ids=[], raw={"code": 0, "data": data})
+            self.sent[key] = SendResult(success=True, message_id=message_id, chunk_ids=[], raw={"code": 0, "data": data})
         return self.sent[key]
 
-    async def reply(self, message: object, content: object, opts: object = None) -> object:
+    async def reply(self, message: object, content: object, opts: object = None) -> SendResult:
         self.replies += 1
         message_id = "probe-reply-" + str(self.replies)
         data = {
@@ -156,16 +163,16 @@ class FakeFeishu:
             "thread_id": getattr(getattr(message, "conversation", None), "thread_id", None),
             "parent_id": getattr(opts, "reply_to", None) or getattr(message, "message_id", None),
         }
-        return SimpleNamespace(success=True, message_id=message_id, chunk_ids=[], raw={"code": 0, "data": data})
+        return SendResult(success=True, message_id=message_id, chunk_ids=[], raw={"code": 0, "data": data})
 
-    async def add_reaction(self, message_id: str, emoji_type: str) -> object:
-        return SimpleNamespace(success=True, raw={"data": {"reaction_id": "probe-reaction"}})
+    async def add_reaction(self, message_id: str, emoji_type: str) -> SendResult:
+        return SendResult(success=True, raw={"data": {"reaction_id": "probe-reaction"}})
 
-    async def remove_reaction(self, message_id: str, reaction_id: str) -> object:
-        return SimpleNamespace(success=True)
+    async def remove_reaction(self, message_id: str, reaction_id: str) -> SendResult:
+        return SendResult(success=True)
 
-    async def update_card(self, message_id: str, card: dict[str, Any]) -> object:
-        return SimpleNamespace(success=True)
+    async def update_card(self, message_id: str, card: dict[str, Any]) -> SendResult:
+        return SendResult(success=True)
 
 
 class McpRecorder:
@@ -960,8 +967,249 @@ async def _binding_phase(
         await management.close(deadline=asyncio.get_running_loop().time() + 5)
 
 
-async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
+def _worktree_git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.name=Netizen Isolated Probe",
+         "-c", "user.email=probe@example.invalid", *args],
+        cwd=cwd, check=True, capture_output=True, text=True, timeout=10,
+        env={**{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+    ).stdout.strip()
+
+
+async def _worktree_phase(root: Path) -> dict[str, object]:
+    from scripts.probe_sdk_partial_answers import (
+        isolated_config, message_events, mock_provider, response_events,
+    )
+
+    replies = [
+        (200, response_events(name, *message_events(name + "-answer", text, "final_answer")))
+        for name, text in (
+            ("new-initial", "NEW-WORKTREE-INITIAL-OK"),
+            ("new-followup", "NEW-WORKTREE-FOLLOWUP-OK"),
+            ("existing-initial", "EXISTING-WORKTREE-INITIAL-OK"),
+            ("existing-followup", "EXISTING-WORKTREE-FOLLOWUP-OK"),
+        )
+    ]
+    with mock_provider(replies) as provider:
+        project_cwd, native_env = isolated_config(root, provider)
+        config_path = Path(native_env["CODEX_HOME"]) / "config.toml"
+        config_path.write_text(
+            'sandbox_mode = "read-only"\n' + config_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        _worktree_git(project_cwd, "init", "-q", "--initial-branch=main")
+        (project_cwd / "committed.txt").write_text("COMMITTED-PROBE-CONTENT\n")
+        _worktree_git(project_cwd, "add", "committed.txt")
+        _worktree_git(project_cwd, "commit", "-q", "-m", "isolated probe baseline")
+        project_head = _worktree_git(project_cwd, "rev-parse", "HEAD")
+        (project_cwd / "committed.txt").write_text("UNCOMMITTED-SOURCE-CONTENT\n")
+        (project_cwd / "untracked.txt").write_text("NOT-FOR-WORKTREE\n")
+        store = BindingStore(root / "channel.sqlite3")
+        try:
+            projects = ProjectRegistry(
+                store=store, project_root=root, projects={"probe": project_cwd},
+            )
+            channel = FakeFeishu()
+            source = store.create_channel_binding(
+                scope=FeishuScope("probe", "probe-chat", ScopeKind.GROUP),
+                project_alias="probe", creator_id="probe-owner",
+            )
+            async with AsyncCodex(CodexConfig(cwd=str(project_cwd), env=native_env)) as codex:
+                runtime = CodexRuntime(
+                    codex=codex, bindings=store,
+                    terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
+                    thread_subscription_control=AppServerThreadSubscriptionControl(codex),
+                    automatic_thread_naming=False, poll_interval_seconds=0.01,
+                )
+                management = InstanceManagementService(
+                    bindings=store, projects=projects,
+                    runtime=ManagementRuntimePort(runtime),
+                    scope_coordinator=ScopeCoordinator(), chat_directory=channel,
+                    root=root / "instance",
+                )
+                management.enable_worktrees(settings=WorktreeSettingsService(
+                    default_root=root / "managed-worktrees",
+                ))
+                application = ChannelApplication(
+                    app_id="probe", channel=channel, runtime=runtime, bindings=store,
+                    projects=projects, management=management,
+                    instance_root=root / "instance",
+                )
+                outcomes: asyncio.Queue[TurnOutcome | BaseException] = asyncio.Queue()
+
+                async def completed(outcome: object) -> None:
+                    try:
+                        await application.handle_completion(outcome)
+                    except BaseException as error:
+                        outcomes.put_nowait(error)
+                        raise
+                    if isinstance(outcome, TurnOutcome):
+                        outcomes.put_nowait(outcome)
+
+                runtime.set_completion_handler(completed)
+
+                async def next_outcome() -> TurnOutcome:
+                    outcome = await asyncio.wait_for(outcomes.get(), 20)
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    assert outcome.status == "completed", outcome.status
+                    assert outcome.error is None, "worktree_turn_failed"
+                    assert await runtime.wait_idle(timeout=5)
+                    return outcome
+
+                clock = [1_800_000_000.0]
+                scheduler = Scheduler(store, runtime, "probe", application.dispatch_scheduled_run, lambda: clock[0])
+                cases = []
+                native_ids = []
+                shared_resource_id = None
+                try:
+                    await scheduler.recover()
+                    scheduler.start()
+                    for mode in ("new", "existing"):
+                        workspace = (
+                            WorkspacePolicy("new") if mode == "new"
+                            else WorkspacePolicy("existing", worktree_id=shared_resource_id)
+                        )
+                        initial_input = f"Return the scripted {mode} initial fixture response."
+                        followup_input = f"Return the scripted {mode} followup fixture."
+                        plan = store.schedules.create(
+                            name=f"{mode} isolated native probe",
+                            instructions=initial_input,
+                            project_alias="probe", app_id="probe", chat_id="probe-chat",
+                            schedule=ScheduleRule("once", "UTC", at=datetime.fromtimestamp(clock[0] + 60, UTC).isoformat()),
+                            request_id=f"probe-create-{mode}", now=clock[0], workspace=workspace,
+                        )
+                        sends_before = len(channel.sent)
+                        requests_before = len(provider.requests)
+                        clock[0] += 60
+                        assert await scheduler.tick() == 1
+                        assert await scheduler.drain(asyncio.get_running_loop().time() + 15)
+                        runs = store.schedules.list_runs(plan.plan_id)
+                        assert len(runs) == 1
+                        run = runs[0]
+                        assert run.binding_id is not None
+                        assert run.initial_turn_id is not None
+                        assert run.worktree_id is not None
+                        binding = store.get(run.binding_id)
+                        assert binding.native_thread_id is not None
+                        native_ids.append(binding.native_thread_id)
+                        if mode == "new":
+                            shared_resource_id = run.worktree_id
+                        assert run.worktree_id == shared_resource_id
+                        assert binding.worktree_id == shared_resource_id
+                        record = store.worktrees.get(shared_resource_id)
+                        selected_cwd = Path(record.cwd)
+                        assert selected_cwd != project_cwd
+                        assert binding.working_cwd == str(selected_cwd)
+                        assert _worktree_git(selected_cwd, "rev-parse", "HEAD") == project_head
+                        assert _worktree_git(selected_cwd, "branch", "--show-current") == ""
+                        assert (selected_cwd / "committed.txt").read_text() == "COMMITTED-PROBE-CONTENT\n"
+                        assert not (selected_cwd / "untracked.txt").exists()
+                        first = await next_outcome()
+                        assert first.cwd == selected_cwd
+                        assert first.thread_id == binding.native_thread_id
+                        assert first.turn_id == run.initial_turn_id
+                        assert first.final_response == f"{mode.upper()}-WORKTREE-INITIAL-OK"
+                        first_native = (
+                            await AsyncThread(codex, binding.native_thread_id).read(include_turns=True)
+                        ).thread
+                        assert _native_cwd(first_native, binding.native_thread_id) == selected_cwd
+                        assert first_native.ephemeral is False
+                        assert len(first_native.turns) == 1
+                        finished_run = store.schedules.get_run(run.id)
+                        assert finished_run.barrier == "released"
+                        assert finished_run.delivery_state == "sent"
+                        assert len(channel.sent) == sends_before + 1
+                        assert len(provider.requests) == requests_before + 1
+                        assert json.dumps(provider.requests[requests_before]).count(initial_input) == 1
+                        assert store.active_binding(source.scope_key).id == source.id
+                        assert len(store.worktrees.list_for_project("probe")) == 1
+                        origin = SimpleNamespace(
+                            id=f"probe-{mode}-followup", message_id=f"probe-{mode}-followup",
+                            chat_id="probe-chat", conversation=SimpleNamespace(thread_id=run.topic_id),
+                        )
+                        admission = await runtime.capture_submission_admission(binding.id)
+                        followup = await runtime.submit(
+                            binding=store.get(binding.id), input=followup_input,
+                            owner_id="probe-owner", origin=origin, admission=admission,
+                        )
+                        assert followup.disposition.value == "started"
+                        assert followup.release_receipt_attempt is not None
+                        followup.release_receipt_attempt()
+                        second = await next_outcome()
+                        assert second.cwd == selected_cwd
+                        assert second.thread_id == binding.native_thread_id
+                        assert second.turn_id == followup.turn_id != run.initial_turn_id
+                        assert second.final_response == f"{mode.upper()}-WORKTREE-FOLLOWUP-OK"
+                        after = (
+                            await AsyncThread(codex, binding.native_thread_id).read(include_turns=True)
+                        ).thread
+                        assert _native_cwd(after, binding.native_thread_id) == selected_cwd
+                        assert len(after.turns) == 2
+                        assert after.turns[-1].id == followup.turn_id
+                        assert store.get(binding.id).worktree_id == shared_resource_id
+                        assert store.get(binding.id).working_cwd == str(selected_cwd)
+                        assert len(store.worktrees.list_for_project("probe")) == 1
+                        assert store.schedules.get_run(run.id).barrier == "released"
+                        assert len(provider.requests) == requests_before + 2
+                        assert json.dumps(provider.requests[requests_before + 1]).count(followup_input) == 1
+                        cases.append({
+                            "mode": mode, "passed": True,
+                            "production_scheduler": True,
+                            "production_channel_dispatch": True,
+                            "production_runtime": True,
+                            "initial_native_cwd_matches_selected_worktree": True,
+                            "run_binding_exact_worktree_id_matches": True,
+                            "initial_completion_cwd_matches": True,
+                            "initial_input_reached_model_once": True,
+                            "followup_without_cwd_override": True,
+                            "followup_input_reached_model_once": True,
+                            "followup_same_native_thread": True,
+                            "followup_native_and_completion_cwd_unchanged": True,
+                            "followup_created_no_worktree": True,
+                            "native_turns": len(after.turns),
+                            "initial_barrier_released_and_fixture_delivery_sent": True,
+                            "source_active_binding_unchanged": True,
+                            "detached_checkout_at_project_head": True,
+                            "only_committed_content_copied": True,
+                        })
+                finally:
+                    await scheduler.close()
+                    await scheduler.drain(asyncio.get_running_loop().time() + 3)
+                    await runtime.interrupt_all()
+                    await runtime.cancel_tasks()
+                    await application.close()
+                    await management.close(deadline=asyncio.get_running_loop().time() + 10)
+                assert len(set(native_ids)) == 2
+                assert len(provider.requests) == 4
+                assert not provider.errors, "mock_provider_error"
+                assert not provider.replies
+                assert _worktree_git(project_cwd, "branch", "--show-current") == "main"
+                assert (project_cwd / "committed.txt").read_text() == "UNCOMMITTED-SOURCE-CONTENT\n"
+                return {
+                    "passed": True, "sdk": openai_codex.__version__,
+                    "transport": "bundled App Server + loopback mock Responses + in-memory FakeFeishu",
+                    "cases": cases, "mock_model_requests": len(provider.requests),
+                    "real_model_requests": 0, "real_feishu_calls": 0,
+                    "temporary_git_repository": True, "managed_worktrees_created": 1,
+                    "distinct_native_threads": len(set(native_ids)),
+                    "temporary_native_home_and_codex_home": True,
+                    "user_codex_configuration_modified": False,
+                    "source_project_dirty_content_preserved": True,
+                }
+        finally:
+            store.close()
+
+
+async def probe(*, phase: str, model: str | None, timeout: float) -> dict[str, Any]:
     _require(openai_codex.__version__ == "0.163.0", "sdk_pin_mismatch")
+    if phase == "worktree":
+        async with asyncio.timeout(timeout):
+            with tempfile.TemporaryDirectory(prefix="netizen-scheduled-worktree-probe-") as temporary:
+                result = await _worktree_phase(Path(temporary))
+        return {**result, "temporary_state_cleaned": True}
+    _require(bool(model), "real_model_phase_requires_model")
     config_path = _user_config_path()
     before = _read_config(config_path)
     result: dict[str, Any] = {"passed": False, "read_only_startup_override": True, "real_feishu_calls": False}
@@ -969,6 +1217,10 @@ async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
     try:
         async with asyncio.timeout(timeout):
             with tempfile.TemporaryDirectory(prefix="netizen-schedule-probe-") as temporary:
+                if phase == "all":
+                    worktree_root = Path(temporary) / "worktree"
+                    worktree_root.mkdir()
+                    result["worktree"] = await _worktree_phase(worktree_root)
                 for selected in (("mcp", "mcp-recovery", "dispatch", "manual", "binding") if phase == "all" else (phase,)):
                     cwd = (Path(temporary) / selected).resolve()
                     cwd.mkdir()
@@ -1016,17 +1268,40 @@ async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", choices=("mcp", "mcp-recovery", "dispatch", "manual", "binding", "all"), default="all")
-    parser.add_argument("--model", required=True, help="explicit compatible model override for this test App Server only")
+    parser.add_argument("--phase", choices=("mcp", "mcp-recovery", "dispatch", "manual", "binding", "worktree", "all"), default="all")
+    parser.add_argument("--model", help="explicit compatible model override for this test App Server only")
     parser.add_argument("--timeout", type=float, default=300, help="total async scenario deadline in seconds; cleanup is bounded separately")
+    parser.add_argument("--output", type=Path, help="save the same sanitized JSON printed to stdout")
     return parser
+
+
+def source_evidence() -> dict[str, object]:
+    """Identify the checkout without exposing its path, remote or patch content."""
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", "-C", str(SOURCE_ROOT), *args],
+                              check=True, capture_output=True, timeout=10).stdout
+
+    patch = git("diff", "--binary", "HEAD", "--")
+    return {"source_commit": git("rev-parse", "HEAD").decode().strip(),
+            "source_dirty": bool(git("status", "--porcelain")),
+            "source_diff_sha256": hashlib.sha256(patch).hexdigest()}
+
+
+def write_result(result: dict[str, Any], output: Path | None) -> None:
+    payload = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    if output is not None:
+        output.write_text(payload, encoding="utf-8")
+    print(payload, end="", flush=True)
 
 
 def main() -> int:
     args = build_parser().parse_args()
     if not 10 <= args.timeout <= 1800:
         raise SystemExit("--timeout must be between 10 and 1800 seconds")
+    if args.phase != "worktree" and not args.model:
+        raise SystemExit("--model is required except for --phase worktree")
     logging.disable(logging.CRITICAL)
+    evidence = source_evidence()
     try:
         result = asyncio.run(probe(phase=args.phase, model=args.model, timeout=args.timeout))
     except Exception as error:
@@ -1037,9 +1312,9 @@ def main() -> int:
             failure["stop_rpc"] = error.rpc
         if isinstance(error, ProbeCompletionFailure):
             failure["completion"] = error.evidence
-        print(json.dumps(failure))
+        write_result({**evidence, **failure}, args.output)
         return 1
-    print(json.dumps(result, indent=2))
+    write_result({**evidence, **result}, args.output)
     return 0
 
 

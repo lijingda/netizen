@@ -20,9 +20,10 @@ from typing import Any, AsyncIterator, Protocol
 from openai_codex import AsyncCodex
 from openai_codex import _goal as _sdk_goal
 from openai_codex import _inputs as _sdk_inputs
-from openai_codex.errors import InvalidRequestError, JsonRpcError
+from openai_codex.errors import CodexError, InvalidRequestError, JsonRpcError
 from openai_codex.generated import v2_all as _generated
 from openai_codex.models import Notification
+from pydantic import ValidationError
 
 from .domain import GoalStatus
 from .progress_card_settings import ProgressCardSettings
@@ -974,11 +975,18 @@ class _AppServerGoalHandle:
             response = await self._client.turn_steer(
                 self.thread_id, expected_turn_id, native_input
             )
-        except (asyncio.CancelledError, InvalidRequestError):
-            raise
-        except Exception as error:
+        except (ValidationError, CodexError) as error:
+            # The pinned SDK rejects a non-object receipt before Pydantic,
+            # using this exact base error rather than a distinct response type.
+            # RPC/transport subclasses and unrelated SDK failures retain their
+            # ordinary steer semantics, even if their message is identical.
+            if not isinstance(error, ValidationError) and not (
+                type(error) is CodexError
+                and error.args == ("turn/steer response must be a JSON object",)
+            ):
+                raise
             raise GoalMutationStateUnknown(
-                "Codex Goal 追加消息结果未确认；不能自动重试。",
+                "Codex Goal 追加消息响应的物理 Turn 无法确认。",
                 handle=self,
                 physical_turn_id=expected_turn_id,
             ) from error

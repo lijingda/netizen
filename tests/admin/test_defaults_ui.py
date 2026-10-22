@@ -24,13 +24,7 @@ class DefaultsUiTest(unittest.TestCase):
         parts = [
             (static / "chat-picker.js").read_text(encoding="utf-8"),
             (static / "progress-card.js").read_text(encoding="utf-8"),
-            source[source.index("async function fetchChatPage("):source.index("let defaultsEditor =")],
-            source[source.index("function actionPayload("):source.index("async function mutate(")],
-            source[source.index("function cell("):source.index("function confirmMaterializedDelete(")],
-            source[source.index("async function queryProjectOptions("):source.index("async function loadSessionProjectOptions(")],
-            source[source.index("function defaultScheduleSessionSettings("):source.index("function renderScheduleSessionSettings(")],
-            source[source.index("let defaultsEditor ="):source.index("function scheduleDate(")],
-            source[source.index('defaultsInput("new").addEventListener'):source.index('scheduleInput("filter").addEventListener')],
+            source,
         ]
         fixture = Path(__file__).with_name("defaults_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_DEFAULTS_CONTROLLER\n")

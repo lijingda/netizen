@@ -6,10 +6,10 @@ window.NetizenWorktrees = (() => {
   const node = (name) => document.querySelector(`#worktree-${name}`);
   let dependencies;
   let settings = null;
-  let branches = null;
+  let creationOptions = null;
   let pending = false;
   let serial = 0;
-  let branchSerial = 0;
+  let creationSerial = 0;
   let editor = null;
   let cursor = null;
   let nextCursor = null;
@@ -59,7 +59,7 @@ window.NetizenWorktrees = (() => {
     node("new-branch").required = mode === "new";
     node("existing").required = mode === "existing";
     node("create-submit").disabled = disabled || editor?.kind !== "create" || editor.loading || editor.checking
-      || editor.uncertain || !branches?.actions?.create || (mode === "existing" && !node("existing").value);
+      || editor.uncertain || !creationOptions?.actions?.create || (mode === "existing" && !node("existing").value.trim());
     node("create-submit").textContent = pending && editor?.kind === "create" ? "正在创建…" : "创建 worktree";
     node("new").disabled = disabled;
     node("configure").disabled = disabled;
@@ -73,8 +73,8 @@ window.NetizenWorktrees = (() => {
     if (!saved && !confirmed && dirty() && !window.confirm("有未保存的修改，确定放弃吗？")) return false;
     const current = editor;
     editor = null;
-    branchSerial += 1;
-    branches = null;
+    creationSerial += 1;
+    creationOptions = null;
     settings = null;
     window.NetizenSelect?.close();
     node(current.kind).hidden = true;
@@ -89,14 +89,14 @@ window.NetizenWorktrees = (() => {
     const current = { kind, returnFocus, loading: true, checking: false, uncertain: false, checkAvailable: false, base: null };
     editor = current;
     settings = null;
-    branches = null;
+    creationOptions = null;
     if (kind === "settings") {
       node("root").value = ""; node("fetch").checked = false;
       node("effective-root").textContent = "";
     } else {
       node("project").replaceChildren(); option(node("project"), "", "选择 Project"); node("project").value = "";
       node("mode").value = "detached"; node("ref").value = ""; node("new-branch").value = "";
-      node("existing").replaceChildren(); node("existing").value = ""; node("refs").replaceChildren();
+      node("existing").value = "";
       node("create-note").textContent = ""; node("create-config").textContent = "";
     }
     current.base = values(kind);
@@ -149,32 +149,25 @@ window.NetizenWorktrees = (() => {
     return dependencies.api(path, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(dependencies.actionPayload(envelope, extra)) });
   }
-  async function loadBranches() {
+  async function loadCreationOptions() {
     const current = editor;
     if (current?.kind !== "create" || current.loading || pending || expired()) return;
-    const request = ++branchSerial;
+    const request = ++creationSerial;
     const project = node("project").value;
-    branches = null;
-    node("existing").replaceChildren(); node("existing").value = "";
-    node("refs").replaceChildren();
+    creationOptions = null;
+    node("existing").value = "";
     controls();
     if (!project || expired()) return;
     try {
-      const result = await dependencies.api(`/api/v1/worktrees/branches?${new URLSearchParams({ project })}`);
-      if (expired() || editor !== current || request !== branchSerial || node("project").value !== project) return;
-      branches = result;
-      option(node("existing"), "", "选择未被占用的本地分支");
-      for (const branch of result.items) {
-        option(node("refs"), branch.ref, branch.name);
-        if (!branch.remote) option(node("existing"), branch.name,
-          `${branch.name}${branch.occupiedPaths?.length ? "（已被其他 checkout 占用）" : ""}`, Boolean(branch.occupiedPaths?.length));
-      }
+      const result = await dependencies.api(`/api/v1/worktrees/create-options?${new URLSearchParams({ project })}`);
+      if (expired() || editor !== current || request !== creationSerial || node("project").value !== project) return;
+      creationOptions = result;
       node("create-note").textContent = result.isGit === false ? "该 Project 不是 Git 仓库，不能创建 worktree。"
         : "默认从此 Project 当前 HEAD 检出；不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。";
     } catch (error) {
-      if (editor === current && request === branchSerial && !expired()) node("create-note").textContent = error.message;
+      if (editor === current && request === creationSerial && !expired()) node("create-note").textContent = error.message;
     } finally {
-      if (request === branchSerial) controls();
+      if (request === creationSerial) controls();
     }
   }
   function renderRows(items) {
@@ -273,11 +266,11 @@ window.NetizenWorktrees = (() => {
     event.preventDefault();
     const current = editor;
     if (expired() || pending || current?.kind !== "create" || current.loading || current.checking
-        || current.uncertain || !branches?.actions?.create) return;
+        || current.uncertain || !creationOptions?.actions?.create) return;
     const mode = node("mode").value;
-    const branch = mode === "existing" ? node("existing").value : mode === "new" ? node("new-branch").value.trim() : null;
+    const branch = mode === "existing" ? node("existing").value.trim() : mode === "new" ? node("new-branch").value.trim() : null;
     const ref = mode === "existing" ? `refs/heads/${branch}` : node("ref").value.trim() || "HEAD";
-    const grant = branches.actions.create; branches.actions.create = null;
+    const grant = creationOptions.actions.create; creationOptions.actions.create = null;
     pending = true; controls(); editorMessage("正在创建 worktree…");
     let result;
     try {
@@ -339,7 +332,7 @@ window.NetizenWorktrees = (() => {
     dependencies = values;
     node("new").addEventListener("click", (event) => openEditor("create", event.currentTarget));
     node("configure").addEventListener("click", (event) => openEditor("settings", event.currentTarget));
-    node("project").addEventListener("change", loadBranches);
+    node("project").addEventListener("change", loadCreationOptions);
     for (const name of ["mode", "root", "fetch", "ref", "existing", "new-branch"]) {
       node(name).addEventListener(name === "mode" ? "change" : "input", controls);
     }
@@ -361,5 +354,5 @@ window.NetizenWorktrees = (() => {
     controls();
   }
   return { init, load, dirty, busy: () => pending, discard,
-    expire() { serial += 1; branchSerial += 1; controls(); } };
+    expire() { serial += 1; creationSerial += 1; controls(); } };
 })();

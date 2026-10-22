@@ -8,7 +8,7 @@ let disconnect = false;
 let creationResult;
 let settingsResult;
 let settingsSave;
-let branchResults = new Map();
+let creationOptionsResults = new Map();
 window.confirm = (text) => { confirmations.push(text); return confirmation; };
 const grant = (kind) => ({ csrfToken: `${kind}-csrf`, actionToken: `${kind}-once`, target: { resource: "worktree", targetId: "one" } });
 const row = (state = "ready") => ({ id: "one", projectAlias: "demo", root: "/worktrees/one", cwd: "/worktrees/one/sub",
@@ -16,11 +16,7 @@ const row = (state = "ready") => ({ id: "one", projectAlias: "demo", root: "/wor
   available: false,
   actions: { previewDelete: grant("preview") } });
 let rows = [row(), { ...row("missing"), id: "missing" }, { ...row("unknown"), id: "unknown" }, { ...row("replaced"), id: "replaced" }];
-const branches = { isGit: true, items: [
-  { name: "main", ref: "refs/heads/main", remote: false, occupiedPaths: ["/source"] },
-  { name: "feature", ref: "refs/heads/feature", remote: false, occupiedPaths: [] },
-  { name: "origin/main", ref: "refs/remotes/origin/main", remote: true, occupiedPaths: [] },
-], actions: { create: grant("create") } };
+const creationOptions = { isGit: true, actions: { create: grant("create") } };
 const settings = { root: "", effectiveRoot: "/instance/worktrees", fetchBeforeCreate: false,
   editable: true, actions: { save: grant("settings") } };
 const input = (id) => document.querySelector(`#worktree-${id}`);
@@ -38,9 +34,9 @@ async function api(path, options = {}) {
     return settingsSave ? settingsSave() : structuredClone(settings);
   }
   if (path.startsWith("/api/v1/worktrees?")) return { items: structuredClone(rows), nextCursor: path.includes("cursor") ? null : "second-page" };
-  if (path.startsWith("/api/v1/worktrees/branches?")) {
+  if (path.startsWith("/api/v1/worktrees/create-options?")) {
     const project = new URLSearchParams(path.split("?")[1]).get("project");
-    return branchResults.has(project) ? branchResults.get(project)() : structuredClone(branches);
+    return creationOptionsResults.has(project) ? creationOptionsResults.get(project)() : structuredClone(creationOptions);
   }
   if (path.endsWith("/create")) {
     if (creationResult) return creationResult();
@@ -112,8 +108,9 @@ async function api(path, options = {}) {
   input("project").value = "demo";
   await trigger("worktree-project", "change");
   assert.equal(input("create-submit").disabled, false);
-  assert.equal(input("existing").children.find((item) => item.value === "main").disabled, true);
-  assert.equal(input("existing").children.some((item) => item.value === "origin/main"), false);
+  assert.equal(input("existing").tagName.toLowerCase(), "input");
+  assert.equal(input("ref").getAttribute("list"), null);
+  assert.equal(input("existing").value, "");
   confirmation = false;
   assert.equal(await trigger("worktree-configure"), false);
   assert.equal(input("create-drawer").open, true);
@@ -154,10 +151,10 @@ async function api(path, options = {}) {
   await trigger("worktree-create", "submit");
   assert.equal(calls("/create").length, 1);
 
-  // Late branch results cannot create a grant for the old Project.
+  // Late creation eligibility results cannot create a grant for the old Project.
   await trigger("worktree-new");
   let resolveOld;
-  branchResults.set("demo", () => new Promise((resolve) => { resolveOld = resolve; }));
+  creationOptionsResults.set("demo", () => new Promise((resolve) => { resolveOld = resolve; }));
   input("project").value = "demo";
   const old = trigger("worktree-project", "change");
   input("project").value = "other";
@@ -179,7 +176,7 @@ async function api(path, options = {}) {
   await trigger("worktree-create-check");
   assert.match(input("create-status").textContent, /列表已刷新/);
   input("project").value = "demo";
-  branchResults.delete("demo");
+  creationOptionsResults.delete("demo");
   await trigger("worktree-project", "change");
   assert.equal(input("create-submit").disabled, true, "new branch reads cannot retry an unknown mutation");
   await trigger("worktree-create", "submit");
@@ -300,7 +297,7 @@ async function api(path, options = {}) {
   assert.equal(input("create-drawer").open, true);
   input("project").value = "demo";
   await trigger("worktree-project", "change");
-  branchResults.set("other", () => ({ isGit: false, items: [], actions: {} }));
+  creationOptionsResults.set("other", () => ({ isGit: false, items: [], actions: {} }));
   input("project").value = "other";
   await trigger("worktree-project", "change");
   assert.match(input("create-note").textContent, /不是 Git 仓库/);

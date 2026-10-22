@@ -310,16 +310,118 @@ class PackagePreflightTest(unittest.TestCase):
 
     def test_target_redirection_and_relative_file_options_are_rejected(self) -> None:
         for key, value in (("PIP_TARGET", "/another/environment"), ("PIP_ROOT", "/elsewhere"),
-                           ("PIP_BREAK_SYSTEM_PACKAGES", "1"), ("PIP_CONSTRAINT", "relative.txt")):
+                           ("PIP_BREAK_SYSTEM_PACKAGES", "1"), ("PIP_DRY_RUN", "1"),
+                           ("PIP_CONSTRAINT", "relative.txt")):
             with self.subTest(key=key), patch.dict(os.environ, {key: value}):
                 with self.assertRaisesRegex(packages.PackageUpdateError, key):
                     self.prepare()
+
+    def test_pip_ignores_unrelated_uv_path_options(self) -> None:
+        unrelated = {
+            key: "relative/path" for key in (
+                "UV_CONSTRAINT", "UV_OVERRIDE", "UV_FIND_LINKS",
+                "UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_CACHE_DIR",
+            )
+        }
+        with patch.dict(os.environ, unrelated):
+            plan = self.prepare()
+        self.assertEqual(plan["backend"], "pip")
+        self.assertFalse(any(call[0] == str(self.uv) for call in self.calls))
+        for key, value in unrelated.items():
+            self.assertEqual(self.environments[-1][key], value)
+
+    def test_pip_ignores_uv_project_environment_for_another_installation(self) -> None:
+        other = str(self.directory / "another project environment")
+        for backend in (None, "pip"):
+            with self.subTest(backend=backend), patch.dict(os.environ, {"UV_PROJECT_ENVIRONMENT": other}):
+                (self.work / "pip-preflight-report.json").unlink(missing_ok=True)
+                plan = self.prepare(backend=backend)
+                self.assertEqual(plan["backend"], "pip")
+                self.assertEqual(self.environments[-1]["UV_PROJECT_ENVIRONMENT"], other)
+        self.assertFalse(any(call[0] == str(self.uv) for call in self.calls))
+
+    def test_uv_project_environment_matching_installation_requires_project_manager(self) -> None:
+        alias = self.directory / "project environment alias"
+        alias.symlink_to(self.prefix, target_is_directory=True)
+        for backend in (None, "pip", "uv-pip"):
+            for target in (self.prefix, alias):
+                with self.subTest(backend=backend, target=target), patch.dict(
+                    os.environ, {"UV_PROJECT_ENVIRONMENT": str(target)},
+                ):
+                    with self.assertRaisesRegex(packages.PackageUpdateError, "UV_PROJECT_ENVIRONMENT.*project manager"):
+                        self.prepare(backend=backend)
+        self.tool_layout()
+        with patch.dict(os.environ, {"UV_PROJECT_ENVIRONMENT": str(self.prefix)}):
+            with self.assertRaisesRegex(packages.PackageUpdateError, "UV_PROJECT_ENVIRONMENT.*project manager"):
+                self.prepare(backend="uv-tool")
+        self.assertFalse(any("install" in call for call in self.calls))
+
+    def test_uv_backends_ignore_another_or_relative_project_environment(self) -> None:
+        for backend in ("uv-pip", "uv-tool"):
+            if backend == "uv-tool":
+                self.tool_layout()
+            for target in (str(self.directory / "another project environment"), "relative/project-env"):
+                with self.subTest(backend=backend, target=target), patch.dict(
+                    os.environ, {"UV_PROJECT_ENVIRONMENT": target},
+                ):
+                    plan = self.prepare(backend=backend)
+                    self.assertEqual(plan["backend"], backend)
+                    self.assertEqual(self.environments[-1]["UV_PROJECT_ENVIRONMENT"], target)
+
+    def test_pip_does_not_infer_project_ownership_from_relative_environment(self) -> None:
+        # Resolving this against the CLI cwd would incorrectly identify our venv;
+        # uv instead resolves it against a workspace root that is not known here.
+        relative = os.path.relpath(self.prefix)
+        for backend in (None, "pip"):
+            with self.subTest(backend=backend), patch.dict(
+                os.environ, {"UV_PROJECT_ENVIRONMENT": relative},
+            ):
+                (self.work / "pip-preflight-report.json").unlink(missing_ok=True)
+                self.assertEqual(self.prepare(backend=backend)["backend"], "pip")
+        self.assertFalse(any(call[0] == str(self.uv) for call in self.calls))
+
+    def test_uv_backends_ignore_unrelated_pip_path_options(self) -> None:
+        unrelated = {"PIP_CONSTRAINT": "relative.txt", "PIP_FIND_LINKS": "./wheels"}
+        for backend in ("uv-pip", "uv-tool"):
+            with self.subTest(backend=backend), patch.dict(os.environ, unrelated):
+                if backend == "uv-tool":
+                    self.tool_layout()
+                self.assertEqual(self.prepare(backend=backend)["backend"], backend)
+                for key, value in unrelated.items():
+                    self.assertEqual(self.environments[-1][key], value)
+
+    def test_selected_backend_still_rejects_relative_resolution_paths(self) -> None:
+        for backend, keys in (
+            ("pip", ("PIP_CONSTRAINT", "PIP_FIND_LINKS")),
+            ("uv-pip", ("UV_CONSTRAINT", "UV_OVERRIDE", "UV_FIND_LINKS")),
+        ):
+            for key in keys:
+                with self.subTest(backend=backend, key=key), patch.dict(os.environ, {key: "relative/path"}):
+                    with self.assertRaisesRegex(packages.PackageUpdateError, key):
+                        self.prepare(backend=backend)
+        self.assertFalse(any("install" in call for call in self.calls))
+
+    def test_uv_ownership_paths_are_checked_even_when_pip_is_selected(self) -> None:
+        self.info["installer"] = "uv"
+        for backend in ("pip", "uv-pip"):
+            for key in ("UV_TOOL_DIR", "UV_CACHE_DIR"):
+                with self.subTest(backend=backend, key=key), patch.dict(os.environ, {key: "relative/path"}):
+                    with self.assertRaisesRegex(packages.PackageUpdateError, key):
+                        self.prepare(backend=backend)
+        self.assertFalse(any("install" in call for call in self.calls))
+
+    def test_uv_tool_bin_path_is_checked_only_for_tool_ownership(self) -> None:
+        with patch.dict(os.environ, {"UV_TOOL_BIN_DIR": "relative/bin"}):
+            self.assertEqual(self.prepare(backend="uv-pip")["backend"], "uv-pip")
+            self.tool_layout()
+            with self.assertRaisesRegex(packages.PackageUpdateError, "UV_TOOL_BIN_DIR must be absolute"):
+                self.prepare()
 
     def test_nonempty_value_options_are_not_mistaken_for_boolean_false(self) -> None:
         options = {
             "pip": ("PIP_TARGET", "PIP_PREFIX", "PIP_ROOT", "PIP_PYTHON",
                     "PIP_REQUIREMENT", "PIP_EDITABLE", "PIP_REPORT"),
-            "uv-pip": ("UV_TARGET", "UV_PREFIX", "UV_PYTHON", "UV_PROJECT_ENVIRONMENT",
+            "uv-pip": ("UV_TARGET", "UV_PREFIX", "UV_PYTHON",
                        "UV_WORKING_DIR", "UV_PROJECT", "UV_REINSTALL_PACKAGE"),
         }
         for backend, keys in options.items():

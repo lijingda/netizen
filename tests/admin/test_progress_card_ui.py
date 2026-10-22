@@ -21,16 +21,13 @@ class ProgressCardUiTest(unittest.TestCase):
         static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
-        source = (static / "admin.js").read_text(encoding="utf-8")
-        parts = [
-            source[source.index("function actionPayload("):source.index("async function mutate(")],
-            source[source.index("function defaultScheduleSessionSettings("):source.index("function renderScheduleSessionSettings(")],
-            (static / "progress-card.js").read_text(encoding="utf-8"),
-        ]
+        scripts = "\n".join((static / name).read_text(encoding="utf-8") for name in (
+            "chat-picker.js", "progress-card.js", "admin.js",
+        ))
         fixture = Path(__file__).with_name("progress_card_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_PROGRESS_CARD_CONTROLLER\n")
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
-        script = "const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + before + "\n".join(parts) + after
+        script = "const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + before + scripts + after
         for case in ("save_discard", "readonly", "conflict", "expiry", "read_failure", "late_refresh", "preview_order"):
             with self.subTest(case=case):
                 result = subprocess.run([node, "-", case], input=script, capture_output=True,

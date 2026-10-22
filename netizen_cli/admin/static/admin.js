@@ -2616,13 +2616,6 @@ function renderWorkspacePolicy(input, editor, { project, loading = false, schedu
   input("worktree").required = workspace.mode === "existing";
   input("workspace-ref").value = workspace.ref || "";
   for (const field of ["workspace", "worktree", "workspace-ref"]) input(field).disabled = loading;
-  input("workspace-refs").replaceChildren();
-  for (const branch of options?.branches || []) {
-    const option = document.createElement("option");
-    option.value = branch.ref;
-    option.textContent = branch.name;
-    input("workspace-refs").append(option);
-  }
   const notes = [];
   if (loading) notes.push("正在读取 worktree 选项…");
   if (editor.workspaceError) notes.push(workspaceErrorMessage(editor.workspaceError));

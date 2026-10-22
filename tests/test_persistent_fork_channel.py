@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, call, patch
 
 from lark_channel import OutboundCard
 
+from netizen_cli.cards import CardActionError
 from netizen_cli.cards.fork import ForkSource, decode_fork_action, fork_form_card
 from netizen_cli.chat_targets import ChatTargetError, ValidatedChatTarget
 from netizen_cli.codex_runtime import NativeThreadMetadata, RuntimeClosed, Submission, SubmitDisposition, ThreadLifecycleError
@@ -41,7 +42,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
             message_context_mode=MentionContextMode.CATCH_UP,
             context_anchor=MessageContextAnchor("om_source_anchor", 1000),
         )
-        self.store.assign_native_thread_id(self.source.id, "native-source")
+        self.runtime.materialize(self.source.id, "native-source", cwd=self.fixture.project)
         self.source = self.store.get(self.source.id)
         self.native = SimpleNamespace(id="native-fork")
         metadata = NativeThreadMetadata("native-source", "来源方案", "原始上下文")
@@ -64,6 +65,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
             self.events.append("native-fork")
             self.assertEqual(source.id, self.source.id)
             self.assertEqual(expected_project_revision, self.reference().project_revision)
+            self.runtime.native_cwds[self.native.id] = self.runtime.native_cwds[source.native_thread_id]
             return self.native
 
         async def adopt(binding, thread, *, name):
@@ -208,6 +210,27 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
             chat_id=self.scope.chat_id, thread_id=self.scope.topic_id,
             chat_type="group", mentioned_bot=False))
         self.assertEqual(len(self.channel.replies), 1)
+
+    async def test_failed_callback_redraw_reports_once_without_replaying_creation(self):
+        event = self.confirm_event()
+        for error in (CardActionError("来源会话已变化"), RuntimeError("创建结果未确认")):
+            with self.subTest(error=type(error).__name__):
+                self.channel.replies.clear()
+                with (
+                    patch.object(self.app, "_create_fork_from_card", AsyncMock(side_effect=error)) as create,
+                    patch.object(self.app, "_safe_update_card", AsyncMock(return_value=False)) as redraw,
+                ):
+                    await self.app.handle_card_action(event)
+                create.assert_awaited_once()
+                redraw.assert_awaited_once()
+                self.assertEqual(len(self.channel.replies), 1)
+                self.assertIn(str(error), self.channel.replies[0][1])
+                target = self.channel.reply_targets[-1]
+                self.assertEqual((target.message_id, target.chat_id, target.conversation.thread_id),
+                                 ("om_fork_form", self.scope.chat_id, self.scope.topic_id))
+                if isinstance(error, RuntimeError):
+                    self.assertIn("/fork", self.channel.replies[0][1])
+                    self.assertNotIn("未执行", self.channel.replies[0][1])
 
     async def test_same_chat_fork_is_complete_before_adoption_and_keeps_source(self):
         self.queue_topic()
@@ -609,7 +632,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         source = self.store.create_channel_binding(
             scope=self.scope, project_alias="test", creator_id="ou_source",
         )
-        self.store.assign_native_thread_id(source.id, f"native-source-{source_kind.value}")
+        self.runtime.materialize(source.id, f"native-source-{source_kind.value}", cwd=self.fixture.project)
         self.source = self.store.get(source.id)
         self.native = SimpleNamespace(id=f"native-fork-{source_kind.value}")
         self.target_scope = FeishuScope("cli_test", chat_id, ScopeKind.TOPIC, "omt_fork")
@@ -735,7 +758,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         async def submit(**kwargs):
             self.runtime.submit_calls.append(kwargs)
             binding = kwargs["binding"]
-            self.store.assign_native_thread_id(binding.id, "native-early")
+            self.runtime.materialize(binding.id, "native-early", cwd=self.fixture.project)
             return Submission(SubmitDisposition.STARTED, binding.id, "native-early", "turn-early",
                               lambda: None, task_feedback=binding.task_feedback)
         self.runtime.submit = submit

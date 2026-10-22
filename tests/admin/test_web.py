@@ -2846,108 +2846,26 @@ class AdminStaticAssetsTest(unittest.TestCase):
         node = shutil.which("node")
         if node is None:
             self.skipTest("Node.js is unavailable for the Admin JavaScript behavior test")
-        javascript = (
-            Path(__file__).resolve().parents[2] / "netizen_cli/admin/static/admin.js"
-        ).read_text(encoding="utf-8")
-        start = javascript.index("let timeRangeModalOwner")
-        end = javascript.index("function initializeTimeRangeFilter")
-        core = javascript[start:end]
-        harness = "const document = { body: null };\n" + core + r"""
-const now = new Date("2026-09-02T08:20:30.456Z");
-const today = presetTimeRange("today", now);
-const rolling = presetTimeRange("last-24-hours", now);
-const exactMinute = presetTimeRange("last-24-hours", new Date("2026-09-02T08:20:00Z"));
-const updated = presetTimeRange("last-3-months", now, true);
-const crossYear = presetTimeRange("last-3-months", new Date("2026-01-02T08:20:30Z"));
-const custom = customTimeRange("2026-08-27T00:00", "2026-09-02T23:59");
-const reversed = customTimeRange("2026-09-02T10:00", "2026-09-02T09:59");
-const gap = customTimeRange("2026-03-08T02:30", "2026-03-08T03:30");
-const fold = customTimeRange("2026-11-01T01:30", "2026-11-01T02:30");
+        from tests.admin.test_session_filter_ui import _HtmlTree
 
-function fakeNode(name, isBackdrop = false) {
-  const attributes = new Set();
-  return {
-    name,
-    isBackdrop,
-    attributes,
-    children: [],
-    parentElement: null,
-    matches(selector) {
-      return selector === "[data-time-range-backdrop]" && this.isBackdrop;
-    },
-    hasAttribute(attribute) { return attributes.has(attribute); },
-    setAttribute(attribute) { attributes.add(attribute); },
-    removeAttribute(attribute) { attributes.delete(attribute); },
-  };
-}
-function append(parent, ...children) {
-  parent.children.push(...children);
-  for (const child of children) child.parentElement = parent;
-}
-const bodyClasses = new Set();
-const body = fakeNode("body");
-body.classList = {
-  toggle(name, enabled) {
-    if (enabled) bodyClasses.add(name);
-    else bodyClasses.delete(name);
-  },
-};
-document.body = body;
-const preexisting = fakeNode("preexisting");
-preexisting.setAttribute("inert", "");
-const header = fakeNode("header");
-const main = fakeNode("main");
-const root = fakeNode("root");
-const otherRoot = fakeNode("other-root");
-const trigger = fakeNode("trigger");
-const backdrop = fakeNode("backdrop", true);
-const popover = fakeNode("popover");
-append(body, preexisting, header, main);
-append(main, root, otherRoot);
-append(root, trigger, backdrop, popover);
-const firstController = {};
-const secondController = {};
-setTimeRangeModalIsolation(firstController, popover, true);
-const modalAfterOpen = bodyClasses.has("time-range-modal-open");
-const isolatedAfterOpen = [header, otherRoot, trigger]
-  .every((node) => node.hasAttribute("inert"));
-const dialogPathAvailable = !main.hasAttribute("inert")
-  && !root.hasAttribute("inert")
-  && !popover.hasAttribute("inert")
-  && !backdrop.hasAttribute("inert");
-setTimeRangeModalIsolation(secondController, popover, false);
-const unaffectedByClosedPeer = bodyClasses.has("time-range-modal-open")
-  && trigger.hasAttribute("inert");
-setTimeRangeModalIsolation(firstController, popover, false);
-const restoredAfterClose = !bodyClasses.has("time-range-modal-open")
-  && [header, otherRoot, trigger].every((node) => !node.hasAttribute("inert"))
-  && preexisting.hasAttribute("inert");
-
-process.stdout.write(JSON.stringify({
-  today,
-  rolling,
-  exactMinute,
-  updated,
-  crossYear,
-  custom,
-  reversed,
-  gap,
-  fold,
-  modalAfterOpen,
-  isolatedAfterOpen,
-  dialogPathAvailable,
-  unaffectedByClosedPeer,
-  restoredAfterClose,
-}));
-"""
+        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
+        tree = _HtmlTree()
+        tree.feed((static / "index.html").read_text(encoding="utf-8"))
+        fixture = Path(__file__).with_name("time_range_ui_harness.js")
+        before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_ADMIN_PAGE\n")
+        dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
+        harness = ("const htmlTree = " + json.dumps(tree.root) + ";\n"
+                   + dom + before + (static / "chat-picker.js").read_text(encoding="utf-8")
+                   + (static / "admin.js").read_text(encoding="utf-8") + after)
 
         def run(timezone: str) -> dict:
             completed = subprocess.run(
-                [node, "-e", harness],
+                [node], input=harness,
                 check=False,
                 capture_output=True,
                 text=True,
                 env={**os.environ, "TZ": timezone},
+                timeout=10,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             return json.loads(completed.stdout)

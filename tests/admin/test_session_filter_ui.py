@@ -42,33 +42,15 @@ class SessionFilterUiTest(unittest.TestCase):
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")
-        filters = source[
-            source.index("const timeRangeControllers ="):
-            source.index("function runtimeLabel(")
-        ]
-        presentation = source[
-            source.index("function cell("):
-            source.index("const pendingProjectDeletes =")
-        ]
-        pagination = source[
-            source.index("function runtimeLabel("):
-            source.index("async function loadSides(")
-        ] + source[
-            source.index("async function moveSessionPage("):
-            source.index("function sideRuntimeLabel(")
-        ]
         harness = Path(__file__).with_name("session_filter_ui_harness.js").read_text(
             encoding="utf-8"
         )
         before, after = harness.split("// SHIPPED_FILTER_CONTROLLERS\n")
         dom = Path(__file__).with_name("dom_harness.js").read_text(encoding="utf-8")
-        shared_chat = (static / "chat-picker.js").read_text(encoding="utf-8") + source[
-            source.index("async function fetchChatPage("):source.index("let defaultsEditor =")]
-        listeners = source[source.index('document.querySelector("#session-filter").addEventListener'):
-                           source.index('document.querySelector("#side-filter").addEventListener')]
+        shared_chat = (static / "chat-picker.js").read_text(encoding="utf-8")
         result = subprocess.run(
             [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + shared_chat + filters + presentation + pagination + listeners + after,
+             + dom + before + shared_chat + source + after,
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

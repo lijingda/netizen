@@ -11,6 +11,7 @@ from lark_channel import (
     InboundMessage,
     MediaSource,
     ResourceDescriptor,
+    SendResult,
     TextContent,
 )
 from netizen_cli.domain import FeishuScope, MessageContextAnchor
@@ -76,9 +77,9 @@ class FakeChannel:
     def __init__(self) -> None:
         self.replies: list[tuple[str, object]] = []
         self.reply_targets: list[object] = []
-        self.reply_results: list[object | BaseException] = []
+        self.reply_results: list[SendResult | BaseException] = []
         self.send_calls: list[tuple[str, object, object]] = []
-        self.send_results: list[object | BaseException] = []
+        self.send_results: list[SendResult | BaseException] = []
         self.upload_calls: list[tuple[MediaSource, str]] = []
         self.upload_results: list[str | BaseException] = []
         self.reactions: list[tuple[str, str]] = []
@@ -101,12 +102,12 @@ class FakeChannel:
         self.download_resource_calls: list[tuple[str, str, str | None]] = []
         self.fail_card_updates = False
         self.card_update_success = True
-        self.card_update_results: list[object | BaseException] = []
+        self.card_update_results: list[SendResult | BaseException] = []
         self.fail_once_reaction_on: str | None = None
         self.fail_once_reaction_remove = False
         self.bot_identity = SimpleNamespace(open_id="ou_bot", name="椰羊")
 
-    async def reply(self, message: FakeMessage, content: object, opts=None) -> object:
+    async def reply(self, message: FakeMessage, content: object, opts=None) -> SendResult:
         self.reply_targets.append(message)
         self.replies.append((message.id, content))
         if self.reply_results:
@@ -114,9 +115,9 @@ class FakeChannel:
             if isinstance(result, BaseException):
                 raise result
             return result
-        return object()
+        return SendResult.ok()
 
-    async def send(self, to: str, content: object, opts=None) -> object:
+    async def send(self, to: str, content: object, opts=None) -> SendResult:
         self.send_calls.append((to, content, opts))
         if not self.send_results:
             raise AssertionError("unexpected channel.send call")
@@ -125,7 +126,7 @@ class FakeChannel:
             raise result
         return result
 
-    async def add_reaction(self, message_id: str, emoji_type: str) -> object:
+    async def add_reaction(self, message_id: str, emoji_type: str) -> SendResult:
         self.reactions.append((message_id, emoji_type))
         self.reaction_operations.append(("add", message_id, emoji_type))
         if self.fail_once_reaction_on == emoji_type:
@@ -133,8 +134,7 @@ class FakeChannel:
             raise RuntimeError("reaction failed")
         reaction_id = f"reaction-{self._next_reaction_id}"
         self._next_reaction_id += 1
-        return SimpleNamespace(
-            success=True,
+        return SendResult.ok(
             raw={"data": {"reaction_id": reaction_id}},
         )
 
@@ -151,16 +151,16 @@ class FakeChannel:
         self,
         message_id: str,
         reaction_id: str,
-    ) -> object:
+    ) -> SendResult:
         self.reaction_removals.append((message_id, reaction_id))
         self.reaction_operations.append(("remove", message_id, reaction_id))
         self.reaction_remove_attempted.set()
         if self.fail_once_reaction_remove:
             self.fail_once_reaction_remove = False
-            return SimpleNamespace(success=False)
-        return SimpleNamespace(success=True)
+            return SendResult(success=False)
+        return SendResult.ok()
 
-    async def update_card(self, message_id: str, card: dict[str, object]) -> object:
+    async def update_card(self, message_id: str, card: dict[str, object]) -> SendResult:
         self.updates.append((message_id, card))
         if self.card_update_results:
             result = self.card_update_results.pop(0)
@@ -169,7 +169,7 @@ class FakeChannel:
             return result
         if self.fail_card_updates:
             raise RuntimeError("card update failed")
-        return SimpleNamespace(success=self.card_update_success)
+        return SendResult(success=self.card_update_success)
 
     async def fetch_message(self, message_id: str) -> dict[str, object]:
         return self.fetched_messages[message_id]

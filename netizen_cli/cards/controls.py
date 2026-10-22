@@ -545,11 +545,6 @@ def _new_workspace_elements(options: Mapping[str, Any]) -> list[dict[str, Any]]:
             f"已有 worktree · {branch} · {item['cwd']}",
             _workspace_reference(options, "id:" + item["id"]),
         ))
-    refs = [("当前 HEAD", "HEAD")]
-    for branch in options.get("branches", ()):
-        occupied = " · 已占用，仅可作起点" if branch.get("occupiedPaths") else ""
-        remote = "远端 · " if branch.get("remote") else "本地 · "
-        refs.append((remote + branch["name"] + occupied, branch["ref"]))
     return [
         _form_label("worktree（切换项目后请重新加载选项）"),
         _static_select(
@@ -564,11 +559,9 @@ def _new_workspace_elements(options: Mapping[str, Any]) -> list[dict[str, Any]]:
                      ("创建并检出新分支", "new")),
             initial_option="detached",
         ),
-        _form_label("起点 revision；检出已有分支时请选择对应的本地分支"),
-        _static_select(
-            name="new_worktree_ref", placeholder="选择起点/已有分支",
-            options=tuple(refs), initial_option="HEAD",
-        ),
+        _form_label("起点 revision；检出已有分支时填写本地分支名"),
+        {"tag": "input", "name": "new_worktree_ref", "max_length": 256,
+         "placeholder": _plain_text("HEAD、分支、标签或提交"), "default_value": "HEAD"},
         {"tag": "input", "name": "new_worktree_branch", "max_length": 255,
          "label": _plain_text("新分支名（仅创建新分支时填写）"),
          "placeholder": _plain_text("例如：feature/my-task")},
@@ -2392,7 +2385,8 @@ def _decode_new_workspace(
     if match is None:
         raise CardActionError("worktree 选择无效，请重新加载 worktree 选项。")
     mode = _required_string(payload["new_worktree_mode"], "new_worktree_mode")
-    ref = _bounded_string(payload["new_worktree_ref"], "new_worktree_ref", max_chars=1000)
+    ref_value = payload["new_worktree_ref"]
+    ref = _bounded_string(ref_value, "new_worktree_ref", max_chars=256).strip() if ref_value != "" else ""
     branch_value = payload.get("new_worktree_branch")
     branch = (
         _bounded_string(branch_value, "new_worktree_branch", max_chars=255).strip()
@@ -2411,10 +2405,11 @@ def _decode_new_workspace(
     if mode == "new" and not branch:
         raise CardActionError("创建新分支时请填写新分支名。")
     if mode == "existing":
-        if not ref.startswith("refs/heads/") or not ref.removeprefix("refs/heads/"):
-            raise CardActionError("检出已有分支时，请选择未被占用的本地分支。")
         branch = ref.removeprefix("refs/heads/")
-    return None, {"mode": mode, "ref": ref, "branch": branch if mode != "detached" else None}
+        if not branch or branch == "HEAD" or branch.startswith("refs/"):
+            raise CardActionError("检出已有分支时，请填写本地分支名。")
+        ref = "refs/heads/" + branch
+    return None, {"mode": mode, "ref": ref or "HEAD", "branch": branch if mode != "detached" else None}
 
 
 def _decode_config_form(

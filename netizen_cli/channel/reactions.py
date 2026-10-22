@@ -227,7 +227,7 @@ class _ReactionController:
                 },
             )
             return None
-        if getattr(result, "success", False) is not True:
+        if not result.success:
             logger.error(
                 "failed to add turn reaction: unsuccessful result",
                 extra={
@@ -237,10 +237,7 @@ class _ReactionController:
                 },
             )
             return None
-        raw = getattr(result, "raw", None)
-        if raw is None and isinstance(result, dict):
-            raw = result
-        data = raw.get("data") if isinstance(raw, dict) else None
+        data = result.raw.get("data") if result.raw is not None else None
         reaction_id = data.get("reaction_id") if isinstance(data, dict) else None
         if not isinstance(reaction_id, str) or not reaction_id:
             logger.error(
@@ -279,7 +276,7 @@ class _ReactionController:
                 },
             )
             return False
-        if getattr(result, "success", False) is not True:
+        if not result.success:
             logger.error(
                 "failed to remove turn reaction: unsuccessful result",
                 extra={

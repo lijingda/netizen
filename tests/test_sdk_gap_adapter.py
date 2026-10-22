@@ -19,8 +19,9 @@ from openai_codex import (
     LocalImageInput,
     SkillInput,
     TextInput,
+    TransportClosedError,
 )
-from openai_codex.errors import InvalidRequestError
+from openai_codex.errors import CodexError, InternalRpcError, InvalidRequestError
 
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.sdk_gap_adapter import (
@@ -315,6 +316,11 @@ for line in sys.stdin:
             continue
         if mode == "goal-steer-loss":
             sys.exit(0)
+        if mode == "goal-steer-rpc-error":
+            send({"id": request_id, "error": {
+                "code": -32603, "message": "turn/steer response must be a JSON object",
+            }})
+            continue
         if params.get("expectedTurnId") != active_turn_id:
             send({"id": request_id, "error": {
                 "code": -32600, "message": "expected Turn is no longer active",
@@ -323,8 +329,14 @@ for line in sys.stdin:
         if mode == "goal-steer-bad-receipt":
             send({"id": request_id, "result": {"turnId": "wrong-turn"}})
             continue
-        if mode == "goal-steer-malformed-receipt":
-            send({"id": request_id, "result": {}})
+        malformed_receipts = {
+            "goal-steer-malformed-receipt": {},
+            "goal-steer-array-receipt": [],
+            "goal-steer-null-receipt": None,
+            "goal-steer-scalar-receipt": "turn-1",
+        }
+        if mode in malformed_receipts:
+            send({"id": request_id, "result": malformed_receipts[mode]})
             continue
         accepted_turn_id = active_turn_id
         if active_turn_id == "turn-1":
@@ -889,8 +901,14 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_goal_steer_unknown_receipt_never_retries_or_pauses(self) -> None:
-        for mode in (
-            "goal-steer-loss", "goal-steer-bad-receipt", "goal-steer-malformed-receipt"
+        for mode, expected_error in (
+            ("goal-steer-loss", TransportClosedError),
+            ("goal-steer-rpc-error", InternalRpcError),
+            ("goal-steer-bad-receipt", GoalMutationStateUnknown),
+            ("goal-steer-malformed-receipt", GoalMutationStateUnknown),
+            ("goal-steer-array-receipt", GoalMutationStateUnknown),
+            ("goal-steer-null-receipt", GoalMutationStateUnknown),
+            ("goal-steer-scalar-receipt", GoalMutationStateUnknown),
         ):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
                 log_path = Path(raw) / "requests.jsonl"
@@ -899,10 +917,11 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 process = codex._client._sync._proc
                 try:
                     handle = await AppServerGoalControl(codex).start("thread-goal", "ship")
-                    with self.assertRaises(GoalMutationStateUnknown) as caught:
+                    with self.assertRaises(expected_error) as caught:
                         await handle.steer("adjust", expected_turn_id="turn-1")
-                    self.assertIs(caught.exception.handle, handle)
-                    self.assertEqual(caught.exception.physical_turn_id, "turn-1")
+                    if isinstance(caught.exception, GoalMutationStateUnknown):
+                        self.assertIs(caught.exception.handle, handle)
+                        self.assertEqual(caught.exception.physical_turn_id, "turn-1")
                 finally:
                     with suppress(BrokenPipeError):
                         await codex.close()
@@ -914,6 +933,24 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                         "thread/goal/set", "turn/steer",
                     ],
                 )
+
+    async def test_goal_steer_unrelated_sdk_failures_preserve_their_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "requests.jsonl"
+            async with AsyncCodex(_config(log_path, "goal-steer")) as codex:
+                process = codex._client._sync._proc
+                handle = await AppServerGoalControl(codex).start("thread-goal", "ship")
+                for failure in (
+                    CodexError("turn/steer unavailable in this runtime"),
+                    TransportClosedError("turn/steer response must be a JSON object"),
+                ):
+                    with self.subTest(error_type=type(failure).__name__):
+                        with patch.object(codex._client, "turn_steer", side_effect=failure) as steer:
+                            with self.assertRaises(type(failure)) as caught:
+                                await handle.steer("adjust", expected_turn_id="turn-1")
+                            self.assertIs(caught.exception, failure)
+                            steer.assert_awaited_once()
+            _close_probe_pipes(process)
 
     async def test_goal_steer_invalid_input_fails_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

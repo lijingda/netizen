@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -226,13 +227,40 @@ async function check(runs, expected) {
                        env={**os.environ, "RELEASE_COMMIT": COMMIT},
                        check=True, capture_output=True, text=True)
 
-    def test_each_publication_stage_rechecks_tag_and_keeps_verification_evidence(self) -> None:
+    @unittest.skipUnless(shutil.which("node"), "Node.js validates publication gates")
+    def test_each_publication_stage_rejects_moved_tags_before_preparation_or_writes(self) -> None:
+        harness = Path(__file__).with_name("release_workflow_harness.js").read_text()
+        artifact_name = "netizen_cli-1.2.3-py3-none-any.whl"
+        artifact = b"exact verified distribution"
+        manifest = json.dumps({"commit": COMMIT, "files": {
+            artifact_name: hashlib.sha256(artifact).hexdigest(),
+        }}).encode()
+        for stage in ("prepare-release", "publish-pypi", "publish-release"):
+            script = next(step["with"]["script"]
+                          for step in self.workflow["jobs"][stage]["steps"]
+                          if step.get("uses", "").startswith("actions/github-script@"))
+            for annotated in (False, True):
+                for moved in (False, True):
+                    with self.subTest(stage=stage, annotated=annotated, moved=moved), tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        source = root / ("candidate" if stage == "publish-pypi" else "dist")
+                        source.mkdir()
+                        (source / artifact_name).write_bytes(artifact)
+                        (source / "netizen-cli-release.json").write_bytes(manifest)
+                        result = subprocess.run(
+                            ["node", "-e", harness, script, stage,
+                             "annotated" if annotated else "lightweight", "moved" if moved else "same"],
+                            cwd=root, env={**os.environ, "RELEASE_COMMIT": COMMIT,
+                                "RELEASE_TAG": "v1.2.3", "RELEASE_ID": "42",
+                                "MANIFEST_SHA256": hashlib.sha256(manifest).hexdigest(),
+                                "MAIN_GATE_URL": "https://example.test/main-gate",
+                                "RELEASE_NOTES": "Verified release notes"},
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_publication_keeps_verification_evidence(self) -> None:
         jobs = self.workflow["jobs"]
-        for name in ("prepare-release", "publish-pypi", "publish-release"):
-            scripts = "\n".join(step.get("with", {}).get("script", "") for step in jobs[name]["steps"])
-            self.assertIn("github.rest.git.getRef", scripts)
-            self.assertIn("github.rest.git.getTag", scripts)
-            self.assertIn("object.sha !== process.env.RELEASE_COMMIT", scripts)
         prepare = next(step for step in jobs["prepare-release"]["steps"] if step.get("id") == "draft")
         self.assertEqual(prepare["env"]["RELEASE_NOTES"], "${{ inputs.notes }}")
         self.assertEqual(prepare["env"]["MAIN_GATE_URL"], "${{ needs.build-artifact.outputs.main-gate-url }}")

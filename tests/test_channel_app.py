@@ -172,12 +172,12 @@ def failed_reply_result(
     code: int,
     message: str,
     retryable: bool = False,
-) -> object:
-    return SimpleNamespace(
+) -> SendResult:
+    return SendResult(
         success=False,
         message_id=None,
-        chunk_ids=(),
-        error=SimpleNamespace(
+        error=SendError(
+            code=FeishuChannelErrorCode.UNKNOWN,
             retryable=retryable,
             raw_code=code,
             hint=message,
@@ -345,7 +345,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                         self.assert_delivered_revision(1)
                         expected = 4 if coalesce else 2
                         self.assertIn(f"revision {expected}", str(second))
-                        responses.put_nowait(SimpleNamespace(success=True))
+                        responses.put_nowait(SendResult(success=True))
                         await asyncio.wait_for(returned.get(), timeout=1)
                         self.assert_delivered_revision(expected)
                         self.assertFalse(self.session.failed)
@@ -359,7 +359,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                 await self.start_card(kind)
                 failed = failed_reply_result(code=2200, message="Internal Error")
                 self.channel.card_update_results.extend((
-                    failed, TimeoutError("timed out"), SimpleNamespace(success=True),
+                    failed, TimeoutError("timed out"), SendResult(success=True),
                     failed, failed, failed,
                 ))
                 update_card = self.channel.update_card
@@ -398,7 +398,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                             await release.wait()
                             returned.set()
                             return failed_reply_result(code=2200, message="Internal Error")
-                        return SimpleNamespace(success=True)
+                        return SendResult(success=True)
 
                     with (
                         patch.object(self.channel, "update_card", side_effect=update),
@@ -457,7 +457,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                     rejected = failed_reply_result(code=2200, message="Internal Error")
                     self.channel.card_update_results.extend((
                         json.JSONDecodeError("Bad Gateway", "", 0), rejected,
-                        SimpleNamespace(success=True) if succeeds else rejected,
+                        SendResult(success=True) if succeeds else rejected,
                     ))
                     with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
                         self.assertEqual(await self.finish_card(), succeeds)
@@ -1060,7 +1060,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         feedback = BindingTaskFeedback(progress_card_enabled=True)
         activity = turn_activity_snapshot(
             binding_id=binding.id,
@@ -1984,7 +1984,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         report = self.project / "reports" / "sales.xlsx"
         report.parent.mkdir()
         report.write_bytes(b"spreadsheet")
@@ -2024,7 +2024,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         report = self.project / "research.md"
         report.write_text("research", encoding="utf-8")
 
@@ -2073,7 +2073,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         (self.project / "shared.txt").write_text("child\nparent\n")
         own = ThreadItem.model_validate({
             "type": "fileChange", "id": "patch", "status": "completed",
@@ -2108,7 +2108,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         image = (
             self.project.parent
             / "codex-home"
@@ -2152,7 +2152,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-images")
+        self.runtime.materialize(binding.id, "native-images", cwd=self.project)
         image = self.project / "result.png"
         image.write_bytes(PNG)
         for progress in (False, True):
@@ -2176,7 +2176,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     await self.app.handle_message(origin)
                     self.channel.fail_card_updates = delivery_fails
                     if delivery_fails:
-                        self.channel.reply_results.extend((RuntimeError("card failed"), object()))
+                        self.channel.reply_results.extend((RuntimeError("card failed"), SendResult.ok()))
                     uploaded_before = len(self.channel.upload_calls)
                     key = f"img_uploaded_{uploaded_before + 1}"
                     expected = f"before\n\n![first]({key})\n\nmiddle\n\n![second]({key})\n\nafter"
@@ -2222,7 +2222,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-images")
+        self.runtime.materialize(binding.id, "native-images", cwd=self.project)
         image = self.project / "unrelated.png"
         image.write_bytes(PNG)
 
@@ -2247,7 +2247,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-images")
+        self.runtime.materialize(binding.id, "native-images", cwd=self.project)
 
         await self.app.handle_completion(TurnOutcome(
             binding_id=binding.id, thread_id="native-images", turn_id="turn-images",
@@ -2272,10 +2272,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         report = self.project / "report.txt"
         report.write_text("report", encoding="utf-8")
-        self.channel.reply_results.extend((RuntimeError("card failed"), object()))
+        self.channel.reply_results.extend((RuntimeError("card failed"), SendResult.ok()))
 
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_completion(
@@ -2300,7 +2300,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         report = self.project / "report.txt"
         report.write_text("report", encoding="utf-8")
 
@@ -2341,7 +2341,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         paths = tuple(f"result-{index:02}.txt" for index in range(10))
         for path in paths:
             (self.project / path).write_text(path, encoding="utf-8")
@@ -2489,7 +2489,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         report = self.project / "report.pdf"
         image = self.project / "trend.png"
         report.write_bytes(b"pdf")
@@ -2585,7 +2585,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         report = self.project / "ephemeral.txt"
         report.write_text("gone soon", encoding="utf-8")
         result = completed_turn_result(file_change_item("ephemeral.txt"))
@@ -2629,7 +2629,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-files")
+        self.runtime.materialize(binding.id, "native-files", cwd=self.project)
         report = self.project / "report.txt"
         report.write_text("report", encoding="utf-8")
         result = completed_turn_result(file_change_item("report.txt"))
@@ -3055,7 +3055,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         assert binding is not None
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.subscription_snapshots[binding.id] = ThreadSubscriptionSnapshot(
             binding_id=binding.id,
             thread_id="native-one",
@@ -3077,7 +3077,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         assert binding is not None
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
 
         await self.app.handle_message(
             FakeMessage("/release", message_id="om_release")
@@ -3103,7 +3103,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key
         )
         assert binding is not None
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.release_disposition = ReleaseDisposition.NOT_SUBSCRIBED
         await self.app.handle_message(
             FakeMessage("/release", message_id="om_release_absent")
@@ -3144,7 +3144,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.active[binding.id] = ActiveTurnSnapshot(
             binding.id,
             "native-one",
@@ -3234,7 +3234,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_one")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         first = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(first.id, "native-one")
+        self.runtime.materialize(first.id, "native-one", cwd=self.project)
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
             thread_id="native-one",
             name="  Named\nThread  ",
@@ -3243,7 +3243,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         await self.fixture.new(message_id="om_new_two")
         second = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(second.id, "native-two")
+        self.runtime.materialize(second.id, "native-two", cwd=self.project)
         self.runtime.thread_metadata_values["native-two"] = NativeThreadMetadata(
             thread_id="native-two",
             name=None,
@@ -3295,7 +3295,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         for i in range(12):
             await self.fixture.new(message_id=f"om_page_{i}")
             binding = self.store.active_binding(scope.key)
-            self.store.assign_native_thread_id(binding.id, f"native-page-{i}")
+            self.runtime.materialize(binding.id, f"native-page-{i}", cwd=self.project)
             self.runtime.thread_metadata_values[f"native-page-{i}"] = NativeThreadMetadata(
                 f"native-page-{i}", f"Indexed {i}", "task", updated_at=i,
             )
@@ -3340,7 +3340,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata("native-one", "Title", "task")
         self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
         entered = asyncio.Event()
@@ -3366,7 +3366,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.goal_snapshot_value = native_goal(GoalStatus.PAUSED)
 
         await self.app.handle_message(
@@ -3385,7 +3385,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
             "native-one",
             "Old name",
@@ -3423,7 +3423,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         original = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(original.id, "native-one")
+        self.runtime.materialize(original.id, "native-one", cwd=self.project)
         rename = self.runtime.rename_exact
 
         async def rename_then_switch(binding_id, name):
@@ -3449,7 +3449,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
             "native-one", "Old name", "first task",
         )
@@ -3472,7 +3472,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
             "native-one",
             "Release review",
@@ -3504,7 +3504,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_first")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         first = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(first.id, "native-one")
+        self.runtime.materialize(first.id, "native-one", cwd=self.project)
         await self.app.handle_message(
             FakeMessage("/archive", message_id="om_archive")
         )
@@ -3561,7 +3561,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
             "native-one",
@@ -3605,7 +3605,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
 
         await self.app.handle_message(
             FakeMessage("/delete", message_id="om_delete_unavailable")
@@ -3633,7 +3633,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             for item in _elements(card.card, "button")
             if item["text"]["content"] == "永久删除当前会话"
         )
-        self.store.assign_native_thread_id(binding.id, "native-raced")
+        self.runtime.materialize(binding.id, "native-raced", cwd=self.project)
 
         await self.app.handle_card_action(
             direct_button_event(
@@ -3681,7 +3681,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_archived")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         archived_binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(archived_binding.id, "native-one")
+        self.runtime.materialize(archived_binding.id, "native-one", cwd=self.project)
         self.store.archive_binding(archived_binding.id)
         self.runtime.archived_thread_metadata_values["native-one"] = (
             NativeThreadMetadata("native-one", "Archived work", "old task")
@@ -3745,7 +3745,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_archived_delete")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         archived_binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(archived_binding.id, "native-one")
+        self.runtime.materialize(archived_binding.id, "native-one", cwd=self.project)
         self.store.archive_binding(archived_binding.id)
         self.runtime.archived_thread_metadata_values["native-one"] = (
             NativeThreadMetadata("native-one", "Archived work", "old task")
@@ -3808,7 +3808,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         first = self.store.active_binding(scope.key)
         first_context_revision = first.context_revision
-        self.store.assign_native_thread_id(first.id, "native-one")
+        self.runtime.materialize(first.id, "native-one", cwd=self.project)
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
             "native-one", "First", "task one",
         )
@@ -3991,7 +3991,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_one")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         first = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(first.id, "native-one")
+        self.runtime.materialize(first.id, "native-one", cwd=self.project)
         await self.fixture.new(message_id="om_new_two")
 
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata("native-one", "Title", "task")
@@ -4238,7 +4238,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             (
                 failed_card_update_result(),
                 failed_card_update_result(),
-                SimpleNamespace(success=True),
+                SendResult(success=True),
             )
         )
         delays: list[float] = []
@@ -4273,7 +4273,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_delete_current")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         target = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
         self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
         self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata(
             "native-target",
@@ -4330,7 +4330,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_running_delete")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-running")
+        self.runtime.materialize(binding.id, "native-running", cwd=self.project)
         self.runtime.thread_metadata_values["native-running"] = (
             NativeThreadMetadata("native-running", "Running", "work")
         )
@@ -4383,7 +4383,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_materialized")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         materialized = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(materialized.id, "native-target")
+        self.runtime.materialize(materialized.id, "native-target", cwd=self.project)
         await self.fixture.new(message_id="om_new_lazy")
         lazy = self.store.active_binding(scope.key)
 
@@ -4472,7 +4472,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             for button in _elements(confirmation, "button")
             if button["text"]["content"] == "永久删除此会话"
         )
-        self.store.assign_native_thread_id(target.id, "native-raced")
+        self.runtime.materialize(target.id, "native-raced", cwd=self.project)
 
         await self.app.handle_card_action(
             direct_button_event(
@@ -4494,7 +4494,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_delete_target")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         target = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
         self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
         await self.app.handle_message(
             FakeMessage("/sessions", message_id="om_sessions")
@@ -4538,13 +4538,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_delete_target")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         target = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
         self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata(
             "native-target", "Delete target", "old task"
         )
         await self.fixture.new(message_id="om_new_current")
         current = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(current.id, "native-current")
+        self.runtime.materialize(current.id, "native-current", cwd=self.project)
         self.runtime.thread_metadata_values["native-current"] = NativeThreadMetadata(
             "native-current", "Current", "current task"
         )
@@ -4650,7 +4650,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_archive_target")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         target = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
         self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata(
             "native-target",
             "Archive target",
@@ -4696,7 +4696,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_running_archive")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-running")
+        self.runtime.materialize(binding.id, "native-running", cwd=self.project)
         self.runtime.thread_metadata_values["native-running"] = (
             NativeThreadMetadata("native-running", "Running", "work")
         )
@@ -4733,7 +4733,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_recovery")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-recovery")
+        self.runtime.materialize(binding.id, "native-recovery", cwd=self.project)
         self.runtime.thread_metadata_values["native-recovery"] = (
             NativeThreadMetadata("native-recovery", "Recovery", "work")
         )
@@ -4785,7 +4785,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_current")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         current = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(current.id, "native-current")
+        self.runtime.materialize(current.id, "native-current", cwd=self.project)
         self.runtime.thread_metadata_values["native-current"] = NativeThreadMetadata(
             "native-current",
             "Current work",
@@ -4824,7 +4824,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_archive_target")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         target = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
         self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata(
             "native-target",
             "Archive target",
@@ -4864,7 +4864,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_archive_target")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         target = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
         await self.fixture.new(message_id="om_new_current")
         current = self.store.active_binding(scope.key)
         other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
@@ -4873,7 +4873,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             project_alias="test",
             creator_id="ou_other",
         )
-        self.store.assign_native_thread_id(other.id, "native-other")
+        self.runtime.materialize(other.id, "native-other", cwd=self.project)
 
         self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata("native-target", "Title", "task")
         await self.app.handle_message(
@@ -4900,7 +4900,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_archive_target")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         target = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
 
         await self.app.handle_message(
             FakeMessage("/sessions", message_id="om_sessions")
@@ -4932,7 +4932,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_archive_target")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         target = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
         await self.fixture.new(message_id="om_new_current")
 
         self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata("native-target", "Title", "task")
@@ -4966,7 +4966,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         for i in range(11):
             await self.fixture.new(message_id=f"om_new_archive_page_{i}")
             binding = self.store.active_binding(scope.key)
-            self.store.assign_native_thread_id(binding.id, f"native-page-{i}")
+            self.runtime.materialize(binding.id, f"native-page-{i}", cwd=self.project)
             self.runtime.thread_metadata_values[f"native-page-{i}"] = (
                 NativeThreadMetadata(
                     f"native-page-{i}",
@@ -5016,7 +5016,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         for i in range(15):
             await self.fixture.new(message_id=f"om_new_{i}")
             binding = self.store.active_binding(scope.key)
-            self.store.assign_native_thread_id(binding.id, f"native-{i}")
+            self.runtime.materialize(binding.id, f"native-{i}", cwd=self.project)
             self.runtime.thread_metadata_values[f"native-{i}"] = NativeThreadMetadata(
                 f"native-{i}", f"Session {i}", f"task {i}",
             )
@@ -5055,7 +5055,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_archived")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         archived = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(archived.id, "native-one")
+        self.runtime.materialize(archived.id, "native-one", cwd=self.project)
         self.store.archive_binding(archived.id)
         self.runtime.archived_thread_metadata_values["native-one"] = (
             NativeThreadMetadata("native-one", "Archived work", "old task")
@@ -5077,7 +5077,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata(
             thread_id="native-one",
             name="  Release\nreview ",
@@ -5099,7 +5099,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "external-only")
+        self.runtime.materialize(binding.id, "external-only", cwd=self.project)
         self.runtime.thread_summary_values["external-only"] = NativeThreadMetadata(
             "external-only", "协作会话", "", updated_at=1_792_074_779,
         )
@@ -5118,7 +5118,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         preview = (
             '哈喽 <feishu_current_message_context> '
             '{"kind": "feishu_current_message", "sender":'
@@ -5141,7 +5141,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         name = '<at id="all">所有人</at> **标题**'
         preview = (
             '[点击](https://example.test) `echo` <at id="ou_user">用户</at> '
@@ -5174,7 +5174,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata(
             thread_id="native-one",
             name=None,
@@ -5199,7 +5199,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(
             used_tokens=24_500,
             context_window_tokens=100_000,
@@ -5227,7 +5227,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(
             used_tokens=24_500,
             context_window_tokens=None,
@@ -5246,7 +5246,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(
             used_tokens=105_000,
             context_window_tokens=100_000,
@@ -5265,7 +5265,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata(
             thread_id="native-one",
             name=None,
@@ -5286,7 +5286,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.thread_metadata_error = RuntimeError("history unavailable")
 
         with patch.object(self.runtime, "thread_summary", side_effect=RuntimeError("read unavailable")):
@@ -5341,7 +5341,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
 
         await self.app.handle_message(
             FakeMessage("/status", message_id="om_status")
@@ -8018,7 +8018,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         for reply_fails in (False, True):
             with self.subTest(reply_fails=reply_fails):
                 command = FakeMessage("/compact", message_id=f"om_compact_{reply_fails}")
@@ -8053,7 +8053,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.materialize(binding.id, "native-one", cwd=self.project)
         self.runtime.compacting.add(binding.id)
 
         await self.app.handle_message(FakeMessage("/status", message_id="om_status"))
@@ -8685,7 +8685,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             chat_id="oc-direct", root_id="om-root", seed_id="om-seed", topic_id="omt-side",
         )
         self.channel.card_update_results.extend((
-            SimpleNamespace(success=False), SimpleNamespace(success=True),
+            SendResult(success=False), SendResult(success=True),
         ))
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_message(source)
@@ -10645,7 +10645,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         missing_code.raw.pop("code")
         nonzero_code = sent_result("om-code", chat_id="oc-chat", code=1)
         chunked = sent_result("om-chunked", chat_id="oc-chat")
-        chunked.chunk_ids = ("om-chunked", "om-other")
+        chunked.chunk_ids = ["om-chunked", "om-other"]
         mismatch = sent_result("om-result", chat_id="oc-chat")
         mismatch.raw["data"]["message_id"] = "om-data"
         wrong_chat = sent_result("om-wrong-chat", chat_id="oc-other")

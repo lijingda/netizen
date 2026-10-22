@@ -21,13 +21,16 @@ class SelectUiTest(unittest.TestCase):
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")
-        source = source[source.index("function initializeSelectControls("):
-                        source.index("function initializeFilter(")]
+        source = (static / "chat-picker.js").read_text(encoding="utf-8") + "\n" + source
         fixture = Path(__file__).with_name("select_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_SELECT_CONTROLS\n")
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
+        bootstrap = fixture.with_name("side_sessions_ui_harness.js").read_text(
+            encoding="utf-8"
+        ).split("// SHIPPED_ADMIN_PAGE\n")[0]
         result = subprocess.run(
-            [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + before + source + after,
+            [node], input="const initialSearch = '';\nconst htmlTree = " + json.dumps(tree.root) + ";\n"
+            + dom + bootstrap + before + source + after,
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

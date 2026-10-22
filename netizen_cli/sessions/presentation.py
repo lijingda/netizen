@@ -105,6 +105,12 @@ def item_summary(item: dict[str, Any], include_outputs: bool, output_chars: int)
             "exitedReviewMode": {"review"},
             "contextCompaction": set(),
         }.get(kind, set())
+        prose = {
+            "plan": {"text"}, "commandExecution": {"command"},
+            "collabAgentToolCall": {"prompt"}, "webSearch": {"query"},
+            "imageGeneration": {"revisedPrompt"},
+            "enteredReviewMode": {"review"}, "exitedReviewMode": {"review"},
+        }.get(kind, set())
         outputs = {"aggregatedOutput", "output", "result", "diff"}
         for key, value in item.items():
             if key not in fields:
@@ -123,7 +129,7 @@ def item_summary(item: dict[str, Any], include_outputs: bool, output_chars: int)
                     for change in value
                 ]
             else:
-                result[key] = truncate(value, 2000) if isinstance(value, str) and key not in {"senderThreadId", "agentThreadId"} else value
+                result[key] = truncate(value, 2000) if key in prose and isinstance(value, str) else value
     return result
 
 
@@ -141,7 +147,32 @@ def result_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
-_PROTECTED = frozenset({"id", "threadId", "bindingId", "chatId", "topicId", "turnId", "cursor", "nextCursor", "afterCursor", "latestAssistantMessageId", "latestToolMarkerId", "projectId", "sourceThreadId", "senderThreadId", "receiverThreadIds", "agentThreadId", "cwd", "code", "type", "status", "reason", "order", "disposition"})
+def _shorten_text(node: dict[str, Any] | None, key: str, limit: int, *, mark: bool = False) -> None:
+    """Shorten one prose field selected by its result projection."""
+    if node is None:
+        return
+    text = node.get(key)
+    if isinstance(text, str) and len(text) > limit:
+        node[key] = text[:limit] if mark else truncate(text, limit)
+        if mark:
+            node["truncated"] = True
+
+
+def _shorten_result_text(value: dict[str, Any], limit: int) -> None:
+    # These are the published list/wait/error projections. Unknown fields,
+    # including nested tool arguments with names like "text", stay untouched.
+    _shorten_text(value.get("error"), "message", limit)
+    for thread in value.get("threads", []):
+        _shorten_text(thread, "title", limit)
+        _shorten_text(thread, "summary", limit)
+    for poll in value.get("polls", []):
+        _shorten_text(poll.get("latestAssistantMessage"), "text", limit)
+        turn = poll.get("latestTurn")
+        if turn is not None:
+            _shorten_text(turn.get("error"), "message", limit)
+            _shorten_text(turn.get("error"), "additionalDetails", limit)
+    for error in value.get("errors", []):
+        _shorten_text(error, "message", limit)
 
 
 def fit_result(value: dict[str, Any]) -> dict[str, Any]:
@@ -165,21 +196,6 @@ def fit_result(value: dict[str, Any]) -> dict[str, Any]:
         if result_bytes(value) <= MAX_RESULT_BYTES:
             return value
 
-        def shorten_read(node: Any, limit: int) -> None:
-            if isinstance(node, dict):
-                changed = False
-                for key, item in list(node.items()):
-                    if key in {"text", "title", "summary", "message"} and isinstance(item, str) and len(item) > limit:
-                        node[key] = item[:limit]
-                        changed = True
-                    else:
-                        shorten_read(item, limit)
-                if changed:
-                    node["truncated"] = True
-            elif isinstance(node, list):
-                for item in node:
-                    shorten_read(item, limit)
-
         low, high = 0, MAX_RESULT_BYTES
         best = None
         while low <= high:
@@ -187,8 +203,10 @@ def fit_result(value: dict[str, Any]) -> dict[str, Any]:
             # Retry from the same compact result, without losing text to a
             # previous trial that chose a smaller per-field limit.
             candidate = copy.deepcopy(value)
-            shorten_read(candidate["thread"], limit)
-            shorten_read(candidate["turns"], limit)
+            for turn in candidate["turns"]:
+                _shorten_text(turn["error"], "message", limit, mark=True)
+                for answer in turn["items"]:
+                    _shorten_text(answer, "text", limit, mark=True)
             if result_bytes(candidate) <= MAX_RESULT_BYTES:
                 best = candidate
                 low = limit + 1
@@ -196,51 +214,10 @@ def fit_result(value: dict[str, Any]) -> dict[str, Any]:
                 high = limit - 1
         return best if best is not None else _oversized_result(value)
 
-    def shorten(node: Any, limit: int) -> None:
-        if isinstance(node, dict):
-            for key, item in node.items():
-                if isinstance(item, str) and key not in _PROTECTED:
-                    node[key] = truncate(item, limit)
-                elif key not in _PROTECTED:
-                    shorten(item, limit)
-        elif isinstance(node, list):
-            for index, item in enumerate(node):
-                if isinstance(item, str):
-                    node[index] = truncate(item, limit)
-                else:
-                    shorten(item, limit)
     for limit in (2000, 1000, 500, 250, 100, 20, 0):
         if result_bytes(value) <= MAX_RESULT_BYTES:
             return value
-        shorten(value, limit)
-    # Large arbitrary tool arguments/structured output can contain many short
-    # values. Replace these payloads explicitly, never identifiers/cursors.
-    def prune(node: Any) -> None:
-        if isinstance(node, dict):
-            for key, item in list(node.items()):
-                if key in {"arguments", "content", "changes", "output", "result", "action", "summary"} and isinstance(item, (dict, list)):
-                    node[key] = {"truncated": True}
-                else:
-                    prune(item)
-        elif isinstance(node, list):
-            for item in node:
-                prune(item)
-    prune(value)
-    # Bounded native identity arrays retain each complete identifier. A
-    # truncated array is explicit; individual IDs are never shortened.
-    def trim_arrays(node: Any) -> None:
-        if isinstance(node, dict):
-            for key, item in list(node.items()):
-                if key == "receiverThreadIds" and isinstance(item, list):
-                    if len(item) > 8:
-                        node[key] = item[:8]
-                        node[key + "Truncated"] = True
-                else:
-                    trim_arrays(item)
-        elif isinstance(node, list):
-            for item in node:
-                trim_arrays(item)
-    trim_arrays(value)
+        _shorten_result_text(value, limit)
     polls = value.get("polls", [])
     while len(polls) > 1 and result_bytes(value) > MAX_RESULT_BYTES:
         wake_id = (value.get("wake") or {}).get("threadId")

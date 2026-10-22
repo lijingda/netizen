@@ -94,8 +94,8 @@
           <div class="workspace-fields">
             <label>Project<select id="worktree-project" required><option value="">选择 Project</option></select></label>
             <label>检出方式<select id="worktree-mode"><option value="detached">Detached（不绑定命名分支）</option><option value="existing">检出已有本地分支</option><option value="new">创建并检出新分支</option></select></label>
-            <label id="worktree-ref-label">起点提交 / 分支<input id="worktree-ref" list="worktree-refs" placeholder="HEAD"><datalist id="worktree-refs"></datalist></label>
-            <label id="worktree-existing-label" hidden>本地分支<select id="worktree-existing"></select></label>
+            <label id="worktree-ref-label">起点提交 / 分支<input id="worktree-ref" maxlength="256" placeholder="HEAD、分支、标签或提交"></label>
+            <label id="worktree-existing-label" hidden>本地分支<input id="worktree-existing" maxlength="256" placeholder="填写本地分支名"></label>
             <label id="worktree-new-label" hidden>新分支名称<input id="worktree-new-branch" maxlength="1024"></label>
           </div>
           <p id="worktree-create-note" class="hint">只检出已提交内容，不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。</p>
@@ -291,7 +291,7 @@
               <label>Project<select id="defaults-project" required><option value="">选择 Project</option></select></label>
               <label>worktree 使用方式<select id="defaults-workspace"><option value="project">项目目录（不使用 worktree）</option><option value="existing">使用已有 worktree</option><option value="new">每个新会话新建 worktree</option></select></label>
               <label id="defaults-worktree-field" hidden>受管 worktree<select id="defaults-worktree"></select></label>
-              <label id="defaults-workspace-ref-field" hidden>起点提交 / 分支<input id="defaults-workspace-ref" list="defaults-workspace-refs" maxlength="256" placeholder="留空使用创建时 Project 的 HEAD"><datalist id="defaults-workspace-refs"></datalist></label>
+              <label id="defaults-workspace-ref-field" hidden>起点提交 / 分支<input id="defaults-workspace-ref" maxlength="256" placeholder="留空使用创建时 Project 的 HEAD"></label>
             </div>
             <p id="defaults-workspace-help" class="defaults-field-help" role="status"></p>
             <div class="schedule-form-grid">
@@ -417,7 +417,7 @@
                 <div id="schedule-workspace-fields" class="schedule-section-fields">
                   <label>worktree 使用方式<select id="schedule-workspace"><option value="project">项目目录（不使用 worktree）</option><option value="existing">使用已有 worktree</option><option value="new">每次执行新建 worktree</option></select></label>
                   <label id="schedule-worktree-field" hidden>受管 worktree<select id="schedule-worktree"></select></label>
-                  <label id="schedule-workspace-ref-field" hidden>起点提交 / 分支<input id="schedule-workspace-ref" list="schedule-workspace-refs" maxlength="256" placeholder="留空使用执行时 Project 的 HEAD"><datalist id="schedule-workspace-refs"></datalist></label>
+                  <label id="schedule-workspace-ref-field" hidden>起点提交 / 分支<input id="schedule-workspace-ref" maxlength="256" placeholder="留空使用执行时 Project 的 HEAD"></label>
                   <p id="schedule-workspace-help" class="schedule-field-help" role="status"></p>
                 </div>
                 <div id="schedule-chat-target" class="chat-target">

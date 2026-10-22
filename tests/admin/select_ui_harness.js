@@ -22,7 +22,14 @@ Element.prototype.dispatchEvent = function(event) { return this.dispatch(event.t
 Element.prototype.getBoundingClientRect = () => ({ left: 50, top: 100, bottom: 135, width: 240, height: 200 });
 window.innerHeight = 800;
 const windowEvents = new Map();
-window.addEventListener = (name, callback) => windowEvents.set(name, callback);
+window.addEventListener = (name, callback) => {
+  const listeners = windowEvents.get(name) || [];
+  listeners.push(callback);
+  windowEvents.set(name, listeners);
+};
+const dispatchWindow = (name, event = {}) => {
+  for (const callback of windowEvents.get(name) || []) callback(event);
+};
 const observers = [];
 class MutationObserver {
   constructor(callback) { this.callback = callback; this.connected = true; observers.push(this); }
@@ -139,13 +146,13 @@ pageSize.click(); kind.focus();
 assert.equal(menu(), null, "focus outside closes popup");
 pageSize.click(); kind.dispatch("pointerdown");
 assert.equal(menu(), null, "outside pointer closes popup");
-pageSize.click(); windowEvents.get("scroll")({ target: menu().querySelector(".multi-filter-options") });
+pageSize.click(); dispatchWindow("scroll", { target: menu().querySelector(".multi-filter-options") });
 assert(menu(), "option-list scrolling must not close its own popup");
-windowEvents.get("scroll")({ target: document });
+dispatchWindow("scroll", { target: document });
 assert.equal(menu(), null);
 kind.click(); document.querySelector("#defaults-drawer").dispatch("close");
 assert.equal(menu(), null);
-pageSize.click(); windowEvents.get("resize")();
+pageSize.click(); dispatchWindow("resize");
 assert.equal(menu(), null);
 pageSize.getBoundingClientRect = () => ({ left: 50, top: 745, bottom: 780, width: 240, height: 35 });
 pageSize.click();

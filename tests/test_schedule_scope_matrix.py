@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from lark_channel import OutboundCard
+from lark_channel import OutboundCard, SendResult
 
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingStore
@@ -168,7 +168,7 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
             await state.app.dispatch_scheduled_run(claim)
             request = state.initial[0]
             state.store.schedules.release(claim.run.id)
-            state.channel.reply_results.append(SimpleNamespace(success=True, message_id="om_first",
+            state.channel.reply_results.append(SendResult(success=True, message_id="om_first",
                 chunk_ids=["om_first", "om_last"], raw={"code": 0, "data": {
                     "message_id": "om_last", "chat_id": state.scope.chat_id, "thread_id": "omt_fresh",
                 }}))

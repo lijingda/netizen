@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from lark_channel import (
+    SendResult,
     FeishuChannel,
     Identity,
     OutboundCard,
@@ -290,23 +291,20 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unconfirmed_progress_update_skips_reminder(self):
         for side in (False, True):
-            for index, receipt in enumerate((
-                object(), SimpleNamespace(success=True, raw={"code": 230071}),
-            )):
-                with self.subTest(side=side, receipt=receipt):
-                    self.channel.replies.clear()
-                    self.channel.updates.clear()
-                    self.channel.send_calls.clear()
-                    outcome = await self.start_progress(self.outcome(
-                        side=side, turn_id=f"unconfirmed-update-{side}-{index}",
-                        task_feedback=BindingTaskFeedback(progress_card_enabled=True),
-                    ))
-                    self.channel.card_update_results.append(receipt)
-                    await self.app.handle_completion(outcome)
-                    self.assertEqual(len(self.channel.replies), 1)
-                    self.assertEqual(len(self.channel.updates), 1)
-                    self.assert_mention(self.channel.updates[0][1], enabled=False)
-                    self.assert_reminder(enabled=False)
+            with self.subTest(side=side):
+                self.channel.replies.clear()
+                self.channel.updates.clear()
+                self.channel.send_calls.clear()
+                outcome = await self.start_progress(self.outcome(
+                    side=side, turn_id=f"unconfirmed-update-{side}",
+                    task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+                ))
+                self.channel.card_update_results.append(SendResult(success=True, raw={"code": 230071}))
+                await self.app.handle_completion(outcome)
+                self.assertEqual(len(self.channel.replies), 1)
+                self.assertEqual(len(self.channel.updates), 1)
+                self.assert_mention(self.channel.updates[0][1], enabled=False)
+                self.assert_reminder(enabled=False)
 
     async def test_unpublished_progress_result_mentions_original_text_fallback(self):
         for side in (False, True):

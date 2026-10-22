@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from lark_channel import OutboundCard, OutboundPost
+from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from scripts import probe_feishu_partial_answers as probe
 
@@ -45,10 +45,10 @@ class PartialAnswerProbeTest(unittest.IsolatedAsyncioTestCase):
         async def send(chat_id, content, opts):
             message_id = f"om_probe_{len(messages)}"
             messages[message_id] = content.card if isinstance(content, OutboundCard) else {"markdown": content.markdown}
-            return SimpleNamespace(success=True, message_id=message_id, raw={"code": 0})
+            return SendResult(success=True, message_id=message_id, raw={"code": 0})
         async def update(message_id, content):
             messages[message_id] = content
-            return SimpleNamespace(success=True, raw={"code": 0})
+            return SendResult(success=True, raw={"code": 0})
         async def fetch(message_id):
             item = {"message_id": message_id, "chat_id": "oc_wrong" if wrong_chat else "oc_synthetic_probe"}
             if not omit_body:

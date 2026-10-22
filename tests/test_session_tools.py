@@ -801,6 +801,46 @@ class ReadResultProjectionTests(unittest.TestCase):
 
 
 class SessionProjectionTests(unittest.TestCase):
+    def test_eight_long_wait_answers_keep_metadata_and_phase_exact(self):
+        from netizen_cli.sessions.service import _poll
+
+        polls = []
+        for index in range(8):
+            poll, _ = _poll({
+                "id": f"thread-{index}", "updatedAt": 10,
+                "status": {"type": "active", "activeFlags": []},
+                "turns": [turn(f"turn-{index}", "长回答" * 9000, status="inProgress")],
+            }, None)
+            poll["latestAssistantMessage"]["phase"] = "commentary"
+            poll["netizen"] = {"bindingId": f"binding-{index}", "chatId": f"chat-{index}",
+                               "topicId": f"topic-{index}", "isCurrent": True,
+                               "projectAlias": "project-项目", "materialized": True,
+                               "topicUrl": f"https://example.invalid/topic/{index}"}
+            polls.append(poll)
+        value = {"timedOut": True, "wake": None, "polls": polls}
+        original = copy.deepcopy(value)
+        result = fit_result(value)
+        self.assertLessEqual(result_bytes(result), 8000)
+        self.assertEqual(len(result["polls"]), 8)
+        for before, after in zip(polls, result["polls"], strict=True):
+            self.assertEqual(after["netizen"], before["netizen"])
+            self.assertEqual(after["cursor"], before["cursor"])
+            self.assertEqual(after["thread"], before["thread"])
+            self.assertEqual(after["latestAssistantMessage"]["phase"], "commentary")
+        self.assertEqual(value, original)
+
+    def test_text_field_names_outside_known_projections_are_not_shortened(self):
+        opaque = {"text": "keep exactly", "message": "keep exactly", "summary": "keep exactly"}
+        value = {"threads": [{"id": "thread", "title": "title" * 5000,
+                              "arguments": opaque, "phase": "future-phase", "newMetadata": "preserve me"}],
+                 "nextCursor": "opaque-next"}
+        result = fit_result(value)
+        self.assertLessEqual(result_bytes(result), 8000)
+        self.assertEqual(result["threads"][0]["arguments"], opaque)
+        self.assertEqual(result["threads"][0]["newMetadata"], "preserve me")
+        self.assertEqual(result["threads"][0]["phase"], "future-phase")
+        self.assertEqual(result["nextCursor"], "opaque-next")
+
     def test_list_retains_existing_entries_cursor_and_text_limits(self):
         value = {"schemaVersion": 4, "threads": [
             {"id": "first", "title": "x" * 9000, "summary": "Summary", "status": "idle"},

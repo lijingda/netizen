@@ -42,7 +42,7 @@ worktree，检查 main 分支的测试，再把结果发到这个群。”
 | --- | --- |
 | 项目目录（不使用 worktree） | 使用 Project 登记的目录。 |
 | 使用已有 worktree | 每次使用指定受管 worktree 的当前文件和分支，多个执行可以共享它。 |
-| 每次执行新建 worktree | 每个实际执行的任务新建 detached worktree；可以指定起点 revision，留空使用创建当时 Project HEAD。 |
+| 每次执行新建 worktree | 每个实际执行的任务新建 detached worktree；可以填写分支、标签或提交作为起点，留空使用创建当时 Project HEAD。 |
 
 后两项适用于 Git 项目。新建只带已提交内容，不复制未提交改动、忽略文件或依赖，不运行
 初始化脚本。保存、预览、加载选项及被跳过的执行都不创建 worktree。一次执行生成的会话

@@ -1,30 +1,17 @@
-const sessionMultiFilters = new Map();
-const timeRangeControllers = new Map();
-const state = { tab: "sessions", sessions: null, sessionPage: {
-  cursor: "page-two", nextCursor: "page-three", previousCursors: [null], number: 2,
-  query: "project=netizen&scopeKind=group&inventoryState=active&pageSize=20",
-} };
+window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
+window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
+const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
+let statusError = false;
+document.querySelector("#status").classList.toggle = (_name, value) => { statusError = value; };
 Object.defineProperty(document.querySelector("#sessions-body"), "rows", {
   get() { return this.querySelectorAll("tr"); },
 });
-let status = "";
-let statusError = false;
-function setStatus(message, error = false) { status = message; statusError = error; }
-function syncPageUrl() {}
 window.prompt = () => { throw new Error("Configuration must use the drawer"); };
 let discardConfirmed = true;
 const discardPrompts = [];
 window.confirm = (message) => { discardPrompts.push(message); return discardConfirmed; };
 const windowListeners = new Map();
 window.addEventListener = (name, callback) => windowListeners.set(name, callback);
-const defaultsEditor = null;
-const defaultsBusy = false;
-const scheduleEditor = null;
-let pendingScheduleDraft = null;
-function defaultEditorHasChanges() { return false; }
-function scheduleEditorHasChanges() { return false; }
-function closeDefaultEditor() {}
-function cancelScheduleSelection() { pendingScheduleDraft = null; }
 const baseSettings = {
   turn_settings: { model_id: "model-one", effort_id: "high", service_tier_id: "priority" },
   reaction_pulse_enabled: true, progress_card_enabled: false, completion_mention_enabled: true,
@@ -77,7 +64,7 @@ function paused(gate, result) {
     gate.reject = (message) => reject(new Error(message));
   });
 }
-async function api(path, options = {}) {
+async function fixtureResponse(path, options = {}) {
   if (options.method === "POST") {
     assert.equal(path, "/api/v1/sessions/configure");
     assert.equal(options.headers["Content-Type"], "application/json");
@@ -90,6 +77,7 @@ async function api(path, options = {}) {
     return { message: "已保存 exact 会话配置" };
   }
   gets.push(path);
+  if (path.startsWith("/api/v1/projects/options?")) return { items: [{ alias: "netizen", enabled: true }], nextCursor: null };
   if (path === "/api/v1/progress-card/settings") {
     if (globalFailure) throw new Error("全局配置读取失败");
     return { settings: structuredClone(globalProgress) };
@@ -106,7 +94,14 @@ async function api(path, options = {}) {
     ...structuredClone(session), actions: { configure: grant(session.bindingId) },
   })), nextCursor: "page-three" };
 }
-async function loadSessionProjectOptions() {}
+async function fetch(path, options = {}) {
+  try {
+    const data = await fixtureResponse(path, options);
+    return { ok: true, status: 200, json: async () => data };
+  } catch (error) {
+    return { ok: false, status: error.status || 400, json: async () => ({ message: error.message }) };
+  }
+}
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 // SHIPPED_SESSION_SETTINGS_CONTROLLER
 const field = sessionSettingsInput;
@@ -163,7 +158,7 @@ const cases = {
     assert.equal(field("progress").checked, false);
     assert.equal(field("completion-mention").checked, true);
     assert.equal(field("context").value, "catch-up");
-    assert.deepEqual(gets.filter((path) => path.includes("/options")), ["/api/v1/sessions/options"]);
+    assert.deepEqual(gets.filter((path) => path === "/api/v1/sessions/options"), ["/api/v1/sessions/options"]);
     change("model", "model-two");
     assert.deepEqual(sessionSettingsEditor.settings.turn_settings,
       { model_id: "model-two", effort_id: "low", service_tier_id: "priority" });
@@ -185,7 +180,7 @@ const cases = {
     assert.equal(field("editor").hidden, true);
     assert.equal(sessionSettingsEditor, null);
     assert.equal(document.activeElement, configureButton());
-    assert.match(status, /已保存/);
+    assert.match(statusNode.textContent, /已保存/);
     assert.equal(statusError, false);
     assert.match(document.querySelector("#sessions-body").textContent,
       /current-only · model-two \/ high \/ default/);
@@ -438,7 +433,7 @@ const cases = {
     assert(field("save").disabled);
     assert(button.disabled);
     assert.match(field("note").textContent, /保存结果未确认.*重新打开/);
-    assert.match(status, /保存结果未确认/);
+    assert.match(statusNode.textContent, /保存结果未确认/);
     assert.equal(statusError, true);
     await submit();
     assert.equal(posts.length, 1);
@@ -518,7 +513,7 @@ const cases = {
     assert.equal(posts[0].body.sessionSettings.completion_mention_enabled, false);
     assert.equal(field("drawer").open, false);
     assert.equal(sessionSettingsEditor, null);
-    assert.match(status, /已保存.*刷新失败/);
+    assert.match(statusNode.textContent, /已保存.*刷新失败/);
     assert.equal(statusError, true);
     assert(button.disabled);
     assertPageRetained(page);
@@ -574,6 +569,11 @@ const cases = {
   },
 };
 (async () => {
+  await flush();
+  state.sessionPage = {
+    cursor: "page-two", nextCursor: "page-three", previousCursors: [null], number: 2,
+    query: "project=netizen&scopeKind=group&inventoryState=active&pageSize=20",
+  };
   const name = process.argv[2];
   assert.equal(typeof cases[name], "function", "Unknown case: " + name);
   await cases[name]();
