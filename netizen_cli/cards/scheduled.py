@@ -385,6 +385,7 @@ def _plan_summary(plan: Mapping[str, Any]) -> str:
         + ("工作目录：" if plan.get("target_kind") == "binding" else "worktree 使用方式：")
         + workspace_summary(None if plan.get("target_kind") == "binding"
             else plan.get("workspace", {"mode": "project"}), new_label="每次执行新建 worktree") + "\n"
+        + ("" if plan.get("target_kind") == "binding" else f"成功后自动归档：{'开启' if plan.get('auto_archive') else '关闭'}\n")
         + f"启停：{'已启用' if plan.get('enabled') else '已暂停'}\n"
         + f"时间：{rule_text} · {rule.get('timezone', '')}\n"
         f"状态：{status}" + (f" · {_display_state(blocked)}" if blocked else "")
@@ -492,9 +493,12 @@ def _input(name: str, label: str, value: str = "", *, required: bool = True, mul
 
 def _select(name: str, label: str, options: Sequence[tuple[str, str]], selected: str | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"tag": "select_static", "name": name, "required": True,
-        "width": "fill", "placeholder": _plain_text(label), "options": [{"text": _plain_text(text), "value": value} for value, text in options]}
+        "width": "fill", "options": [{"text": _plain_text(text), "value": value} for value, text in options]}
     if selected is not None:
+        # Invisible placeholders still consume Feishu's card element budget.
         result["initial_option"] = selected
+    else:
+        result["placeholder"] = _plain_text(label)
     return result
 
 
@@ -573,6 +577,7 @@ def schedule_form_card(scope: FeishuScope, *, projects: Sequence[Project], defau
         meta["target_workspace_description"] = _binding_workspace_summary(
             existing.get("effective_workspace") or effective_workspace)
     else:
+        fields["cron_auto_archive"] = "true" if existing.get("auto_archive", False) else "false"
         meta["project"] = existing.get("project_alias") or initial_project or projects[0].alias
         project = next((project for project in projects if project.alias == meta["project"]), None)
         meta["project_revision"] = project.revision if project is not None and project.revision > 0 else None
@@ -661,7 +666,7 @@ def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[
         _form_columns(
             (1, _labeled("截止日期", _draft_picker("cron_end_date", "date_picker", fields.get("cron_end_date", "")))),
             (1, _labeled("截止时间（含该时刻）", _draft_picker(end_time_name, "picker_time", fields.get("cron_end_time", ""))))),
-        _form_hint("截止日期与时间使用上方时区；同时留空可取消截止。"),
+        _form_hint("截止日期与时间使用上方时区；同时留空可取消截止。\n只使用所选频率对应的日期、时间、星期或间隔；日期与时间以所填时区为准。"),
     ]
     project_meta = {key: value for key, value in meta.items()
         if key not in {"plan_id", "expected_revision", "anchor", "original_at", "original_end_at"}}
@@ -694,7 +699,10 @@ def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[
             new_label="每次执行新建 worktree",
             footer="已有 worktree 由各次执行共享文件；不可用时不新建话题，不切回项目目录。已生成 worktree 需在 Admin 显式管理。",
         )))
-    elements.append(_form_hint("只使用所选频率对应的日期、时间、星期或间隔；日期与时间以所填时区为准。"))
+        if "cron_auto_archive" in fields:
+            elements.extend(_labeled("成功后自动归档\n<font color='grey'>首轮正常结束且结果送达后归档，恢复使用 /sessions archived。</font>",
+                _select("cron_auto_archive", "成功后自动归档",
+                [("false", "关闭"), ("true", "开启")], fields["cron_auto_archive"])))
     elements.append({"tag": "button", "name": "cron_save", "text": _plain_text("保存修改" if editing else "创建任务"),
         "type": "primary_filled", "width": "fill", "form_action_type": "submit"})
     if not binding_target:
@@ -884,7 +892,7 @@ def read_schedule_form(scope: FeishuScope, form: Mapping[str, Any]) -> ScheduleF
     allowed = {"cron_name", "cron_instructions", "cron_project", "cron_timezone", "cron_kind",
         "cron_every_minutes", "cron_at", "cron_date", "cron_weekdays", "cron_end_date", "cron_end_time"}
     if not binding_target:
-        allowed.update({"cron_target_mode", "cron_group_id", "cron_chat_id", "cron_chat_query", "cron_chat_page"})
+        allowed.update({"cron_target_mode", "cron_group_id", "cron_chat_id", "cron_chat_query", "cron_chat_page", "cron_auto_archive"})
     for key, value in form.items():
         if not isinstance(key, str):
             raise CardActionError("表单字段格式无效，无法恢复。")
@@ -934,6 +942,8 @@ def read_schedule_form(scope: FeishuScope, form: Mapping[str, Any]) -> ScheduleF
             elif value and base in {"cron_at", "cron_end_time"}:
                 value = _picker_clock(value)
         fields[base] = value
+    if "cron_auto_archive" in fields:
+        _decode_auto_archive(fields["cron_auto_archive"])
     if not {"cron_name", "cron_instructions", "cron_project", "cron_timezone", "cron_kind"} <= fields.keys():
         raise CardActionError("定时任务表单缺少字段。")
     if fields["cron_kind"] not in _KINDS:
@@ -1063,7 +1073,7 @@ def _decode_form(scope: FeishuScope, form: Any, *, value: Any = None) -> Schedul
         expected.add("cron_target_mode")
     optional = {"cron_every_minutes", "cron_at", "cron_date", "cron_weekdays", "cron_end_date", "cron_end_time"}
     if not binding_target:
-        optional.update({"cron_group_id", "cron_chat_id", "cron_chat_query", "cron_chat_page"})
+        optional.update({"cron_group_id", "cron_chat_id", "cron_chat_query", "cron_chat_page", "cron_auto_archive"})
     if not expected <= set(form) or set(form) - expected - optional:
         raise CardActionError("定时任务表单缺少字段或混入其他操作。")
     rule: dict[str, Any] = {"kind": kind, "timezone": _text(form["cron_timezone"], "时区")}
@@ -1095,6 +1105,8 @@ def _decode_form(scope: FeishuScope, form: Any, *, value: Any = None) -> Schedul
     else:
         assert settings is not None
         draft.update(project=meta["project"], session_settings=settings.to_dict())
+        if "cron_auto_archive" in form:
+            draft["auto_archive"] = _decode_auto_archive(form["cron_auto_archive"])
         if workspace_fields:
             draft["workspace"] = decode_workspace_form(workspace_fields, prefix="cron",
                 project=meta["project"], revision=meta.get("project_revision"))
@@ -1109,6 +1121,12 @@ def _decode_form(scope: FeishuScope, form: Any, *, value: Any = None) -> Schedul
     if "plan_id" in meta:
         draft.update(plan_id=meta["plan_id"], expected_revision=meta["expected_revision"])
     return ScheduleCardAction("save", draft, meta["request_id"], meta["navigation"])
+
+
+def _decode_auto_archive(value: Any) -> bool:
+    if not isinstance(value, str) or value not in {"false", "true"}:
+        raise CardActionError("成功后自动归档选项无效，请重新选择。")
+    return value == "true"
 
 
 def schedule_retry_card(*, app_id: str, chat_id: str, value: Any, form: Any,

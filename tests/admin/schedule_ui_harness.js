@@ -323,6 +323,8 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("target-note").hidden, true);
   assert.equal(scheduleInput("binding-field").hidden, true);
   assert.equal(scheduleTargetKind(), "new_topic");
+  assert.equal(scheduleInput("auto-archive-field").hidden, false);
+  assert.equal(scheduleInput("auto-archive").checked, false);
   assert.equal(document.activeElement, scheduleInput("name"));
   assert.equal(scheduleInput("effort").querySelectorAll("option")[0].textContent, "medium");
   assert.deepEqual(scheduleInput("project").querySelectorAll("option").map((o) => o.value),
@@ -352,7 +354,7 @@ async function chooseScheduleTarget(value) {
   assert.deepEqual(posts[0].body, actionPayload(envelope("create"), { definition: {
     workspace: { mode: "project" },
     name: "My report", project: "project-two", chat_id: "oc_explicit", instructions: "One.\nTwo.",
-    schedule: { kind: "daily", timezone: "Asia/Shanghai", at: "10:00" }, enabled: true,
+    schedule: { kind: "daily", timezone: "Asia/Shanghai", at: "10:00" }, enabled: true, auto_archive: false,
     session_settings: defaultSessionSettings,
   } }));
   assert.equal(scheduleInput("editor").hidden, true);
@@ -481,11 +483,14 @@ async function chooseScheduleTarget(value) {
 
   // A failed save keeps user input and makes its spent action unusable.
   await editSchedule(state.schedules.plans[0]);
+  scheduleInput("auto-archive").checked = true;
   await previewSchedule();
   respond = () => { throw new Error("计划已变化，请刷新。"); };
   const beforeFailure = posts.length;
   await saveSchedule({ preventDefault() {} });
   assert.equal(scheduleInput("instructions").value, fixturePlan().instructions);
+  assert.equal(scheduleInput("auto-archive").checked, true);
+  assert.equal(posts.at(-1).body.definition.auto_archive, true);
   assert.equal(scheduleInput("save").disabled, true);
   assert.match(scheduleInput("form-error").textContent, /请刷新列表并重新打开编辑/);
   assert.equal(scheduleInput("form-error").hidden, false);
@@ -568,6 +573,8 @@ async function chooseScheduleTarget(value) {
   assert.equal(JSON.parse(new URL(gets.at(-1), "http://localhost").searchParams.get("session_settings")).turn_settings.effort_id, "high");
   await chooseScheduleTarget("binding");
   assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("auto-archive-field").hidden, true);
+  assert.equal(scheduleInput("auto-archive").disabled, true);
   assert.equal(scheduleInput("target-note").hidden, false);
   assert.equal(scheduleInput("select-session").hidden, false);
   assert.match(scheduleInput("binding-summary").textContent, /Sessions/);
@@ -578,6 +585,8 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("target-note").hidden, true);
   assert.equal(scheduleInput("binding-field").hidden, true);
   assert.equal(scheduleInput("session-settings").hidden, false);
+  assert.equal(scheduleInput("auto-archive-field").hidden, false);
+  assert.equal(scheduleInput("auto-archive").disabled, false);
   assert.equal(scheduleInput("session-settings").open, true);
   assert.equal(scheduleInput("project").required, true);
   assert.equal(scheduleInput("chat-target").hidden, false);
@@ -932,7 +941,7 @@ async function chooseScheduleTarget(value) {
   const bindingCreate = posts.at(-1).body.definition;
   assert.equal(bindingCreate.target_kind, "binding");
   assert.equal(bindingCreate.target_binding_id, "binding-inactive");
-  for (const name of ["session_settings", "project", "chat_id", "workspace", "expected_project_revision"]) assert.equal(name in bindingCreate, false);
+  for (const name of ["session_settings", "project", "chat_id", "workspace", "expected_project_revision", "auto_archive"]) assert.equal(name in bindingCreate, false);
   assert.equal(posts.at(-1).body.actionToken, "fresh-session-create-grant");
   assert.equal(gets.length, beforeBindingSave, "saving from Sessions must not reload or move its list");
   assert.equal(state.tab, "sessions");
@@ -978,6 +987,7 @@ async function chooseScheduleTarget(value) {
   assert(scheduleInput("detail-settings").textContent.includes("已登记工作目录：/managed/original/subproject"));
   assert(scheduleInput("detail-settings").textContent.includes("worktree：wt-original"));
   assert(scheduleInput("detail-settings").textContent.includes("实际目录由原会话确定"));
+  assert(!scheduleInput("detail-settings").textContent.includes("成功后自动归档"));
   closeScheduleDetail();
   viewedPlan = previousViewedPlan;
   await openScheduleEditor(boundPlan);
@@ -1002,7 +1012,7 @@ async function chooseScheduleTarget(value) {
   await previewSchedule();
   await saveSchedule({ preventDefault() {} });
   const bindingUpdate = posts.at(-1).body.definition;
-  for (const name of ["target_kind", "target_binding_id", "session_settings", "project", "chat_id", "workspace", "expected_project_revision"]) {
+  for (const name of ["target_kind", "target_binding_id", "session_settings", "project", "chat_id", "workspace", "expected_project_revision", "auto_archive"]) {
     assert.equal(name in bindingUpdate, false);
   }
   assert.equal(scheduleRunStatus("input_started"), "已启动新一轮");
@@ -1556,6 +1566,45 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("runs-body").querySelectorAll("a").length, 0);
 
   closeScheduleDetail();
+  // Auto-archive is a plan policy: edits, option refreshes and draft protection
+  // retain the exact choice without placing it in inherited session settings.
+  const archivePlan = { ...fixturePlan(), auto_archive: true };
+  await openScheduleEditor(archivePlan);
+  assert.equal(scheduleInput("auto-archive").checked, true);
+  assert.equal(scheduleEditorHasChanges(), false);
+  scheduleInput("auto-archive").checked = false;
+  assert.equal(scheduleEditorHasChanges(), true);
+  scheduleInput("auto-archive").checked = true;
+  assert.equal(scheduleEditorHasChanges(), false);
+  await loadScheduleSessionOptions();
+  assert.equal(scheduleInput("auto-archive").checked, true);
+  await previewSchedule();
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.at(-1).body.definition.auto_archive, true);
+  assert.equal("session_settings" in posts.at(-1).body.definition, false);
+  await openScheduleEditor(archivePlan);
+  scheduleInput("auto-archive").checked = false;
+  await loadScheduleSessionOptions();
+  assert.equal(scheduleInput("auto-archive").checked, false);
+  await previewSchedule();
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.at(-1).body.definition.auto_archive, false);
+  viewedPlan = archivePlan;
+  await showSchedule(archivePlan.id);
+  assert(scheduleInput("detail-settings").textContent.includes("成功后自动归档：开启"));
+  closeScheduleDetail();
+  await openNewScheduleEditor();
+  assert.equal(scheduleInput("auto-archive").checked, false);
+  scheduleInput("auto-archive").checked = true;
+  catalogError = { code: "unavailable", message: "模型目录读取失败" };
+  await changeScheduleProject();
+  assert.equal(scheduleInput("auto-archive").checked, true);
+  await previewSchedule();
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.at(-1).body.definition.auto_archive, true);
+  assert.equal("auto_archive" in posts.at(-1).body.definition.session_settings, false);
+  catalogError = null;
+
   defaultSessionSettings.progress_card_settings = null;
   await openNewScheduleEditor();
   scheduleInput("progress").checked = !defaultSessionSettings.progress_card_enabled;

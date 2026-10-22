@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 from netizen_cli.worktrees.policy import WorkspacePolicy
-from netizen_cli.cards.scheduled import decode_schedule_action, read_schedule_form
+from netizen_cli.cards.scheduled import _element_count, decode_schedule_action, read_schedule_form
 from netizen_cli.cards.workspace import workspace_reference
 from netizen_cli.chat_targets import ChatTargetError
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
@@ -147,7 +147,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         policy = {"mode": "new"}
         values["cron_workspace"] = workspace_reference(project["project"], project["project_revision"], policy)
         values["cron_worktree_ref"] = "refs/heads/main"
-        values.update(cron_target_mode="group", cron_chat_query="研发", cron_chat_id="oc_pending")
+        values.update(cron_target_mode="group", cron_chat_query="研发", cron_chat_id="oc_pending", cron_auto_archive="true")
         options = {"projectAlias": project["project"], "projectRevision": project["project_revision"],
             "isGit": True, "items": [{"id": "wt-ready", "cwd": "/tmp/wt-ready", "state": "ready", "available": True}],
             "branches": [{"name": "main", "ref": "refs/heads/main", "remote": False}]}
@@ -158,11 +158,15 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         before = self.store._connection.total_changes
         searched = await self.action(value=callback(card, "查找群聊"), form=values)
         paged = await self.jump(searched, 1, values={"cron_group_id": "oc_workspace_0"})
+        for rendered in (searched, paged):
+            self.assertLessEqual(_element_count(rendered.card), 200)
+            self.assertEqual(form_values(rendered)["cron_auto_archive"], "true")
         drafted = read_schedule_form(self.scope, form_values(paged))
         self.assertEqual(drafted.workspace_fields, {key: values[key] for key in ("cron_workspace", "cron_worktree_ref")})
         self.assertEqual(drafted.meta["request_id"], project["request_id"])
         self.management.query_available_chats.reset_mock()
         refreshed = await self.action(value=callback(paged, "加载 worktree 选项"), form=form_values(paged))
+        self.assertLessEqual(_element_count(refreshed.card), 200)
         self.assertEqual(read_schedule_form(self.scope, form_values(refreshed)),
             replace(drafted, fields={key: value for key, value in drafted.fields.items() if key != "cron_chat_page"}))
         self.management.query_available_chats.assert_not_awaited()
@@ -319,11 +323,12 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         values = form_values(card)
         values[next(key for key in values if key.startswith("cron_name"))] = ""
         values[next(key for key in values if key.startswith("cron_instructions"))] = ""
-        values.update(cron_target_mode="group", cron_group_id="oc_group", cron_chat_id="oc_private", cron_chat_query="研发")
+        values.update(cron_target_mode="group", cron_group_id="oc_group", cron_chat_id="oc_private", cron_chat_query="研发", cron_auto_archive="true")
         before = self.store.schedules.get(created.plan_id)
         changes = self.store._connection.total_changes
         self.management.query_available_chats.reset_mock()
         searched = await self.action(value=callback(card, "查找群聊"), form=values)
+        self.assertLessEqual(_element_count(searched.card), 200)
         self.assertEqual(self.store._connection.total_changes, changes)
         self.assertEqual(self.store.schedules.get(created.plan_id), before)
         expected_search = {**values, "cron_group_id": ""}
@@ -349,6 +354,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
             paged = await self.jump(paged, page_index, values={
                 "cron_group_id": "oc_page_0", "cron_chat_query": "尚未查找的产品群",
             })
+            self.assertLessEqual(_element_count(paged.card), 200)
             self.assertEqual(callback(paged, "跳转")["payload"]["snapshot"], next_action["payload"]["snapshot"])
             options = {option["value"] for option in self.field(paged, "cron_group_id")["options"]}
             expected_page = {group.chat_id for group in groups[page_index * 10:(page_index + 1) * 10]}
@@ -372,6 +378,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.schedule, before.schedule)
         self.assertEqual(saved.revision, before.revision + 1)
         self.assertEqual(saved.instructions, "搜索后保存")
+        self.assertTrue(saved.auto_archive)
 
     async def test_complete_snapshot_consumes_empty_platform_page_and_does_not_drop_tail(self):
         groups = tuple(AvailableChat(f"oc_search_{i}", f"检索群 {i}", "group", False) for i in range(12))

@@ -116,6 +116,60 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response["ok"], response)
         return response["plan"]
 
+    async def test_auto_archive_defaults_and_partial_update_preserve_saved_policy(self):
+        default = await self.create()
+        self.assertIs(default["auto_archive"], False)
+        enabled = await self.create(auto_archive=True)
+        self.assertIs(enabled["auto_archive"], True)
+        response = await self.service.manage({
+            "mode": "update", "plan_id": enabled["id"], "expected_revision": 1,
+            "request_id": "rename-auto-archive", "name": "renamed",
+        })
+        self.assertTrue(response["ok"], response)
+        self.assertIs(response["plan"]["auto_archive"], True)
+        response = await self.service.manage({
+            "mode": "update", "plan_id": enabled["id"], "expected_revision": 2,
+            "request_id": "disable-auto-archive", "auto_archive": False,
+        })
+        self.assertTrue(response["ok"], response)
+        self.assertIs(response["plan"]["auto_archive"], False)
+        self.assertEqual(response["plan"]["session_settings"], enabled["session_settings"])
+        listing = await self.service.manage({"mode": "list"}, native_thread_id="native-a")
+        self.assertTrue(all(item["auto_archive"] is False for item in listing["plans"]))
+
+    async def test_auto_archive_is_strict_boolean_and_new_topic_only(self):
+        topic = await self.create()
+        binding = await self.create(target_kind="binding")
+        self.assertIs(binding["auto_archive"], False)
+        for target_kind, plan, values in (
+            ("new_topic", topic, (None, 0, 1, "false", {}, [])),
+            ("binding", binding, (False, True, None)),
+        ):
+            for index, value in enumerate(values):
+                with self.subTest(target_kind=target_kind, value=value):
+                    response = await self.service.manage(
+                        self.create_request(target_kind=target_kind, auto_archive=value),
+                        native_thread_id="native-a",
+                    )
+                    self.assertFalse(response["ok"], response)
+                    response = await self.service.manage({
+                        "mode": "update", "plan_id": plan["id"], "expected_revision": 1,
+                        "request_id": f"invalid-{target_kind}-{index}", "auto_archive": value,
+                    })
+                    self.assertFalse(response["ok"], response)
+                    self.assertEqual(self.store.schedules.get(plan["id"]).revision, 1)
+
+    async def test_auto_archive_preview_uses_saved_policy_and_rejects_binding_override(self):
+        plan = await self.create(auto_archive=True)
+        preview = await self.service.preview({"plan_id": plan["id"]})
+        self.assertTrue(preview["ok"], preview)
+        self.assertIs(preview["auto_archive"], True)
+        preview = await self.service.preview({"plan_id": plan["id"], "auto_archive": False})
+        self.assertIs(preview["auto_archive"], False)
+        binding = await self.create(target_kind="binding")
+        preview = await self.service.preview({"plan_id": binding["id"], "auto_archive": False})
+        self.assertFalse(preview["ok"], preview)
+
     async def test_same_cwd_native_threads_resolve_their_own_groups(self):
         first, second = await asyncio.gather(
             self.create(native_thread_id="native-a"),

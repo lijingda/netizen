@@ -296,6 +296,7 @@ class Plan:
     target_kind: str = "new_topic"
     target_binding_id: str | None = None
     workspace: WorkspacePolicy | None = WorkspacePolicy()
+    auto_archive: bool = False
 
 
 @dataclass(frozen=True, slots=True)

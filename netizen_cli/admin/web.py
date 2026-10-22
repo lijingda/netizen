@@ -986,7 +986,7 @@ class AdminWebApplication:
         )
         definition = payload.get("definition", {})
         if not isinstance(definition, dict) or set(definition) - {
-            "name", "instructions", "project", "expected_project_revision", "chat_id", "schedule", "enabled", "session_settings", "workspace", "target_kind", "target_binding_id",
+            "name", "instructions", "project", "expected_project_revision", "chat_id", "schedule", "enabled", "session_settings", "workspace", "target_kind", "target_binding_id", "auto_archive",
         }:
             raise AdminWebError(400, "invalid_input", "定时任务定义字段无效。")
         request: dict[str, object] = {

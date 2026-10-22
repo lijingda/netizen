@@ -42,12 +42,14 @@ class OptionalProgressCardSettingsMigrationTest(unittest.TestCase):
         before = self.contents()
         expected = {"source_version": 18, "target_version": 19,
                     "steps": [{"from_version": 18, "to_version": 19}]}
-        self.assertEqual(migrations.plan_channel_database(self.path), expected)
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=18), expected)
+        with patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS[:5]), patch.object(migrations, "SCHEMA_VERSION", 19):
+            self.assertEqual(migrations.plan_channel_database(self.path), expected)
+            self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=18), expected)
         self.assertEqual(self.contents(), tuple(
             line.replace('INSERT INTO "schema_version" VALUES(18);', 'INSERT INTO "schema_version" VALUES(19);')
             for line in before
         ))
+        migrations.migrate_channel_database(self.path, expected_source_version=19)
         validate_channel_database(self.path)
         with closing(BindingStore(self.path)) as store:
             self.assertEqual(store.get("binding").task_feedback.progress_card_settings, ProgressCardSettings())
@@ -55,7 +57,7 @@ class OptionalProgressCardSettingsMigrationTest(unittest.TestCase):
                              ProgressCardSettings())
             self.assertEqual(store.schedules.get("plan-topic").session_settings.task_feedback.progress_card_settings, custom)
         before_noop = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=19)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=20)["steps"], [])
         self.assertEqual(self.contents(), before_noop)
 
     def test_old_version_rejects_null_intent_without_silently_reinterpreting_data(self):
@@ -74,7 +76,7 @@ class OptionalProgressCardSettingsMigrationTest(unittest.TestCase):
 
         before = self.contents()
         step = migrations.Migration(18, 19, v19.apply, fail)
-        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:4], step)):
+        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:4], step, *migrations.MIGRATIONS[5:])):
             with self.assertRaisesRegex(RuntimeError, "after nullable intent validation"):
                 migrations.migrate_channel_database(self.path, expected_source_version=18)
         self.assertEqual(self.contents(), before)

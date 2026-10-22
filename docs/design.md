@@ -1534,7 +1534,7 @@ Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle R
 ## 定时任务
 
 Scheduled Plan 保存明确的执行指令、时间规则与执行目标，支持 `new_topic` 和 `binding`。
-新话题模式另保存 Project、目标飞书会话、独立会话配置与工作区策略。每次触发在目标会话中新建真实话题和普通持久 Thread；单聊、普通群、话题群及
+新话题模式另保存 Project、目标飞书会话、独立会话配置、工作区策略与完成后自动归档选项。每次触发在目标会话中新建真实话题和普通持久 Thread；单聊、普通群、话题群及
 已有话题来源使用相同语义。已有话题的计划在所属 chat 新建 sibling 话题，不切换来源
 Scope 的 active Binding，不 fork 来源历史；使用项目目录、共享已有工作区还是新建目录由计划策略决定。
 执行话题的继续交流、配置、停止、归档、删除和 Files 均复用普通会话能力。
@@ -1572,6 +1572,31 @@ Admin 列表/详情、`/cron` 摘要/详情和 MCP list/view/mutation 计划投�
 选项和状态打开/刷新时按需有界读取，相同资源在本次查询内去重，不持久化健康状态、不扫描完整 dirty 文件或后台巡检。
 未取得新鲜状态不能当成确定可用。编辑器保留失效 exact 选择并说明原因，可重新选择；
 模型、聊天和 worktree 某组选项读取失败不丢弃其他选项或草稿。UI 状态不替代实际 dispatch 复核。
+
+### 新话题完成后自动归档
+
+`auto_archive` 是独立于 SessionSettings 的计划布尔选项，只对 `new_topic` 开放，默认
+false；创建省略为关闭，更新省略保留旧值，显式值须为布尔值。`binding` 计划保持 false，
+不接受显式设置。Admin、`/cron` 与自然语言管理使用同一策略，定时触发和“立即运行”均适用。
+
+认领时将选项固定在 `Claim.plan`，交接时传入本次内存中的 `ScheduledOrigin`；之后编辑、
+暂停或删除计划不改变已经认领的一次。选项不属于普通会话配置，不从来源 Binding 或聊天
+默认配置继承，不随执行话题的 `/config` 改变。
+
+仅当本次 exact initial Turn 的普通完成结果为 completed、无执行错误，且现有结果交付链
+确认 sent，才在交付收尾追加既有 exact Binding 归档调用。成功只指这些流程条件，不分析
+回复内容或判断业务目标是否达成。执行异常、停止、状态未知和投递失败继续走原有路径，
+不为本策略改写结果、重发回复或重新执行任务。
+
+归档不再检查用户是否续聊、是否空闲或出现新 Turn，也不等待后续空闲；即使用户已启动
+下一轮，也直接按既有原生归档语义处理，可能结束后续工作。归档始终针对本次执行创建的
+准确 Binding/Thread，不能转投后来切换到的当前会话。生命周期预约、释放锁后调用原生
+归档及结果未知时的有界对账复用现有能力。归档异常不改变已确认的执行成功和送达回执，
+不新增重试、Run 终态、归档回执或历史记录。
+
+结果卡、过程卡、Files 与富文本回复均保持原样，不增加归档通知或恢复按钮。归档保留
+原生历史、飞书话题与工作区，恢复走 `/sessions archived` 的既有链路。重启不重放执行、
+不重发结果，也不从 Run 或原生历史推断待执行策略并补归档。
 
 ### 原会话目标
 
@@ -1639,7 +1664,7 @@ OnIt/接收回执，保留原轮模型、卡片、结果来源和发起人。系
 
 | 操作 | 对调度和普通会话的影响 |
 | --- | --- |
-| 暂停、修改、删除计划 | 影响后续认领；已经认领的一次继续使用冻结的配置和工作区策略，已有话题、会话及工作区保留 |
+| 暂停、修改、删除计划 | 影响后续认领；已经认领的一次继续使用冻结的配置、工作区策略和自动归档选项，已有话题、会话及工作区保留 |
 | 启用计划 | 取下一未来时间点，不重跑旧触发；过去的一次性须先重新安排 |
 | 立即运行 | 按当前已保存版本认领一次手动执行，暂停及已结束计划也可运行；不改变启停、时间规则、游标、下次到期点或 revision |
 | 普通 /stop、归档、删除会话 | /stop 处理当前任务；新话题计划独立保留。原会话目标归档自动暂停，删除目标一并删除计划，不重放触发 |
@@ -1692,7 +1717,8 @@ Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后�
 
 `/cron` 用一张管理卡，默认当前飞书聊天已启用且未结束，筛选和任务各用下拉框确认。
 选择任务后原卡展开详情和操作，最近记录按需展开；刷新仅作用于所选任务，新建入口独立
-放在底部，并提供冻结当前 Binding 的原会话入口。新建/编辑各用一张完整表单，频率
+放在底部，并提供冻结当前 Binding 的原会话入口。新话题计划提供独立的“成功后自动归档”选项，
+详情展示当前选择，查找、预览和失败重绘保留草稿；原会话目标不提供此项。新建/编辑各用一张完整表单，频率
 不触发多级页面跳转，只校验对应时间字段。原会话表单只展示目标及继承说明，不编辑配置。
 卡片默认每批最多 50 个计划、5 条执行记录；更长指令通过 Admin/自然语言编辑。
 新话题表单按项目、worktree、模型、消息上下文与反馈分组，复用 `/defaults` 的 worktree 使用方式
@@ -1932,7 +1958,7 @@ blocking-I/O executor 写入既有 YAML。每个配置服务仅串行化写操�
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v19 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v20 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
 `schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
 v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
@@ -1948,6 +1974,9 @@ v19 保留 v18 表结构和全部已有值，仅允许 `progress_card_settings_j
 JSON null，以及完整 SessionSettings 的 `progress_card_settings` 为 null，以保存未配置意图。
 历史完整值均为显式设置，不按是否等于旧默认值转换；全局兜底保存在实例 YAML，解析后的
 有效值不落库。只存展示意图，不存过程正文、原生事件、分段历史或卡片 session。
+v20 为 `schedule_plans` 增加独立的 `auto_archive` 布尔列；所有旧计划与删除墓碑迁移为
+false，只有有效 `new_topic` 计划可开启。冻结 v19 → v20 迁移保留其余数据和回执，
+不向 `schedule_runs` 增加归档状态、执行终态、策略快照或结果历史。
 受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
 创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
 不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
@@ -1970,7 +1999,7 @@ Codex 配置或卡片 session，也不与 Project 或 Worktree 删除级联。
 Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
 每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
-数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18；基线仍为 v14，沿用
+数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18 → v19 → v20；基线仍为 v14，沿用
 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
 历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
 在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
