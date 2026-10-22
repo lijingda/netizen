@@ -9927,18 +9927,23 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_only_terminal_preserves_native_status_without_final(self) -> None:
         for status in ("completed", "failed", "interrupted"):
+            binding = self.binding(FeishuScope("cli_test", f"oc_{status}", ScopeKind.DIRECT))
+            started = await self.submit(binding)
+            handle = self.codex.handles[-1]
+            handle.complete(status=status)
+            handle.record.items = [ThreadItem.model_validate({
+                "type": "agentMessage", "id": "partial", "phase": "partial_answer",
+                "text": "stable but not a terminal signal",
+            })]
+            started.release_receipt_attempt()
+            # Drain before the subtest so a timeout cannot leak this Turn into
+            # the next case. This checks terminal semantics, not 200ms latency.
+            self.assertTrue(await self.runtime.wait_idle(timeout=2), status)
             with self.subTest(status=status):
-                binding = self.binding(FeishuScope("cli_test", f"oc_{status}", ScopeKind.DIRECT))
-                started = await self.submit(binding)
-                handle = self.codex.handles[-1]
-                handle.complete(status=status)
-                handle.record.items = [ThreadItem.model_validate({
-                    "type": "agentMessage", "id": "partial", "phase": "partial_answer",
-                    "text": "stable but not a terminal signal",
-                })]
-                started.release_receipt_attempt()
-                self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
                 outcome = self.outcomes[-1]
+                self.assertEqual(outcome.binding_id, binding.id)
+                self.assertEqual(outcome.thread_id, started.thread_id)
+                self.assertEqual(outcome.turn_id, started.turn_id)
                 self.assertEqual(outcome.status, status)
                 self.assertIsNone(outcome.final_response)
                 self.assertEqual(len(outcome.partial_answers), 1)

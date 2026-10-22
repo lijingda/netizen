@@ -10325,7 +10325,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 mentioned_bot=False,
             )
         )
-        read_branch.assert_awaited_once_with(self.project.resolve())
+        read_branch.assert_awaited_once_with(self.project)
         self.assertTrue(any("Side 中不可用" in str(content) for _mid, content in self.channel.replies))
 
         open_card = self.channel.updates[-1][1]
