@@ -315,7 +315,7 @@ async function chooseScheduleTarget(value) {
 
   await openNewScheduleEditor();
   assert.equal(scheduleInput("timezone").value, "Asia/Shanghai");
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
   assert.equal(scheduleInput("editor").hidden, false);
   assert.equal(scheduleInput("drawer").open, true);
   assert.equal(scheduleInput("session-settings").open, true);
@@ -344,10 +344,9 @@ async function chooseScheduleTarget(value) {
   invalidateSchedulePreview();
   previewResolve();
   await late;
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
   assert.equal(schedulePrepared, null);
   previewWait = false;
-  await previewSchedule();
   await saveSchedule({ preventDefault() {} });
   assert.equal(posts.length, 1);
   assert.equal(posts[0].path, "/api/v1/schedules/create");
@@ -399,7 +398,7 @@ async function chooseScheduleTarget(value) {
   scheduleInput("timezone").value = "America/New_York";
   scheduleInput("at").value = "2030-11-03T01:30";
   await previewSchedule();
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
   assert.equal(scheduleInput("offset-field").hidden, false);
   assert.equal(scheduleInput("offset").getAttribute("aria-invalid"), "true");
   assert.equal(document.activeElement, scheduleInput("offset"));
@@ -411,7 +410,7 @@ async function chooseScheduleTarget(value) {
   scheduleInput("at").dispatch("input");
   assert.equal(scheduleInput("offset-field").hidden, true);
   assert.equal(scheduleInput("offset").value, "");
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
   ambiguous = false;
   scheduleInput("timezone").value = "Asia/Shanghai";
   scheduleInput("kind").value = "interval";
@@ -441,10 +440,15 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("project").value, "project-one");
   assert.equal(scheduleInput("chat").value, "oc_other");
   assert.equal(scheduleInput("instructions").value, fixturePlan().instructions);
-  await previewSchedule();
+  assert.equal(scheduleInput("target-kind").disabled, true);
+  scheduleInput("name").value = "Renamed without preview";
+  scheduleInput("name").dispatch("input");
+  assert.equal(schedulePrepared, null);
+  assert.equal(scheduleInput("save").disabled, false);
   await saveSchedule({ preventDefault() {} });
   assert.equal(posts[1].path, "/api/v1/schedules/update");
   assert.deepEqual(posts[1].body.target, envelope("update").target);
+  assert.equal(posts[1].body.definition.name, "Renamed without preview");
   assert.equal(posts[1].body.definition.instructions, fixturePlan().instructions);
 
   const plan = state.schedules.plans[0];
@@ -550,7 +554,7 @@ async function chooseScheduleTarget(value) {
   changeScheduleSessionSettings("completion-mention");
   scheduleInput("context").value = "catch-up";
   changeScheduleSessionSettings("context");
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
   await previewSchedule();
   const previewQuery = new URL(gets.at(-1), "http://localhost").searchParams;
   const selectedSettings = { turn_settings: { model_id: "native-default", effort_id: "high", service_tier_id: "priority" },
@@ -572,7 +576,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("save").disabled, false);
   assert.equal(JSON.parse(new URL(gets.at(-1), "http://localhost").searchParams.get("session_settings")).turn_settings.effort_id, "high");
   await chooseScheduleTarget("binding");
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
   assert.equal(scheduleInput("auto-archive-field").hidden, true);
   assert.equal(scheduleInput("auto-archive").disabled, true);
   assert.equal(scheduleInput("target-note").hidden, false);
@@ -683,7 +687,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("end-details").open, true, "deadline ambiguity choices must be visible even after collapsing");
   assert.equal(scheduleInput("end-offset-field").hidden, false);
   assert.equal(scheduleInput("offset-field").hidden, true);
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
   scheduleInput("end-offset").value = "-05:00";
   scheduleInput("end-offset").dispatch("input");
   await previewSchedule();
@@ -717,7 +721,7 @@ async function chooseScheduleTarget(value) {
   previewResolve();
   await staleDeadline;
   assert.equal(schedulePrepared, null);
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
   previewWait = false;
   scheduleInput("kind").value = "once";
   scheduleInput("kind").dispatch("input");
@@ -755,7 +759,12 @@ async function chooseScheduleTarget(value) {
   await openNewScheduleEditor();
   assert.equal(scheduleInput("end-at").value, "");
   await previewSchedule();
-  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("save").disabled, false);
+  const beforeNoFutureSave = posts.length;
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.length, beforeNoFutureSave);
+  assert.match(scheduleInput("form-error").textContent, /没有后续触发时间/);
+  previewTimes = times;
 
   // Manual execution stays available for paused/ended plans and displays its
   // source independently from enablement, due time, and execution status.
@@ -1138,8 +1147,8 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleEditor.action, grantBeforeOptions);
   assert.equal(scheduleInput("fields").disabled, false);
   assert.equal(scheduleInput("close").disabled, false);
-  assert.equal(scheduleInput("save").disabled, true);
-  assert.match(scheduleInput("preview-message").textContent, /重新预览/);
+  assert.equal(scheduleInput("save").disabled, false);
+  assert.match(scheduleInput("form-error").textContent, /重新保存/);
   closeScheduleEditor();
   // Inline validation rejects only applicable, locally knowable field errors.
   // It never sends a mutation or consumes the grant for a correctable draft.
@@ -1615,4 +1624,133 @@ async function chooseScheduleTarget(value) {
   await saveSchedule({ preventDefault() {} });
   assert.equal(posts.at(-1).body.definition.session_settings.progress_card_settings, null,
     "changing the original schedule feedback switch must not freeze global details");
+
+  // Every rule can be saved directly; local times still use server normalization.
+  for (const kind of ["daily", "weekly", "interval", "once"]) {
+    await openNewScheduleEditor();
+    scheduleInput("kind").value = kind;
+    scheduleInput("kind").dispatch("input");
+    scheduleInput("at").value = "2030-01-02T10:15";
+    scheduleInput("time").value = "10:15";
+    scheduleInput("every").value = "90";
+    scheduleInput("weekdays").querySelectorAll("input")[2].checked = true;
+    scheduleInput("end-at").value = "2030-02-01T18:00";
+    assert.equal(schedulePrepared, null);
+    assert.equal(scheduleInput("save").disabled, false);
+    const beforeDirectSave = posts.length;
+    await saveSchedule({ preventDefault() {} });
+    assert.equal(posts.length, beforeDirectSave + 1);
+    const rule = posts.at(-1).body.definition.schedule;
+    assert.equal(rule.kind, kind);
+    if (kind === "once") {
+      assert.equal(rule.at, "2030-01-02T10:15+08:00");
+      assert.equal("end_at" in rule, false);
+    } else {
+      assert.equal(rule.end_at, "2030-02-01T18:00+08:00");
+      if (kind === "interval") assert.equal(rule.anchor, 1893456000);
+      else assert.equal(rule.at, "10:15");
+      if (kind === "weekly") assert.deepEqual(rule.weekdays, [2]);
+    }
+  }
+
+  // Direct edits retain existing interval anchors and exact Binding targets.
+  for (const plan of [existingInterval, boundPlan]) {
+    await openScheduleEditor(plan);
+    scheduleInput("instructions").value = "Edited without a preview";
+    scheduleInput("instructions").dispatch("input");
+    assert.equal(scheduleInput("target-kind").disabled, true);
+    assert.equal(scheduleInput("save").disabled, false);
+    const beforeDirectEdit = posts.length;
+    await saveSchedule({ preventDefault() {} });
+    assert.equal(posts.length, beforeDirectEdit + 1);
+    assert.deepEqual(posts.at(-1).body.target, plan.actions.update.target);
+    assert.equal(posts.at(-1).body.definition.instructions, "Edited without a preview");
+    if (plan === existingInterval) assert.equal(posts.at(-1).body.definition.schedule.anchor, 1893448800);
+    else {
+      assert.equal("target_kind" in posts.at(-1).body.definition, false);
+      assert.equal("target_binding_id" in posts.at(-1).body.definition, false);
+      assert.equal("session_settings" in posts.at(-1).body.definition, false);
+    }
+  }
+
+  // Automatic preparation holds the same submission/close guard as the POST.
+  await openNewScheduleEditor();
+  previewWait = true;
+  const beforeAutoPost = posts.length;
+  const beforeAutoRead = gets.filter(path => path.includes("mode=preview")).length;
+  const preparingSave = saveSchedule({ preventDefault() {} });
+  assert.equal(scheduleInput("fields").disabled, true);
+  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("close").disabled, true);
+  await saveSchedule({ preventDefault() {} });
+  await previewSchedule();
+  scheduleInput("drawer").dispatch("cancel");
+  assert.equal(scheduleInput("drawer").open, true);
+  assert.equal(gets.filter(path => path.includes("mode=preview")).length, beforeAutoRead + 1);
+  assert.equal(posts.length, beforeAutoPost);
+  previewWait = false;
+  previewResolve();
+  await preparingSave;
+  assert.equal(posts.length, beforeAutoPost + 1);
+  assert.equal(scheduleInput("drawer").open, false);
+
+  // Correctable read failures and DST ambiguity preserve drafts and grants.
+  for (const kind of ["once", "daily"]) {
+    await openNewScheduleEditor();
+    scheduleInput("kind").value = kind;
+    scheduleInput("kind").dispatch("input");
+    scheduleInput("timezone").value = "America/New_York";
+    scheduleInput(kind === "once" ? "at" : "end-at").value = "2030-11-03T01:30";
+    const beforeReadFailure = posts.length;
+    const grant = scheduleEditor.action;
+    previewError = new Error("时间校验暂不可用");
+    await saveSchedule({ preventDefault() {} });
+    assert.equal(posts.length, beforeReadFailure);
+    assert.equal(scheduleEditor.action, grant);
+    assert.equal(scheduleInput("save").disabled, false);
+    assert.equal(scheduleInput("fields").disabled, false);
+    assert.match(scheduleInput("form-error").textContent, /时间校验暂不可用/);
+    previewError = null;
+    ambiguous = kind === "once";
+    ambiguousEnd = kind === "daily";
+    await saveSchedule({ preventDefault() {} });
+    const offset = kind === "once" ? "offset" : "end-offset";
+    assert.equal(posts.length, beforeReadFailure);
+    assert.equal(scheduleEditor.action, grant);
+    assert.equal(scheduleInput(`${offset}-field`).hidden, false);
+    assert.equal(document.activeElement, scheduleInput(offset));
+    assert.equal(scheduleInput("save").disabled, false);
+    scheduleInput(offset).value = "-05:00";
+    scheduleInput(offset).dispatch("input");
+    await saveSchedule({ preventDefault() {} });
+    assert.equal(posts.length, beforeReadFailure + 1);
+    assert.equal(posts.at(-1).body.definition.schedule[kind === "once" ? "at" : "end_at"],
+      "2030-11-03T01:30-05:00");
+    ambiguous = false;
+    ambiguousEnd = false;
+  }
+
+  // Options arriving during automatic preparation cannot silently change a save.
+  await openNewScheduleEditor();
+  scheduleOptionsGate = {};
+  const autoOptions = loadScheduleSessionOptions();
+  previewWait = true;
+  const autoGrant = scheduleEditor.action;
+  const beforeAutoRace = posts.length;
+  const autoRace = saveSchedule({ preventDefault() {} });
+  scheduleOptionsGate.resolve({ session_settings: {
+    ...structuredClone(defaultSessionSettings), progress_card_enabled: !defaultSessionSettings.progress_card_enabled,
+  } });
+  scheduleOptionsGate = null;
+  await autoOptions;
+  previewWait = false;
+  previewResolve();
+  await autoRace;
+  assert.equal(posts.length, beforeAutoRace);
+  assert.equal(scheduleEditor.action, autoGrant);
+  assert.equal(scheduleInput("fields").disabled, false);
+  assert.equal(scheduleInput("save").disabled, false);
+  assert.match(scheduleInput("form-error").textContent, /重新保存/);
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.length, beforeAutoRace + 1);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

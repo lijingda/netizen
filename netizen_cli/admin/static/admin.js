@@ -3736,8 +3736,8 @@ function renderScheduleWorkspace() {
 }
 
 function updateScheduleSaveAvailability() {
-  scheduleInput("save").disabled = !schedulePrepared || !scheduleEditor?.action
-    || (!schedulePrepared.hasFuture && !scheduleEditor.plan) || !scheduleWorkspaceCanSave();
+  scheduleInput("save").disabled = scheduleInput("fields").disabled || !scheduleEditor?.action
+    || !scheduleWorkspaceCanSave();
 }
 
 async function changeScheduleProject() {
@@ -3855,9 +3855,9 @@ function readScheduleRule() {
 function invalidateSchedulePreview() {
   schedulePrepared = null;
   schedulePreviewSerial += 1;
-  scheduleInput("save").disabled = true;
+  updateScheduleSaveAvailability();
   scheduleInput("preview-times").replaceChildren();
-  scheduleInput("preview-message").textContent = "保存前请预览触发时间。";
+  scheduleInput("preview-message").textContent = "可预览触发时间，也可直接保存。";
   scheduleInput("preview-message").classList.toggle("error", false);
   for (const node of document.querySelectorAll("[data-schedule-rule]")) {
     node.hidden = !node.dataset.scheduleRule.split(" ").includes(scheduleInput("kind").value);
@@ -3882,9 +3882,12 @@ function renderSchedulePreview(selector, preview) {
 
 async function previewSchedule() {
   if (scheduleInput("fields").disabled || !scheduleEditor) return;
+  return prepareSchedule();
+}
+
+async function prepareSchedule() {
   const serial = ++schedulePreviewSerial;
   schedulePrepared = null;
-  scheduleInput("save").disabled = true;
   if (!validateScheduleFields()) return;
   scheduleInput("preview-message").textContent = "正在计算触发时间…";
   scheduleInput("preview-message").classList.toggle("error", false);
@@ -3921,6 +3924,7 @@ async function previewSchedule() {
       ? `预计触发时间 · ${data.schedule.timezone}`
       : scheduleEditor?.plan ? "没有后续触发时间。仍可保存计划修改；已认领的执行可以继续。" : "没有后续触发时间，请调整规则。";
     updateScheduleSaveAvailability();
+    return schedulePrepared;
   } catch (error) {
     if (serial !== schedulePreviewSerial) return;
     if (["ambiguous_local_time", "ambiguous_end_time"].includes(error.code) && Array.isArray(error.choices)) {
@@ -4005,33 +4009,45 @@ async function editSchedule(plan) {
 
 async function saveSchedule(event) {
   event.preventDefault();
-  if (scheduleInput("fields").disabled || !scheduleEditor?.action || !schedulePrepared
-      || schedulePrepared.fingerprint !== scheduleRuleFingerprint()) return;
+  if (scheduleInput("fields").disabled || !scheduleEditor?.action) return;
   if (!validateScheduleFields({ saving: true })) return;
   const editor = scheduleEditor;
-  const prepared = schedulePrepared;
-  if (scheduleTargetKind() !== "binding") {
-    let validationError = null;
-    scheduleInput("fields").disabled = true;
-    scheduleInput("close").disabled = true;
-    try { await chatTarget("schedule").validate(); }
-    catch (error) {
-      invalidateSchedulePreview();
-      validationError = error;
-    } finally {
-      scheduleInput("fields").disabled = false;
-      scheduleInput("close").disabled = false;
+  let prepared = schedulePrepared;
+  let validationError = null;
+  scheduleInput("fields").disabled = true;
+  scheduleInput("close").disabled = true;
+  updateScheduleSaveAvailability();
+  try {
+    // Resolve local times and validate the current draft without requiring a
+    // separate preview click. The same read preserves DST and interval anchors.
+    if (!prepared || prepared.fingerprint !== scheduleRuleFingerprint()) prepared = await prepareSchedule();
+    if (!prepared) {
+      if (scheduleInput("form-error").hidden) showScheduleFormError("配置已更新，请检查后重新保存。");
+      return;
     }
-    if (scheduleEditor !== editor) return;
-    if (validationError) { showScheduleRequestError(validationError); return; }
+    if (!prepared.hasFuture && !editor.plan) {
+      showScheduleFormError("没有后续触发时间，请调整规则后保存。");
+      return;
+    }
+    if (scheduleTargetKind() !== "binding") await chatTarget("schedule").validate();
+  } catch (error) {
+    invalidateSchedulePreview();
+    validationError = error;
+  } finally {
+    scheduleInput("fields").disabled = false;
+    scheduleInput("close").disabled = false;
+    updateScheduleSaveAvailability();
+    if (scheduleFieldErrors.size) focusScheduleError();
   }
+  if (scheduleEditor !== editor) return;
+  if (validationError) { showScheduleRequestError(validationError); return; }
   // A late options response may replace defaults and invalidate the preview
   // while group validation is in flight. Never submit that stale confirmation.
   if (schedulePrepared !== prepared || prepared.fingerprint !== scheduleRuleFingerprint()) {
     invalidateSchedulePreview();
-    scheduleInput("preview-message").textContent = "配置已更新，请重新预览后保存。";
+    scheduleInput("preview-message").textContent = "配置已更新，请检查后重新保存。";
     scheduleInput("preview-message").classList.toggle("error", true);
-    showScheduleFormError("配置已更新，请重新预览后保存。");
+    showScheduleFormError("配置已更新，请检查后重新保存。");
     return;
   }
   if (!scheduleWorkspaceCanSave()) {
