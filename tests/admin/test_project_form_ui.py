@@ -22,12 +22,6 @@ class ProjectFormUiTest(unittest.TestCase):
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")
-        payload = source[source.index("function actionPayload("):source.index("async function mutate(")]
-        controller = source[source.index("let projectEditor ="):source.index("function confirmMaterializedDelete(")]
-        handlers = source[
-            source.index('projectInput("new").addEventListener'):
-            source.index('document.querySelector("#session-inventory-state").addEventListener')
-        ]
         fixture = Path(__file__).with_name("project_form_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split(
             "// SHIPPED_PROJECT_FORM_HANDLERS\n"
@@ -35,7 +29,7 @@ class ProjectFormUiTest(unittest.TestCase):
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run(
             [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + payload + controller + handlers + after,
+             + dom + before + (static / "chat-picker.js").read_text(encoding="utf-8") + source + after,
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -55,7 +55,7 @@ def decode_workspace_form(
     if policy["mode"] == "new":
         ref = fields.get(prefix + "_worktree_ref", "HEAD")
         if not isinstance(ref, str) or len(ref) > 256 or any(ord(character) < 32 for character in ref):
-            raise CardActionError("新建 worktree 起点无效，请重新选择。")
+            raise CardActionError("新建 worktree 起点无效，请重新填写。")
         if ref.strip() and ref.strip() != "HEAD":
             policy["ref"] = ref.strip()
     return policy
@@ -117,19 +117,11 @@ def workspace_form_elements(
          "placeholder": _plain_text("选择 worktree 使用方式"), "options": rendered_choices, "initial_option": selected},
     ])
     if policy["mode"] == "new" or any(choice["mode"] == "new" for _, choice in choices):
-        refs = [("创建时的 Project HEAD", "HEAD")]
-        if options is not None:
-            refs.extend((("远端 · " if branch.get("remote") else "本地 · ") + branch["name"], branch["ref"])
-                        for branch in options.get("branches", ()))
         ref = (draft_fields or {}).get(prefix + "_worktree_ref", policy.get("ref") or "HEAD")
-        if not any(value == ref for _, value in refs):
-            refs.append((str(ref) + " · 保留原配置", ref))
         elements.extend([
             {"tag": "markdown", "content": "新建起点（仅新建策略生效）"},
-            {"tag": "select_static", "name": prefix + "_worktree_ref",
-             "placeholder": _plain_text("选择新建起点"),
-             "options": [{"text": _plain_text(label), "value": value} for label, value in refs],
-             "initial_option": ref},
+            {"tag": "input", "name": prefix + "_worktree_ref", "max_length": 256,
+             "placeholder": _plain_text("HEAD、分支、标签或提交"), "default_value": ref},
             _form_hint("每次创建独立 Detached worktree；只检出提交内容，不复制未提交改动或初始化环境。"),
         ])
     elements.append(_form_hint(footer))

@@ -25,14 +25,7 @@ class SessionSettingsUiTest(unittest.TestCase):
         parts = [
             (static / "chat-picker.js").read_text(encoding="utf-8"),
             (static / "progress-card.js").read_text(encoding="utf-8"),
-            source[source.index("function actionPayload("):source.index("async function mutate(")],
-            source[source.index("function cell("):source.index("function showProjectDeleteResult(")],
-            source[source.index("function runtimeLabel("):source.index("async function loadSides(")],
-            source[source.index("function rowByIdentity("):source.index("let defaultsEditor =")],
-            source[source.index("function sessionSettingsFingerprint("):source.index("function scheduleDate(")],
-            source[source.index("function defaultScheduleSessionSettings("):source.index("function renderScheduleSessionSettings(")],
-            source[source.index("async function refresh("):source.index("function selectTab(")],
-            source[source.index('sessionSettingsInput("cancel").addEventListener'):source.index('defaultsInput("new").addEventListener')],
+            source,
         ]
         fixture = Path(__file__).with_name("session_settings_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_SESSION_SETTINGS_CONTROLLER\n")

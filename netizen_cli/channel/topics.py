@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from lark_channel import SendOpts
+from lark_channel import SendOpts, SendResult
 
 from .messages import _nonempty_field, _object_field
 from .ports import ReplyChannel
@@ -71,7 +71,7 @@ async def send_topic_message(channel: ReplyChannel, chat_id: str, content: Any, 
             if attempt == 0:
                 continue
             raise TopicPublishError("话题发布结果未确认；同 UUID 有界对账也未成功。", unknown=True) from error
-        if getattr(result, "success", None) is not True and getattr(getattr(result, "error", None), "retryable", None) is True:
+        if not result.success and result.error is not None and result.error.retryable:
             uncertain = True
             if attempt == 0:
                 continue
@@ -85,17 +85,17 @@ async def send_topic_message(channel: ReplyChannel, chat_id: str, content: Any, 
     raise AssertionError("unreachable send budget")
 
 
-def validate_topic_message(result: object, chat_id: str) -> TopicMessage:
-    raw = getattr(result, "raw", None)
+def validate_topic_message(result: SendResult, chat_id: str) -> TopicMessage:
+    raw = result.raw
     code = _object_field(raw, "code")
     if code == 230071:
         raise TopicPublishError("当前飞书会话不支持创建话题（230071）。")
-    if getattr(result, "success", None) is not True:
+    if not result.success:
         raise TopicPublishError(f"飞书未确认消息发送成功（code={code!r}）。")
     data = _object_field(raw, "data")
-    message_id = _nonempty_field(result, "message_id")
+    message_id = result.message_id or None
     if (
-        code != 0 or getattr(result, "chunk_ids", None) or data is None
+        code != 0 or result.chunk_ids or data is None
         or message_id is None or _nonempty_field(data, "message_id") != message_id
         or _nonempty_field(data, "chat_id") != chat_id
     ):

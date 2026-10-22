@@ -1,30 +1,40 @@
+window.location = { pathname: "/projects", search: "", assign() {} };
+window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
+const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 const grant = (mode) => ({ csrfToken: "csrf", actionToken: mode, target: { resource: "project-registry" } });
 const actions = () => ({ register: grant("register"), createDirectory: grant("create") });
-const state = { tab: "projects", projects: { actions: actions() } };
 const requests = [];
 let completeMutation;
 let failMutation;
 let listRead;
 let listReads = 0;
 let listFailure = false;
-let status = "";
-function setStatus(message) { status = message; }
-function api(path, options) {
+const status = () => document.querySelector("#status").textContent;
+async function fixtureResponse(path, options = {}) {
+  if (path.startsWith("/api/v1/projects?")) {
+    listReads += 1;
+    if (listRead) await listRead;
+    if (listFailure) throw new Error("list unavailable");
+    return { items: [], nextCursor: null, actions: actions() };
+  }
+  assert.equal(options.method, "POST");
   requests.push({ path, payload: JSON.parse(options.body) });
   return new Promise((resolve, reject) => { completeMutation = resolve; failMutation = reject; });
 }
-async function loadProjects() {
-  listReads += 1;
-  if (listRead) await listRead;
-  if (listFailure) throw new Error("list unavailable");
-  state.projects = { actions: actions() };
-  renderProjectEditorControls();
-  return true;
+async function fetch(path, options = {}) {
+  try {
+    const data = await fixtureResponse(path, options);
+    return { ok: true, status: 200, json: async () => data };
+  } catch (error) {
+    if (!error.status) throw error;
+    return { ok: false, status: error.status,
+      json: async () => ({ message: error.message, code: error.code }) };
+  }
 }
 let discardConfirmed = true;
 let discardPrompts = 0;
 window.confirm = () => { discardPrompts += 1; return discardConfirmed; };
-function confirmDiscardChanges(changed) { return !changed || window.confirm("discard"); }
 let valid = true;
 document.querySelector("#project-editor").reportValidity = () => valid;
 const input = (name) => document.querySelector(`#project-${name}`);
@@ -35,6 +45,7 @@ function open() {
 function submit() { return input("editor").listeners.get("submit")[0]({ preventDefault() {} }); }
 // SHIPPED_PROJECT_FORM_HANDLERS
 (async () => {
+  await flush();
   renderProjectEditorControls();
   assert.equal(input("drawer").open, undefined);
   assert.equal(input("editor").hidden, true);
@@ -110,7 +121,7 @@ function submit() { return input("editor").listeners.get("submit")[0]({ preventD
     await pending;
     assert.equal(input("drawer").open, false);
     assert.equal(projectEditorHasChanges(), false);
-    assert.match(status, /example.*目录：\/workspace\/result/);
+    assert.match(status(), /example.*目录：\/workspace\/result/);
     assert.equal(document.activeElement, input("new"));
   }
 
@@ -160,7 +171,7 @@ function submit() { return input("editor").listeners.get("submit")[0]({ preventD
   completeMutation({ alias: "success", cwd: "/workspace/success" });
   await pending;
   assert.equal(input("drawer").open, false);
-  assert.match(status, /已登记.*列表刷新失败/);
+  assert.match(status(), /已登记.*列表刷新失败/);
   listFailure = false;
 
   // A late read can update the list, but cannot overwrite a newer editor.

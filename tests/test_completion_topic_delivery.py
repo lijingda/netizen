@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from lark_channel import OutboundConfig, OutboundSender, RetryConfig
+from lark_channel import OutboundConfig, OutboundSender, RetryConfig, SendResult
 
 from netizen_cli.channel.completion_mentions import send_completion_mention
 from netizen_cli.domain import FeishuScope, ScopeKind
@@ -77,8 +77,8 @@ class CompletionTopicDeliveryTest(unittest.IsolatedAsyncioTestCase):
         )
         for kind, changes, expected in cases:
             with self.subTest(kind=kind, changes=changes):
-                channel = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(
-                    success=True, message_id="om_reminder", chunk_ids=(),
+                channel = SimpleNamespace(send=AsyncMock(return_value=SendResult(
+                    success=True, message_id="om_reminder",
                     raw={"code": 0, "data": base | changes},
                 )))
                 kwargs = dict(

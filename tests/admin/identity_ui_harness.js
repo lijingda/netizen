@@ -1,10 +1,5 @@
 
 document.head = document.querySelector("head");
-const state = { tab: "system" };
-const statusMessages = [];
-function setStatus(message) { statusMessages.push(message); }
-let pollsStopped = 0;
-function stopUpdatePolling() { pollsStopped += 1; }
 let nextTimer = 0;
 const timers = new Map();
 function setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; }
@@ -14,7 +9,7 @@ const confirmations = [];
 window.confirm = (text) => { confirmations.push(text); return confirmed; };
 let navigation = null;
 let reloads = 0;
-window.location = { assign(path) { navigation = path; }, reload() { reloads += 1; } };
+window.location = { pathname: "/system", search: "", assign(path) { navigation = path; }, reload() { reloads += 1; } };
 const calls = [];
 let answer;
 async function fetch(path, options = {}) { calls.push({ path, options }); return answer(path, options); }
@@ -268,6 +263,8 @@ answer = async (path, options) => {
   await settle();
 
   // Removing oneself confirms exactly once, invalidates the UI, and stops requests.
+  updatePollTimer = setTimeout(() => { throw new Error("expired polling must stop"); }, 2000);
+  const pendingPoll = updatePollTimer;
   const priorConfirmations = confirmations.length;
   list.children[0].querySelector("button").click();
   await settle();
@@ -277,7 +274,8 @@ answer = async (path, options) => {
   assert.equal(document.querySelector("#auth-expired").hidden, false);
   assert.equal(document.querySelector("#system").inert, true);
   assert.equal(navigation, null);
-  assert.equal(pollsStopped, 1);
+  assert.equal(updatePollTimer, null);
+  assert.equal(timers.has(pendingPoll), false);
   finishBody({ stale: "success" });
   await assert.rejects(lateRequest, (error) => error.status === 401);
   const requestCount = calls.length;

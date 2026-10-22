@@ -22,22 +22,12 @@ class ScheduleUiTest(unittest.TestCase):
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")
-        payload = source[source.index("function actionPayload("):source.index("async function mutate(")]
-        helpers = source[source.index("function cell("):source.index("function confirmMaterializedDelete(")]
-        filters = source[source.index("const timeRangeControllers ="):source.index("async function queryProjectOptions(")]
-        project_options = source[source.index("async function queryProjectOptions("):source.index("async function loadSessionProjectOptions(")]
-        controller = source[source.index("function scheduleDate("):source.index("async function refresh(")]
-        guards = source[source.index("function sessionSettingsFingerprint("):source.index("function scheduleDate(")]
-        pagination = source[source.index("function firstSessionPage("):source.index("function sessionSort(")]
-        listeners = source[source.index('scheduleInput("filter").addEventListener'):source.index('document.querySelector("#service-restart").addEventListener')]
-        shared_chat = (static / "chat-picker.js").read_text(encoding="utf-8") + source[
-            source.index("async function fetchChatPage("):source.index("let defaultsEditor =")]
         fixture = Path(__file__).with_name("schedule_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_SCHEDULE_CONTROLLER\n")
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run(
             [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + payload + helpers + filters + project_options + shared_chat + guards + pagination + controller + listeners + after,
-            capture_output=True, text=True, timeout=30,
+             + dom + before + (static / "chat-picker.js").read_text(encoding="utf-8") + source + after,
+            capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

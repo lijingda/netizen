@@ -10,6 +10,7 @@ from unittest import mock
 
 from netizen_cli.deployment.update_protocol import CODES, PHASES, TERMINAL_PHASES
 from netizen_cli.admin.web import AdminActionTarget, _action_target_json
+from tests.admin.test_session_filter_ui import _HtmlTree
 
 
 class UpdateUiTest(unittest.TestCase):
@@ -21,13 +22,11 @@ class UpdateUiTest(unittest.TestCase):
                 self.fail(reason)
             self.skipTest(reason)
         root = Path(__file__).resolve().parents[2]
-        source = (root / "netizen_cli/admin/static/admin.js").read_text(encoding="utf-8")
-        # Exercise the shipped controller with deterministic HTTP and timers.
-        core = (
-            source[source.index("let pendingSessionChatLabels ="):source.index("async function loadSessionChatLabels(")]
-            + source[source.index("async function api("):source.index("async function mutate(")]
-        )
-        refresh = source[source.index("async function refresh("):source.index("function renderSessionTabs(")]
+        static = root / "netizen_cli/admin/static"
+        tree = _HtmlTree()
+        tree.feed((static / "index.html").read_text(encoding="utf-8"))
+        source = (static / "admin.js").read_text(encoding="utf-8")
+        dom = Path(__file__).with_name("dom_harness.js").read_text(encoding="utf-8")
         harness = Path(__file__).with_name("update_ui_harness.js").read_text(encoding="utf-8")
         before, after = harness.split("// SHIPPED_UPDATE_CONTROLLER\n")
         # Use the HTTP serializer's real target shape for browser reconciliation.
@@ -44,7 +43,9 @@ class UpdateUiTest(unittest.TestCase):
             + json.dumps(sorted(CODES - {"none"})) + ");\n"
         )
         result = subprocess.run(
-            [node, "-e", before + core + refresh + contract + after],
+            [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
+            + dom + before + (static / "chat-picker.js").read_text(encoding="utf-8")
+            + source + contract + after,
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

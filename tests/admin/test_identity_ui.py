@@ -35,15 +35,10 @@ class IdentityUiTest(unittest.TestCase):
     def test_profile_selector_membership_and_session_expiry(self) -> None:
         static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         source = (static / "admin.js").read_text(encoding="utf-8")
-        core = "\n".join(source[source.index(start):source.index(end)] for start, end in (
-            ("let pendingSessionChatLabels =", "async function loadSessionChatLabels("),
-            ("async function api(", "const updateTerminalPhases ="),
-            ("function actionPayload(", "async function mutate("),
-            ("function actionButton(", "function actionsCell("),
+        scripts = "\n".join((static / name).read_text(encoding="utf-8") for name in (
+            "chat-picker.js", "identity.js",
         ))
-        self.run_controller("index.html", core + (static / "identity.js").read_text(
-            encoding="utf-8"
-        ), "identity_ui_harness.js")
+        self.run_controller("index.html", scripts + "\n" + source, "identity_ui_harness.js")
 
     def test_login_only_starts_on_click_and_ignores_cancelled_results(self) -> None:
         static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"

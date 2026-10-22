@@ -56,7 +56,7 @@ from .worktrees.settings import WorktreeSettingsService
 from .admin.users import AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
 from .cli_setup import require_admin_binding, SetupError
-from .bindings import BindingStore, validate_channel_database
+from .bindings import BindingStore
 from .builtin_skills import builtin_skill_root
 from .cli_data import (
     InstanceDataError,
@@ -626,8 +626,7 @@ async def run(
     stage_started_at = time.monotonic()
     # Initialization belongs to explicit setup. A lost database must never turn
     # into a fresh empty instance merely because Runtime was restarted.
-    validate_channel_database(settings.data_dir / "channel.sqlite3")
-    store = BindingStore(settings.data_dir / "channel.sqlite3")
+    store = BindingStore(settings.data_dir / "channel.sqlite3", create=False)
     stage_started_at = _log_startup_timing("database", stage_started_at)
     try:
         try:

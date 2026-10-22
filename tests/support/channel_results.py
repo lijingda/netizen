@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from lark_channel import FeishuChannelErrorCode, SendError, SendResult
 from openai_codex.types import ThreadItem
 from netizen_cli.codex_runtime import (
     ActiveState,
@@ -43,11 +44,10 @@ def sent_result(
     parent_id: str | None = None,
     success: bool = True,
     code: int = 0,
-) -> object:
-    return SimpleNamespace(
+) -> SendResult:
+    return SendResult(
         success=success,
         message_id=message_id,
-        chunk_ids=(),
         raw={
             "code": code,
             "data": {
@@ -61,12 +61,9 @@ def sent_result(
     )
 
 
-def retryable_sent_result(*, code: int = 999_999) -> object:
-    return SimpleNamespace(
-        success=False,
-        message_id=None,
-        chunk_ids=(),
-        error=SimpleNamespace(retryable=True),
+def retryable_sent_result(*, code: int = 999_999) -> SendResult:
+    return SendResult.fail(
+        SendError(code=FeishuChannelErrorCode.UNKNOWN, retryable=True, raw_code=code),
         raw={"code": code, "data": None},
     )
 

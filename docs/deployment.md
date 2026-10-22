@@ -268,6 +268,33 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 只运行受影响的 phase。没有触及这些边界的迭代无需
 运行 live probe。
 
+Worktree 目录选择、定时工作区交接或原生 cwd 采用边界变化时，从源码 checkout 运行：
+
+```bash
+probe_evidence_dir="$PWD/docs/research/compatibility"
+mkdir -p "$probe_evidence_dir"
+timeout --signal=INT --kill-after=5s 120s .venv/bin/python \
+  scripts/probe_scheduled_tasks.py --phase worktree --timeout 100 \
+  --output "$probe_evidence_dir/scheduled-worktree.json"
+timeout --signal=INT --kill-after=5s 90s .venv/bin/python \
+  scripts/probe_worktree_cwd.py --output "$probe_evidence_dir/worktree-cwd.json"
+```
+
+macOS 将 `timeout` 换为 `gtimeout`。前者使用生产 Scheduler、Channel dispatch、Runtime
+和临时 Git，分别验证 `new/existing` 工作区的首次及后续输入：native cwd、Binding/Run
+资源身份、completion cwd、实际请求中的本次输入、首轮交接和来源 current pointer。后续
+输入从 Runtime 提交，不覆盖完整 Channel 消息准备；后者验证跨 App Server 的
+cwd 冷恢复及 Runtime 采用。定时 Worktree 探针隔离 HOME 和 CODEX_HOME；cwd 探针仅
+隔离 CODEX_HOME，HOME 继承调用者环境。两者使用 loopback mock 模型，不使用真实模型
+账号，不发送飞书消息，也不修改业务 Project 或用户 Codex 配置。
+它们不替代真实飞书表单/回调、Skill/Files 或真实模型 MCP 参数生成的验收。
+
+输出包含源码 commit、dirty 标记和 tracked diff 摘要，只保留固定断言结果及错误位置，
+不包含配置、业务路径或消息正文。将 JSON 保留在上述忽略目录或 CI artifact 中，并与
+审查/提交关联；dirty 结果只能证明当时工作区，不能冒充 exact commit 的验收，正式更新
+兼容性结论前需在对应干净提交复验。失败 JSON 也保留，新增脚本或成功退出之外的文件
+存在本身不算验收通过。既有真实模型定时 phases 同样支持 `--output`，仍需显式 `--model`。
+
 过程卡展示设置与时间组织（ADR 0086）调整，需在本地覆盖默认兼容、独立窗口/分段、
 配置捕获、旧卡及新 manifest 往返，并实测最大配置组合的中文、转义和 callback 编码容量，
 回归既有超限处理。只改展示而未改变 SDK adapter、原生消费/生命周期或租户能力时，
@@ -715,9 +742,11 @@ override，仍复用原 Thread/目录且不新增工作区。初轮 barrier 已�
 替身中确认投递；来源 active Binding 不变，未提交/未跟踪文件未复制，源目录改动保留。
 原生 rollout 初建时有两次短暂空记录读取失败，既有有界观测恢复后全部断言通过。
 
-探针为 `/tmp/netizen-scheduled-worktree-native-probe.py`，JSON 证据为
-`/tmp/netizen-scheduled-worktree-native-evidence.json`，外部进程超时 120 秒，实际耗时
-1.637 秒。真实模型与飞书调用均为零，用户 Codex 配置未修改，临时状态已清理。
+以上为当时一次性临时探针的历史结果，外部进程超时 120 秒，实际耗时 1.637 秒。
+该场景现已纳入 `scripts/probe_scheduled_tasks.py --phase worktree`，复验命令与可保留
+证据要求见[代码门禁与按需实时兼容性验证](#代码门禁与按需实时兼容性验证)；旧临时
+脚本和输出不再作为持续复验入口，也不据此宣称新版本已通过。
+当时真实模型与飞书调用均为零，用户 Codex 配置未修改，临时状态已清理。
 此结果只证明上述原生目录与普通后续输入交接；真实飞书客户端布局/回调、真实 MCP
 参数生成、目标平台启动迁移，以及本次工作区组合下的 Skill/Files 与完整生命周期
 仍未验收，不能据此声明全部实时兼容性通过或已部署。
@@ -1005,8 +1034,11 @@ add 后 reset 未启动、取消/超时和未知结果仍保留登记。独立�
 复验用外部 deadline（macOS 对应 `gtimeout`）：
 
 ```bash
-timeout 90s python scripts/probe_worktree_cwd.py
+timeout 90s .venv/bin/python scripts/probe_worktree_cwd.py --output /tmp/worktree-cwd.json
 ```
+
+持续复验需将输出移入可保留位置并关联提交，具体要求见
+[代码门禁与按需实时兼容性验证](#代码门禁与按需实时兼容性验证)。
 
 同日额外原生探针确认 idle/unloaded Thread 的跨客户端 cwd 交接窗口：只读取得 A 后，
 另一客户端 cold resume 到 B、完成 Turn 并退出，前者不传 cwd 恢复时实际使用 B。
@@ -1877,13 +1909,17 @@ Project 删除联动，保留原记录并在使用时重新校验。不要手工
 
 ## Fail-closed 运维语义
 
-- 若 Netizen 提示 admission 已关闭或要求重启，表示一次 native start/turn/terminal
-  结果无法安全判定。Pilot 有意不自动重试，也不自动修改 Binding；检查平台日志后
-  人工执行 `netizen restart --root "<NETIZEN_ROOT>"`。
-- 若某个 Binding 长时间停留在 running，公开 native read 会继续保留该 slot 并周期
-  记录 warning，避免在未知终态下误开第二轮。其他 Binding 不受影响；持续异常时检查
-  App Server/平台日志，并通过正常 `/stop` 或服务重启恢复，禁止手工清理 SQLite 或
-  `.codex` 状态。
+- 先区分本次请求被明确拒绝、目标 Binding 结果未知和实例 admission 已关闭；
+  按[失败语义](design.md#失败语义)处理，不因一次请求失败就重启整个实例。
+  仅当实例明确要求重启时，检查平台日志后人工执行
+  `netizen restart --root "<NETIZEN_ROOT>"`；不要自动重放结果未知的输入。
+- 若单个 Binding 提示 Turn 观测不可用，先检查 App Server/平台日志，再使用 `/sessions`
+  中该会话的“重新检查”或“停止”。观测与恢复是有界的，其他 Binding 仍可使用；具体状态和
+  允许操作以[普通 Turn 终态与观测恢复](design.md#普通-turn-终态与观测恢复)为准，
+  不按旧运行卡猜测终态，不手工清理 SQLite 或 `.codex` 状态。
+- 若归档、恢复或删除结果未知，保留目标 Binding，按
+  [原生归档与删除](design.md#原生归档与删除)核查该操作的结果；不得用目录缺项证明
+  删除成功，或在运维层自动重发删除。
 - 若引用 prompt 提示超时、撤回/删除、权限不足或准备期间任务状态已变，
   该次输入没有 start/steer。请先修复权限或确认当前 Turn，然后由用户重新发送；
   不要在运维层自动重放旧消息。

@@ -34,6 +34,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         fixture = await self.enterAsyncContext(channel_fixture())
         self.app, self.store = fixture.app, fixture.store
         self.channel, self.runtime = fixture.channel, fixture.runtime
+        self.project = fixture.project
         self.scope = FeishuScope("cli_test", "oc_source", ScopeKind.TOPIC, "omt_source")
         self.channel.chat_types.update(oc_source="group", oc_target="group")
         self.source = self.store.create_channel_binding(
@@ -43,7 +44,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
                 organization="time", commentary_limit=8, show_operations=False,
             )),
         )
-        self.store.assign_native_thread_id(self.source.id, "native-source")
+        self.runtime.materialize(self.source.id, "native-source", cwd=self.project)
         self.source = self.store.get(self.source.id)
         self.runtime.thread_summary_values["native-source"] = NativeThreadMetadata(
             "native-source", "来源任务", "不应展示的摘要",
@@ -75,7 +76,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.submissions.append(kwargs)
             binding = kwargs["binding"]
             if binding.native_thread_id is None:
-                self.store.assign_native_thread_id(binding.id, "native-created")
+                self.runtime.materialize(binding.id, "native-created", cwd=kwargs["cwd"])
                 binding = self.store.get(binding.id)
             return Submission(
                 self.disposition, binding.id, binding.native_thread_id, "turn-external",
@@ -114,7 +115,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_target", ScopeKind.TOPIC if topic else ScopeKind.GROUP,
                             "omt_target" if topic else None)
         target = self.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_target")
-        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.materialize(target.id, "native-target", cwd=self.project)
         return self.store.get(target.id), scope
 
     def queue_target_message(self, *, topic=False):

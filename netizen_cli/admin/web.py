@@ -609,8 +609,8 @@ class AdminWebApplication:
             return await self._projects(context)
         if route == ("GET", "/api/v1/worktrees"):
             return await self._worktrees(context)
-        if route == ("GET", "/api/v1/worktrees/branches"):
-            return await self._worktree_branches(context)
+        if route == ("GET", "/api/v1/worktrees/create-options"):
+            return await self._worktree_creation_options(context)
         if route == ("GET", "/api/v1/worktrees/settings"):
             return self._worktree_settings(context)
         if route == ("GET", "/api/v1/progress-card/settings"):
@@ -1054,14 +1054,14 @@ class AdminWebApplication:
         )}} for item in result["items"]]
         return _json_response(200, {**result, "items": items, "requestId": context.request.request_id})
 
-    async def _worktree_branches(self, context: _RequestContext) -> Response:
+    async def _worktree_creation_options(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, {"project"})
         alias = _optional_text_query(context.query, "project", maximum=64)
         if not alias:
             raise AdminWebError(400, "invalid_input", "请选择 Project。")
-        result = await self._worktree_service().branches(project_alias=alias)
+        result = await self._worktree_service().creation_options(project_alias=alias)
         actions = {}
-        if result.get("isGit", True):
+        if result["isGit"]:
             actions["create"] = self._grant(
                 context, "worktrees.create", AdminActionTarget("project", alias),
                 _empty_preconditions(project_revision=ExpectedValue.expect(result["projectRevision"])),

@@ -6,7 +6,7 @@ import json
 import io
 import tomllib
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
@@ -21,7 +21,7 @@ from scripts.probe_scheduled_tasks import (
     FakeFeishu, ManualMcpRecorder, McpRecorder, ProbeCompletionFailure, ProbeFailure, ProbeStopFailure, _manual_phase, _mcp_phase,
     _mcp_recovery_phase, _record_completion, _remove_fixture_trust, _safe_traceback,
     _wait_for_completion, _wait_for_exact_active, _cleanup_error,
-    _binding_phase, build_parser,
+    _binding_phase, build_parser, main, probe,
 )
 from test_codex_runtime import FakeCodex, FakeTerminalCleanup, FakeThread, FakeThreadSubscriptionControl
 
@@ -89,6 +89,50 @@ class FixtureTrustCleanupTest(unittest.TestCase):
             self.assertEqual(tomllib.loads(path.read_text()), {
                 "model": "new", "projects": {"/new-user-project": {"trust_level": "trusted"}},
             })
+
+
+class ProbeEvidenceTest(unittest.TestCase):
+    def test_failure_is_retained_with_checkout_identity_without_exception_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "result.json"
+            args = build_parser().parse_args(["--phase", "worktree", "--output", str(output)])
+            identity = {"source_commit": "fixture-commit", "source_dirty": True,
+                        "source_diff_sha256": "fixture-digest"}
+            stdout = io.StringIO()
+            with patch("scripts.probe_scheduled_tasks.build_parser") as parser, \
+                 patch("scripts.probe_scheduled_tasks.source_evidence", return_value=identity), \
+                 patch("scripts.probe_scheduled_tasks.probe", new_callable=AsyncMock,
+                       side_effect=RuntimeError("private configuration secret")), \
+                 patch("scripts.probe_scheduled_tasks.logging.disable"), redirect_stdout(stdout):
+                parser.return_value.parse_args.return_value = args
+                self.assertEqual(main(), 1)
+            self.assertEqual(output.read_text(), stdout.getvalue())
+            self.assertNotIn("private configuration secret", output.read_text())
+            result = json.loads(output.read_text())
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["error_code"], "RuntimeError")
+            for key, value in identity.items():
+                self.assertEqual(result[key], value)
+
+
+class IsolatedWorktreeProbeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_worktree_phase_needs_no_model_or_user_configuration_and_cleans_fixture(self):
+        roots = []
+
+        async def scenario(root):
+            self.assertTrue(root.is_dir())
+            roots.append(root)
+            (root / "owned-fixture").write_text("fixture")
+            return {"passed": True, "real_model_requests": 0}
+
+        with patch("scripts.probe_scheduled_tasks._worktree_phase", side_effect=scenario), \
+             patch("scripts.probe_scheduled_tasks._user_config_path",
+                   side_effect=AssertionError("isolated probe must not read user config")):
+            result = await probe(phase="worktree", model=None, timeout=10)
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["temporary_state_cleaned"])
+        self.assertEqual(len(roots), 1)
+        self.assertFalse(roots[0].exists())
 
 
 class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):

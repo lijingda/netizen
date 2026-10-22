@@ -90,7 +90,7 @@ class WorktreeToolIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.worktrees.list_for_project("test"), ())
         options = await self.worktrees.options(project_alias="test")
         self.assertTrue(options["isGit"])
-        self.assertEqual([branch["name"] for branch in options["branches"]], ["main"])
+        self.assertNotIn("branches", options)
 
     async def test_source_subdirectory_is_preserved_and_explicit_ref_wins(self):
         self.fixture.runtime.native_cwds["source-native"] = self.repo / "sub"

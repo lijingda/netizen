@@ -161,16 +161,18 @@ def _check_environment_options(backend: str, env: Mapping[str, str]) -> None:
             "PIP_IGNORE_INSTALLED", "PIP_FORCE_REINSTALL",
             "PIP_NO_DEPS", "PIP_IGNORE_REQUIRES_PYTHON",
         )
+        path_options = ("PIP_CONSTRAINT", "PIP_FIND_LINKS")
     else:
         denied_values = (
             "UV_TARGET", "UV_PREFIX",
-            "UV_PYTHON", "UV_PROJECT_ENVIRONMENT", "UV_WORKING_DIR", "UV_PROJECT",
+            "UV_PYTHON", "UV_WORKING_DIR", "UV_PROJECT",
             "UV_REINSTALL_PACKAGE",
         )
         denied_flags = (
             "UV_SYSTEM_PYTHON", "UV_BREAK_SYSTEM_PACKAGES", "UV_NO_DEPS",
             "UV_EXACT", "UV_REINSTALL",
         )
+        path_options = ("UV_CONSTRAINT", "UV_OVERRIDE", "UV_FIND_LINKS")
     for key in (*denied_values, *denied_flags):
         value = env.get(key, "")
         # A path or package literally named "false" is still a redirect. Only
@@ -179,12 +181,9 @@ def _check_environment_options(backend: str, env: Mapping[str, str]) -> None:
             raise PackageUpdateError(
                 f"{key} changes the package update target or contract; clear it or update manually."
             )
-    for key in ("UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_CACHE_DIR"):
-        if env.get(key) and not Path(env[key]).is_absolute():
-            raise PackageUpdateError(f"{key} must be absolute for an unambiguous update target.")
     # The worker runs outside the package environment. Never reinterpret a user's
     # relative constraint/index path against that unrelated working directory.
-    for key in ("PIP_CONSTRAINT", "PIP_FIND_LINKS", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_FIND_LINKS"):
+    for key in path_options:
         if not env.get(key):
             continue
         try:
@@ -220,8 +219,15 @@ def _check_environment_layout(info: dict[str, Any], env: Mapping[str, str]) -> l
             raise PackageUpdateError(f"Environment is managed by another tool ({marker.name}); update it manually.")
     if (prefix.parent / "uv.lock").exists() or (prefix.parent / "poetry.lock").exists():
         raise PackageUpdateError("A project-managed environment must be updated through its project manager.")
-    if env.get("UV_PROJECT_ENVIRONMENT"):
-        raise PackageUpdateError("UV_PROJECT_ENVIRONMENT makes ownership ambiguous; use the project manager.")
+    project_environment = env.get("UV_PROJECT_ENVIRONMENT")
+    # This selects a project venv, not the target of pip/uv pip or uv tool.
+    # Only an absolute path can independently identify this installation;
+    # relative values belong to a workspace root we do not discover here.
+    if project_environment and Path(project_environment).is_absolute():
+        if Path(project_environment).resolve() == prefix:
+            raise PackageUpdateError(
+                "UV_PROJECT_ENVIRONMENT identifies this installation as a project environment; use the project manager."
+            )
     return evidence
 
 
@@ -257,6 +263,11 @@ def _reject_uv_cache_environment(prefix: Path, cache_root: Path | None = None) -
 
 
 def _uv_context(uv: str, env: Mapping[str, str], cwd: Path) -> tuple[str, Path, Path]:
+    # These affect ownership discovery even when pip was explicitly selected
+    # for a distribution originally installed with uv.
+    for key in ("UV_TOOL_DIR", "UV_CACHE_DIR"):
+        if env.get(key) and not Path(env[key]).is_absolute():
+            raise PackageUpdateError(f"{key} must be absolute for an unambiguous update target.")
     result = _run([uv, "self", "version", "--output-format", "json"], env=env, cwd=cwd)
     _require_success(result, "uv version query")
     version = _object(result.stdout, "uv version query").get("version")
@@ -277,6 +288,8 @@ def _require_uv_tool_version(version: str) -> None:
 
 
 def _tool_receipt(prefix: Path, info: dict[str, Any], env: Mapping[str, str]) -> tuple[Path, Path]:
+    if env.get("UV_TOOL_BIN_DIR") and not Path(env["UV_TOOL_BIN_DIR"]).is_absolute():
+        raise PackageUpdateError("UV_TOOL_BIN_DIR must be absolute for an unambiguous update target.")
     receipt = prefix / "uv-receipt.toml"
     try:
         if receipt.is_symlink():

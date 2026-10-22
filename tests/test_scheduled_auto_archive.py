@@ -6,7 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from lark_channel import OutboundCard
+from lark_channel import OutboundCard, SendResult
 
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.domain import FeishuScope, ScopeKind
@@ -178,7 +178,7 @@ class ScheduledAutoArchiveTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unconfirmed_rejected_or_wrong_topic_delivery_is_not_archived(self):
         for result in (
-            SimpleNamespace(success=False),
+            SendResult(success=False),
             sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh", success=False, code=230017),
             sent_result("om_final", chat_id="oc_group", thread_id="omt_other"),
             TimeoutError("reply response lost"),
@@ -197,7 +197,7 @@ class ScheduledAutoArchiveTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_partial_receipt_prevents_archive_after_final_send(self):
         fixture, claim, outcome = await self.start()
-        fixture.channel.reply_results.append(SimpleNamespace(success=False))
+        fixture.channel.reply_results.append(SendResult(success=False))
         self.confirmed(fixture)
         outcome = replace(outcome, partial_answers=(PartialAnswer(
             thread_id=outcome.thread_id, turn_id=outcome.turn_id, item_id="partial", text="step",
@@ -223,7 +223,7 @@ class ScheduledAutoArchiveTest(unittest.IsolatedAsyncioTestCase):
         for topic in ("omt_fresh", "omt_other"):
             with self.subTest(topic=topic):
                 fixture, claim, outcome = await self.start(progress=True)
-                fixture.channel.card_update_results.append(SimpleNamespace(success=True, raw={"code": 0}))
+                fixture.channel.card_update_results.append(SendResult(success=True, raw={"code": 0}))
                 fixture.channel.fetched_messages["om_progress"] = {"code": 0, "data": {"items": [
                     {"message_id": "om_progress", "chat_id": "oc_group", "thread_id": topic}]}}
                 await fixture.app.handle_completion(outcome)

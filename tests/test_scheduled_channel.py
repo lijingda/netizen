@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from lark_channel import (
+    SendResult,
     FeishuChannel,
     OutboundCard,
     OutboundFile,
@@ -230,7 +231,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         claim, request = await self.progress_fixture()
         if retry:
             self.channel.card_update_results.append(TimeoutError("response lost after patch"))
-        self.channel.card_update_results.append(SimpleNamespace(success=True, raw={"code": 0}))
+        self.channel.card_update_results.append(SendResult(success=True, raw={"code": 0}))
         self.channel.fetched_messages["om_progress"] = {"code": 0, "data": {"items": [
             {"message_id": "om_progress", "chat_id": "oc_group", "thread_id": topic}]}}
         self.store.schedules.release(claim.run.id)
@@ -277,7 +278,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.assert_uncertain_progress_update(TimeoutError("response lost after patch"))
 
     async def test_terminal_update_false_without_receipt_stays_unknown(self):
-        await self.assert_uncertain_progress_update(SimpleNamespace(success=False))
+        await self.assert_uncertain_progress_update(SendResult(success=False))
 
     async def test_sdk_missing_patch_response_is_not_delivery_confirmation(self):
         peer = SimpleNamespace(_patch_card=AsyncMock(return_value=None))
@@ -287,12 +288,12 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_terminal_update_explicit_rejection_does_not_resend_result(self):
         await self.assert_uncertain_progress_update(
-            SimpleNamespace(success=False, raw={"code": 230017}), state="failed")
+            SendResult(success=False, raw={"code": 230017}), state="failed")
 
     async def test_later_rejection_does_not_disprove_an_earlier_unknown_update(self):
         await self.assert_uncertain_progress_update(
             TimeoutError("response lost after patch"),
-            later=SimpleNamespace(success=False, raw={"code": 230017}),
+            later=SendResult(success=False, raw={"code": 230017}),
         )
 
     async def test_terminal_render_failure_before_update_can_fall_back(self):
@@ -317,7 +318,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_old_run_survives_busy_retention_until_final_card_delivery_is_confirmed(self):
         claim, request = await self.progress_fixture()
-        self.channel.card_update_results.append(SimpleNamespace(success=True, raw={"code": 0}))
+        self.channel.card_update_results.append(SendResult(success=True, raw={"code": 0}))
         for occurrence in range(1, 102):
             self.assertIsNone(self.store.schedules.claim_due(
                 claim.plan.id, app_id="app", now=160 + 60 * occurrence))
@@ -487,7 +488,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.dispatch_scheduled_run(claim)
         request = self.submissions[0]
         self.store.schedules.release(claim.run.id)
-        self.channel.reply_results.append(SimpleNamespace(success=False))
+        self.channel.reply_results.append(SendResult(success=False))
         await self.app.handle_completion(TurnOutcome(binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
             turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"], result=SimpleNamespace(status="completed", final_response="报告", items=())))
         run = self.store.schedules.get_run(claim.run.id)
@@ -802,7 +803,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             observed.append(content)
             self.assertIsNone(self.store.schedules.get_run(claim.run.id).delivery_state)
             if len(observed) == 1:
-                return SimpleNamespace(success=False)
+                return SendResult(success=False)
             return sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh")
 
         with patch.object(self.channel, "reply", side_effect=reply):
@@ -823,7 +824,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             conversation=ScheduledBindingConversation("oc_group", "group", "omt_fresh"),
             plan_id=claim.plan.id, run_id=claim.run.id, binding_id=request["binding"].id,
         )
-        self.channel.card_update_results.extend(SimpleNamespace(success=False, raw={"code": 2200}) for _ in range(3))
+        self.channel.card_update_results.extend(SendResult(success=False, raw={"code": 2200}) for _ in range(3))
         self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_group", thread_id="omt_fresh") for index in range(2))
         with patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", 0):
             await self.app.handle_completion(TurnOutcome(

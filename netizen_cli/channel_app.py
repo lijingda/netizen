@@ -25,6 +25,7 @@ from lark_channel import (
     OutboundImage,
     OutboundPost,
     SendOpts,
+    SendResult,
 )
 from openai_codex import ExternalMessage, InvalidRequestError
 
@@ -576,6 +577,13 @@ class _CardReplyTarget:
 @dataclass(frozen=True, slots=True)
 class _CardCommandOrigin(_CardReplyTarget):
     """A real card callback reply anchor, never a fabricated prompt message."""
+
+
+@dataclass(slots=True)
+class _CardCallbackContext:
+    """Keep the verified location even when later form decoding fails."""
+
+    scope: FeishuScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1476,8 +1484,8 @@ class ChannelApplication:
             except Exception:
                 logger.exception("failed to send scheduled retry feedback")
 
-    async def _reply_to_origin(self, message: Any, content: Any) -> object:
-        if isinstance(message, (ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin, _CardCommandOrigin)):
+    async def _reply_to_origin(self, message: Any, content: Any) -> SendResult:
+        if isinstance(message, (ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin, _CardReplyTarget)):
             return await self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=message.conversation.thread_id is not None,
@@ -1509,16 +1517,18 @@ class ChannelApplication:
             and self._scheduled_message_matches(origin, items[0], message_id)
         )
 
-    async def _record_scheduled_card_delivery(self, origin: ScheduledOrigin, message_id: str, result: object) -> None:
+    async def _record_scheduled_card_delivery(self, origin: ScheduledOrigin, message_id: str, result: SendResult | None) -> None:
         # Updating a card acknowledges content only; fetch its exact destination
         # before declaring the scheduled result delivered. Unknown is not a retry.
         state = "unknown"
         try:
+            if result is None:
+                return
             code = _send_result_error_code(result)
-            raw_code = _object_field(_object_field(result, "raw"), "code")
-            if getattr(result, "success", None) is False and code is not None and code > 0:
+            raw_code = _object_field(result.raw, "code")
+            if not result.success and code is not None and code > 0:
                 state = "failed"
-            elif getattr(result, "success", None) is True and type(raw_code) is int and raw_code == 0:
+            elif result.success and type(raw_code) is int and raw_code == 0:
                 async with asyncio.timeout(5):
                     if await self._scheduled_message_confirmed(origin, message_id):
                         state = "sent"
@@ -1533,13 +1543,13 @@ class ChannelApplication:
         if completion is not None:
             completion.delivery_state = state
 
-    async def _scheduled_reply_confirmed(self, message: ScheduledOrigin, result: object) -> bool:
+    async def _scheduled_reply_confirmed(self, message: ScheduledOrigin, result: SendResult) -> bool:
 
-        raw = _object_field(result, "raw")
+        raw = result.raw
         raw_code = _object_field(raw, "code")
         if type(raw_code) is not int or raw_code != 0:
             return False
-        chunks = getattr(result, "chunk_ids", None)
+        chunks = result.chunk_ids
         if not chunks:
             return self._scheduled_message_matches(message, _object_field(raw, "data"), _nonempty_field(result, "message_id"))
         # The SDK returns only the final chunk's raw response. Confirm every
@@ -1555,19 +1565,19 @@ class ChannelApplication:
             return False
         return True
 
-    async def _send_completion_reply(self, message: Any, content: Any) -> object:
+    async def _send_completion_reply(self, message: Any, content: Any) -> SendResult:
         scheduled = isinstance(message, ScheduledOrigin) and message.run_id in self._scheduled_completions
         try:
             result = await self._reply_to_origin(message, content)
             if scheduled:
-                success = getattr(result, "success", None)
+                success = result.success
                 # The SDK also returns success=False for transport exceptions.
                 # An explicit rejection describes a failed result, not proof
                 # that earlier SDK chunks/retries had no side effects.
                 code = _send_result_error_code(result)
                 state = "failed" if success is False and code is not None and code > 0 else "unknown"
                 if success is True:
-                    raw = _object_field(result, "raw")
+                    raw = result.raw
                     data = _object_field(raw, "data")
                     if await self._scheduled_reply_confirmed(message, result):
                         state = "sent" if self._scheduled_completions[message.run_id].partial_answers_confirmed else "unknown"
@@ -2019,54 +2029,15 @@ class ChannelApplication:
             await self._handle_turn_file_card_action(event)
             return
         intent: CardControlIntent | None = None
+        context = _CardCallbackContext()
         message_id = str(getattr(event, "message_id", "") or "")
         callback_chat_id = str(getattr(event, "chat_id", "") or "")
         try:
-            intent = await self._decode_card_event(event)
+            intent = await self._decode_card_event(event, context)
+            context.scope = intent.scope
             await self._card_control(intent)
-        except SettingsCardActionError as error:
-            await self._safe_update_card(
-                message_id,
-                self._settings_card(
-                    error.scope,
-                    section=error.section,
-                    notice=str(error),
-                    notice_is_error=True,
-                ),
-            )
-        except CardActionError as error:
-            if (
-                intent is not None
-                and intent.name
-                in {
-                    CardControlName.GOAL_REFRESH,
-                    CardControlName.GOAL_PAUSE,
-                    CardControlName.GOAL_RESUME,
-                    CardControlName.GOAL_CLEAR,
-                }
-            ):
-                if not await self._update_goal_action_notice(intent, str(error)):
-                    await self._safe_reply_to_card(intent, str(error))
-                return
-            record = self._bindings.side_topic_for_message(
-                app_id=self._app_id,
-                chat_id=callback_chat_id,
-                topic_id=None,
-                root_message_id=message_id,
-            )
-            if record is not None:
-                await self._update_side_card(
-                    record,
-                    notice=str(error),
-                    notice_is_error=True,
-                )
-                return
-            updated = await self._safe_update_card(message_id, error_card(str(error)))
-            if not updated and intent is not None and intent.name in {
-                CardControlName.CREATE_BINDING, CardControlName.PREPARE_NEW_WORKSPACE,
-            }:
-                await self._safe_reply_to_card(intent, str(error))
         except (
+            CardActionError,
             BindingContextRevisionConflict,
             BindingNotFound,
             ContextAnchorRequired,
@@ -2079,6 +2050,7 @@ class ChannelApplication:
             NativeThreadMissing,
             ProjectError,
             RuntimeClosed,
+            SideCloseFailed,
             ThreadCompacting,
             ThreadGoalActive,
             ThreadLifecycleError,
@@ -2087,123 +2059,84 @@ class ChannelApplication:
             ThreadOccupied,
             TurnStartFailed,
         ) as error:
-            detail = describe_error(error)
-            if (
-                intent is not None
-                and intent.name
-                in {
-                    CardControlName.GOAL_REFRESH,
-                    CardControlName.GOAL_PAUSE,
-                    CardControlName.GOAL_RESUME,
-                    CardControlName.GOAL_CLEAR,
-                }
-            ):
-                if not await self._update_goal_action_notice(intent, detail):
-                    await self._safe_reply_to_card(intent, detail)
-                return
-            card = (
-                self._settings_card(
-                    intent.scope,
-                    section=intent.settings_section,
-                    notice=detail,
-                    notice_is_error=True,
-                )
-                if intent is not None and intent.settings_section is not None
-                else error_card(detail)
+            await self._report_card_action_error(
+                intent, message_id, callback_chat_id, error, scope=context.scope,
             )
-            updated = await self._safe_update_card(message_id, card)
-            if (
-                not updated
-                and intent is not None
-                and intent.name
-                in {
-                    CardControlName.CREATE_BINDING,
-                    CardControlName.PREPARE_NEW_WORKSPACE,
-                    CardControlName.CONFIGURE_BINDING,
-                    CardControlName.RENAME_BINDING,
-                    CardControlName.ARCHIVE_BINDING,
-                    CardControlName.ARCHIVE_EXACT_BINDING,
-                    CardControlName.DELETE_BINDING,
-                    CardControlName.PREPARE_EXACT_DELETE_BINDING,
-                    CardControlName.DELETE_EXACT_BINDING,
-                    CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
-                    CardControlName.DELETE_ARCHIVED_BINDING,
-                    CardControlName.UNARCHIVE_BINDING,
-                    CardControlName.ACTIVATE_BINDING,
-                    CardControlName.STOP_EXACT_BINDING,
-                    CardControlName.RECHECK_EXACT_TURN,
-                    CardControlName.REFRESH_ARCHIVED_SESSIONS,
-                }
-            ):
-                await self._safe_reply_to_card(
-                    intent,
-                    f"❌ 会话操作失败：{detail}",
-                )
         except Exception as error:
             logger.exception(
                 "card interaction failed",
                 extra={"error_type": type(error).__name__},
             )
-            detail = describe_error(error)
-            if (
-                intent is not None
-                and intent.name
-                in {
-                    CardControlName.GOAL_REFRESH,
-                    CardControlName.GOAL_PAUSE,
-                    CardControlName.GOAL_RESUME,
-                    CardControlName.GOAL_CLEAR,
-                }
-            ):
-                if not await self._update_goal_action_notice(
-                    intent,
-                    f"卡片操作未完成：{detail}。请发送 /goal 检查当前状态。",
-                ):
-                    await self._safe_reply_to_card(
-                        intent,
-                        f"卡片操作未完成：{detail}。请发送 /goal 检查当前状态。",
-                    )
-                return
-            card = (
-                self._settings_card(
-                    intent.scope,
-                    section=intent.settings_section,
-                    notice=f"设置操作未完成：{detail}。请发送 /settings 检查当前设置。",
-                    notice_is_error=True,
-                )
-                if intent is not None and intent.settings_section is not None
-                else error_card(
-                    f"卡片操作未完成：{detail}。请发送 /sessions 检查当前状态。",
-                )
+            await self._report_card_action_error(
+                intent, message_id, callback_chat_id, error, scope=context.scope, unexpected=True,
             )
-            updated = await self._safe_update_card(message_id, card)
-            if (
-                not updated
-                and intent is not None
-                and intent.name
-                in {
-                    CardControlName.CREATE_BINDING,
-                    CardControlName.PREPARE_NEW_WORKSPACE,
-                    CardControlName.CONFIGURE_BINDING,
-                    CardControlName.RENAME_BINDING,
-                    CardControlName.ARCHIVE_BINDING,
-                    CardControlName.ARCHIVE_EXACT_BINDING,
-                    CardControlName.DELETE_BINDING,
-                    CardControlName.PREPARE_EXACT_DELETE_BINDING,
-                    CardControlName.DELETE_EXACT_BINDING,
-                    CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
-                    CardControlName.DELETE_ARCHIVED_BINDING,
-                    CardControlName.UNARCHIVE_BINDING,
-                    CardControlName.ACTIVATE_BINDING,
-                    CardControlName.STOP_EXACT_BINDING,
-                    CardControlName.RECHECK_EXACT_TURN,
-                    CardControlName.REFRESH_ARCHIVED_SESSIONS,
-                }
-            ):
-                await self._safe_reply_to_card(
-                    intent,
-                    f"❌ 会话操作未完成：{detail}。请发送 /sessions 检查当前状态。",
+
+    async def _report_card_action_error(
+        self,
+        intent: CardControlIntent | None,
+        message_id: str,
+        callback_chat_id: str,
+        error: Exception,
+        *,
+        scope: FeishuScope | None,
+        unexpected: bool = False,
+        recovery_command: str = "/sessions",
+    ) -> None:
+        # Choose the feedback destination once, independently of the exception
+        # category. A failed redraw never replays the business operation.
+        goal = intent is not None and intent.name in {
+            CardControlName.GOAL_REFRESH, CardControlName.GOAL_PAUSE,
+            CardControlName.GOAL_RESUME, CardControlName.GOAL_CLEAR,
+        }
+        settings_scope = error.scope if isinstance(error, SettingsCardActionError) else (
+            intent.scope if intent is not None and intent.settings_section is not None else None
+        )
+        settings_section = error.section if isinstance(error, SettingsCardActionError) else (
+            intent.settings_section if intent is not None else None
+        )
+        detail = str(error) if isinstance(error, CardActionError) else describe_error(error)
+        if unexpected:
+            command = "/goal" if goal else "/settings" if settings_scope is not None else recovery_command
+            detail = f"卡片操作未完成：{detail}。请发送 {command} 检查当前状态。"
+        source_id = intent.source_id if intent is not None else message_id
+        updated = False
+        try:
+            if goal:
+                assert intent is not None
+                updated = await self._update_goal_action_notice(intent, detail)
+            elif settings_scope is not None:
+                updated = await self._safe_update_card(message_id, self._settings_card(
+                    settings_scope, section=settings_section,
+                    notice=detail, notice_is_error=True,
+                ))
+            else:
+                side = self._bindings.side_topic_for_message(
+                    app_id=self._app_id, chat_id=callback_chat_id,
+                    topic_id=None, root_message_id=message_id,
                 )
+                if side is not None:
+                    # The persisted exact root supplies a verified destination
+                    # even if decoding this callback could not produce an intent.
+                    scope = self._side_scope(side) if side.topic_id is not None else FeishuScope(
+                        side.app_id, side.chat_id,
+                        ScopeKind.GROUP if side.requires_mention else ScopeKind.DIRECT,
+                    )
+                    source_id = side.root_message_id
+                    updated = await self._update_side_card(side, notice=detail, notice_is_error=True)
+                else:
+                    updated = await self._safe_update_card(message_id, error_card(detail))
+        except Exception:
+            logger.exception("failed to prepare card action error feedback")
+        if not updated and scope is not None and source_id:
+            target = _CardReplyTarget(
+                id=source_id, message_id=source_id, chat_id=scope.chat_id,
+                conversation=_CardReplyConversation(thread_id=scope.topic_id),
+            )
+            notice = detail if unexpected else f"❌ 会话操作失败：{detail}"
+            try:
+                await self._reply(target, notice)
+            except Exception:
+                logger.exception("failed to send card action error feedback")
 
     async def handle_completion(
         self,
@@ -2693,7 +2626,7 @@ class ChannelApplication:
             return
         try:
             result = await self._send_completion_reply(outcome.origin, card)
-            if getattr(result, "success", True) is not False:
+            if result.success:
                 return
             logger.warning("completed Turn file card was not confirmed", extra={"turn_id": outcome.turn_id})
         except asyncio.CancelledError:
@@ -2840,7 +2773,7 @@ class ChannelApplication:
                     return
             else:
                 result = await self._reply_to_origin(origin, card)
-                if getattr(result, "success", True) is not False:
+                if result.success:
                     return
         except asyncio.CancelledError:
             raise
@@ -3751,6 +3684,7 @@ class ChannelApplication:
         action = getattr(event, "action", None)
         message_id = str(getattr(event, "message_id", "") or "")
         chat_id = str(getattr(event, "chat_id", "") or "")
+        scope: FeishuScope | None = None
         try:
             sender_id = getattr(getattr(event, "operator", None), "open_id", None)
             if getattr(action, "tag", None) != "button" or not message_id or not chat_id or not sender_id:
@@ -3792,8 +3726,10 @@ class ChannelApplication:
             raise
         except Exception as error:
             logger.warning("fork card action failed", extra={"error_type": type(error).__name__})
-            if message_id:
-                await self._safe_update_card(message_id, error_card(describe_error(error)))
+            await self._report_card_action_error(
+                None, message_id, chat_id, error, scope=scope,
+                unexpected=not isinstance(error, CardActionError), recovery_command="/fork",
+            )
 
     async def _create_fork_from_card(
         self, *, intent: ForkCardAction, scope: FeishuScope, source: ThreadBinding,
@@ -5042,7 +4978,7 @@ class ChannelApplication:
         except Exception:
             logger.exception("failed to send Turn file callback feedback")
             return
-        if getattr(result, "success", True) is False:
+        if not result.success:
             logger.error("Turn file callback feedback was not confirmed")
 
     async def _card_control(self, intent: CardControlIntent) -> None:
@@ -5063,14 +4999,6 @@ class ChannelApplication:
                 raise CardActionError(
                     "Side 卡片与当前话题或根消息不一致，本次未执行。"
                 ) from error
-            except SideCloseFailed as error:
-                current = self._bindings.get_side_topic(record.id)
-                await self._update_side_card(
-                    current,
-                    notice=str(error),
-                    notice_is_error=True,
-                )
-                return
             if closed.outcome is None and not closed.missing_runtime_session:
                 await self._update_side_card(
                     closed.record,
@@ -6120,7 +6048,7 @@ class ChannelApplication:
             "配置来源：Netizen 会话配置",
         )
 
-    async def _decode_card_event(self, event: Any) -> CardControlIntent:
+    async def _decode_card_event(self, event: Any, context: _CardCallbackContext) -> CardControlIntent:
         action = getattr(event, "action", None)
         if action is None:
             raise CardActionError("卡片回调缺少 action。")
@@ -6148,6 +6076,7 @@ class ChannelApplication:
                 fetched_message=fetched,
                 chat_type=chat_kind,
             )
+            context.scope = scope
             intent = decode_card_form(
                 scope=scope,
                 message_id=message_id,
@@ -6413,7 +6342,7 @@ class ChannelApplication:
                 extra={"message_id": message_id},
             )
             return
-        if getattr(fallback_result, "success", True) is False:
+        if not fallback_result.success:
             logger.error(
                 "failed to send safe reply failure notice",
                 extra={
@@ -6441,7 +6370,7 @@ class ChannelApplication:
                 extra={"message_id": message_id, "emoji_type": emoji_type},
             )
             return False
-        if getattr(result, "success", True) is False:
+        if not result.success:
             logger.error(
                 "failed to add message reaction: unsuccessful result",
                 extra={"message_id": message_id, "emoji_type": emoji_type},
@@ -6449,7 +6378,7 @@ class ChannelApplication:
             return False
         return True
 
-    async def _update_card(self, message_id: str, content: Any) -> object:
+    async def _update_card(self, message_id: str, content: Any) -> SendResult:
         return await self._channel.update_card(message_id, content.card)
 
     async def _safe_update_card(self, message_id: str, content: Any) -> bool:
@@ -6461,7 +6390,7 @@ class ChannelApplication:
             except Exception:
                 logger.exception("failed to render card action result")
                 return False
-            if getattr(result, "success", True) is not False:
+            if result.success:
                 return True
             if (
                 not _is_feishu_card_action_lock(result)
@@ -6580,21 +6509,21 @@ def _turn_file_action_uuid(
 
 
 def _validate_turn_file_reply(
-    result: object,
+    result: SendResult,
     *,
     intent: TurnFileActionIntent,
 ) -> _SentMessage:
-    raw = getattr(result, "raw", None)
+    raw = result.raw
     code = _object_field(raw, "code")
     if code == 230071:
         raise TurnFileError(
             "当前飞书会话不支持将本卡片转为话题（230071），文件未发送。"
         )
-    if getattr(result, "success", None) is not True:
+    if not result.success:
         raise TurnFileError(
             f"飞书未确认本轮文件发送成功（code={code!r}）。"
         )
-    if getattr(result, "chunk_ids", None):
+    if result.chunk_ids:
         raise TurnFileError("本轮文件消息被意外拆分，无法确认话题关系。")
     if code != 0:
         raise TurnFileError(f"飞书本轮文件响应 code 异常：{code!r}。")
@@ -6655,10 +6584,10 @@ def _side_reply_target(
     )
 
 
-def _is_feishu_card_action_lock(result: object) -> bool:
-    if getattr(result, "success", None) is not False:
+def _is_feishu_card_action_lock(result: SendResult) -> bool:
+    if result.success:
         return False
-    error = getattr(result, "error", None)
+    error = result.error
     if getattr(error, "raw_code", None) != _FEISHU_CARD_ACTION_LOCK_OUTER_CODE:
         return False
     hint = getattr(error, "hint", None)
@@ -6675,16 +6604,16 @@ def _is_feishu_card_action_lock(result: object) -> bool:
 
 
 
-def _reply_failure_notice(result: object) -> str | None:
-    if getattr(result, "success", None) is not False:
+def _reply_failure_notice(result: SendResult) -> str | None:
+    if result.success:
         return None
     code = _send_result_error_code(result)
     if code != _FEISHU_CONTENT_AUDIT_REJECTION_CODE:
         return None
-    raw = _object_field(result, "raw")
+    raw = result.raw
     message = _object_field(raw, "msg")
     if not isinstance(message, str):
-        error = _object_field(result, "error")
+        error = result.error
         message = _object_field(error, "hint")
     normalized = message.upper() if isinstance(message, str) else ""
     for reason, label in _FEISHU_AUDIT_REASON_LABELS.items():

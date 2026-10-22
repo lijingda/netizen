@@ -235,15 +235,16 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
             await self.service.options(project_alias="plain")
         self.assertNotEqual(caught.exception.code, "not_git")
 
-    async def test_human_branch_options_do_not_resolve_agent_default_base(self):
-        self.git("branch", "feature")
-        with patch.object(self.service._git, "default_base", side_effect=AssertionError("agent-only default")):
-            branches = await self.service.branches(project_alias="repo")
+    async def test_options_and_creation_eligibility_never_enumerate_branch_candidates(self):
+        resource = await self.resource()
+        with patch.object(self.service._git, "default_base", side_effect=AssertionError("agent-only default")), \
+             patch.object(self.service._git, "list_branches", side_effect=TimeoutError) as branches:
+            creation = await self.service.creation_options(project_alias="repo")
             options = await self.service.options(project_alias="repo")
-        self.assertEqual(branches["defaultRef"], "HEAD")
-        self.assertEqual(options["branches"], branches["items"])
-        self.assertEqual({item["ref"] for item in options["branches"]},
-                         {"refs/heads/main", "refs/heads/feature"})
+        branches.assert_not_awaited()
+        self.assertEqual(creation, {"projectAlias": "repo", "projectRevision": 1, "isGit": True})
+        self.assertNotIn("branches", options)
+        self.assertEqual([item["id"] for item in options["items"]], [resource["id"]])
 
     async def test_keep_sessions_delete_retains_cwd_and_history_identity(self):
         resource = await self.resource()
@@ -390,8 +391,8 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(item["orphaned"])
         self.assertFalse(item["available"])
 
-    async def test_branch_timeout_is_explicitly_unavailable_not_non_git(self):
-        with patch.object(self.service._git, "list_branches", side_effect=TimeoutError):
+    async def test_repository_timeout_is_explicitly_unavailable_not_non_git(self):
+        with patch.object(self.service._git, "inspect_repository", side_effect=TimeoutError):
             with self.assertRaises(WorktreeError) as caught:
                 await self.service.options(project_alias="repo")
         self.assertEqual(caught.exception.code, "unavailable")

@@ -1,7 +1,11 @@
-let status = "";
-function setStatus(value) { status = value; }
 let confirm = true;
-function confirmDiscardChanges(dirty) { return !dirty || confirm; }
+window.location = { pathname: "/projects", search: "", assign() {} };
+window.confirm = () => confirm;
+window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
+let nextTimer = 0;
+const timers = new Map();
+function setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; }
+function clearTimeout(id) { timers.delete(id); }
 const initialSettings = { show_commentary: true, show_operations: true, show_plan: true,
   commentary_limit: 7, operation_limit: 15, commentary_max_chars: 280, operation_max_chars: 210,
   organization: "time" };
@@ -18,18 +22,20 @@ function deferred() {
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 }
-async function api(path, options = {}) {
+const response = (data, status = 200) => ({ status, ok: status >= 200 && status < 300, json: async () => data });
+async function fetch(path, options = {}) {
+  if (path === "/api/v1/projects") return response({ items: [], nextCursor: null });
   assert.equal(path, "/api/v1/progress-card/settings");
   requests.push({ path, options });
   const readSettings = structuredClone(stored);
   if (gate) await gate.promise;
-  if (failure) throw new Error("配置已变化，请刷新");
+  if (failure) return response({ message: "配置已变化，请刷新" }, 409);
   if (options.method === "POST") {
     stored = structuredClone(JSON.parse(options.body).settings);
     revision += 1;
   }
-  return { settings: options.method === "POST" ? structuredClone(stored) : readSettings,
-    revision, editable, actions: { save: editable ? grant(revision) : null } };
+  return response({ settings: options.method === "POST" ? structuredClone(stored) : readSettings,
+    revision, editable, actions: { save: editable ? grant(revision) : null } });
 }
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 // SHIPPED_PROGRESS_CARD_CONTROLLER
@@ -75,7 +81,7 @@ const cases = {
     assert.deepEqual(body.settings, { ...initialSettings, organization: "content" });
     assert.equal(controller.dirty(), false);
     assert.equal(controller.current().organization, "content");
-    assert.match(status, /已保存/);
+    assert.match(document.querySelector("#status").textContent, /已保存/);
   },
   async readonly() {
     editable = false;
@@ -94,7 +100,7 @@ const cases = {
     assert.equal(posts().length, 1);
     assert.equal(controller.dirty(), true);
     assert.equal(field("save").disabled, true);
-    assert.match(status, /配置已变化/);
+    assert.match(document.querySelector("#status").textContent, /配置已变化/);
     assert.match(field("note").textContent, /未自动重试/);
     await submit();
     assert.equal(posts().length, 1);

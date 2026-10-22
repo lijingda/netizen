@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from lark_channel import Identity, OutboundText
+from lark_channel import Identity, OutboundText, SendResult
 
 from scripts import probe_feishu_completion_mention as probe
 
@@ -24,7 +24,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
         })
 
     def sent(self, message_id, *, thread_id=None, root_id=None, parent_id=None):
-        return SimpleNamespace(
+        return SendResult(
             success=True, message_id=message_id,
             raw={"code": 0, "data": {
                 "message_id": message_id, "chat_id": "oc_probe",
@@ -48,7 +48,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
                     parent_id=root_id if topic else "om_probe",
                 ),
             ]),
-            update_card=AsyncMock(return_value=SimpleNamespace(success=True)),
+            update_card=AsyncMock(return_value=SendResult(success=True)),
             fetch_message=AsyncMock(return_value={"code": 0, "data": {"items": [{
                 "message_id": "om_source", "chat_id": "oc_probe",
                 "thread_id": thread_id if target_topic else None,
@@ -147,7 +147,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
             for raises in (False, True):
                 with self.subTest(stage=stage, raises=raises):
                     channel = self.channel()
-                    failure = RuntimeError("test-only-do-not-print") if raises else SimpleNamespace(
+                    failure = RuntimeError("test-only-do-not-print") if raises else SendResult(
                         success=False, raw={"credential": "test-only-do-not-print"},
                     )
                     if stage == "send":

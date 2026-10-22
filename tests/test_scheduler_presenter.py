@@ -6,7 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from lark_channel import OutboundCard, OutboundPost
+from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from netizen_cli.cards import turn_progress_card
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
@@ -32,10 +32,10 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             plan_may_be_stale=False,
             steps=(),
         )
-        self.result = SimpleNamespace(success=True, message_id="om_progress")
+        self.result = SendResult(success=True, message_id="om_progress")
         self.channel = SimpleNamespace(
             reply=AsyncMock(return_value=self.result),
-            update_card=AsyncMock(return_value=SimpleNamespace(success=True)),
+            update_card=AsyncMock(return_value=SendResult(success=True)),
         )
         self.runtime = SimpleNamespace(
             turn_activity=Mock(return_value=self.activity),
@@ -86,7 +86,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_custom_reply_is_validated_before_terminal_uses_its_exact_id(self):
         events = []
-        routed_result = SimpleNamespace(success=True, message_id="om_topic_progress")
+        routed_result = SendResult(success=True, message_id="om_topic_progress")
 
         async def reply(card):
             self.assertIsInstance(card, OutboundCard)
@@ -118,7 +118,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
                     turn_id=self.identity["turn_id"], item_id="partial-one", text="scheduled partial")
                 self.runtime.turn_activity.return_value = replace(self.activity, partial_answers=(partial,))
                 self.presenter._poll_seconds = 0.001
-                partial_result = SimpleNamespace(success=True, message_id="om_partial")
+                partial_result = SendResult(success=True, message_id="om_partial")
                 reply_partial = AsyncMock(return_value=partial_result)
                 partial_checked = asyncio.Event()
 
@@ -179,8 +179,8 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.channel.update_card.assert_not_awaited()
 
     async def test_terminal_retries_preserve_explicit_rejection_or_unknown_result(self):
-        rejected = SimpleNamespace(success=False, raw={"code": 230017})
-        for response in (rejected, SimpleNamespace(success=False), RuntimeError("update unavailable")):
+        rejected = SendResult(success=False, raw={"code": 230017})
+        for response in (rejected, SendResult(success=False), RuntimeError("update unavailable")):
             with self.subTest(response=response):
                 self.assertTrue(await self.start())
                 self.channel.update_card.reset_mock()
@@ -209,7 +209,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
         # Public update_card can report success without a raw acknowledgment.
         # Ordinary display retains its projection; Channel can inspect the same
         # response before confirming scheduled terminal delivery.
-        result = SimpleNamespace(success=True, message_id="om_progress", raw=None)
+        result = SendResult(success=True, message_id="om_progress", raw=None)
         self.channel.update_card.return_value = result
         attempt = await self.finish()
         self.assertIsNotNone(attempt)

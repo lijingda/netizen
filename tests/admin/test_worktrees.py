@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from netizen_cli.worktrees.errors import WorktreeError
 from netizen_cli.worktrees.settings import WorktreeSettingsService
@@ -28,10 +28,8 @@ class WorktreeServiceFixture:
         self.calls.append(("query", kwargs))
         return {"items": [deepcopy(self.resource)], "nextCursor": "page-two"}
 
-    async def branches(self, project_alias):
-        return {"projectAlias": project_alias, "projectRevision": 7, "isGit": True,
-            "defaultRef": "main", "items": [{"name": "main", "ref": "refs/heads/main",
-                "commit": "a" * 40, "remote": False, "occupiedPaths": ["/source"]}]}
+    async def creation_options(self, project_alias):
+        return {"projectAlias": project_alias, "projectRevision": 7, "isGit": True}
 
     async def create(self, **kwargs):
         self.calls.append(("create", kwargs))
@@ -89,7 +87,7 @@ class AdminWorktreeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_grant_binds_project_revision_and_rejects_replay_or_target_change(self):
         session = await self.login()
-        status, _, result = await self.json_get("/api/v1/worktrees/branches?project=test", session)
+        status, _, result = await self.json_get("/api/v1/worktrees/create-options?project=test", session)
         self.assertEqual(status, 200, result)
         body = {**fixture._action_payload(result["actions"]["create"]), "mode": "new", "ref": "HEAD", "branch": "feature"}
         bad = {**body, "target": {"resource": "project", "targetId": "other"}}
@@ -151,13 +149,13 @@ class AdminWorktreeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_git_and_failed_query_never_offer_creation(self):
         session = await self.login()
-        self.worktrees.branches = AsyncMock(return_value={"projectAlias": "test", "projectRevision": 7,
-            "isGit": False, "items": [], "defaultRef": None})
-        status, _, result = await self.json_get("/api/v1/worktrees/branches?project=test", session)
+        self.worktrees.creation_options = AsyncMock(return_value={"projectAlias": "test", "projectRevision": 7,
+            "isGit": False})
+        status, _, result = await self.json_get("/api/v1/worktrees/create-options?project=test", session)
         self.assertEqual(status, 200, result)
         self.assertEqual(result["actions"], {})
-        self.worktrees.branches.side_effect = WorktreeError("unavailable", "状态未取得。")
-        status, _, result = await self.json_get("/api/v1/worktrees/branches?project=test", session)
+        self.worktrees.creation_options.side_effect = WorktreeError("unavailable", "状态未取得。")
+        status, _, result = await self.json_get("/api/v1/worktrees/create-options?project=test", session)
         self.assertEqual(status, 503, result)
         self.assertEqual(result["code"], "unavailable")
         self.assertNotIn("actions", result)
@@ -236,10 +234,10 @@ class AdminWorktreeGitIntegrationTest(unittest.IsolatedAsyncioTestCase):
         })
 
     async def create(self, session):
-        status, _, branches = await self.json_get("/api/v1/worktrees/branches?project=test", session)
-        self.assertEqual(status, 200, branches)
+        status, _, options = await self.json_get("/api/v1/worktrees/create-options?project=test", session)
+        self.assertEqual(status, 200, options)
         status, _, result = await self.json_post("/api/v1/worktrees/create", session,
-            {**fixture._action_payload(branches["actions"]["create"]), "mode": "detached", "ref": "HEAD"})
+            {**fixture._action_payload(options["actions"]["create"]), "mode": "detached", "ref": "HEAD"})
         self.assertEqual(status, 200, result)
         return result["resource"]
 
@@ -255,6 +253,14 @@ class AdminWorktreeGitIntegrationTest(unittest.IsolatedAsyncioTestCase):
     def bind(self, resource):
         return self.store.create_channel_binding(scope=self.scope, project_alias="test", creator_id="ou_user",
             working_cwd=resource["cwd"], worktree_id=resource["id"])
+
+    async def test_creation_grant_and_detached_checkout_do_not_query_branch_candidates(self):
+        session = await self.login()
+        with patch.object(self.management.worktrees._git, "list_branches", side_effect=TimeoutError) as branches:
+            resource = await self.create(session)
+        branches.assert_not_awaited()
+        self.assertEqual(resource["state"], "ready")
+        self.assertIsNone(resource["branch"])
 
     async def test_real_checkout_delete_preserves_unselected_lazy_session_and_cwd(self):
         session = await self.login()

@@ -1,21 +1,27 @@
-const state = { sessionPage: firstSessionPage() };
+window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
+window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
+const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
+window.addEventListener = () => {};
 const requests = [];
-let answer;
-async function api(path) { requests.push(path); return answer(path); }
-let refreshed;
-let loadOnRefresh = false;
-let selectedScheduleSession = null;
-function setStatus() {}
-function syncPageUrl() {}
-function openScheduleForSession(session, button) { selectedScheduleSession = { session, button }; }
-async function refresh(tab, page) {
-  refreshed = tab;
-  if (loadOnRefresh) {
-    return loadSessions(page);
+let answer = () => ({ items: [], nextCursor: null });
+let useSessionAnswers = false;
+let failSessionReads = false;
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+async function fetch(path) {
+  requests.push(path);
+  try {
+    if (path.startsWith("/api/v1/sessions?") && failSessionReads) throw new Error("catalog unavailable");
+    const data = path.startsWith("/api/v1/sessions?") && !useSessionAnswers
+      ? { items: [], nextCursor: null } : await answer(path);
+    return { ok: true, status: 200, json: async () => data };
+  } catch (error) {
+    return { ok: false, status: 400, json: async () => ({ message: error.message }) };
   }
 }
 // SHIPPED_FILTER_CONTROLLERS
 (async () => {
+  await flush();
+  requests.length = 0;
   const form = document.querySelector("#session-filter");
   const roots = new Map(form.querySelectorAll("[data-session-multi]")
     .map((root) => [root.dataset.sessionMulti, root]));
@@ -160,8 +166,10 @@ async function refresh(tab, page) {
   document.querySelector("#session-page-size").value = "100";
   state.sessionPage = { cursor: "later", nextCursor: "next", previousCursors: [null], number: 2 };
   const displayedPage = state.sessionPage;
+  failSessionReads = true;
   await resetSessionFilters();
-  assert.equal(refreshed, "sessions");
+  failSessionReads = false;
+  assert.match(statusNode.textContent, /catalog unavailable/);
   assert.deepEqual(query().getAll("inventoryState"), ["active"]);
   assert.equal(query().get("pageSize"), "20");
   for (const key of ["project", "scopeKind", "current", "createdFrom", "createdBefore"]) {
@@ -210,6 +218,7 @@ async function refresh(tab, page) {
   await resetSessionFilters();
   state.sessionPage = firstSessionPage();
   const sessionQueries = [];
+  useSessionAnswers = true;
   let failNextPage = false;
   answer = (path) => {
     if (path.startsWith("/api/v1/projects/options?")) {
@@ -238,7 +247,6 @@ async function refresh(tab, page) {
   applyTimePreset("yesterday");
   assert.deepEqual(query().getAll("inventoryState"), ["archived"]);
   assert.notEqual(query().get("createdFrom"), bounds);
-  loadOnRefresh = true;
   await moveSessionPage("next");
   assert.equal(sessionQueries.at(-1).get("cursor"), "page-two");
   assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["active"]);
@@ -288,10 +296,24 @@ async function refresh(tab, page) {
   assert(!more.open, "secondary actions start collapsed");
   const createSchedule = rows.querySelectorAll("button").find((button) => button.textContent === "创建定时任务");
   assert(more.contains(createSchedule), "schedule entry remains available under more actions");
+  const sessionAnswer = answer;
+  answer = (path) => {
+    if (path === "/api/v1/schedules?mode=list") return {
+      actions: { create: { actionToken: "create-once", csrfToken: "csrf", target: { resource: "schedule-registry", targetId: "all" } } },
+      default_timezone: "UTC",
+    };
+    if (path.startsWith("/api/v1/schedules?mode=options")) return {
+      models: [], session_settings: defaultScheduleSessionSettings(), context_mode_available: false,
+    };
+    return sessionAnswer(path);
+  };
   createSchedule.click();
-  assert.equal(selectedScheduleSession.session, state.sessions.items[0]);
-  assert.equal(selectedScheduleSession.session.bindingId, unknown.bindingId);
-  assert.equal(selectedScheduleSession.button, createSchedule);
+  await flush();
+  assert.equal(scheduleEditor.targetSession, state.sessions.items[0]);
+  assert.equal(scheduleEditor.targetSession.bindingId, unknown.bindingId);
+  assert.equal(scheduleEditor.returnFocus, createSchedule);
+  closeScheduleEditor({ confirmed: true });
+  answer = sessionAnswer;
 
   // Native seconds render in the browser's time zone and change with the list response.
   const previousTZ = process.env.TZ;
@@ -353,7 +375,6 @@ async function refresh(tab, page) {
     ? { items: [{ chatId: "oc_selected", name: "研发 & 测试群",
       avatarUrl: "https://example.feishucdn.com/sessions.jpg" }], nextCursor: null }
     : answerSessions(path);
-  const flush = () => new Promise((resolve) => setImmediate(resolve));
   const pickerRoot = document.querySelector("#session-chat-picker");
   assert.equal(pickerRoot.querySelector(".chat-picker-summary").textContent, "全部");
   sessionChatPicker.focus();

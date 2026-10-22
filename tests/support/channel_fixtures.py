@@ -68,7 +68,7 @@ class ChannelFixture:
         logical_turn_id: str = "goal-one",
     ) -> OutboundCard:
         if binding.native_thread_id is None:
-            self.store.assign_native_thread_id(binding.id, goal.thread_id)
+            self.runtime.materialize(binding.id, goal.thread_id, cwd=self.project)
             binding = self.store.get(binding.id)
         return goal_card(
             scope=scope, binding_id=binding.id, short_id=binding.short_id,
@@ -94,7 +94,7 @@ class SideChannelFixture(ChannelFixture):
             creator_id="ou_owner",
             task_feedback=task_feedback,
         )
-        self.store.assign_native_thread_id(binding.id, f"native-{binding.id}")
+        self.runtime.materialize(binding.id, f"native-{binding.id}", cwd=self.project)
         return self.store.get(binding.id)
 
     def queue_promoted_topic(
@@ -148,7 +148,7 @@ class ScheduledChannelFixture(ChannelFixture):
     async def submit_initial(self, **kwargs):
         self.submissions.append(kwargs)
         binding = kwargs["binding"]
-        self.store.assign_native_thread_id(binding.id, "native-" + kwargs["run_id"])
+        self.runtime.materialize(binding.id, "native-" + kwargs["run_id"], cwd=kwargs["cwd"])
         self.store.schedules.set_run(kwargs["run_id"], phase="handed_off", initial_turn_id="turn-initial")
         return Submission(
             SubmitDisposition.STARTED, binding.id, "native-" + kwargs["run_id"],

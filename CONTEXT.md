@@ -281,19 +281,17 @@ authority 选择它已开放操作的 exact target。archive/delete 的 removal 
 Codex 拥有，不写入 Channel Database。
 
 **Binding Delete / 本地会话删除**：永久删除 Channel Database 中的 exact Binding。
-Lazy Binding 可直接删除；materialized Binding 只能在原生 Delete 正常返回或 Native
-Thread Delete Reconciliation 明确 absent 后提交。它本身不修改 Codex 历史。
+它本身不修改 Codex 历史；物化会话与原生删除的先后及结果处理遵循
+[原生归档与删除契约](docs/design.md#原生归档与删除)。
 
 **Native Thread Delete / 原生会话删除**：永久删除已有历史的 Codex Thread、App Server
 管理的 spawned descendants 及其 Codex App/CLI 历史，并在确认后删除 Binding。它是
 ADR 0037 批准的独立不可逆 native capability，只能通过固定薄 Adapter 调用，不能用本地
 Binding 删除模拟。
 
-**Native Thread Delete Reconciliation / 原生删除对账**：Delete 非取消异常后，对 exact
-native ID 做一次有界四视图读取：rollout scan 与 state DB 各自的 active/archived catalog。
-任一视图存在为 **present**，保留 Binding 并允许用户重新确认；四个完整视图均不存在为
-**absent**，可以提交 Binding Delete；视图冲突、失败、超时或取消为 **unknown**，保留
-Binding/lifecycle 槽并只隔离该 Binding。它是只读判定，不会自动再发一次 delete。
+**Lifecycle Unknown / 生命周期结果未知**：一次原生生命周期操作的结果无法确认，
+仅隔离目标 Binding、保留其本地关联的状态；它不表示原生操作已失败或会话已删除。
+各操作的确认来源和恢复边界见[原生归档与删除契约](docs/design.md#原生归档与删除)。
 
 **Goal Operation / Goal 操作**：一个原生持久化 Goal 在 Runtime 中的单一逻辑槽位。
 它可跨多个物理 Turn 自动 continuation；只有逻辑通知流、persisted Goal、exact 最终

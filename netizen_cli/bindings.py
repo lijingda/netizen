@@ -563,23 +563,29 @@ class BindingStore:
     A file-backed Store owns a WAL writer plus one query-only Admin reader.
     ``:memory:`` is the explicit compatibility/test mode: Admin reads run on
     the same connection under the writer lock, never against a second empty
-    in-memory database.
+    in-memory database. Service startup uses ``create=False`` so validation and
+    opening share the requirement for an existing, nonempty database.
     """
 
     def __init__(
         self,
         path: str | Path = ":memory:",
         *,
+        create: bool = True,
         id_factory: Callable[[], str] | None = None,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._path = path
         self._path_string = str(path)
         self._is_memory = self._path_string == ":memory:"
-        if not self._is_memory and Path(path).exists():
+        if not create or (not self._is_memory and Path(path).exists()):
             # Reject unsupported data before a writer can recover/checkpoint a
             # previous process's WAL, even while closing after an open failure.
-            validate_channel_database(path, allow_empty=True)
+            validate_channel_database(path, allow_empty=create)
+        self._connection_target = (
+            self._path_string if create else Path(path).resolve().as_uri() + "?mode=rw"
+        )
+        self._connection_uri = not create
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._wall_clock = wall_clock
         self._lock = threading.RLock()
@@ -593,11 +599,12 @@ class BindingStore:
             max_workers=1,
             thread_name_prefix="netizen-binding-query",
         )
-        if not self._is_memory:
+        if create and not self._is_memory:
             db_path = Path(path)
             db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._connection = sqlite3.connect(
-            self._path_string,
+            self._connection_target,
+            uri=self._connection_uri,
             isolation_level=None,
             check_same_thread=False,
         )
@@ -606,7 +613,7 @@ class BindingStore:
         self.defaults = DefaultsStore(self)
         self.worktrees = WorktreeStore(self)
         try:
-            self._initialize()
+            self._initialize(create=create)
             if not self._is_memory:
                 self._query_connection = self._query_executor.submit(
                     self._open_query_connection
@@ -618,14 +625,14 @@ class BindingStore:
         if not self._is_memory:
             os.chmod(Path(path), 0o600)
 
-    def _initialize(self) -> None:
+    def _initialize(self, *, create: bool) -> None:
         with self._lock:
             tables = {
                 row["name"] for row in self._connection.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
             }
-            if tables:
+            if tables or not create:
                 if "schema_version" not in tables:
                     raise RuntimeError("Channel database is missing its schema version; existing data was not changed")
                 _require_current_schema(self._connection)
@@ -862,7 +869,8 @@ class BindingStore:
 
     def _open_query_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
-            self._path_string,
+            self._connection_target,
+            uri=self._connection_uri,
             isolation_level=None,
             check_same_thread=False,
         )

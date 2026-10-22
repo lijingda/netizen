@@ -1018,7 +1018,7 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                     connection.execute("CREATE TABLE retained (value TEXT)")
                     connection.execute("INSERT INTO retained VALUES ('keep this data')")
                 before = path.read_bytes()
-                for opener in (validate_channel_database, BindingStore):
+                for opener in (validate_channel_database, BindingStore, lambda path: BindingStore(path, create=False)):
                     with self.subTest(opener=opener.__name__), self.assertRaisesRegex(RuntimeError, "unsupported.*schema version"):
                         opener(path)
                     self.assertEqual(path.read_bytes(), before)
@@ -1032,7 +1032,7 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                 connection.execute("CREATE TABLE retained (value TEXT)")
                 connection.execute("INSERT INTO retained VALUES ('keep this data')")
             before = path.read_bytes()
-            for opener in (validate_channel_database, BindingStore):
+            for opener in (validate_channel_database, BindingStore, lambda path: BindingStore(path, create=False)):
                 with self.assertRaises(RuntimeError):
                     opener(path)
                 self.assertEqual(path.read_bytes(), before)
@@ -1056,7 +1056,7 @@ os._exit(0)
             wal = Path(str(path) + "-wal")
             before, before_wal = path.read_bytes(), wal.read_bytes()
             self.assertTrue(before_wal)
-            for opener in (validate_channel_database, BindingStore):
+            for opener in (validate_channel_database, BindingStore, lambda path: BindingStore(path, create=False)):
                 with self.subTest(opener=opener.__name__), self.assertRaisesRegex(RuntimeError, "unsupported.*schema version"):
                     opener(path)
                 self.assertEqual(path.read_bytes(), before)
@@ -1078,7 +1078,7 @@ os._exit(0)
                 check=True, capture_output=True, timeout=10,
             )
             self.assertTrue(Path(str(path) + "-wal").is_file())
-            store = BindingStore(path)
+            store = BindingStore(path, create=False)
             try:
                 self.assertEqual(store.get_project("retained").cwd, "/tmp/retained")
             finally:
@@ -1097,6 +1097,39 @@ os._exit(0)
                 store.close()
                 validate_channel_database(path)
 
+    def test_open_existing_rejects_missing_or_empty_database_without_creating_it(self) -> None:
+        for kind in ("missing", "empty", "sqlite_header"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "channel.sqlite3"
+                if kind != "missing":
+                    path.touch()
+                if kind == "sqlite_header":
+                    with sqlite3.connect(path) as connection:
+                        connection.execute("VACUUM")
+                before = path.read_bytes() if path.exists() else None
+                with self.assertRaises(RuntimeError):
+                    BindingStore(path, create=False)
+                self.assertEqual(path.read_bytes() if path.exists() else None, before)
+                self.assertFalse(Path(str(path) + "-wal").exists())
+
+    def test_open_existing_does_not_initialize_database_lost_after_validation(self) -> None:
+        for replacement in ("missing", "empty"):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "channel.sqlite3"
+                BindingStore(path).close()
+
+                def lose_database(database, **kwargs):
+                    validate_channel_database(database, **kwargs)
+                    path.unlink()
+                    if replacement == "empty":
+                        path.touch()
+
+                with patch("netizen_cli.bindings.validate_channel_database", side_effect=lose_database):
+                    with self.assertRaises((RuntimeError, sqlite3.OperationalError)):
+                        BindingStore(path, create=False)
+                self.assertEqual(path.read_bytes() if path.exists() else None,
+                                 b"" if replacement == "empty" else None)
+
     def test_current_database_missing_activation_column_is_rejected_without_repair(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "channel.sqlite3"
@@ -1105,7 +1138,7 @@ os._exit(0)
                 connection.execute("DROP TRIGGER scopes_activate_binding")
                 connection.execute("ALTER TABLE bindings DROP COLUMN ever_activated")
             before = path.read_bytes()
-            for opener in (validate_channel_database, BindingStore):
+            for opener in (validate_channel_database, BindingStore, lambda path: BindingStore(path, create=False)):
                 with self.subTest(opener=opener.__name__), self.assertRaisesRegex(RuntimeError, "missing Binding columns: ever_activated"):
                     opener(path)
                 self.assertEqual(path.read_bytes(), before)
@@ -1124,7 +1157,7 @@ os._exit(0)
             validate_channel_database(path)
             validate_channel_database(path)
             self.assertEqual(path.read_bytes(), before)
-            restarted = BindingStore(path)
+            restarted = BindingStore(path, create=False)
             try:
                 self.assertEqual(restarted.get_project("p"), project)
                 self.assertEqual(restarted.get(binding.id), binding)
@@ -1809,12 +1842,16 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
                         matching, key=lambda item: (item[1 if sort_by == "created_at" else 2], item[0]),
                         reverse=direction == "desc",
                     )
-                    first = await self.store.query_side_topics(query=query, limit=20)
+                    # Check ordering and page boundaries independently of CI
+                    # scheduling latency; deadline behavior has separate tests.
+                    first = await self.store.query_side_topics(query=query, limit=20, deadline_seconds=2)
                     self.assertEqual([item.side_topic.id for item in first.items], [item[0] for item in expected[:20]])
                     self.assertIsNotNone(first.next_cursor)
                     self.assertEqual(first.next_cursor.created_at, expected[19][1])
                     self.assertEqual(first.next_cursor.updated_at, expected[19][2] if sort_by == "updated_at" else None)
-                    second = await self.store.query_side_topics(query=query, cursor=first.next_cursor, limit=20)
+                    second = await self.store.query_side_topics(
+                        query=query, cursor=first.next_cursor, limit=20, deadline_seconds=2,
+                    )
                     self.assertEqual([item.side_topic.id for item in second.items], [item[0] for item in expected[20:]])
                     self.assertIsNone(second.next_cursor)
 

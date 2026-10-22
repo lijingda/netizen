@@ -1709,26 +1709,15 @@ class CodexRuntime:
                     self._refresh_turn_activity(active)
                 stale_after_cursor = active.plan_cursor
                 try:
-                    await active.handle.steer(native_input)
+                    await self._steer_turn(
+                        active.handle.steer(native_input),
+                        race_message="当前 Side Turn 恰好已经结束，本条消息未执行，请重新发送。",
+                    )
                 except asyncio.CancelledError:
                     session.state = SideSessionState.CLOSING
                     session.revision += 1
                     self._cancel_side_idle(session)
-                    self.close_admission()
                     raise
-                except InvalidRequestError as error:
-                    raise SteerRace(
-                        "当前 Side Turn 恰好已经结束，本条消息未执行，请重新发送。"
-                    ) from error
-                except Exception as error:
-                    session.state = SideSessionState.CLOSING
-                    session.revision += 1
-                    self._cancel_side_idle(session)
-                    self.close_admission()
-                    raise SideStartFailed(
-                        "Codex Side steer 结果未确认；服务已停止接收新任务，"
-                        "请重启服务。"
-                    ) from error
                 active.steer_count += 1
                 last_update = active.plan_last_update_cursor
                 if last_update is not None and last_update > stale_after_cursor:
@@ -3579,18 +3568,10 @@ class CodexRuntime:
                 self._mark_thread_subscribed_locked(binding, active.thread)
                 self._refresh_turn_activity(active)
                 stale_after_cursor = active.plan_cursor
-                try:
-                    await active.handle.steer(native_input)
-                except asyncio.CancelledError:
-                    # The official async SDK delegates steer to a blocking
-                    # worker-thread RPC. Cancellation does not prove that the
-                    # native request stopped, so fail closed service-wide.
-                    self.close_admission()
-                    raise
-                except InvalidRequestError as error:
-                    raise SteerRace(
-                        "当前任务恰好已经结束，本条消息未执行，请重新发送。"
-                    ) from error
+                await self._steer_turn(
+                    active.handle.steer(native_input),
+                    race_message="当前任务恰好已经结束，本条消息未执行，请重新发送。",
+                )
                 active.steer_count += 1
                 last_update = active.plan_last_update_cursor
                 if last_update is not None and last_update > stale_after_cursor:
@@ -3646,17 +3627,12 @@ class CodexRuntime:
                         raise RuntimeError(
                             "thread_resume returned a different native ID"
                         )
-            except ThreadOccupied:
+            except (ThreadOccupied, ThreadLifecycleError):
                 raise
             except asyncio.CancelledError:
                 self.close_admission()
                 raise
             except Exception as error:
-                if external and isinstance(error, ThreadLifecycleError):
-                    # Exact resume rejection proves there was no delivery;
-                    # another client may have archived the target after the
-                    # tool's read-only catalog check.
-                    raise
                 # Starting/resuming is side-effectful and a lost response does
                 # not prove that App Server left native state untouched.
                 self.close_admission()
@@ -3866,7 +3842,7 @@ class CodexRuntime:
                 thread = await self._resume_thread_for_operation(binding.native_thread_id)
                 if thread.id != binding.native_thread_id:
                     raise RuntimeError("thread_resume returned a different native ID")
-            except ThreadOccupied:
+            except (ThreadOccupied, ThreadLifecycleError):
                 raise
             except asyncio.CancelledError:
                 self.close_admission()
@@ -5036,6 +5012,23 @@ class CodexRuntime:
             raise SteerRace("Goal 当前物理 Turn 已结束或正在换轮，本条消息未执行，请重新发送。")
         return turn_id
 
+    async def _steer_turn(
+        self,
+        request: Awaitable[object],
+        *,
+        race_message: str,
+    ) -> None:
+        """Share exact-Turn rejection and cancellation handling across inputs."""
+        try:
+            await request
+        except asyncio.CancelledError:
+            # The SDK delegates steer to a blocking worker-thread RPC. Cancelling
+            # its waiter does not prove that the native request stopped.
+            self.close_admission()
+            raise
+        except InvalidRequestError as error:
+            raise SteerRace(race_message) from error
+
     async def _steer_goal_locked(
         self,
         *,
@@ -5048,17 +5041,15 @@ class CodexRuntime:
         handle = active.handle
         assert handle is not None
         try:
-            await handle.steer(input, expected_turn_id=expected_turn_id)
+            await self._steer_turn(
+                handle.steer(input, expected_turn_id=expected_turn_id),
+                race_message="Goal 当前物理 Turn 已变化或不再接受输入，本条消息未执行，请重新发送。",
+            )
         except asyncio.CancelledError:
             # As with ordinary steer, cancelling the waiter cannot cancel the
             # SDK's worker-thread mutation or prove non-delivery.
             active.state = GoalOperationState.UNKNOWN
-            self.close_admission()
             raise
-        except InvalidRequestError as error:
-            raise SteerRace(
-                "Goal 当前物理 Turn 已变化或不再接受输入，本条消息未执行，请重新发送。"
-            ) from error
         except GoalMutationStateUnknown as error:
             active.state = GoalOperationState.UNKNOWN
             self.close_admission()

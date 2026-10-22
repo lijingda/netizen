@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from lark_channel import SendResult
+
 from scripts import probe_feishu_turn_file_card as probe
 
 
@@ -15,10 +17,10 @@ class FileCardCapacityProbeTest(unittest.IsolatedAsyncioTestCase):
         for count in (18, 100, 400):
             with self.subTest(count=count):
                 channel = SimpleNamespace(
-                    send=AsyncMock(return_value=SimpleNamespace(
+                    send=AsyncMock(return_value=SendResult(
                         success=True, message_id="om_capacity",
                     )),
-                    update_card=AsyncMock(return_value=SimpleNamespace(success=True)),
+                    update_card=AsyncMock(return_value=SendResult(success=True)),
                     fetch_message=AsyncMock(return_value={
                         "data": {"items": [{
                             "message_id": "om_capacity", "chat_id": chat_id,

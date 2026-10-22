@@ -31,6 +31,9 @@ their cited ADRs before changing that boundary.
   SDK compatibility boundaries are in [adapters](docs/design.md#sdk-适配边界).
   Goal input retains exact physical-Turn admission across rollover
   ([ADR 0069](docs/adr/0069-steer-the-current-physical-goal-turn.md)).
+  Ordinary/Side/Goal steer failures and verified ordinary-input resume rejections
+  follow [ADR 0088](docs/adr/0088-align-steer-failures-and-input-resume-rejections.md);
+  preserve cancellation and Goal receipt-identity protections separately.
   Ordinary session collaboration follows
   [ADR 0081](docs/adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md):
   native Thread IDs, instance tool ranges, and the narrow ExternalMessage start/join

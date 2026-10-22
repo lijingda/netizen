@@ -8,7 +8,9 @@ by the Worktree service; this probe isolates the native cwd contract.
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
+import logging
 from pathlib import Path
 import sys
 import tempfile
@@ -26,6 +28,7 @@ from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup
 from probe_sdk_partial_answers import (
     isolated_config, message_events, mock_provider, response_events,
 )
+from scripts.probe_scheduled_tasks import _safe_traceback, source_evidence, write_result
 
 
 async def native_case(root: Path) -> dict[str, object]:
@@ -166,12 +169,28 @@ async def native_case(root: Path) -> dict[str, object]:
         }
 
 
-async def main() -> None:
+async def probe() -> dict[str, object]:
     async with asyncio.timeout(60):
         with tempfile.TemporaryDirectory(prefix="netizen-worktree-cwd-probe-") as temporary:
             result = await native_case(Path(temporary))
-    print(json.dumps({**result, "temporary_state_cleaned": True}), flush=True)
+    return {**result, "temporary_state_cleaned": True}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, help="save sanitized result and checkout identity as JSON")
+    args = parser.parse_args()
+    logging.disable(logging.CRITICAL)
+    evidence = source_evidence()
+    try:
+        result = asyncio.run(probe())
+    except Exception as error:
+        write_result({**evidence, "passed": False, "error_type": type(error).__name__,
+                      "traceback": _safe_traceback(error)}, args.output)
+        return 1
+    write_result({**evidence, **result}, args.output)
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())

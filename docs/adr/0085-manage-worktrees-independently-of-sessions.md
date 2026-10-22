@@ -44,7 +44,7 @@ SDK 尚未提供的专用管理接口，或复制 Codex App 的全部环境、�
 | Agent worktree 工具 | 仅提供发现受管工作区和创建能力，复用同一服务；创建返回资源标识、根目录/实际工作目录及真实分支或 detached 状态。分支由 Agent 按需通过 Git 查询并填写 `ref`，不提供专用分支查询或删除工具。 |
 | Agent `create_thread` | 参数保持 CLI 形态，不增加 `cwd`、worktree 或 branch；后台使用来源 Thread 的实际 cwd 创建会话。 |
 
-新建 worktree 提供基线/已有分支选择及 checkout 新分支配置；已有 worktree 只使用其
+新建 worktree 提供基线 ref/已有本地分支名输入及 checkout 新分支配置；已有 worktree 只使用其
 当前状态，不能借创建会话隐式切分支。不选 worktree 时也不借此切换 Project 的分支。
 已被其他 checkout 占用的命名分支不能强占；“选择起点提交”与“checkout 命名分支”必须
 在界面和参数中区分。默认检出方式见下文已确认策略。
@@ -227,7 +227,12 @@ Git 和飞书交互验收。当前实现与验证范围见下节；未验收项�
 和创建状态，不缓存分支/dirty 状态或原生会话历史。两个级联选项默认关闭，未知创建与
 部分删除保留已知成果，不自动补偿或恢复。没有扩展 `/fork` 或 `create_thread` 参数。
 复审后移除 `list_worktree_branches`，保留 `list_worktrees` 与 `create_worktree`；Admin
-与飞书表单的内部选项查询保留，不将 Agent 查询需求扩展成另一套分支工具或分页接口。
+与飞书表单保留受管 worktree 选项查询，不将 Agent 查询需求扩展成另一套分支工具或分页接口。
+
+2026-10-22 移除创建表单的全量分支候选目录和 1000 分支拒绝限制。起点默认创建时的
+Project HEAD，其他 ref 或已有本地分支名由用户填写；Admin 创建授权只依赖有效 Project、
+仓库和 revision，不依赖分支目录读取成功。已有 worktree 选择及其真实分支展示保留，
+创建时仍复核 ref、分支存在性和占用；删除前关联 Side 完整清单的独立预算不变。
 
 真实临时 Git、应用层/卡片/Agent 工具/Admin HTTP 与 JavaScript 行为、迁移及删除并发
 保护测试已补充。独立 `scripts/probe_worktree_cwd.py` 使用固定 SDK 0.163.0 的 bundled

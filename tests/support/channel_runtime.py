@@ -211,15 +211,16 @@ class StubRuntime:
         assert self.binding_store is not None
         binding = self.binding_store.get(binding_id)
         assert binding.native_thread_id is not None
-        # Legacy Channel-only fixtures materialize Threads without a fake SDK
-        # start. Model their native creation directory once, independently of
-        # the caller's default_cwd; explicit native facts always take priority.
-        cwd = self.native_cwds.setdefault(
-            binding.native_thread_id,
-            Path(binding.working_cwd or self.binding_store.get_project(binding.project_alias).cwd),
-        )
+        cwd = self.native_cwds[binding.native_thread_id]
         assert isinstance(cwd, Path) and cwd.is_absolute()
         return cwd
+
+    def materialize(self, binding_id: str, thread_id: str, *, cwd: Path) -> None:
+        """Record both the simulated native creation and its Binding identity."""
+        assert self.binding_store is not None
+        assert cwd.is_absolute()
+        self.binding_store.assign_native_thread_id(binding_id, thread_id)
+        self.native_cwds[thread_id] = cwd
 
     async def submit(self, **kwargs) -> Submission:
         if self.enforce_active_submission:

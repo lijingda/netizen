@@ -1,14 +1,11 @@
-const state = { tab: "schedules", schedules: null, sessionPage: { cursor: "sessions-page-three", number: 3 } };
-function selectTab(name) { state.tab = name; }
-function syncPageUrl() {}
-function sessionSettingsHasChanges() { return false; }
-function defaultEditorHasChanges() { return false; }
+window.location = { pathname: "/schedules", search: "", assign() {} };
+window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
+const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 const windowListeners = new Map();
 window.addEventListener = (name, callback) => windowListeners.set(name, callback);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-let status = "";
 let statusError = false;
-function setStatus(message, error = false) { status = message; statusError = error; }
+document.querySelector("#status").classList.toggle = (_name, value) => { statusError = value; };
 let confirmation = true;
 const confirmations = [];
 window.confirm = (message) => { confirmations.push(message); return confirmation; };
@@ -22,12 +19,10 @@ let scheduleOptionsGate = null;
 const workspaceOptions = new Map(["project-one", "project-two"].map((project, index) => [project, {
   projectAlias: project, projectRevision: index + 1, isGit: true,
   items: [{ id: `wt-${project}`, cwd: `/managed/${project}`, branch: null, available: true }],
-  branches: [{ ref: "refs/heads/main", name: "main" }],
 }]));
 const workspaceErrors = new Map();
 let runRecords = null;
 let unavailableProject = null;
-let openTimeRangeFilter = null;
 const defaultSessionSettings = { turn_settings: { model_id: "native-default", effort_id: "medium", service_tier_id: "default" },
   reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true, message_context_mode: "current-only",
   progress_card_settings: { show_commentary: false, show_operations: true, show_plan: true,
@@ -68,13 +63,14 @@ let failList = false;
 let failView = false;
 let failRuns = false;
 const times = [{ utc: "2030-01-01T01:00:00Z", local: "2030-01-01T09:00:00+08:00" }];
-async function api(path, options = {}) {
+async function fixtureResponse(path, options = {}) {
   if (options.method === "POST") {
     posts.push({ path, body: JSON.parse(options.body) });
     if (respond) return respond(path, options);
     return { ok: true, plan: plans[0] };
   }
   gets.push(path);
+  if (path.startsWith("/api/v1/sessions?")) return { items: [], nextCursor: null };
   const query = new URL(path, "http://localhost").searchParams;
   if (path.startsWith("/api/v1/chats/validate?")) {
     if (chatValidationError) throw chatValidationError;
@@ -136,7 +132,15 @@ async function api(path, options = {}) {
   return { ok: true, plans: structuredClone(plans), next_cursor: "page-two",
     default_timezone: "Asia/Shanghai", actions: { create: createGrant } };
 }
-async function refresh() { await loadSchedules(); return true; }
+async function fetch(path, options = {}) {
+  try {
+    const data = await fixtureResponse(path, options);
+    return { ok: true, status: 200, json: async () => data };
+  } catch (error) {
+    return { ok: false, status: error.status || 400,
+      json: async () => ({ message: error.message, code: error.code, choices: error.choices }) };
+  }
+}
 // SHIPPED_SCHEDULE_CONTROLLER
 const scheduleFilterRoots = new Map(scheduleInput("filter").querySelectorAll("[data-schedule-filter]")
   .map((root) => [root.dataset.scheduleFilter, root]));
@@ -167,6 +171,8 @@ async function chooseScheduleTarget(value) {
   await flush();
 }
 (async () => {
+  await flush();
+  state.sessionPage = { ...state.sessionPage, cursor: "sessions-page-three", number: 3 };
   await loadSchedules();
   const rows = document.querySelector("#schedules-body").querySelectorAll("tr");
   assert.equal(rows.length, 1);
@@ -454,7 +460,7 @@ async function chooseScheduleTarget(value) {
   const plan = state.schedules.plans[0];
   await changeSchedule(plan, "update");
   assert.deepEqual(posts.at(-1).body.definition, { enabled: false });
-  assert.equal(status, "计划已暂停。");
+  assert.equal(statusNode.textContent, "计划已暂停。");
   confirmation = false;
   const count = posts.length;
   await changeSchedule(state.schedules.plans[0], "delete");
@@ -471,7 +477,7 @@ async function chooseScheduleTarget(value) {
   releaseDelete({ ok: true, id: "plan-exact" });
   await deleting;
   respond = null;
-  assert.match(status, /历史会话保留/);
+  assert.match(statusNode.textContent, /历史会话保留/);
   assert.equal(statusError, false);
 
   await showSchedule("plan-exact");
@@ -503,7 +509,7 @@ async function chooseScheduleTarget(value) {
   assert.match(scheduleInput("form-error").textContent, /请刷新列表并重新打开编辑/);
   await saveSchedule({ preventDefault() {} });
   assert.equal(posts.length, beforeFailure + 1);
-  assert.match(status, /已变化/);
+  assert.match(statusNode.textContent, /已变化/);
   assert.equal(statusError, true);
 
   // Submission cannot be dismissed/reopened or submitted twice while pending.
@@ -530,7 +536,7 @@ async function chooseScheduleTarget(value) {
   await previewSchedule();
   failList = true;
   await saveSchedule({ preventDefault() {} });
-  assert.match(status, /计划已保存.*列表刷新失败/);
+  assert.match(statusNode.textContent, /计划已保存.*列表刷新失败/);
   assert.equal(scheduleInput("drawer").open, false);
   assert.equal(document.activeElement, scheduleInput("new"));
   failList = false;
@@ -747,7 +753,7 @@ async function chooseScheduleTarget(value) {
   await saveSchedule({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.schedule, exhausted.schedule);
   assert.equal(posts.at(-1).body.definition.instructions, "Updated instructions after the final execution.");
-  assert.match(status, /已保存计划.*没有后续触发/);
+  assert.match(statusNode.textContent, /已保存计划.*没有后续触发/);
   await openScheduleEditor(deadlinePlan);
   scheduleInput("end-at").value = "2029-12-01T18:00";
   scheduleInput("end-at").dispatch("input");
@@ -822,8 +828,8 @@ async function chooseScheduleTarget(value) {
     run_id: "manual-exact", replayed: false,
     run: { status: "starting", trigger_source: "manual", feishu_url: "https://applink.feishu.cn/client/message/link?token=om_manual" } });
   await running;
-  assert.match(status, /已受理.*手动运行.*原定时安排保持不变/);
-  assert(!status.includes("已完成"));
+  assert.match(statusNode.textContent, /已受理.*手动运行.*原定时安排保持不变/);
+  assert(!statusNode.textContent.includes("已完成"));
   assert.equal(scheduleInput("run-receipt").hidden, false);
   assert.match(scheduleInput("run-receipt").textContent, /manual-exact/);
   assert.equal(scheduleInput("run-receipt").querySelector("a").href,
@@ -834,7 +840,7 @@ async function chooseScheduleTarget(value) {
   failList = true;
   respond = () => ({ ok: true, accepted: true, run_id: "accepted-before-refresh", run: null });
   await runSchedule(state.schedules.plans[0]);
-  assert.match(status, /已受理.*列表刷新失败/);
+  assert.match(statusNode.textContent, /已受理.*列表刷新失败/);
   assert.equal(statusError, false);
   assert.match(scheduleInput("run-receipt").textContent, /accepted-before-refresh/);
   assert.equal(scheduleInput("run-receipt").querySelector("a"), null);
@@ -857,7 +863,7 @@ async function chooseScheduleTarget(value) {
     assert.match(scheduleInput(mode === "view" ? "detail-note" : "runs-note").textContent,
       mode === "view" ? /详情刷新失败/ : /记录刷新失败/);
     assert.equal(scheduleInput(mode === "view" ? "detail-retry" : "runs-retry").hidden, false);
-    assert.match(status, /已受理/);
+    assert.match(statusNode.textContent, /已受理/);
     assert.equal(statusError, false);
     assert.equal(scheduleInput("run-receipt").hidden, false);
     assert.match(scheduleInput("run-receipt").textContent, /已受理/);
@@ -878,7 +884,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(posts.length, beforeUnknown + 1);
   assert.equal(gets.length, queriesBeforeUnknown);
   assert.equal(unknownPlan.actions.run_now, null);
-  assert.match(status, /触发结果尚未确认.*查看最近记录/);
+  assert.match(statusNode.textContent, /触发结果尚未确认.*查看最近记录/);
   assert.equal(statusError, true);
   assert.equal(scheduleInput("run-receipt").hidden, true);
 
@@ -909,6 +915,7 @@ async function chooseScheduleTarget(value) {
   scheduleInput("end-offset-field").hidden = false;
   const expectedDraft = captureScheduleDraft();
   scheduleInput("select-session").click();
+  await flush();
   assert.equal(state.tab, "sessions");
   assert.equal(scheduleInput("drawer").open, false);
   assert.equal(document.querySelector("#session-schedule-selection").hidden, false);

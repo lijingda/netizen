@@ -8,7 +8,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from lark_channel import Identity, OutboundCard, OutboundPost
+from lark_channel import Identity, OutboundCard, OutboundPost, SendResult
 
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
@@ -207,7 +207,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                         delivered.set()
                         return sent_result("om_partial", chat_id="oc_direct")
 
-                    reply = AsyncMock(return_value=(object() if failure == "missing-id" else
+                    reply = AsyncMock(return_value=(SendResult.ok() if failure == "missing-id" else
                         sent_result("om_untrusted" if failure == "validation" else "om_card", chat_id="oc_direct")))
                     if failure == "send":
                         reply.side_effect = RuntimeError("initial card unavailable")
@@ -339,7 +339,7 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         for confirmed in (True, False):
             with self.subTest(confirmed=confirmed):
                 self.channel.replies.clear()
-                self.channel.reply_results.append(sent_result("om_partial", chat_id="oc_direct") if confirmed else object())
+                self.channel.reply_results.append(sent_result("om_partial", chat_id="oc_direct") if confirmed else SendResult(success=False))
                 outcome = TurnOutcome(binding_id=self.binding.id, thread_id="native-one", turn_id="turn-one",
                     owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"),
                     result=completed_turn_result(final_response=None), partial_answers=(answer(),))
@@ -369,7 +369,7 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
             owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"),
             result=completed_turn_result(final_response=None), partial_answers=(answer(),),
             task_feedback=BindingTaskFeedback(progress_card_enabled=True))
-        self.channel.reply_results.append(SimpleNamespace(success=False))
+        self.channel.reply_results.append(SendResult(success=False))
         await self.app.handle_completion(outcome)
         self.assertEqual(len(self.channel.replies), 2)
         closing = self.channel.replies[-1][1]
@@ -412,7 +412,7 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("first stable answer", text)
 
     async def test_goal_failed_fallback_send_does_not_claim_partial_delivery(self):
-        self.channel.reply_results.append(SimpleNamespace(success=False))
+        self.channel.reply_results.append(SendResult(success=False))
         outcome = GoalOutcome(binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
             owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"), goal=native_goal(status=GoalStatus.COMPLETE),
             final_physical_turn_id="turn-one", final_turn_status="completed", partial_answers=(answer(),))
@@ -555,10 +555,10 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
                     self.channel.updates.clear()
                     outcome = await self.start_progress(self.outcome(side=side, partials=partials))
                     self.channel.card_update_results.extend([
-                        SimpleNamespace(success=False, raw={"code": 2200}),
+                        SendResult(success=False, raw={"code": 2200}),
                         *([sent_result("om_progress", chat_id="oc_direct")] if recovers else [
-                            SimpleNamespace(success=False, raw={"code": 2200}),
-                            SimpleNamespace(success=False, raw={"code": 2200}),
+                            SendResult(success=False, raw={"code": 2200}),
+                            SendResult(success=False, raw={"code": 2200}),
                         ]),
                     ])
                     if not recovers:
@@ -617,7 +617,7 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
                 else:
                     await self.app._progress_cards.start(binding_id=self.binding.id, **kwargs)
                     session = self.app._progress_cards._sessions[(self.binding.id, "native-one", "turn-one")]
-                self.channel.reply_results.append(SimpleNamespace(success=False))
+                self.channel.reply_results.append(SendResult(success=False))
                 await self.app._progress_cards._deliver_partial_answers(session, (first,))
                 self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_direct") for index in range(2))
                 await self.app.handle_completion(outcome)

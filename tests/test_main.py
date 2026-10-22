@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from lark_channel import DedupStore
+from lark_channel import DedupStore, SendResult
 from openai_codex import CodexConfig
 
 from netizen_cli.admin.port_config import ConfigFileSnapshot
@@ -44,6 +44,7 @@ from netizen_cli.main import (
     _start_channel_input,
     build_channel,
     main,
+    run,
 )
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.settings import AdminWebSettings, Settings
@@ -532,6 +533,24 @@ class MainConfigurationTest(unittest.TestCase):
             self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
             _clear_ready_marker(path)
             self.assertFalse(path.exists())
+
+
+class RunDatabaseAdmissionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_rejects_missing_or_empty_database_before_channel_creation(self) -> None:
+        for missing in (True, False):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw).resolve()
+                configured = settings(root)
+                configured.data_dir.mkdir(parents=True, exist_ok=True)
+                database = configured.data_dir / "channel.sqlite3"
+                if not missing:
+                    database.touch()
+                with patch("netizen_cli.main.build_channel") as build:
+                    with self.assertRaises(RuntimeError):
+                        await run(configured, instance_root=root)
+                    build.assert_not_called()
+                self.assertEqual(database.read_bytes() if database.exists() else None,
+                                 None if missing else b"")
 
 
 class FakeScheduleMcpRunner:
@@ -1416,7 +1435,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
 
         async def update_card(message_id: str, card: object) -> object:
             side_card_updates.append((message_id, card))
-            return SimpleNamespace(success=True)
+            return SendResult(success=True)
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

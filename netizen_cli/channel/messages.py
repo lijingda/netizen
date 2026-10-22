@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from lark_channel import SendResult
+
 
 def public_chat_kind(chat_info: object) -> str | None:
     """Classify public ChatInfo, keeping chat visibility separate from mode."""
@@ -29,28 +31,27 @@ def _nonempty_field(value: object, name: str) -> str | None:
     return field if isinstance(field, str) and field else None
 
 
-def _send_result_error_code(result: object) -> int | None:
-    raw = _object_field(result, "raw")
-    code = _object_field(raw, "code")
+def _send_result_error_code(result: SendResult | None) -> int | None:
+    if result is None:
+        return None
+    code = result.raw.get("code") if result.raw is not None else None
     if isinstance(code, int) and not isinstance(code, bool):
         return code
-    error = _object_field(result, "error")
-    raw_code = _object_field(error, "raw_code")
+    raw_code = result.error.raw_code if result.error is not None else None
     if isinstance(raw_code, int) and not isinstance(raw_code, bool):
         return raw_code
     return None
 
 
-def _progress_card_message_id(result: object) -> str | None:
+def _progress_card_message_id(result: SendResult) -> str | None:
     """Return an exact reply ID only when Feishu did not report failure."""
 
-    if getattr(result, "success", True) is False:
+    if not result.success:
         return None
-    if getattr(result, "chunk_ids", None):
+    if result.chunk_ids:
         return None
-    direct = _nonempty_field(result, "message_id")
-    raw = _object_field(result, "raw")
-    data = _object_field(raw, "data")
+    direct = result.message_id or None
+    data = result.raw.get("data") if result.raw is not None else None
     nested = _nonempty_field(data, "message_id")
     if direct is not None and nested is not None and direct != nested:
         return None

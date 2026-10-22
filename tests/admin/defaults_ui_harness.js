@@ -1,7 +1,7 @@
-const state = { defaults: null };
-function syncPageUrl() {}
-let status = "";
-function setStatus(value) { status = value; }
+window.location = { pathname: "/defaults", search: "", assign() {} };
+window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
+const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
+const status = () => document.querySelector("#status").textContent;
 let discardConfirmed = true;
 const discardPrompts = [];
 window.confirm = (message) => { discardPrompts.push(message); return discardConfirmed; };
@@ -46,7 +46,7 @@ function pauseRequest(gate, result) {
     gate.reject = (message) => reject(new Error(message));
   });
 }
-async function api(path, options = {}) {
+async function fixtureResponse(path, options = {}) {
   if (options.method === "POST") {
     posts.push({ path, body: JSON.parse(options.body) });
     if (pendingPost) return pauseRequest(pendingPost, {});
@@ -88,9 +88,19 @@ async function api(path, options = {}) {
     order_revision: 7, actions: { create: envelope("create", kind), reorder: envelope("reorder", "order") } };
   return pendingList && kind === "chat" ? pauseRequest(pendingList, result) : result;
 }
+async function fetch(path, options = {}) {
+  try {
+    const data = await fixtureResponse(path, options);
+    return { ok: true, status: 200, json: async () => data };
+  } catch (error) {
+    return { ok: false, status: error.status || 400,
+      json: async () => ({ message: error.message, code: error.code, choices: error.choices }) };
+  }
+}
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 // SHIPPED_DEFAULTS_CONTROLLER
 (async () => {
+  await flush();
   await loadDefaults();
   assert.equal(defaultsInput("rules-body").querySelectorAll("tr").length, 3);
   const first = defaultsInput("rules-body").querySelector("tr");
@@ -228,7 +238,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   failPost = true;
   const beforeFailure = posts.length;
   await saveDefault({ preventDefault() {} });
-  assert(status.includes("配置已变化"));
+  assert(status().includes("配置已变化"));
   assert(defaultsInput("save").disabled);
   await saveDefault({ preventDefault() {} });
   assert.equal(posts.length, beforeFailure + 1);
@@ -434,7 +444,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush();
   failList = true;
   await saveDefault({ preventDefault() {} });
-  assert(status.includes("列表刷新失败"));
+  assert(status().includes("列表刷新失败"));
   assert(defaultsInput("new").disabled);
   assert(defaultsInput("rules-body").querySelector("button").disabled);
   openDefaultEditor("group_name", state.defaults.group_name.items[0]);
@@ -623,13 +633,13 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   pendingAvatar = {};
   const failedAvatar = pendingAvatar;
   target.set({ chatId: "oc_unavailable", chat: { chatType: "group" }, readOnly: true });
-  const statusBeforeAvatarFailure = status;
+  const statusBeforeAvatarFailure = status();
   failedAvatar.reject("群头像暂不可用");
   pendingAvatar = null;
   await flush();
   assert.equal(selectedAvatar().querySelector("img"), null);
   assert.equal(defaultsInput("chat").value, "oc_unavailable");
-  assert.equal(status, statusBeforeAvatarFailure);
+  assert.equal(status(), statusBeforeAvatarFailure);
   pendingAvatar = {};
   const staleAvatar = pendingAvatar;
   target.set({ chatId: "oc_same", chat: { chatType: "group" } });
@@ -724,9 +734,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   workspaceOptions = {
     available: { projectAlias: "available", projectRevision: 7, isGit: true,
       items: [{ id: "managed-one", cwd: "/worktrees/one", branch: "main", available: true },
-        { id: "deleting-exact", cwd: "/worktrees/deleting", branch: null, state: "ready", available: false }],
-      branches: [{ ref: "refs/heads/main", name: "main" }] },
-    nongit: { projectAlias: "nongit", projectRevision: 8, isGit: false, items: [], branches: [] },
+        { id: "deleting-exact", cwd: "/worktrees/deleting", branch: null, state: "ready", available: false }] },
+    nongit: { projectAlias: "nongit", projectRevision: 8, isGit: false, items: [] },
   };
   const existingRule = { ...rules[0], project: "available",
     workspace: { mode: "existing", worktree_id: "managed-one" } };
@@ -776,7 +785,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   defaultsInput("workspace").dispatch("change");
   assert.equal(defaultsInput("workspace-ref-field").hidden, false);
   assert.equal(defaultsInput("worktree-field").hidden, true);
-  assert.equal(defaultsInput("workspace-refs").querySelector("option").value, "refs/heads/main");
+  assert.equal(defaultsInput("workspace-ref").value, "");
   assert.equal(defaultEditorHasChanges(), true);
   await saveDefault({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.workspace, { mode: "new" });
