@@ -1842,12 +1842,16 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
                         matching, key=lambda item: (item[1 if sort_by == "created_at" else 2], item[0]),
                         reverse=direction == "desc",
                     )
-                    first = await self.store.query_side_topics(query=query, limit=20)
+                    # Check ordering and page boundaries independently of CI
+                    # scheduling latency; deadline behavior has separate tests.
+                    first = await self.store.query_side_topics(query=query, limit=20, deadline_seconds=2)
                     self.assertEqual([item.side_topic.id for item in first.items], [item[0] for item in expected[:20]])
                     self.assertIsNotNone(first.next_cursor)
                     self.assertEqual(first.next_cursor.created_at, expected[19][1])
                     self.assertEqual(first.next_cursor.updated_at, expected[19][2] if sort_by == "updated_at" else None)
-                    second = await self.store.query_side_topics(query=query, cursor=first.next_cursor, limit=20)
+                    second = await self.store.query_side_topics(
+                        query=query, cursor=first.next_cursor, limit=20, deadline_seconds=2,
+                    )
                     self.assertEqual([item.side_topic.id for item in second.items], [item[0] for item in expected[20:]])
                     self.assertIsNone(second.next_cursor)
 
