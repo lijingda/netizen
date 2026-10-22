@@ -686,11 +686,13 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
             **fixture._action_payload(page["actions"]["create"]), "definition": {
                 "name": "Report", "instructions": "One.\nTwo.", "project": "test",
                 "chat_id": "oc_explicit", "schedule": preview["schedule"], "enabled": False,
+                "auto_archive": True,
             },
         })
         self.assertEqual(status, 200, created)
         self.assertEqual(created["plan"]["instructions"], "One.\nTwo.")
         self.assertEqual(created["plan"]["schedule"], preview["schedule"])
+        self.assertIs(created["plan"]["auto_archive"], True)
         defaults = created["plan"]["session_settings"]
         self.assertEqual(defaults, {
             "turn_settings": {"model_id": "native-model", "effort_id": "medium", "service_tier_id": "default"},
@@ -704,6 +706,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200, updated)
         self.assertEqual(updated["plan"]["revision"], plan["revision"] + 1)
         self.assertEqual(updated["plan"]["session_settings"], defaults)
+        self.assertIs(updated["plan"]["auto_archive"], True)
         status, _, stale = await self.json_post("/api/v1/schedules/delete", session,
                                               fixture._action_payload(plan["actions"]["delete"]))
         self.assertEqual(status, 409, stale)
@@ -713,10 +716,11 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         plan = (await self.page(session))["plans"][0]
         status, _, configured = await self.json_post("/api/v1/schedules/update", session, {
             **fixture._action_payload(plan["actions"]["update"]),
-            "definition": {"session_settings": {"progress_card_enabled": False}},
+            "definition": {"session_settings": {"progress_card_enabled": False}, "auto_archive": False},
         })
         self.assertEqual(status, 200, configured)
         self.assertEqual(configured["plan"]["session_settings"], {**defaults, "progress_card_enabled": False})
+        self.assertIs(configured["plan"]["auto_archive"], False)
         plan = (await self.page(session))["plans"][0]
         status, _, deleted = await self.json_post("/api/v1/schedules/delete", session,
                                                 fixture._action_payload(plan["actions"]["delete"]))

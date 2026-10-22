@@ -88,9 +88,51 @@ class ScheduleCardsTest(unittest.TestCase):
                 self.assertEqual(action.payload["schedule"]["kind"], kind)
                 self.assertEqual(action.payload["project"], "work")
                 self.assertEqual(action.payload["chat_id"], self.scope.chat_id)
+                self.assertIs(action.payload["auto_archive"], False)
                 self.assertNotIn("sender_id", action.payload)
                 if kind == "once":
                     self.assertEqual(action.payload["schedule"]["at"], "2030-09-10T09:00+08:00")
+
+    def test_auto_archive_round_trips_as_plan_option_and_is_hidden_for_binding(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                plan = {**self.plan, "auto_archive": enabled}
+                card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=plan)
+                values = form_values(card)
+                self.assertEqual(values["cron_auto_archive"], str(enabled).lower())
+                action = decode_schedule_action(scope=self.scope, value=None, form=values)
+                self.assertIs(action.payload["auto_archive"], enabled)
+                self.assertNotIn("auto_archive", action.payload["session_settings"])
+                values["cron_auto_archive"] = str(not enabled).lower()
+                self.assertIs(decode_schedule_action(scope=self.scope, value=None, form=values).payload["auto_archive"], not enabled)
+                detail = schedule_manager_card(self.scope, {"plans": [plan]}, selected={"plan": plan})
+                self.assertIn("成功后自动归档：" + ("开启" if enabled else "关闭"), str(detail.card))
+        plan = {**self.plan, "target_kind": "binding", "target_binding_id": "binding-exact", "session_settings": None}
+        card = schedule_form_card(self.scope, projects=[], default_timezone="UTC", plan=plan)
+        values = form_values(card)
+        self.assertNotIn("cron_auto_archive", values)
+        self.assertNotIn("auto_archive", decode_schedule_action(scope=self.scope, value=None, form=values).payload)
+        self.assertNotIn("成功后自动归档", str(schedule_manager_card(self.scope, {"plans": [plan]}, selected={"plan": plan}).card))
+        with self.assertRaises(CardActionError):
+            decode_schedule_action(scope=self.scope, value=None, form={**values, "cron_auto_archive": "true"})
+        with self.assertRaises(CardActionError):
+            read_schedule_form(self.scope, {**values, "cron_auto_archive": "true"})
+
+    def test_auto_archive_rejects_malformed_native_values_and_omission_keeps_old_form_patch(self):
+        values = form_values(schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan))
+        for value in (True, False, None, 0, 1, "", "yes", [], {"value": "true"}):
+            with self.subTest(value=value):
+                malformed = {**values, "cron_auto_archive": value}
+                with self.assertRaises(CardActionError):
+                    decode_schedule_action(scope=self.scope, value=None, form=malformed)
+                with self.assertRaises(CardActionError):
+                    read_schedule_form(self.scope, malformed)
+        values.pop("cron_auto_archive")
+        original = decode_schedule_action(scope=self.scope, value=None, form=values)
+        self.assertNotIn("auto_archive", original.payload)
+        _, retry = schedule_retry_card(app_id="app", chat_id=self.scope.chat_id, value=None,
+            form=values, notice="稍后重试", projects=[self.project])
+        self.assertEqual(decode_schedule_action(scope=self.scope, value=None, form=form_values(retry)), original)
 
     def test_chat_inputs_only_use_selected_mode(self):
         values = form_values(schedule_form_card(self.scope, projects=[self.project],
@@ -207,7 +249,7 @@ class ScheduleCardsTest(unittest.TestCase):
         values = form_values(card)
         name = next(key for key in values if key.startswith("cron_name"))
         values[name] = ""
-        values.update(cron_chat_query=" 新词 ", cron_target_mode="group", cron_group_id="oc_0", cron_chat_id="oc_inactive", cron_chat_page="2")
+        values.update(cron_chat_query=" 新词 ", cron_target_mode="group", cron_group_id="oc_0", cron_chat_id="oc_inactive", cron_chat_page="2", cron_auto_archive="true")
         values["cron_instructions__plan-one:2"] = "未完成但要保留的任务"
         values["cron_timezone"] = "invalid-zone"
         action = decode_schedule_action(scope=self.scope, value=callback(card, "跳转"), form=values)
@@ -223,6 +265,7 @@ class ScheduleCardsTest(unittest.TestCase):
             chat_snapshot=action.payload["snapshot"], chat_page=action.payload["page"])
         restored = form_values(retry)
         self.assertEqual(restored["cron_group_id"], "oc_0")
+        self.assertEqual(restored["cron_auto_archive"], "true")
         options = next(node["options"] for node in elements(retry.card, "select_static") if node["name"] == "cron_group_id")
         self.assertEqual([item["value"] for item in options], ["oc_20", "oc_0"])
         self.assertEqual(restored["cron_chat_id"], "oc_inactive")
@@ -236,6 +279,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertNotIn("snapshot", fresh.payload)
         self.assertEqual(fresh.payload["draft"].target.choice, "")
         self.assertEqual(fresh.payload["draft"].target.chat_id, "oc_inactive")
+        self.assertEqual(form_values(schedule_draft_card(fresh.payload["draft"], projects=[self.project]))["cron_auto_archive"], "true")
 
     def test_group_jump_validates_page_and_snapshot_and_save_ignores_page(self):
         snapshot = ChatSearchSnapshot("", tuple(AvailableChat(f"oc_{index}", "同名", "group", False)
@@ -700,6 +744,7 @@ class ScheduleCardsTest(unittest.TestCase):
                 self.assertEqual([option_value(item["value"])["project"] for item in control["options"]], ["available", "work"])
                 self.assertIn("已停用或不可用", str(card.card))
                 form = form_values(card)
+                form["cron_auto_archive"] = "true"
                 searched = decode_schedule_action(scope=self.scope, value=callback(card, "查找群聊"), form=form)
                 self.assertEqual(searched.action, "search_chats")
                 self.assertEqual(searched.payload["draft"].meta["project"], "work")
@@ -719,6 +764,7 @@ class ScheduleCardsTest(unittest.TestCase):
                 refreshed = schedule_draft_card(draft, projects=[available])
                 action = decode_schedule_action(scope=self.scope, value=None, form=form_values(refreshed))
                 self.assertEqual(action.payload["project"], "available")
+                self.assertIs(action.payload["auto_archive"], True)
                 if "plan" in existing:
                     self.assertEqual(action.payload["instructions"], self.plan["instructions"])
                     self.assertEqual(action.payload["plan_id"], self.plan["id"])
@@ -751,6 +797,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["查找群聊", "加载 worktree 选项", "保存修改", "取消"])
 
     def test_retry_form_renews_transport_identity_but_keeps_all_business_fields(self):
+        self.plan["auto_archive"] = True
         self.plan["schedule"] = {"kind": "interval", "timezone": "America/New_York", "every_minutes": 45,
             "anchor": 1900000000.123456, "end_at": "2030-11-03T01:30-05:00"}
         self.plan["session_settings"] = SessionSettings().merge({"turn_settings": {"model_id": "missing-model", "effort_id": "high", "service_tier_id": "default"},
@@ -759,6 +806,7 @@ class ScheduleCardsTest(unittest.TestCase):
         original = form_values(schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan,
             allow_context_mode=True, navigation=navigation))
         first = decode_schedule_action(scope=self.scope, value=None, form=original)
+        self.assertIs(first.payload["auto_archive"], True)
         for _ in range(2):
             restored_scope, retry = schedule_retry_card(app_id=self.scope.app_id, chat_id=self.scope.chat_id,
                 value=None, form=original, notice="稍后重试", projects=[])

@@ -21,6 +21,7 @@ from .migrations.v16 import apply as apply_v16, validate as validate_v16
 from .migrations.v17 import apply as apply_v17, validate as validate_v17
 from .migrations.v18 import apply as apply_v18, validate as validate_v18
 from .migrations.v19 import apply as apply_v19, validate as validate_v19
+from .migrations.v20 import apply as apply_v20, validate as validate_v20
 
 
 MIN_SUPPORTED_SCHEMA_VERSION = 14
@@ -42,6 +43,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(16, 17, apply_v17, validate_v17),
     Migration(17, 18, apply_v18, validate_v18),
     Migration(18, 19, apply_v19, validate_v19),
+    Migration(19, 20, apply_v20, validate_v20),
 )
 
 

@@ -586,6 +586,12 @@ class _SentMessage:
     parent_id: str | None
 
 
+@dataclass(slots=True)
+class _ScheduledCompletion:
+    partial_answers_confirmed: bool = True
+    delivery_state: str | None = None
+
+
 class ChannelApplication:
     def __init__(
         self,
@@ -616,9 +622,9 @@ class ChannelApplication:
         self._management.enable_schedules(app_id=app_id, chat_info=channel)
         self._management.enable_defaults(app_id=app_id, chat_info=channel)
         self._scope_coordinator = management.scope_coordinator
-        # Whether earlier standalone answers in this completion were confirmed.
-        # Only the final send writes the aggregate Scheduled Run receipt.
-        self._scheduled_completions: dict[str, bool] = {}
+        # Only the final send writes the aggregate Scheduled Run receipt. Keep
+        # this completion's receipt through pruning of the persisted Run.
+        self._scheduled_completions: dict[str, _ScheduledCompletion] = {}
         self._reactions = _ReactionController(channel)
         self._progress_cards = _ReplyCardPresenter(channel, runtime)
         runtime.set_completion_handler(self.handle_completion)
@@ -1014,7 +1020,8 @@ class ChannelApplication:
             assert origin_message.thread_id is not None
             scope = FeishuScope(self._app_id, run.chat_id, ScopeKind.TOPIC, origin_message.thread_id)
             origin = ScheduledOrigin(self._app_id, run.chat_id, origin_message.message_id,
-                                     ScheduledConversation(origin_message.thread_id), plan.id, run.id)
+                                     ScheduledConversation(origin_message.thread_id), plan.id, run.id,
+                                     auto_archive=plan.auto_archive)
             store.set_run(run.id, topic_id=scope.topic_id, origin_message_id=origin_message.message_id)
             context_anchor = (
                 await self._resolve_context_anchor(scope, origin_message.message_id)
@@ -1517,7 +1524,13 @@ class ChannelApplication:
         except Exception:
             logger.warning("scheduled result card destination was not confirmed", extra={"run_id": origin.run_id})
         finally:
-            self._bindings.schedules.set_run(origin.run_id, delivery_state=state)
+            self._record_scheduled_delivery(origin, state)
+
+    def _record_scheduled_delivery(self, origin: ScheduledOrigin, state: str) -> None:
+        self._bindings.schedules.set_run(origin.run_id, delivery_state=state)
+        completion = self._scheduled_completions.get(origin.run_id)
+        if completion is not None:
+            completion.delivery_state = state
 
     async def _scheduled_reply_confirmed(self, message: ScheduledOrigin, result: object) -> bool:
 
@@ -1556,17 +1569,17 @@ class ChannelApplication:
                     raw = _object_field(result, "raw")
                     data = _object_field(raw, "data")
                     if await self._scheduled_reply_confirmed(message, result):
-                        state = "sent" if self._scheduled_completions[message.run_id] else "unknown"
+                        state = "sent" if self._scheduled_completions[message.run_id].partial_answers_confirmed else "unknown"
                     else:
                         logger.warning("scheduled reply destination was not confirmed", extra={
                             "run_id": message.run_id,
                             "expected_topic_id": message.conversation.thread_id,
                             "returned_topic_id": _nonempty_field(data, "thread_id"),
                         })
-                self._bindings.schedules.set_run(message.run_id, delivery_state=state)
+                self._record_scheduled_delivery(message, state)
         except BaseException:
             if scheduled:
-                self._bindings.schedules.set_run(message.run_id, delivery_state="unknown")
+                self._record_scheduled_delivery(message, "unknown")
             raise
         return result
 
@@ -2205,10 +2218,17 @@ class ChannelApplication:
     ) -> None:
         origin = getattr(outcome, "origin", None)
         scheduled = isinstance(outcome, TurnOutcome) and isinstance(origin, ScheduledOrigin)
+        completion = _ScheduledCompletion()
         if scheduled:
-            self._scheduled_completions[origin.run_id] = True
+            self._scheduled_completions[origin.run_id] = completion
         try:
             await self._handle_completion(outcome)
+            if (scheduled and origin.auto_archive and outcome.error is None
+                    and outcome.status == "completed" and completion.delivery_state == "sent"):
+                # The initial submission carries the immutable claim policy.
+                # Later input deliberately does not cancel this archive intent.
+                # Recovery never replays this completion or its side effects.
+                await self._archive_scheduled_completion(outcome)
         finally:
             if scheduled:
                 self._scheduled_completions.pop(origin.run_id, None)
@@ -2220,6 +2240,23 @@ class ChannelApplication:
                         self._bindings.schedules.set_run(origin.run_id, delivery_state="unknown")
                 except ScheduleNotFound:
                     pass  # A completed receipt may have allowed normal pruning.
+
+    async def _archive_scheduled_completion(self, outcome: TurnOutcome) -> None:
+        origin = outcome.origin
+        assert isinstance(origin, ScheduledOrigin)
+        scope = FeishuScope(origin.app_id, origin.chat_id, ScopeKind.TOPIC,
+                            origin.conversation.thread_id)
+        try:
+            await self._management.archive_exact_binding(target=ExactBindingTarget(
+                scope.key, outcome.binding_id, expected_active_binding_id=None,
+            ))
+        except Exception as error:
+            # Native lifecycle handling owns reconciliation/uncertainty. The
+            # successful execution and delivery stay intact, without a retry.
+            logger.warning("scheduled completion archive did not finish", extra={
+                "run_id": origin.run_id, "binding_id": outcome.binding_id,
+                "error_type": type(error).__name__,
+            })
 
     async def _handle_completion(
         self,
@@ -6315,7 +6352,7 @@ class ChannelApplication:
                     if unconfirmed_content is not None:
                         content = unconfirmed_content
                 if isinstance(target, ScheduledOrigin) and target.run_id in self._scheduled_completions:
-                    self._scheduled_completions[target.run_id] = confirmed
+                    self._scheduled_completions[target.run_id].partial_answers_confirmed = confirmed
                 await final_reply(content)
         except TimeoutError:
             # A timed-out post may already have published SDK chunks. Do not

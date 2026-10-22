@@ -37,8 +37,8 @@ class ProgressCardSettingsMigrationTest(unittest.TestCase):
             )]
             before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
         plan = migrations.plan_channel_database(self.path)
-        self.assertEqual(plan, {"source_version": 17, "target_version": 19,
-                                "steps": [{"from_version": 17, "to_version": 18}, {"from_version": 18, "to_version": 19}]})
+        self.assertEqual(plan, {"source_version": 17, "target_version": 20,
+                                "steps": [{"from_version": 17, "to_version": 18}, {"from_version": 18, "to_version": 19}, {"from_version": 19, "to_version": 20}]})
         self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=17), plan)
         with closing(sqlite3.connect(self.path)) as connection:
             for table, rows in before.items():
@@ -69,7 +69,7 @@ class ProgressCardSettingsMigrationTest(unittest.TestCase):
                 self.assertIsNone(store.schedules.get(identifier, include_deleted=True).session_settings)
             self.assertEqual(store.schedules.get("deleted-new_topic", include_deleted=True).session_settings, SessionSettings())
         unchanged = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=19)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=20)["steps"], [])
         self.assertEqual(self.contents(), unchanged)
 
     def test_fresh_and_migrated_constraints_are_equivalent(self):

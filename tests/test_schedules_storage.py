@@ -161,7 +161,7 @@ class BindingScheduleStorageTest(unittest.TestCase):
 
     def test_target_identity_settings_and_inactive_manual_admission(self):
         for changes in ({"chat_id": "other-chat"}, {"target_binding_id": "missing"},
-                        {"session_settings": SessionSettings()}, {"target_kind": "invalid"}):
+                        {"session_settings": SessionSettings()}, {"target_kind": "invalid"}, {"auto_archive": True}):
             with self.subTest(changes=changes), self.assertRaises(ScheduleError):
                 self.create(**changes)
         self.store.create_channel_binding(scope=self.scope, project_alias="p", creator_id="other")
@@ -342,6 +342,35 @@ class ScheduleStorageTest(unittest.TestCase):
             plan_id, app_id=app_id, expected_revision=expected_revision,
             request_id=request_id or self.request(), now=now,
         )
+
+    def test_auto_archive_defaults_updates_and_claim_snapshots(self):
+        self.assertFalse(self.schedules.get(self.create().plan_id).auto_archive)
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                plan_id = self.create(auto_archive=True).plan_id
+                claim = self.manual(plan_id)[1] if manual else self.claim(plan_id, self.now + 60)
+                self.assertTrue(claim.plan.auto_archive)
+                self.schedules.update(plan_id, expected_revision=1, request_id=self.request(),
+                                      changes={"name": "renamed"})
+                self.assertTrue(self.schedules.get(plan_id).auto_archive)
+                self.schedules.update(plan_id, expected_revision=2, request_id=self.request(),
+                                      changes={"auto_archive": False})
+                self.assertFalse(self.schedules.get(plan_id).auto_archive)
+                self.assertTrue(claim.plan.auto_archive)
+                self.schedules.delete(plan_id, expected_revision=3, request_id=self.request())
+                self.assertFalse(self.schedules.get(plan_id, include_deleted=True).auto_archive)
+                self.assertTrue(claim.plan.auto_archive)
+
+    def test_auto_archive_rejects_non_boolean_values_atomically(self):
+        plan_id = self.create(auto_archive=True).plan_id
+        before = self.schedules.get(plan_id)
+        for value in (None, 0, 1, "false", [], {}):
+            with self.subTest(value=value), self.assertRaises(ScheduleError):
+                self.create(auto_archive=value)
+            with self.subTest(value=value), self.assertRaises(ScheduleError):
+                self.schedules.update(plan_id, expected_revision=1, request_id=self.request(),
+                                      changes={"auto_archive": value})
+            self.assertEqual(self.schedules.get(plan_id), before)
 
     def test_manual_claim_freezes_saved_plan_without_changing_schedule(self):
         settings = SessionSettings(BindingTurnSettings("model", "high", "default"), BindingTaskFeedback(False, True))

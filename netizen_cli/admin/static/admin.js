@@ -3392,6 +3392,8 @@ function renderScheduleTarget() {
   scheduleInput("chat-target").hidden = binding;
   if (binding) { scheduleInput("chat").required = false; chatTarget("schedule").close(); }
   scheduleInput("session-settings").hidden = binding;
+  scheduleInput("auto-archive-field").hidden = binding;
+  scheduleInput("auto-archive").disabled = binding;
   renderScheduleWorkspace();
   const target = editor.targetSession;
   const selected = editor.plan?.target_binding_id || target?.bindingId || "";
@@ -3445,6 +3447,7 @@ function scheduleEditorValues() {
     .filter((input) => input.checked).map((input) => input.value);
   return { name: scheduleInput("name").value, instructions: scheduleInput("instructions").value,
     enabled: scheduleInput("enabled").checked, targetKind: scheduleTargetKind(),
+    autoArchive: binding ? null : scheduleInput("auto-archive").checked,
     binding: binding ? scheduleInput("binding").value : "",
     project: binding ? "" : scheduleInput("project").value,
     chat: binding ? "" : scheduleInput("chat").value, rule,
@@ -3458,7 +3461,7 @@ function scheduleEditorHasChanges() {
 }
 
 function captureScheduleDraft() {
-  const fields = ["name", "instructions", "enabled", "kind", "timezone", "time", "at", "offset", "end-at", "end-offset", "every"];
+  const fields = ["name", "instructions", "enabled", "auto-archive", "kind", "timezone", "time", "at", "offset", "end-at", "end-offset", "every"];
   return {
     discardBase: structuredClone(scheduleEditor.discardBase), dirty: scheduleEditorHasChanges(),
     fields: fields.map((id) => ({ id, value: scheduleInput(id).value, checked: scheduleInput(id).checked })),
@@ -3963,6 +3966,7 @@ function openScheduleEditor(plan = null, source = {}) {
   chatTarget("schedule", changeScheduleChat).set({ chatId: plan?.chat_id, chat: plan?.chat });
   scheduleInput("instructions").value = plan?.instructions || "";
   scheduleInput("enabled").checked = plan?.enabled ?? true;
+  scheduleInput("auto-archive").checked = plan?.auto_archive ?? false;
   scheduleInput("timezone").value = rule.timezone;
   scheduleInput("kind").value = rule.kind;
   scheduleInput("time").value = ["daily", "weekly"].includes(rule.kind) ? rule.at : "09:00";
@@ -4051,6 +4055,7 @@ async function saveSchedule(event) {
   } else {
     definition.project = scheduleInput("project").value.trim();
     definition.chat_id = scheduleInput("chat").value.trim();
+    definition.auto_archive = scheduleInput("auto-archive").checked;
     if (scheduleWorkspaceChanged()) {
       definition.workspace = structuredClone(editor.workspace);
       if (editor.workspaceOptions?.projectAlias === definition.project) {
@@ -4324,6 +4329,9 @@ async function showSchedule(planId, returnFocus = document.activeElement) {
       : scheduleSessionSummary(data.plan.session_settings || defaultScheduleSessionSettings());
     scheduleInput("detail-settings").textContent += ` · ${data.plan.target_kind === "binding"
       ? scheduleInheritedWorkspace(data.plan) : workspacePolicySummary(data.plan.workspace, { scheduled: true })}`;
+    if (data.plan.target_kind !== "binding") {
+      scheduleInput("detail-settings").textContent += ` · 成功后自动归档：${data.plan.auto_archive ? "开启" : "关闭"}`;
+    }
     scheduleInput("detail-rule").textContent = scheduleRuleLabel(data.plan.schedule);
     renderSchedulePreview("#schedule-detail-preview", data.preview);
     scheduleInput("detail-note").textContent = "";

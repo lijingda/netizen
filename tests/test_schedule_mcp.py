@@ -99,6 +99,31 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
         await self.call(request)
         self.assertEqual(self.requests, [(request, None)])
 
+    async def test_auto_archive_schema_and_calls_preserve_boolean_intent(self):
+        self.runner.open_admission()
+        validator = Draft202012Validator(_tool_schema())
+        for value in (False, True):
+            request = {**CREATE_EXAMPLE, "auto_archive": value}
+            self.assertFalse(list(validator.iter_errors(request)))
+            response = await self.call(request)
+            self.assertFalse(response["isError"], response)
+            self.assertEqual(self.requests[-1], (request, None))
+        invalid = [
+            {**CREATE_EXAMPLE, "auto_archive": value} for value in (None, 0, 1, "false", [], {})
+        ] + [
+            {**CREATE_EXAMPLE, "target_kind": "binding", "auto_archive": value} for value in (False, True)
+        ] + [{
+            "mode": "run_now", "plan_id": "saved", "expected_revision": 1,
+            "request_id": "manual", "auto_archive": True,
+        }]
+        self.requests.clear()
+        for request in invalid:
+            with self.subTest(request=request):
+                self.assertTrue(list(validator.iter_errors(request)))
+                response = await self.call(request)
+                self.assertEqual(response["structuredContent"]["error"]["code"], "invalid_request")
+        self.assertEqual(self.requests, [])
+
     async def test_binding_target_arguments_preserve_source_identity_and_exact_selection(self):
         self.runner.open_admission()
         base = {**CREATE_EXAMPLE, "target_kind": "binding"}

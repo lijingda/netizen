@@ -85,6 +85,7 @@ class ScheduledOrigin:
     conversation: ScheduledConversation
     plan_id: str
     run_id: str
+    auto_archive: bool = False
 
     @property
     def id(self) -> str:

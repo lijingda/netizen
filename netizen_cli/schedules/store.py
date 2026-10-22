@@ -62,6 +62,9 @@ SCHEMA = (
         source TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)),
         session_settings_json TEXT,
         workspace_json TEXT,
+        auto_archive INTEGER NOT NULL DEFAULT 0 CHECK(
+            typeof(auto_archive) = 'integer' AND auto_archive IN (0,1)
+            AND (auto_archive = 0 OR (target_kind = 'new_topic' AND deleted = 0))),
         target_kind TEXT NOT NULL DEFAULT 'new_topic' CHECK(target_kind IN ('new_topic','binding')),
         target_binding_id TEXT,
         CHECK((target_kind = 'new_topic' AND target_binding_id IS NULL) OR
@@ -82,7 +85,7 @@ TABLE_COLUMNS = {
     "schedule_plans": {
         "plan_id", "revision", "name", "instructions", "project_alias", "app_id", "chat_id",
         "schedule_json", "enabled", "next_due_at", "processed_through", "created_at",
-        "updated_at", "source", "deleted", "session_settings_json", "target_kind", "target_binding_id", "workspace_json",
+        "updated_at", "source", "deleted", "session_settings_json", "target_kind", "target_binding_id", "workspace_json", "auto_archive",
     },
     "schedule_runs": {
         "run_id", "plan_id", "plan_revision", "due_at", "project_alias", "app_id", "chat_id",
@@ -118,6 +121,14 @@ def require_schema(connection: sqlite3.Connection) -> None:
     if request_run["type"].upper() != "TEXT" or request_run["notnull"] != 0:
         raise RuntimeError("current scheduling request Run reference has invalid shape")
     columns = {row["name"]: row for row in connection.execute("PRAGMA table_info(schedule_plans)")}
+    auto_archive = columns["auto_archive"]
+    if auto_archive["type"].upper() != "INTEGER" or auto_archive["notnull"] != 1 or auto_archive["dflt_value"] != "0":
+        raise RuntimeError("current scheduling auto archive has invalid shape")
+    if connection.execute(
+        "SELECT 1 FROM schedule_plans WHERE typeof(auto_archive) != 'integer' OR auto_archive NOT IN (0,1) "
+        "OR (auto_archive != 0 AND (target_kind != 'new_topic' OR deleted != 0)) LIMIT 1"
+    ).fetchone():
+        raise RuntimeError("current scheduling auto archive values are invalid")
     if "session_settings_json" not in columns or columns["session_settings_json"]["type"].upper() != "TEXT":
         raise RuntimeError("current Channel database is missing scheduled session settings")
     for table in ("schedule_plans", "schedule_runs"):
@@ -217,6 +228,7 @@ def _plan(row: sqlite3.Row) -> Plan:
         target_kind=row["target_kind"], target_binding_id=row["target_binding_id"],
         workspace=(WorkspacePolicy.from_dict(json.loads(row["workspace_json"]))
                    if not row["deleted"] and row["target_kind"] == "new_topic" else None),
+        auto_archive=bool(row["auto_archive"]),
     )
 
 
@@ -340,13 +352,15 @@ class ScheduleStore:
             raise ScheduleError("执行指令过长，请缩短或引用文件/文档。")
         if type(plan.enabled) is not bool or not isinstance(plan.schedule, ScheduleRule):
             raise ScheduleError("计划需要有效规则和布尔 enabled。")
+        if type(plan.auto_archive) is not bool:
+            raise ScheduleError("auto_archive 必须是布尔值。")
         if plan.target_kind == "new_topic":
             if (plan.target_binding_id is not None or not isinstance(plan.session_settings, SessionSettings)
                     or not isinstance(plan.workspace, WorkspacePolicy)):
                 raise ScheduleError("新话题计划需要独立会话设置与 worktree 使用方式，不能指定原会话。")
         elif plan.target_kind == "binding":
             if (not isinstance(plan.target_binding_id, str) or not plan.target_binding_id
-                    or plan.session_settings is not None or plan.workspace is not None):
+                    or plan.session_settings is not None or plan.workspace is not None or plan.auto_archive):
                 raise ScheduleError("原会话计划需要准确 Binding，并沿用该会话设置与工作目录。")
         else:
             raise ScheduleError("执行目标仅支持新话题或原会话。")
@@ -359,7 +373,7 @@ class ScheduleStore:
         # renders its common three-occurrence preview.
         plan.schedule.preview(boundary)
 
-    def create(self, *, name: str, instructions: str, project_alias: str, app_id: str, chat_id: str, schedule: ScheduleRule, request_id: str, workspace: WorkspacePolicy | None, enabled: bool = True, source: str = "", now: float | None = None, request_payload: object | None = None, session_settings: SessionSettings | None = SessionSettings(), target_kind: str = "new_topic", target_binding_id: str | None = None, checked_project_revision: int | None = None) -> MutationResult:
+    def create(self, *, name: str, instructions: str, project_alias: str, app_id: str, chat_id: str, schedule: ScheduleRule, request_id: str, workspace: WorkspacePolicy | None, enabled: bool = True, source: str = "", now: float | None = None, request_payload: object | None = None, session_settings: SessionSettings | None = SessionSettings(), target_kind: str = "new_topic", target_binding_id: str | None = None, checked_project_revision: int | None = None, auto_archive: bool = False) -> MutationResult:
         now = self._now(now)
         if session_settings is not None and not isinstance(session_settings, SessionSettings):
             raise ScheduleError("计划需要有效的会话设置。")
@@ -368,27 +382,28 @@ class ScheduleStore:
         payload = dict(name=name, instructions=instructions, project_alias=project_alias, app_id=app_id, chat_id=chat_id, schedule=schedule.to_dict(), enabled=enabled, source=source, target_kind=target_kind, target_binding_id=target_binding_id)
         payload["session_settings"] = session_settings.to_dict() if session_settings is not None else None
         payload["workspace"] = workspace.to_dict() if workspace is not None else None
+        payload["auto_archive"] = auto_archive
         if request_payload is not None:
             payload = request_payload
         with self.owner._transaction():
             if result := self._request(request_id, "create", payload, now):
                 return result
-            plan = Plan(str(uuid.uuid4()), 1, name, instructions, project_alias, app_id, chat_id, schedule, enabled, schedule.next_after(now) if enabled else None, None, now, now, source, session_settings=session_settings, target_kind=target_kind, target_binding_id=target_binding_id, workspace=workspace)
+            plan = Plan(str(uuid.uuid4()), 1, name, instructions, project_alias, app_id, chat_id, schedule, enabled, schedule.next_after(now) if enabled else None, None, now, now, source, session_settings=session_settings, target_kind=target_kind, target_binding_id=target_binding_id, workspace=workspace, auto_archive=auto_archive)
             self._validate(plan, now)
             self._project(project_alias)
             if checked_project_revision is not None:
                 self._require_checked_workspace(plan, checked_project_revision)
             self.require_binding_target(plan, require_active=False)
             self._db.execute(
-                "INSERT INTO schedule_plans(plan_id,revision,name,instructions,project_alias,app_id,chat_id,schedule_json,enabled,next_due_at,processed_through,created_at,updated_at,source,deleted,session_settings_json,target_kind,target_binding_id,workspace_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
-                (plan.id, 1, name, instructions, project_alias, app_id, chat_id, _json(schedule.to_dict()), int(enabled), plan.next_due_at, None, now, now, source, _json(session_settings.to_dict()) if session_settings is not None else None, target_kind, target_binding_id, _json(workspace.to_dict()) if workspace is not None else None),
+                "INSERT INTO schedule_plans(plan_id,revision,name,instructions,project_alias,app_id,chat_id,schedule_json,enabled,next_due_at,processed_through,created_at,updated_at,source,deleted,session_settings_json,target_kind,target_binding_id,workspace_json,auto_archive) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+                (plan.id, 1, name, instructions, project_alias, app_id, chat_id, _json(schedule.to_dict()), int(enabled), plan.next_due_at, None, now, now, source, _json(session_settings.to_dict()) if session_settings is not None else None, target_kind, target_binding_id, _json(workspace.to_dict()) if workspace is not None else None, int(auto_archive)),
             )
             result = MutationResult(plan.id, 1)
             self._remember(request_id, "create", payload, result, now)
             return result
 
     def update(self, plan_id: str, *, expected_revision: int, request_id: str, changes: dict[str, Any], now: float | None = None, request_payload: object | None = None, checked_project_revision: int | None = None, expected_project_revision: int | None = None) -> MutationResult:
-        allowed = {"name", "instructions", "project_alias", "chat_id", "schedule", "enabled", "session_settings", "target_kind", "target_binding_id", "workspace"}
+        allowed = {"name", "instructions", "project_alias", "chat_id", "schedule", "enabled", "session_settings", "target_kind", "target_binding_id", "workspace", "auto_archive"}
         if not isinstance(changes, dict) or not changes or set(changes) - allowed:
             raise ScheduleError("更新字段为空或包含不可修改字段。")
         if "schedule" in changes and not isinstance(changes["schedule"], ScheduleRule):
@@ -450,8 +465,8 @@ class ScheduleStore:
                 # that is still within the normal scheduler grace period.
                 due = current.next_due_at
             self._db.execute(
-                "UPDATE schedule_plans SET revision=?, name=?, instructions=?, project_alias=?, chat_id=?, schedule_json=?, enabled=?, next_due_at=?, updated_at=?, session_settings_json=?, target_kind=?, target_binding_id=?, workspace_json=? WHERE plan_id=?",
-                (changed.revision, changed.name, changed.instructions, changed.project_alias, changed.chat_id, _json(changed.schedule.to_dict()), int(changed.enabled), due, now, _json(changed.session_settings.to_dict()) if changed.session_settings is not None else None, changed.target_kind, changed.target_binding_id, _json(changed.workspace.to_dict()) if changed.workspace is not None else None, plan_id),
+                "UPDATE schedule_plans SET revision=?, name=?, instructions=?, project_alias=?, chat_id=?, schedule_json=?, enabled=?, next_due_at=?, updated_at=?, session_settings_json=?, target_kind=?, target_binding_id=?, workspace_json=?, auto_archive=? WHERE plan_id=?",
+                (changed.revision, changed.name, changed.instructions, changed.project_alias, changed.chat_id, _json(changed.schedule.to_dict()), int(changed.enabled), due, now, _json(changed.session_settings.to_dict()) if changed.session_settings is not None else None, changed.target_kind, changed.target_binding_id, _json(changed.workspace.to_dict()) if changed.workspace is not None else None, int(changed.auto_archive), plan_id),
             )
             result = MutationResult(plan_id, changed.revision)
             self._remember(request_id, "update", payload, result, now)
@@ -476,7 +491,7 @@ class ScheduleStore:
 
     def _tombstone(self, where: str, parameters: tuple[object, ...], now: float) -> None:
         self._db.execute(
-            "UPDATE schedule_plans SET deleted=1, enabled=0, name='', instructions='', schedule_json=NULL, session_settings_json=NULL, workspace_json=NULL, source='', next_due_at=NULL, revision=revision+1, updated_at=? WHERE deleted=0 AND " + where,
+            "UPDATE schedule_plans SET deleted=1, enabled=0, name='', instructions='', schedule_json=NULL, session_settings_json=NULL, workspace_json=NULL, auto_archive=0, source='', next_due_at=NULL, revision=revision+1, updated_at=? WHERE deleted=0 AND " + where,
             (now, *parameters),
         )
 

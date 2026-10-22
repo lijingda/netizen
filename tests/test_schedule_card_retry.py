@@ -230,6 +230,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_write_response_retries_same_business_request_without_duplicate_create(self):
         form = self.new_form()
+        form["cron_auto_archive"] = "true"
         manage = self.fixture.management.schedules.manage
         lost = False
         async def lose_first_write_response(request, **kwargs):
@@ -243,7 +244,9 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(form=form)
         self.assertEqual(len(self.fixture.store.schedules.list(app_id="app")), 1)
+        self.assertTrue(self.fixture.store.schedules.list(app_id="app")[0].auto_archive)
         restored = self.restored_form()
+        self.assertEqual(restored["cron_auto_archive"], "true")
         self.assertEqual(decode_schedule_action(scope=self.scope, value=None, form=restored).request_id,
             decode_schedule_action(scope=self.scope, value=None, form=form).request_id)
         await self.push(form={**restored, "cron_instructions": "不能把未知结果变成另一项创建"})

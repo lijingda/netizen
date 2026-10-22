@@ -40,8 +40,8 @@ _FIELDS = {
     "options": {"chat_id", "binding_query", "project", "expected_project_revision"},
     "list": {"chat_id", "project", "enabled", "ended", "all", "cursor", "limit", "name", "target_kind", "target_binding_id"},
     "view": {"plan_id"},
-    "create": {"name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "request_id", "session_settings", "workspace", "expected_project_revision", "target_kind", "target_binding_id"},
-    "update": {"plan_id", "expected_revision", "request_id", "name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "session_settings", "workspace", "expected_project_revision", "target_kind", "target_binding_id"},
+    "create": {"name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "request_id", "session_settings", "workspace", "expected_project_revision", "target_kind", "target_binding_id", "auto_archive"},
+    "update": {"plan_id", "expected_revision", "request_id", "name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "session_settings", "workspace", "expected_project_revision", "target_kind", "target_binding_id", "auto_archive"},
     "delete": {"plan_id", "expected_revision", "request_id"},
     "run_now": {"plan_id", "expected_revision", "request_id"},
     "runs": {"plan_id", "cursor", "limit"},
@@ -140,10 +140,10 @@ class ScheduleService:
             mode = request.get("mode")
             if not isinstance(mode, str) or mode not in _FIELDS:
                 raise ScheduleError("请选择 options/list/view/create/update/delete/run_now/runs 操作。")
-            # Optional arguments treat null as omission, except the settings
-            # object. False remains a real pause/filter value.
+            # Optional arguments treat null as omission, except settings,
+            # workspace and the strict completion policy. False is a value.
             data = {key: value for key, value in request.items()
-                    if mode == "run_now" or value is not None or key in {"session_settings", "workspace"}}
+                    if mode == "run_now" or value is not None or key in {"session_settings", "workspace", "auto_archive"}}
             if set(data) - (_FIELDS[mode] | {"mode"}):
                 raise ScheduleError("该操作包含不支持的字段。")
             if "expected_project_revision" in data:
@@ -224,6 +224,8 @@ class ScheduleService:
                 rule = self._rule(data, now=now)
                 enabled = data.get("enabled", True)
                 _boolean(enabled, "enabled")
+                auto_archive = data.get("auto_archive", False)
+                _boolean(auto_archive, "auto_archive")
                 result = self._store.create(
                     name=_text(data.get("name"), "name"),
                     instructions=_text(data.get("instructions"), "instructions"),
@@ -232,6 +234,7 @@ class ScheduleService:
                     session_settings=settings,
                     workspace=workspace, checked_project_revision=checked_project_revision,
                     target_kind=target_kind, target_binding_id=target_binding_id,
+                    auto_archive=auto_archive,
                     request_id=_text(data.get("request_id"), "request_id"), now=now,
                     request_payload=request_payload,
                 )
@@ -287,9 +290,11 @@ class ScheduleService:
                 return {"ok": True, "plan_id": result.plan_id, "revision": result.revision,
                         "inflight": inflight, "replayed": result.replayed}
             self._validate_target_update(data, plan)
-            changes = {key: data[key] for key in ("name", "instructions", "chat_id", "enabled") if key in data}
+            changes = {key: data[key] for key in ("name", "instructions", "chat_id", "enabled", "auto_archive") if key in data}
             if "enabled" in changes:
                 _boolean(changes["enabled"], "enabled")
+            if "auto_archive" in changes:
+                _boolean(changes["auto_archive"], "auto_archive")
             if "project" in data:
                 changes["project_alias"] = _text(data["project"], "project")
             if "chat_id" in changes:
@@ -350,10 +355,13 @@ class ScheduleService:
                 settings = await self._resolve_session_settings(request, binding=binding, previous=plan.session_settings if plan else None, chat_kind=kind)
                 effective = settings.to_dict()
             rule = self._rule(request, now=now, previous=plan.schedule if plan else None)
+            auto_archive = request.get("auto_archive", plan.auto_archive if plan else False)
+            _boolean(auto_archive, "auto_archive")
             boundary = max(now, plan.processed_through or now) if plan else now
             return {"ok": True, "schedule": rule.to_dict(),
                     "preview": _preview(rule, boundary),
                     "target_kind": target_kind,
+                    "auto_archive": auto_archive,
                     "session_settings": settings.to_dict() if settings is not None else None,
                     "effective_session_settings": effective, "default_timezone": self.default_timezone}
         except (ScheduleError, SessionSettingsError, BindingNotFound, ScopeNotFound, ProjectNotFound, ProjectConflict) as error:
@@ -361,6 +369,8 @@ class ScheduleService:
 
     @staticmethod
     def _reject_binding_overrides(request: Mapping[str, Any]) -> None:
+        if "auto_archive" in request:
+            raise ScheduleError("执行成功后自动归档仅适用于新话题计划。")
         if {"project", "chat_id", "session_settings", "workspace", "expected_project_revision"}.intersection(request):
             raise ScheduleError("Agent 会话计划沿用目标 Binding 的 Project、位置、配置和实际工作目录，不接受独立覆盖。")
 
