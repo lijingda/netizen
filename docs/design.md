@@ -106,7 +106,7 @@ capability 或版本/指纹门禁及移除条件，不扩展成通用 RPC 层；
 
 目标是让少量受信用户在一台受支持的 Linux 或 macOS 主机上，通过飞书单聊、群聊和话题使用原生 Codex。
 飞书只是新的 Channel；历史、工具、Skills、MCP、配置、sandbox 和认证仍由 Codex
-管理。Project Registry 可通过飞书设置卡片或 Admin Web 管理；当前仍不实现审批卡、Codex 原生配置
+管理。Project Registry 可通过飞书项目管理卡片或 Admin Web 管理；当前仍不实现审批卡、Codex 原生配置
 值的 idle read/update、文件/音视频作为 prompt 输入、流式 token、HA 或
 durable queue。普通 Turn 的结构化本轮文件可在终态卡片中按需发送；普通图片
 和富文本图片按 [ADR 0015](adr/0015-support-native-image-inputs-for-message-and-quote.md)
@@ -2055,7 +2055,7 @@ Registry 中的一个 Project，不存在 default/unbound 或服务 cwd fallback
 只做 `INSERT OR IGNORE` bootstrap；飞书卡片可登记已有绝对路径，或只在必填的
 `projectRoot` 内创建空目录。`/new` 可以从同 Scope 的现有 Binding 记录预选当前或最近
 使用且仍 enabled 的 Project，不另存 recent 状态；没有可推导偏好时必须由用户选择，
-没有 enabled Project 时引导 `/settings` 且不创建 Binding。停用阻止新 Binding 和定时触发，已有
+没有 enabled Project 时引导 `/projects` 且不创建 Binding。停用阻止新 Binding 和定时触发，已有
 Binding 仍能继续。Admin 可按 [ADR 0060](adr/0060-delete-projects-with-exact-session-inventory.md)
 明确删除 Project 及完整关联 Sessions，成功后保留 Registry 墓碑和原 Project 目录；
 ADR 0085 另允许明确选择删除关联受管 Worktree，不能据此删除外部目录。
@@ -2599,10 +2599,11 @@ worktree 安全删除全部确认后才完成 Project 删除。worktree 失败�
 出口。文字回复固定 `reply_target_gone="fail"`：原卡不可回帖时允许反馈失败，不能从话题
 降级到所在群主线。缺少已验证 Scope、原卡或持久 Side 根消息身份时不猜测文字投递位置。
 
-### Project 设置卡片
+### Project 管理卡片
 
-`/settings` 和零参数 `/new` 使用 Card 2.0。Settings 是可扩展的分区界面，当前只
-显示已实现的 Projects 分区；分区由版本化回调选择，不保存当前分区或卡片 session。
+`/projects` 和零参数 `/new` 使用 Card 2.0。`/projects` 是唯一的项目管理命令，
+帮助与后续引导统一使用 `/projects`。卡片标题为项目管理，
+继续使用现有 Settings 的 Projects 分区回调，不保存当前分区或卡片 session。
 Projects 不逐行渲染 Registry，而是在一个表单中选择 Project 和启停操作；选项值
 携带 alias 与 revision。新增/登记表单与管理表单位于同一卡片，成功或业务错误后均
 重绘原 Projects 分区。按钮 value 携带版本化 Scope envelope，回调严格拒绝未知字段
@@ -2692,7 +2693,7 @@ worktree 选项使用所选 Project 的受管资源；加载与保存不创建�
 表单，不新增卡片 session。`/new` 仍按原有表单与预选逻辑工作，`/config` 仍修改已有
 Binding，两者不受默认值回填影响。
 
-`/config` 是独立的会话卡片，不属于实例级 `/settings` Projects 分区；它用同一组
+`/config` 是独立的会话配置卡片，与实例级 `/projects` 项目管理入口分开；它用同一组
 Model inherit/explicit 语义更新当前 active Binding 的持久设置，并允许独立切换
 Reaction Pulse、Progress Card 与 Completion Mention；群聊/群话题还可切换 Mention Context Mode。不要求任务、不创建
 Turn。配置其他 Binding 必须先 `/resume` 切换。完整 Binding ID、settings revision、
@@ -2872,7 +2873,7 @@ CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令同样明确
 首次使用引导只读取现有 Project 与当前 Scope 的 Binding 元数据，不记录用户是否已读
 教程。普通消息在没有 active Binding 时先按聊天默认配置尝试自动创建；没有命中，或已
 说明默认配置不可用后，与需要当前会话的 control 共用下一步提示：无
-enabled Project 引导 `/settings` 后 `/new`，有 enabled Project 引导 `/new`；当前 Scope
+enabled Project 引导 `/projects` 后 `/new`，有 enabled Project 引导 `/new`；当前 Scope
 有 Binding 记录时优先提示 `/sessions`，并提供 `/sessions archived` 查找归档的入口。
 这些记录只用于导航，不推断原生会话是否可恢复，不触发 native read 或 mutation。普通
 消息还明确告知任务未执行、准备后需重新发送；群消息按公开 chat type 提醒逐条 @，

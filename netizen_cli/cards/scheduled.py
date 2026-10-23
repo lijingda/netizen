@@ -531,7 +531,7 @@ def schedule_form_card(scope: FeishuScope, *, projects: Sequence[Project], defau
                 notice="这项计划的完整指令超过卡片编辑容量，请通过 Admin 或自然语言修改。")
         raise CardActionError("执行指令超过卡片编辑容量，请通过 Admin 或自然语言维护。")
     if not projects and not binding_target:
-        notice = "没有可用的 Project，请先通过 /settings 登记并启用 Project 后再编辑。"
+        notice = "没有可用的 Project，请先通过 /projects 登记并启用 Project 后再编辑。"
         if plan:
             return schedule_manager_card(scope, {"plans": [plan]}, selected={"plan": plan}, navigation=navigation, notice=notice)
         builder.raw(_plain(notice))

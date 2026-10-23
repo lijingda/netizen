@@ -208,7 +208,7 @@ class ControlName(str, Enum):
     CONFIG = "config"
     DEFAULTS = "defaults"
     COMPACT = "compact"
-    SETTINGS = "settings"
+    PROJECTS = "projects"
     CRON = "cron"
     SESSIONS = "sessions"
     RESUME = "resume"

@@ -206,7 +206,7 @@ class DefaultsCardsTest(unittest.TestCase):
     def test_unconfigured_without_projects_explains_setup_without_empty_select(self):
         view = {**self.view, "exact": None, "effective": None}
         card = self.card(view=view, projects=[])
-        self.assertIn("/settings", str(card.card))
+        self.assertIn("/projects", str(card.card))
         self.assertFalse(elements(card.card, "select_static"))
         self.assertNotIn("删除默认配置", str(card.card))
 

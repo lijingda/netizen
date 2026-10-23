@@ -107,7 +107,7 @@ class ExperienceTest(unittest.TestCase):
 
     def test_supported_commands_are_typed_controls(self) -> None:
         new = self.parse("/new")
-        settings = self.parse("/settings")
+        projects = self.parse("/projects")
         config = self.parse("/config")
         sessions = self.parse("/threads")
         archived = self.parse("/sessions archived")
@@ -119,7 +119,8 @@ class ExperienceTest(unittest.TestCase):
         self.assertIsInstance(new, ControlIntent)
         self.assertEqual(new.name, ControlName.NEW)
         self.assertEqual(new.arguments, ())
-        self.assertEqual(settings.name, ControlName.SETTINGS)
+        self.assertEqual(projects.name, ControlName.PROJECTS)
+        self.assertEqual(projects.arguments, ())
         self.assertEqual(config.name, ControlName.CONFIG)
         self.assertEqual(sessions.name, ControlName.SESSIONS)
         self.assertEqual(archived.arguments, ("archived",))
@@ -156,14 +157,31 @@ class ExperienceTest(unittest.TestCase):
             ):
                 self.parse(command)
 
-    def test_project_mistakes_explain_settings_without_registering_controls(self) -> None:
-        for command in ("/project", "/projects", "/PROJECT demo", '/projects "demo"'):
+    def test_projects_command_is_case_insensitive(self) -> None:
+        for command in ("/projects", "/PROJECTS"):
+            with self.subTest(command=command):
+                control = self.parse(command)
+                self.assertIsInstance(control, ControlIntent)
+                self.assertEqual(control.name, ControlName.PROJECTS)
+                self.assertEqual(control.arguments, ())
+
+    def test_projects_rejects_arguments(self) -> None:
+        for command in ('/projects "demo"', "/projects demo", '/projects "unterminated'):
+            with self.subTest(command=command), self.assertRaises(
+                InvalidInteraction
+            ) as raised:
+                self.parse(command)
+            self.assertIn("用法：/projects", str(raised.exception))
+            self.assertNotIn("/settings", str(raised.exception))
+
+    def test_project_mistakes_explain_projects_without_registering_a_control(self) -> None:
+        for command in ("/project", "/PROJECT demo"):
             with self.subTest(command=command), self.assertRaises(
                 InvalidInteraction
             ) as raised:
                 self.parse(command)
             error = str(raised.exception)
-            self.assertIn("/settings", error)
+            self.assertIn("/projects", error)
             self.assertIn("/new", error)
             self.assertIn("/help", error)
             self.assertIn("未执行", error)
@@ -171,7 +189,7 @@ class ExperienceTest(unittest.TestCase):
         escaped = self.parse("//project demo")
         self.assertIsInstance(escaped, PromptInput)
         self.assertEqual(escaped.text, "/project demo")
-        self.assertNotIn("/project", command_help())
+        self.assertNotIn("`/project`", command_help())
 
     def test_empty_message_points_to_help(self) -> None:
         with self.assertRaises(InvalidInteraction) as raised:
@@ -315,8 +333,9 @@ class ExperienceTest(unittest.TestCase):
     def test_help_starts_with_session_and_task_steps(self) -> None:
         first_section = command_help().split("\n---\n", maxsplit=1)[0]
         self.assertLess(first_section.index("/new"), first_section.index("直接发送任务"))
-        self.assertIn("/settings", first_section)
+        self.assertIn("/projects", first_section)
         self.assertIn("/sessions", first_section)
+        self.assertNotIn("/settings", command_help())
 
     def test_grouped_help_lists_each_available_command_once(self) -> None:
         for capabilities in (frozenset(), frozenset(NativeCapability)):
@@ -354,10 +373,13 @@ class ExperienceTest(unittest.TestCase):
         self.assertNotIn("/exit", help_text)
 
     def test_unknown_command_never_becomes_a_prompt(self) -> None:
-        with self.assertRaisesRegex(InvalidInteraction, "未知命令") as raised:
-            self.parse("/unknown")
-        self.assertIn("/help", str(raised.exception))
-        self.assertIn("未执行", str(raised.exception))
+        for command in ("/unknown", "/settings", "/SETTINGS", "/settings demo"):
+            with self.subTest(command=command), self.assertRaisesRegex(
+                InvalidInteraction, "未知命令"
+            ) as raised:
+                self.parse(command)
+            self.assertIn("/help", str(raised.exception))
+            self.assertIn("未执行", str(raised.exception))
 
     def test_invalid_quotes_offer_correct_usage_and_help(self) -> None:
         for command, usage in (

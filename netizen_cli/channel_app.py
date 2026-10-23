@@ -2096,7 +2096,7 @@ class ChannelApplication:
         )
         detail = str(error) if isinstance(error, CardActionError) else describe_error(error)
         if unexpected:
-            command = "/goal" if goal else "/settings" if settings_scope is not None else recovery_command
+            command = "/goal" if goal else "/projects" if settings_scope is not None else recovery_command
             detail = f"卡片操作未完成：{detail}。请发送 {command} 检查当前状态。"
         source_id = intent.source_id if intent is not None else message_id
         updated = False
@@ -2813,7 +2813,7 @@ class ChannelApplication:
         else:
             lines.append(
                 "新建会话需要一个已启用的项目（Codex 工作的目录）。"
-                "发送 /settings 创建、登记或启用项目，再发送 /new 创建会话。"
+                "发送 /projects 创建、登记或启用项目，再发送 /new 创建会话。"
             )
         if task_not_executed:
             lines.append("这条任务尚未执行；准备好会话后，请重新发送刚才的任务。")
@@ -4336,7 +4336,7 @@ class ChannelApplication:
         if intent.name is ControlName.SIDE:
             await self._create_side(message, intent)
             return
-        if intent.name is ControlName.SETTINGS:
+        if intent.name is ControlName.PROJECTS:
             await self._reply(message, self._settings_card(intent.scope))
             return
         if intent.name is ControlName.DEFAULTS:

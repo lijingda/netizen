@@ -5425,15 +5425,17 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             reply.splitlines(),
         )
 
-    async def test_skills_command_is_rejected_without_native_mutation(self) -> None:
+    async def test_removed_commands_are_rejected_without_native_mutation(self) -> None:
         await self.fixture.new()
         self.runtime.available_capabilities = frozenset({NativeCapability.SKILLS})
 
-        await self.app.handle_message(FakeMessage("/skills", message_id="om_skills"))
-
-        reply = str(self.channel.replies[-1][1])
-        self.assertIn("未知命令：/skills", reply)
-        self.assertEqual(self.runtime.submit_calls, [])
+        for command in ("/skills", "/settings"):
+            with self.subTest(command=command):
+                await self.app.handle_message(FakeMessage(command, message_id=f"om_{command[1:]}"))
+                reply = self.channel.replies[-1][1]
+                self.assertNotIsInstance(reply, OutboundCard)
+                self.assertIn(f"未知命令：{command}", str(reply))
+                self.assertEqual(self.runtime.submit_calls, [])
 
     async def test_multiple_skills_from_current_message_reach_one_submission(
         self,
@@ -5799,7 +5801,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(FakeMessage("帮我整理文件", message_id="om_first"))
 
         guidance = self.channel.replies[-1][1]
-        self.assertLess(guidance.index("/settings"), guidance.index("/new"))
+        self.assertLess(guidance.index("/projects"), guidance.index("/new"))
         self.assertIn("/help", guidance)
         self.assertIn("尚未执行", guidance)
         self.assertIn("重新发送", guidance)
@@ -5814,7 +5816,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(FakeMessage("帮我整理文件", message_id="om_first"))
         guidance = self.channel.replies[-1][1]
         self.assertIn("/new", guidance)
-        self.assertNotIn("/settings", guidance)
+        self.assertNotIn("/projects", guidance)
         self.assertIn("尚未执行", guidance)
         self.assertEqual(self.store.list_bindings(scope.key), [])
 
@@ -5847,7 +5849,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         guidance = self.channel.replies[-1][1]
         self.assertIn("/sessions archived", guidance)
-        self.assertLess(guidance.index("/sessions"), guidance.index("/settings"))
+        self.assertLess(guidance.index("/sessions"), guidance.index("/projects"))
         self.assertNotIn("还没有会话", guidance)
         self.assertIsNone(self.store.active_binding(scope.key))
         self.assertEqual(self.store.list_bindings(scope.key), bindings_before)
@@ -6647,17 +6649,17 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertIn("active 会话已切换", str(self.channel.replies[-1][1]))
 
-    async def test_settings_and_bare_new_reply_with_cards_in_the_origin_scope(self) -> None:
+    async def test_projects_and_bare_new_reply_with_cards_in_the_origin_scope(self) -> None:
         topic = FakeMessage(
-            "/settings",
-            message_id="om_settings",
+            "/projects",
+            message_id="om_projects",
             chat_id="oc_group",
             chat_type="group",
             thread_id="omt_settings",
         )
         await self.app.handle_message(topic)
         settings_reply = self.channel.replies[-1]
-        self.assertEqual(settings_reply[0], "om_settings")
+        self.assertEqual(settings_reply[0], topic.id)
         self.assertIsInstance(settings_reply[1], OutboundCard)
         self.assertEqual(settings_reply[1].card["schema"], "2.0")
         self.assertIn("project_manage_v1", str(settings_reply[1].card))
@@ -6791,7 +6793,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         disabled_picker, selected = await render("om_no_projects")
         self.assertIsNone(selected)
         self.assertEqual(_elements(disabled_picker.card, "form"), [])
-        self.assertIn("/settings", str(disabled_picker.card))
+        self.assertIn("/projects", str(disabled_picker.card))
         self.assertEqual(len(self.store.list_bindings(scope.key)), 3)
         self.assertEqual(first.project_alias, "test")
         self.assertFalse(other.enabled)
@@ -7202,7 +7204,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_inline_project_create_recovers_topic_and_persists_registry(self) -> None:
         await self.app.handle_message(
             FakeMessage(
-                "/settings",
+                "/projects",
                 message_id="om_settings",
                 chat_id="oc_group",
                 chat_type="group",
@@ -7250,7 +7252,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_project_management_targets_revision_and_keeps_errors_inline(self) -> None:
         await self.app.handle_message(
             FakeMessage(
-                "/settings",
+                "/projects",
                 message_id="om_settings",
                 chat_id="oc_group",
                 chat_type="group",
@@ -9379,25 +9381,26 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(self.channel.updates), root_updates)
 
-    async def test_side_rejects_goal_even_when_native_goal_is_available(self) -> None:
+    async def test_side_rejects_goal_and_project_management(self) -> None:
         self.runtime.available_capabilities = frozenset(
             {NativeCapability.SIDE, NativeCapability.GOAL}
         )
         _binding, record = await self.open_direct_side()
 
-        await self.app.handle_message(
-            FakeMessage(
-                "/goal ship",
-                message_id="om-side-goal",
-                chat_id="oc-direct",
-                chat_type="p2p",
-                thread_id=record.topic_id,
-                mentioned_bot=False,
-            )
-        )
-
-        self.assertEqual(self.runtime.start_goal_calls, [])
-        self.assertIn("该命令在 Side 中不可用", str(self.channel.replies[-1][1]))
+        for index, command in enumerate(("/goal ship", "/projects")):
+            with self.subTest(command=command):
+                await self.app.handle_message(
+                    FakeMessage(
+                        command,
+                        message_id=f"om-side-control-{index}",
+                        chat_id="oc-direct",
+                        chat_type="p2p",
+                        thread_id=record.topic_id,
+                        mentioned_bot=False,
+                    )
+                )
+                self.assertEqual(self.runtime.start_goal_calls, [])
+                self.assertIn("该命令在 Side 中不可用", str(self.channel.replies[-1][1]))
 
     async def test_side_creation_covers_all_entry_contexts_and_always_sends_fresh(
         self,

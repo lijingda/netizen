@@ -139,10 +139,10 @@ def defaults_card(
         project_options.append({"text": _plain_text(f"{selected_project} · 不可用（保留原配置）"), "value": selected_value})
         builder.raw(_notice(f"Project「{selected_project}」已停用或不可用；请选择可用项目后保存，或删除本聊天的默认配置。", error=True))
     if not enabled_projects:
-        builder.raw(_notice("没有可用 Project，请先通过 /settings 登记或启用项目。"))
+        builder.raw(_notice("没有可用 Project，请先通过 /projects 登记或启用项目。"))
     if not project_options:
         # Feishu cannot render an empty static select. There is no saved exact
-        # record to delete in this branch; opening again after /settings gives
+        # record to delete in this branch; opening again after /projects gives
         # the ordinary single form without inventing a default Project.
         return OutboundCard(card=builder.to_dict())
 

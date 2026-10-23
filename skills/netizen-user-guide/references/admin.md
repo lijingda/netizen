@@ -32,7 +32,7 @@ Admin 默认监听 `0.0.0.0`；首次未指定端口时从 `8787` 开始寻找�
 session token 或免登录链接，也不改变管理权限。打开管理页后点击飞书登录，在官方页面
 完成确认，再回原页继续。不要在聊天中发送 App Secret 或用户 token。Admin 使用受信内网
 HTTP，名单中的管理员权限相同，不提供 TLS、角色分级或 Project ACL；不应直接暴露到
-不受信网络。普通使用者继续使用 `/settings`、`/defaults` 和当前 Scope 的会话命令。
+不受信网络。普通使用者继续使用 `/projects`、`/defaults` 和当前 Scope 的会话命令。
 
 ## 管理员与登录状态
 
