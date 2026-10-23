@@ -89,6 +89,24 @@ class CardErrorFeedbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.fixture.channel.replies), 1)
         self.assertEqual(self.fixture.channel.reply_targets[-1].conversation.thread_id, "omt_card")
 
+    async def test_project_error_recovery_points_to_projects(self):
+        intent = CardControlIntent(
+            scope=self.scope, source_id="om_card", sender_id="ou_user",
+            name=CardControlName.REFRESH_SETTINGS, settings_section=SettingsSection.PROJECTS,
+        )
+        with (
+            patch.object(self.app, "_decode_card_event", AsyncMock(return_value=intent)),
+            patch.object(self.app, "_card_control", AsyncMock(side_effect=RuntimeError("刷新失败"))),
+            patch.object(self.app, "_safe_update_card", AsyncMock(return_value=False)),
+            self.assertLogs("netizen_cli.channel_app", level="ERROR"),
+        ):
+            await self.app.handle_card_action(self.event)
+        source, text = self.fixture.channel.replies[-1]
+        self.assertEqual(source, "om_card")
+        self.assertIn("/projects", text)
+        self.assertNotIn("/settings", text)
+        self.assertEqual(self.fixture.channel.reply_targets[-1].conversation.thread_id, "omt_card")
+
     async def test_verified_form_decode_errors_keep_feedback_location(self):
         for fields in ({"config_model": "old-card"}, {"new_project": "old-card"},
                        {"rename_name_v1__binding": ""}):

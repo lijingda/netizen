@@ -17,10 +17,10 @@
   截断或分页；Model 可继承 Codex，也可显式选择 Model、Effort 和 Speed。Reaction Pulse
   默认关闭，Progress Card 默认开启，可独立选择；群聊和群话题还可选择 @ 时读取的消息范围。
   同 Scope 当前或最近使用且仍 enabled 的 Project 可能被预选；没有历史偏好时需要明确
-  选择。提交后创建并切换 Lazy 会话；没有 enabled Project 时会引导先打开 `/settings`。
+  选择。提交后创建并切换 Lazy 会话；没有 enabled Project 时会引导先打开 `/projects`。
   新会话的过程卡细项默认未单独配置，执行时使用本实例的[全局过程卡配置](admin.md#全局过程卡配置)。
 - 任何带参数的 `/new ...` 快捷创建都已下线；请在卡片中选择。
-- `/settings`：打开实例设置卡片。当前可在 Projects 分区启用、停用、创建或登记 Project。
+- `/projects`：打开项目管理卡片，启用、停用、创建或登记 Project。
 - 停用 Project 只阻止用它创建新会话，已有会话仍可继续；Netizen 不会删除 Project 目录。
 
 ## 选择受管 worktree

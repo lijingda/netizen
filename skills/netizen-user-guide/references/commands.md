@@ -11,7 +11,7 @@ control 或一个 prompt，不能串联多个命令。群聊中的命令同样�
 | `//...` | 将字面 `/...` 作为普通任务文本发送 | [文本与斜杠](messages.md#普通文本和斜杠) |
 | `/new` | 用卡片选择 Project 及可选受管 worktree，新建当前会话；不接受参数 | [新建会话](sessions.md#新建与配置-project) |
 | `/defaults` | 用一张表单查看、保存或删除当前聊天的会话默认配置，不接受参数 | [默认配置](sessions.md#默认会话配置与自动创建) |
-| `/settings` | 登记、创建、启用或停用 Project | [Project 管理](sessions.md#新建与配置-project) |
+| `/projects` | 登记、创建、启用或停用 Project | [Project 管理](sessions.md#新建与配置-project) |
 | `/config` | 修改当前空闲会话的模型、思考强度、速度、任务反馈和群聊消息范围，后续新任务生效 | [会话设置](sessions.md#session-settings) |
 | `/sessions`、`/threads` | 列出当前聊天或话题的会话，切换或按行管理 | [查找与切换](sessions.md#查找切换和命名会话) |
 | `/sessions archived` | 查看归档会话，恢复或经确认永久删除 | [归档管理](sessions.md#归档恢复和删除) |

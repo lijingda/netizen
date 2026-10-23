@@ -982,9 +982,9 @@ def _failure(error: Exception) -> dict[str, Any]:
     if isinstance(error, ProjectDeleting):
         return {"ok": False, "error": {"code": "project_deleting", "message": "该 Project 正在删除，请等待操作完成后刷新，或选择其他可用的 Project。"}}
     if isinstance(error, ProjectDisabled):
-        return {"ok": False, "error": {"code": "project_disabled", "message": "该 Project 已停用，请选择其他可用的 Project，或通过 /settings 重新启用后重试。"}}
+        return {"ok": False, "error": {"code": "project_disabled", "message": "该 Project 已停用，请选择其他可用的 Project，或通过 /projects 重新启用后重试。"}}
     if isinstance(error, ProjectNotFound):
-        return {"ok": False, "error": {"code": "not_found", "message": "找不到该 Project，请选择已登记的 Project，或先通过 /settings 登记并启用。"}}
+        return {"ok": False, "error": {"code": "not_found", "message": "找不到该 Project，请选择已登记的 Project，或先通过 /projects 登记并启用。"}}
     code = getattr(error, "code", "invalid_schedule")
     if isinstance(error, (ScheduleNotFound, ProjectNotFound, BindingNotFound, ScopeNotFound)):
         code = "not_found"

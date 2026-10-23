@@ -127,7 +127,7 @@ CLI setup 的官方 SDK 浏览器流程会请求下面的应用身份权限、`i
 无论来源，飞书应用版本在发布前都必须确认：
 
 - 单聊事件投递具备 `im:message.p2p_msg:readonly`，普通消息能力具备 `im:message`；
-- `/settings` 等卡片回调识别会话类型具备 canonical `im:chat:read`；官方“获取群信息”接口
+- `/projects` 等卡片回调识别会话类型具备 canonical `im:chat:read`；官方“获取群信息”接口
   支持的 `im:chat`、`im:chat:read`、`im:chat:readonly` 三者任一 tenant 授权都满足门禁；
 - 群聊回查额外具备 `im:message.group_msg`，不能只有接收 @ 消息的
   `im:message.group_at_msg`/readonly；
@@ -2138,7 +2138,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    form，不显示任务输入或快捷创建按钮。工作区路径与分支选择按 [专项验收](#受管-worktree-专项验收)核对。
    Project 使用现有单个静态下拉框，并展示 Registry 中全部 enabled 项；同 Scope 当前或
    最近使用且仍 enabled 的 Project 可基于现有 Binding 记录预选，不新增 recent 状态；没有
-   该记录时下拉保持未选。零 enabled Project 时不显示 form，只引导 `/settings`，且零 Binding
+   该记录时下拉保持未选。零 enabled Project 时不显示 form，只引导 `/projects`，且零 Binding
    mutation。准备 13 个以上 enabled Projects 验证没有 12 项截断、分页控件或命令兜底，
    disabled 项不出现。P2P 表单不显示
    @ 时读取的消息范围；群主线和普通群话题显示“仅这条 @ 消息（默认）”与“自动带上期间
@@ -2248,7 +2248,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     删除其中一张资源后重试必须零提交。再分别发送 locale 正文与顶层 `post.files`
     并存的真实文件、文件夹，两者都必须明确拒绝且零提交。连续发送的多条独立图片不要求
     自动合并。
-16. 在单聊、群聊、话题分别发送 `/settings` 和零参数 `/new`；卡片必须留在原
+16. 在单聊、群聊、话题分别发送 `/projects` 和零参数 `/new`；卡片必须留在原
     Scope。Settings 只显示已实现分区，Projects 使用下拉管理且新增表单留在同一卡片；
     创建/登记/启停或业务错误后仍显示原 Projects 分区。重启服务后 Registry 仍存在；
     停用条目不能新建 Binding，但旧 Binding 仍可继续。`/new` Project 下拉应同步展示全部

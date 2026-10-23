@@ -71,10 +71,10 @@ COMMAND_SPECS = (
         group=CommandGroup.START,
     ),
     CommandSpec(
-        "settings",
-        ControlName.SETTINGS,
+        "projects",
+        ControlName.PROJECTS,
         CommandOwner.CHANNEL,
-        "/settings",
+        "/projects",
         "添加、启用和管理项目（任务使用的工作目录）",
         group=CommandGroup.START,
     ),
@@ -360,9 +360,9 @@ def parse_message(
     spec = _COMMANDS.get(tokens[0].lower())
     if spec is None:
         unavailable = tokens[0].lower()
-        if unavailable in {"project", "projects"}:
+        if unavailable == "project":
             raise _command_error(
-                "项目通过 /settings 添加或启用；准备好项目后，发送 /new 创建会话。"
+                "项目通过 /projects 添加或启用；准备好项目后，发送 /new 创建会话。"
                 "本条消息未执行。"
             )
         if unavailable in _CONFIG_ALIASES:
@@ -408,7 +408,7 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
         ControlName.CONFIG: 0,
         ControlName.DEFAULTS: 0,
         ControlName.COMPACT: 0,
-        ControlName.SETTINGS: 0,
+        ControlName.PROJECTS: 0,
         ControlName.CRON: 0,
         ControlName.SESSIONS: None,
         ControlName.RESUME: 1,
@@ -493,7 +493,7 @@ def command_help(
         "1. **创建会话**：发送 `/new`，在卡片中选择项目并创建会话。",
         "2. **发送任务**：创建成功后，直接发送任务，例如：介绍一下这个项目。",
         "",
-        "**没有可选项目？** 先用 `/settings` 添加或启用项目（任务使用的工作目录）。",
+        "**没有可选项目？** 先用 `/projects` 添加或启用项目（任务使用的工作目录）。",
         "",
         "**已有会话？** 发送 `/sessions` 查看并切换，继续之前的工作。",
     ]

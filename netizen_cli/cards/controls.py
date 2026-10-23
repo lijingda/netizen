@@ -138,7 +138,7 @@ def settings_card(
     notice: str | None = None,
     notice_is_error: bool = False,
 ) -> OutboundCard:
-    builder = _builder("Netizen 设置", _settings_section_label(section))
+    builder = _builder("Netizen 项目管理", _settings_section_label(section))
     builder.raw(_settings_navigation(scope=scope, active=section))
     builder.markdown(
         "当前聊天的参与者均可管理项目；修改会影响使用这个机器人的其他聊天。"
@@ -179,7 +179,7 @@ def _render_projects_settings(
 
     builder.raw(
         _repeatable_callback_button(
-            label="刷新当前配置",
+            label="刷新项目列表",
             value=_envelope(
                 scope,
                 CardControlName.REFRESH_SETTINGS,
@@ -1015,7 +1015,7 @@ def new_binding_card(
     )
     if not projects:
         builder.markdown(
-            "还没有已启用的项目。请先发送 `/settings` 创建、登记或启用项目，"
+            "还没有已启用的项目。请先发送 `/projects` 创建、登记或启用项目，"
             "再发送 `/new`。发送 `/help` 查看快速开始。"
         )
     else:
