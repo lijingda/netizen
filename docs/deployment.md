@@ -54,7 +54,7 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
 ```text
 <selected-python-environment>/
   .../site-packages/netizen_cli/               # 程序、Admin 静态资源
-    resources/skills/                         # 两个内置 Skills
+    resources/skills/                         # 内置 Skills
     resources/config.example.yaml
   bin/netizen                                 # console entry point
 <NETIZEN_ROOT>/                                # 默认有效账号 ~/.netizen

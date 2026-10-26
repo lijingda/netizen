@@ -31,6 +31,7 @@ REQUIRED_WHEEL_FILES = frozenset({
     "netizen_cli/resources/config.example.yaml",
     "netizen_cli/resources/skills/netizen-lark/SKILL.md",
     "netizen_cli/resources/skills/netizen-user-guide/SKILL.md",
+    "netizen_cli/resources/skills/netizen-runtime-guidance/SKILL.md",
     "netizen_cli/admin/static/index.html",
 })
 
@@ -122,6 +123,7 @@ def verify_sdist(path: Path, version: str, *, extract_to: Path | None = None) ->
         required = {f"{root}/{name}" for name in (
             "PKG-INFO", "pyproject.toml", "_build.py", "config.example.yaml",
             "netizen_cli/cli.py", "skills/netizen-lark/SKILL.md", "skills/netizen-user-guide/SKILL.md",
+            "skills/netizen-runtime-guidance/SKILL.md",
         )}
         if not required.issubset(names):
             raise DistributionError("sdist is missing package or build resources")

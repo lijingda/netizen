@@ -17,7 +17,7 @@ class BuildPy(build_py):
         if destination.exists():
             shutil.rmtree(destination)
         destination.mkdir(parents=True)
-        for name in ("netizen-lark", "netizen-user-guide"):
+        for name in ("netizen-lark", "netizen-user-guide", "netizen-runtime-guidance"):
             skill = source / "skills" / name
             if not (skill / "SKILL.md").is_file():
                 raise ValueError(f"missing built-in Skill: {skill}")

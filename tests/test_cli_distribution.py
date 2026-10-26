@@ -44,6 +44,7 @@ class DistributionContractTest(unittest.TestCase):
             members = {name: b"fixture" for name in (
                 "pyproject.toml", "_build.py", "config.example.yaml", "netizen_cli/cli.py",
                 "skills/netizen-lark/SKILL.md", "skills/netizen-user-guide/SKILL.md",
+                "skills/netizen-runtime-guidance/SKILL.md",
             )}
             members["PKG-INFO"] = b"Metadata-Version: 2.1\nName: netizen-cli\nVersion: 1.2.3\n"
             with tarfile.open(output / "netizen_cli-1.2.3.tar.gz", "w:gz") as archive:

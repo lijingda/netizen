@@ -141,6 +141,11 @@ Admin 是必备能力，不支持 `adminWeb.enabled`。管理员通过飞书登�
 环境过滤策略移除时，内置 Lark Skill 明确失败，不猜另一实例凭据。实际模型加载和
 双实例隔离见[对应验收](deployment.md#多实例与内置-skills-验收)。
 
+维护 `netizen-runtime-guidance` 时，遵守[运行环境提示边界](design.md#运行环境提示与使用指南的边界)：
+直接生效所需信息放在 description，正文只补充细节；分别保持在 300/600 个 Unicode
+字符内，不搬入用户指南内容。新增内置 Skill 时同步运行清单、wheel 构建、sdist manifest
+和发布资源校验，并验证包外导入及原生发现；不修改用户全局 Skill 或配置。
+
 ## 私有运维记录
 
 仓库不定义默认部署主机或远端账号。维护者可为当前 checkout 保存开发机路径、SSH
