@@ -6,6 +6,7 @@ import json
 import tempfile
 import tomllib
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,9 +14,9 @@ from unittest.mock import patch
 from jsonschema import Draft202012Validator
 from mcp.types import CallToolRequestParams
 
-from netizen_cli.bindings import BindingStore
+from netizen_cli.bindings import BindingStore, SideTopicState
 from netizen_cli.domain import FeishuScope, ScopeKind
-from netizen_cli.runtime.contracts import NativeThreadCatalogPage, NativeThreadMetadata
+from netizen_cli.runtime.contracts import NativeThreadCatalogPage, NativeThreadMetadata, SideSessionSnapshot, SideSessionState
 from netizen_cli.sessions.delegation import delegated_prompt
 from netizen_cli.sessions.errors import SessionToolError
 from netizen_cli.sessions.mcp import SessionMcpRunner
@@ -45,6 +46,10 @@ class Catalog:
         self.history_reads = []
         self.catalog_reads = []
         self.read_hook = None
+        self.sides = {}
+
+    def side_snapshot_for_thread(self, thread_id):
+        return self.sides.get(thread_id)
 
     async def list_turns(self, thread_id, *, cursor=None, limit=1, items_view="full"):
         self.history_reads.append(("turns", thread_id, cursor, limit, items_view))
@@ -130,6 +135,25 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def call(self, name, data=None, source="source"):
         return await self.service.call(name, data or {}, source)
+
+    def side(self, thread_id="side", *, app_id="app", route_state=SideTopicState.OPEN):
+        route = self.store.create_side_topic(
+            app_id=app_id, chat_id="chat-a", source_message_id=f"request-{thread_id}",
+            parent_binding_id=self.source.id, creator_id="person", requires_mention=False,
+        )
+        self.store.set_side_topic_root(route.id, f"root-{thread_id}")
+        if route_state is not SideTopicState.CREATING:
+            self.store.open_side_topic(route.id, f"topic-{thread_id}")
+            if route_state is not SideTopicState.OPEN:
+                self.store.transition_side_topic(route.id, route_state)
+        snapshot = SideSessionSnapshot(
+            side_id=route.id, parent_binding_id=self.source.id, parent_thread_id="source",
+            thread_id=thread_id, project_alias="p", cwd=Path(self.directory.name),
+            creator_id="person", state=SideSessionState.OPEN, topic_id=f"topic-{thread_id}",
+            root_message_id=f"root-{thread_id}", turn_id=None, turn_state=None, last_activity=0,
+        )
+        self.catalog.sides[thread_id] = snapshot
+        return snapshot
 
     async def test_discovery_uses_native_cwd_and_reports_unknown_without_project_fallback(self):
         self.catalog.items["target"]["cwd"] = "/managed/worktree"
@@ -258,7 +282,7 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("open_thread_id=omt_topic", result["netizen"]["topicUrl"])
         self.assertNotIn("messageId", result["netizen"]["topicUrl"])
 
-    async def test_only_registered_ordinary_instance_sources_and_targets(self):
+    async def test_unregistered_and_other_app_sources_and_targets_are_rejected(self):
         external = self.binding("chat-c", "other-app", app_id="another")
         for source in (None, "unregistered", external.native_thread_id):
             result = await self.call("list_threads", source=source)
@@ -268,23 +292,147 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["error"]["code"], "target_not_registered")
         self.assertEqual(self.catalog.reads, [])
 
-    async def test_discovery_and_read_send_are_independent(self):
-        self.policy.discovery = {"chat-b"}
-        self.policy.read_send = set()
-        listing = await self.call("list_threads")
-        self.assertEqual([item["id"] for item in listing["threads"]], ["target"])
-        self.assertNotIn("summary", listing["threads"][0])
-        self.assertNotIn("PRIVATE BODY", json.dumps(listing))
-        denied = await self.call("read_thread", {"threadId": "target"})
-        self.assertEqual(denied["error"]["code"], "access_denied")
-        self.policy.discovery = set()
-        self.policy.read_send = {"chat-b"}
-        self.assertEqual((await self.call("list_threads"))["threads"], [])
-        self.assertEqual((await self.call("read_thread", {"threadId": "target"}))["thread"]["id"], "target")
-        sent = await self.call("send_message_to_thread", {"threadId": "target", "prompt": "continue"})
+    async def test_side_can_use_five_collaboration_tools_without_entering_directories(self):
+        side = self.side()
+        archived_side = self.side("archived-side")
+        self.catalog.items[side.thread_id] = thread(side.thread_id)
+        self.catalog.items[archived_side.thread_id] = thread(archived_side.thread_id)
+        self.binding("chat-c", "archived-target")
+        self.catalog.archived.update({"archived-target", archived_side.thread_id})
+        active = await self.call("list_threads", source=side.thread_id)
+        self.assertEqual({item["id"] for item in active["threads"]}, {"source", "target"})
+        archived = await self.call("list_archived_threads", source=side.thread_id)
+        self.assertEqual([item["id"] for item in archived["threads"]], ["archived-target"])
+        self.catalog.items["target"]["turns"] = [turn("completed", "ordinary result")]
+        read = await self.call("read_thread", {"threadId": "target"}, source=side.thread_id)
+        self.assertEqual(read["thread"]["id"], "target")
+        waited = await self.call("wait_threads", {
+            "targets": [{"threadId": "target"}], "timeoutMs": 0,
+        }, source=side.thread_id)
+        self.assertEqual(waited["wake"], {"threadId": "target", "reason": "turnCompleted", "turnId": "completed"})
+        sent = await self.call("send_message_to_thread", {
+            "threadId": "target", "prompt": "continue", "model": "model-a",
+        }, source=side.thread_id)
         self.assertTrue(sent["netizen"]["accepted"])
-        self.assertEqual(self.calls[0][1]["source_thread_id"], "source")
-        self.assertNotIn("authorize", self.calls[0][1])
+        self.assertEqual(self.calls, [("send", {
+            "source_thread_id": side.thread_id, "target_thread_id": "target",
+            "prompt": "continue", "model": "model-a",
+        })])
+
+    async def test_side_cannot_create_threads_or_use_worktree_tools(self):
+        side = self.side()
+        worktree_calls = self.worktree_service()
+        for name, data in (("create_thread", {"prompt": "new task"}),
+                           ("list_worktrees", {}), ("create_worktree", {})):
+            with self.subTest(tool=name):
+                result = await self.call(name, data, source=side.thread_id)
+                self.assertEqual(result["error"]["code"], "invalid_call_context")
+        self.assertEqual(worktree_calls, [])
+        self.assertEqual(self.calls, [])
+
+    async def test_side_targets_are_rejected_with_explicit_side_explanation(self):
+        source_side = self.side()
+        target_side = self.side("target-side")
+        for source in ("source", source_side.thread_id):
+            for name, data in (
+                ("read_thread", {"threadId": target_side.thread_id}),
+                ("wait_threads", {"targets": [{"threadId": target_side.thread_id}], "timeoutMs": 0}),
+                ("send_message_to_thread", {"threadId": target_side.thread_id, "prompt": "continue"}),
+            ):
+                with self.subTest(source=source, tool=name):
+                    result = await self.call(name, data, source=source)
+                    self.assertEqual(result["error"]["code"], "target_not_registered")
+                    self.assertIn("Side", result["error"]["message"])
+        self.assertEqual(self.catalog.reads, [])
+        self.assertEqual(self.catalog.history_reads, [])
+        self.assertEqual(self.calls, [])
+
+    async def test_side_source_requires_matching_open_runtime_and_instance_route(self):
+        side = self.side()
+        invalid_sources = [
+            self.side("wrong-app", app_id="another"),
+            replace(side, thread_id="no-route", side_id="missing"),
+            replace(side, thread_id="closing", state=SideSessionState.CLOSING),
+            replace(side, thread_id="no-topic", topic_id=None),
+            replace(side, thread_id="wrong-topic", topic_id="other-topic"),
+            replace(side, thread_id="wrong-root", root_message_id="other-root"),
+        ]
+        invalid_sources.extend(
+            self.side(f"route-{state.value}", route_state=state)
+            for state in SideTopicState if state is not SideTopicState.OPEN
+        )
+        for invalid in invalid_sources:
+            self.catalog.sides[invalid.thread_id] = invalid
+        missing_runtime = self.side("missing-runtime")
+        del self.catalog.sides[missing_runtime.thread_id]
+        for source in [item.thread_id for item in invalid_sources] + [missing_runtime.thread_id]:
+            for name, data in (("list_threads", {}),
+                               ("send_message_to_thread", {"threadId": "target", "prompt": "continue"})):
+                with self.subTest(source=source, tool=name):
+                    result = await self.call(name, data, source=source)
+                    self.assertEqual(result["error"]["code"], "invalid_call_context")
+        self.assertEqual(self.catalog.catalog_reads, [])
+        self.assertEqual(self.calls, [])
+
+    async def test_side_source_survives_parent_switch_and_deletion_with_ordinary_target_rules(self):
+        side = self.side()
+        replacement = self.binding("chat-a", "replacement")
+        parent_read = await self.call("read_thread", {"threadId": "source"}, source=side.thread_id)
+        self.assertFalse(parent_read["netizen"]["isCurrent"])
+        denied = await self.call("send_message_to_thread", {
+            "threadId": "source", "prompt": "continue",
+        }, source=side.thread_id)
+        self.assertEqual(denied["error"]["code"], "target_not_current")
+        self.assertFalse(denied["netizen"]["accepted"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.store.active_binding(self.source.scope_key).id, replacement.id)
+        for parent_removed in (False, True):
+            with self.subTest(parent_removed=parent_removed):
+                if parent_removed:
+                    self.store.delete_binding(self.source.id)
+                    missing = await self.call("send_message_to_thread", {
+                        "threadId": "source", "prompt": "continue",
+                    }, source=side.thread_id)
+                    self.assertEqual(missing["error"]["code"], "target_not_registered")
+                sent = await self.call("send_message_to_thread", {
+                    "threadId": "target", "prompt": "continue",
+                }, source=side.thread_id)
+                self.assertTrue(sent["netizen"]["accepted"])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual({call[1]["source_thread_id"] for call in self.calls}, {side.thread_id})
+        self.assertEqual({call[1]["target_thread_id"] for call in self.calls}, {"target"})
+
+    async def test_discovery_and_read_send_are_independent(self):
+        for source in ("source", self.side().thread_id):
+            with self.subTest(source=source):
+                self.policy.discovery = {"chat-b"}
+                self.policy.read_send = set()
+                listing = await self.call("list_threads", source=source)
+                self.assertEqual([item["id"] for item in listing["threads"]], ["target"])
+                self.assertNotIn("summary", listing["threads"][0])
+                self.assertNotIn("PRIVATE BODY", json.dumps(listing))
+                for name, data in (
+                    ("read_thread", {"threadId": "target"}),
+                    ("wait_threads", {"targets": [{"threadId": "target"}], "timeoutMs": 0}),
+                    ("send_message_to_thread", {"threadId": "target", "prompt": "continue"}),
+                ):
+                    denied = await self.call(name, data, source=source)
+                    self.assertEqual(denied["error"]["code"], "access_denied")
+                self.policy.discovery = set()
+                self.policy.read_send = {"chat-b"}
+                self.assertEqual((await self.call("list_threads", source=source))["threads"], [])
+                read = await self.call("read_thread", {"threadId": "target"}, source=source)
+                self.assertEqual(read["thread"]["id"], "target")
+                waited = await self.call("wait_threads", {
+                    "targets": [{"threadId": "target"}], "timeoutMs": 0,
+                }, source=source)
+                self.assertEqual(waited["polls"][0]["thread"]["id"], "target")
+                sent = await self.call("send_message_to_thread", {
+                    "threadId": "target", "prompt": "continue",
+                }, source=source)
+                self.assertTrue(sent["netizen"]["accepted"])
+                self.assertEqual(self.calls[-1][1]["source_thread_id"], source)
+                self.assertNotIn("authorize", self.calls[-1][1])
 
     async def test_discovery_keeps_admitted_rules_and_cursor_during_policy_change(self):
         self.policy.discovery = {"chat-b"}

@@ -22,10 +22,18 @@ Netizen 负责实例目录、飞书位置、访问范围和输入交接，Codex 
 发现增加可选搜索和分页，Netizen 位置、Binding 和接受状态使用明确的扩展字段。
 分叉、改名、归档/恢复的模型工具留待后续；现有人工控制继续可用。
 
-`threadId` 始终表示完整原生 Thread ID，经已有精确查询映射到本实例普通 Binding。
+工具目标的 `threadId` 始终表示完整原生 Thread ID，经已有精确查询映射到本实例普通 Binding。
 不导入外部 CLI/App 会话，不把 Side 或子 agent 纳入普通会话目录。尚无原生 Thread 的
 Binding 只能展示本地元信息，不能伪造 Thread ID 或因发现/读取而物化。
 现有 `/resume`、卡片和 Admin 管理继续使用 Binding 身份；ID 改动限于说明、展示与复制。
+
+2026-10-26 补充：调用来源与普通目标分别解析。来源仍取每次原生 MCP 调用的可信
+Thread metadata；本实例运行时登记的 Side 仅允许调用 `list_threads`、
+`list_archived_threads`、`read_thread`、`wait_threads`、`send_message_to_thread`。
+`create_thread` 及同入口的 `list_worktrees`、`create_worktree` 仍要求普通 Binding。
+Side 不进入目录，也不成为 read/wait/send 的目标；任意外部 ephemeral Thread 不因此
+获得调用资格。Side 来源使用现有内存身份和实例路由，不持久化 native Thread ID，
+不依赖 Parent 仍是 current 或仍有 Binding；目标及访问范围始终沿用普通会话规则。
 
 ## 创建、输入与复用
 
@@ -48,6 +56,10 @@ output 完全匹配。命名不走人工 rename 的 lifecycle，不影响已接�
 兼容 namespace 与固定 `<codex_delegation>` envelope，携带真实来源 Thread ID，并按
 CLI 顺序转义正文的 `&`、`<`、`>`。该 namespace 是原生委派协议标签，不宣称消息来自
 真人或另一个 CLI 进程；MCP server 名、Netizen 权限与飞书来源展示保持原有身份。
+Side 发送使用自身真实 native Thread ID，来源展示与执行归属不借用 Parent 或虚构
+普通 Binding。Side 来信在兼容 envelope 的正文内附固定来源说明，让接收方模型知道
+来源是临时 Side，不能用该来源 ID 进行 read/wait/send；普通来源格式保持不变。
+工具说明和目标拒绝信息同样明确这一限制，但未知目标不得被断言为 Side。
 原生识别 `create_thread`／`send_message_to_thread` 后，在 preview 为空时从该工具输入
 生成 preview；后续输入不覆盖非空 preview。配合公开 `thread_list(use_state_db_only=True)`
 使仅收到协作来信的新普通会话可正常发现。保持工具级不可信角色，不制造 userMessage，
@@ -72,6 +84,11 @@ start/steer 契约处理。不能通过正文、`is_bot` 或模型自填来源�
 当前固定 Python SDK 对本连接管理的 active Goal 拒绝普通 `turn(ExternalMessage)`。
 保留现有 Goal 准入限制，不为该组合新增 RPC adapter 或修改 SDK。Goal 只读预检失败
 或状态未确认时，来信尚未提交，返回明确未接受；不能据此推断投递结果未知。
+
+Side 调用上述五工具时沿用通用工具取消与 Side 关闭机制，不增加专用关闭协调器、
+在途登记、逐阶段来源复核或补偿撤销。已被普通目标接受的任务不随来源 Side 关闭而撤销。
+Side 向 Parent 发送同样受 exact 目标规则约束，不因父子关系自动激活、恢复或改投。
+需要后续反馈时，Side 可以主动 read/wait 普通目标；不增加反向投递或自动汇报机制。
 
 ## 范围与进程边界
 

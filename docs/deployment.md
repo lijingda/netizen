@@ -842,6 +842,18 @@ Node.js 24.18.1；wheel/sdist 隔离构建与资源加载包含在门禁中。�
 只使用临时 Codex 目录与 loopback，不调用真实模型账号或发送飞书消息。Runtime 竞态
 只延迟一次真实公开 history read 的返回，不伪造原生 Turn ID 或完成结果。
 
+2026-10-26 Side 来源扩展通过 `make check`：3,674 项测试、15 项条件跳过，编译、依赖及
+SDK synthetic probes 通过。另用真实 bundled App Server `0.163.0`、临时
+HOME/CODEX_HOME/数据库和 loopback mock provider 验证：实际 Runtime Side 经 MCP
+`read_thread` 读取 Parent 时，per-call 来源为 Side 自身；既有边界消息中的 Parent/Side
+完整 ID 均进入模型输入。实际 SessionService 发送经隔离原生 callback 及生产
+Channel envelope 构造后，普通目标的模型输入和持久历史保留工具权限、真实 Side ID
+与不可回信说明；外部未登记 ephemeral 和关闭后的 Side 来源被拒绝。
+本地证据为 `docs/research/compatibility/netizen-side-session-source-2026-10-26.py`
+及同名 `.json`，记录最终生产源码 hash。该探针未覆盖真实模型的发送审批交互或真实
+飞书投递；这些不视为已验收，也未执行服务部署。当前执行沙箱的最小 `asyncio.to_thread`
+程序会挂起，沙箱外同一程序正常，因此完整代码门禁在沙箱外完成，没有为环境阻塞修改业务代码。
+
 2026-10-15 在 `openai-codex` / bundled CLI `0.162.1` 已通过五个场景：
 
 - ExternalMessage 首次创建、空闲开始新轮以及运行中加入原轮；模型输入保持

@@ -140,7 +140,7 @@ class SkillExecutionCleanupTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         evidence["fork_parent_field"], "matched" if parent_id else "missing",
                     )
-                    boundary.inject_boundary.assert_awaited_once_with("side")
+                    boundary.inject_boundary.assert_awaited_once_with("side", parent_thread_id="parent")
                     proof.assert_called_once()
 
     async def test_cleanup_only_archives_created_ids_once_in_reverse_order(self) -> None:

@@ -60,6 +60,9 @@ Side 适合在不打断 Parent 会话的情况下讨论一个临时分支。
   与普通 Turn 使用同一规则。
 - Side 内只支持普通 prompt、`//`、`/status`、`/usage`（能力可用时）、`/stop`、`/admin`、`/help`、`/` 和 `/side close`。
 - Side 内不支持 Goal；需要 Goal 时回到普通会话。
+- Side 可按要求查找、读取、等待普通会话，并向父会话或其他普通会话发送消息；具体
+  范围见[Side 会话协作](session-collaboration.md#side-向普通会话发送消息)。Side 自身不能
+  被这些工具读取、等待或接收回信，也不能用会话工具创建新会话或查询、创建受管 worktree。
 - `/stop` 只中断当前 Side Turn，Side 仍可继续；`/side close` 才真正结束 Side 并取消订阅。
 - Side 空闲两小时或 Netizen 服务重启后过期。旧 Side 话题不会自动变成普通会话。
 

@@ -5,6 +5,12 @@ from __future__ import annotations
 _PREFIX = "<codex_delegation>\n  <source_thread_id>"
 _SEPARATOR = "</source_thread_id>\n  <input>"
 _SUFFIX = "</input>\n</codex_delegation>"
+SIDE_SOURCE_NOTICE = (
+    "Source: a temporary Netizen Side conversation. The source_thread_id identifies "
+    "the sender only; this Side cannot be a target of read_thread, wait_threads or "
+    "send_message_to_thread. Do not attempt to reply to that ID.\n\n"
+    "Delegated message:\n"
+)
 
 
 def delegated_prompt(source_thread_id: str, prompt: str) -> str:

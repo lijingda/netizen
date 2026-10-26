@@ -131,10 +131,11 @@ class SessionAgentOrigin:
     chat_id: str
     message_id: str
     conversation: SessionAgentConversation
-    source_binding_id: str
+    source_binding_id: str | None
     source_thread_id: str
     target_binding_id: str
     call_id: str
+    source_side_id: str | None = None
 
     @property
     def id(self) -> str:

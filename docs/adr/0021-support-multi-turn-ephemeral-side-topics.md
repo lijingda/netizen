@@ -47,6 +47,16 @@ Side 的 native Thread 是 ephemeral，服务重启后不能恢复。与此同�
    已达到无订阅终态。高层 facade 出现等价公开能力后，migration sentinel 必须要求删除
    对应 shim。
 
+2026-10-26 补充：既有 Side boundary 在继承历史之后、首轮用户问题之前一次性注入。
+固定模板包含已核验的 Parent 和 Side 完整 native Thread ID，说明用户要求回传时可向
+该 Parent ID 发送；原有继承历史仅供参考的隔离语义不变。Parent ID 固定为创建时身份，
+不随 active pointer 改写，不要求自动汇报。此项仍是固定边界模板，不提供任意上下文
+注入接口，不覆盖 developer/base instructions。
+按 [ADR 0081](0081-coordinate-ordinary-sessions-with-native-external-messages.md)，Side
+可作为五个发现、读取、等待和发送工具的来源，不能创建会话或调用受管 Worktree 工具，
+也不成为普通协作目标。工具取消与关闭继续沿用本决定的通用生命周期，已被普通目标
+接受的任务不随 Side 关闭撤销，不新增这组工具专属的关闭处理。
+
 ### 飞书 Side Topic 与持久路由
 
 1. `/side` 和 `/side <首轮问题>` 在当前 Scope 的 active Binding 上创建 Side。创建前先按

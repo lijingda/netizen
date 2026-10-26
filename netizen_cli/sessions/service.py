@@ -1,4 +1,4 @@
-"""Instance-scoped session tools over ordinary Bindings and public Codex APIs."""
+"""Instance-scoped collaboration with ordinary targets and optional Side callers."""
 from __future__ import annotations
 
 import asyncio
@@ -24,6 +24,7 @@ from .errors import SessionToolError
 from .policy import SessionAccessPolicy, SessionPolicyService
 from .presentation import fit_result, native_json, result_bytes, truncate, turn_summary
 from .schema import validate_arguments
+from .sources import SIDE_SESSION_TOOLS, resolve_session_source
 
 logger = logging.getLogger(__name__)
 _READ_SECONDS = 10.0
@@ -62,8 +63,12 @@ class SessionService:
     def _binding(self, thread_id: str | None, *, source: bool = False) -> tuple[Any, Any]:
         binding = self._bindings.find_by_native_thread_id(thread_id) if thread_id else None
         if binding is None:
-            raise SessionToolError("invalid_call_context" if source else "target_not_registered",
-                                   "The native Thread must belong to an ordinary session registered to this Netizen instance.")
+            detail = ("Side callers cannot use create_thread or the Worktree tools." if source else
+                      "Temporary Side threads cannot be targets of read_thread, wait_threads or send_message_to_thread.")
+            raise SessionToolError(
+                "invalid_call_context" if source else "target_not_registered",
+                "The native Thread must belong to an ordinary session registered to this Netizen instance. " + detail,
+            )
         scope = self._bindings.get_scope(binding.scope_key)
         if scope.app_id != self._app_id:
             raise SessionToolError("invalid_call_context" if source else "target_not_registered",
@@ -95,7 +100,10 @@ class SessionService:
         invoked = False
         try:
             data = validate_arguments(tool_name, arguments)
-            source, source_scope = self._binding(native_thread_id, source=True)
+            if tool_name in SIDE_SESSION_TOOLS:
+                resolve_session_source(self._bindings, self._runtime, self._app_id, native_thread_id)
+            else:
+                source, source_scope = self._binding(native_thread_id, source=True)
             # Admin edits apply to the next call. An admitted operation keeps
             # these immutable rules while native and Channel I/O is in flight.
             policy, revision = self._policy.snapshot()
@@ -131,7 +139,7 @@ class SessionService:
                 async with asyncio.timeout(_READ_SECONDS):
                     value = await self._read(data)
             elif tool_name == "wait_threads":
-                value = await self._wait(data, source.native_thread_id, policy)
+                value = await self._wait(data, native_thread_id, policy)
             elif tool_name == "create_thread":
                 self._authorize(policy, source_scope.chat_id)
                 invoked = True
@@ -143,7 +151,7 @@ class SessionService:
                     raise SessionToolError("target_not_current", "The target is no longer its chat/topic's current session. No input was sent.",
                                            {"threadId": target.native_thread_id, "netizen": {**self._metadata(target, scope), "accepted": False}})
                 invoked = True
-                value = await self._send(source_thread_id=source.native_thread_id, target_thread_id=data["threadId"],
+                value = await self._send(source_thread_id=native_thread_id, target_thread_id=data["threadId"],
                                          prompt=data["prompt"], model=data.get("model"))
             return fit(value)
         except SessionToolError as error:

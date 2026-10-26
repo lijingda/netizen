@@ -764,7 +764,7 @@ async def _side_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         forked_from = getattr(native, "forked_from_id", None)
         if forked_from is not None and forked_from != parent.id:
             raise AssertionError("Side fork parent identity changed")
-        await boundary.inject_boundary(side.id)
+        await boundary.inject_boundary(side.id, parent_thread_id=parent.id)
 
         responses: list[str | None] = []
         for expected in ("SIDE-ONE", "SIDE-TWO"):
