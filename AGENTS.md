@@ -96,6 +96,9 @@ their cited ADRs before changing that boundary.
 - End-user usage consultation:
   [netizen-user-guide](skills/netizen-user-guide/SKILL.md). Its reference manual
   explains the product; it is not an engineering implementation guide.
+  Runtime-specific Agent guidance stays separate; follow its
+  [description/body boundary and size budgets](docs/design.md#运行环境提示与使用指南的边界)
+  before adding execution hints.
 - Decisions: [ADRs](docs/adr/). Add a root navigation reference only when a new
   decision creates a durable guardrail contributors need before related work.
 

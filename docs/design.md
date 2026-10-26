@@ -2924,19 +2924,42 @@ MCP namespace instructions 与工具 description 提供管理指引；全新 Thr
 `auto_review`，不提供 Ask/Custom 宿主选择器；持久 fork 保留原生继承权限，其余配置不由
 Netizen 覆盖。
 
-安装包通过原生 Skill 提供 Netizen 使用咨询和应用 profile／当前消息入口，不进入
+安装包通过原生 Skill 提供 Netizen 使用咨询、应用 profile／当前消息入口及运行环境约定，不进入
 Channel command router，也不替代动态 `/help`。[内置清单与资源校验](../netizen_cli/builtin_skills.py)
 只定位实际导入包的 `resources/skills`；显式源码／editable 导入使用对应 checkout 的
 canonical Skills 树，不依赖 cwd、PATH 或实例目录。启动同一个 AsyncCodex
 后、创建或恢复 Thread 及开放 admission 前，校验内置文件树并用上述固定适配口注册额外
 目录；资源校验或注册失败即启动失败。兼容性 discovery 探针在隔离环境中检查内置
-`netizen-user-guide`、`netizen-lark` 的 catalog 唯一名称和精确文件路径，不把该检查作为
+`netizen-user-guide`、`netizen-lark`、`netizen-runtime-guidance` 的 catalog 唯一名称和精确文件路径，不把该检查作为
 每次启动保证，也不覆盖用户同名 Skill 的原生解析规则。
 不写 `$CODEX_HOME/skills` 或用户 config.toml，不扫描全机实例，不回滚共享 Codex 状态。
 包卸载由包管理器清理该安装的内置资源；实例移除不删除共享安装，其他用户 Skills 仍由用户维护。
 SDK/Adapter 变更须验证 discovery、进程间额外根不串线及普通 start/resume、Side/fork、
 子 agent 的实际 Skill 执行加载；只读发现测试不能替代执行 live gate。完整门禁见
 [部署文档](deployment.md#多实例与内置-skills-验收)。
+
+### 运行环境提示与使用指南的边界
+
+[netizen-runtime-guidance](../skills/netizen-runtime-guidance/SKILL.md) 独立承载 Netizen
+环境特有的简短执行约定与建议，当前只提示最终回复的本地图片使用 Markdown 图片语法，
+交付行为仍由 [ADR 0065](adr/0065-preview-local-images-in-result-markdown.md) 定义。
+`netizen-user-guide` 继续负责产品使用咨询，其触发范围、手册结构和迭代不依赖本 Skill；
+也不要求先读取用户指南正文。宿主识别沿用其既有 description 约定，只依据当前输入，
+不以 Skill 存在或历史标记证明仍在 Netizen 中。
+
+这是原生 developer 字段缺少独立追加机制时的有限取舍：不覆盖用户/项目指令、不按每条
+消息重复追加，也不新增空 MCP 工具。Agent 无需读取正文即可获得的规则完整放入
+description；正文仅供需要细节时补充，不藏入影响核心行为的前置条件。
+技能目录受原生预算、禁用和发现规则约束，description 不保证始终完整可见；普通恢复
+也可能暂时保留历史目录，不能承诺换宿主立即撤除。该 Skill 不承担权限或能力门禁。
+若原生以后支持独立、可组合且能在恢复/压缩后重建的宿主指令来源，再评估迁移。
+
+为保持这个折中克制，新增内容必须是已有 Netizen 运行能力所需、原生通用行为不能
+自然得出的少量提示；产品教程留在用户指南，工程维护规则留在仓库文档。维护预算为
+解析后的 description 不超过 300 个 Unicode 字符、正文不超过 600 个 Unicode 字符，
+重要规则置前。这是项目控制增长的上限，不是 Codex 可见性保证或鼓励填满的目标。
+增加规则时先替换或合并已有内容；无法保持简短时重新评估承载方式，不直接放宽预算、
+扩成另一套手册或依赖正文补足必须直接可见的信息。
 
 ### 原生配置与公开能力
 

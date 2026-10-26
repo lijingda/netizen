@@ -9,7 +9,7 @@ from markdown_it import MarkdownIt
 import yaml
 
 
-BUILTIN_SKILL_NAMES = ("netizen-user-guide", "netizen-lark")
+BUILTIN_SKILL_NAMES = ("netizen-user-guide", "netizen-lark", "netizen-runtime-guidance")
 
 
 class BuiltinSkillError(RuntimeError):
@@ -39,7 +39,7 @@ def builtin_skill_root(
 
 
 def validate_builtin_skills(source_root: Path) -> Path:
-    """Require both self-contained Skill trees, including referenced resources."""
+    """Require every built-in Skill tree, including referenced resources."""
     raw_root = source_root.resolve() / "skills"
     if raw_root.is_symlink() or not raw_root.is_dir():
         raise BuiltinSkillError(f"built-in Skills directory is unavailable: {raw_root}")
