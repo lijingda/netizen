@@ -727,6 +727,9 @@ class StubRuntime:
         except KeyError as error:
             raise SideSessionNotFound(side_id) from error
 
+    def side_snapshot_for_thread(self, thread_id: str) -> SideSessionSnapshot | None:
+        return next((side for side in self.side_snapshots.values() if side.thread_id == thread_id), None)
+
     async def capture_side_submission_admission(
         self,
         side_id: str,

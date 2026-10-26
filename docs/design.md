@@ -540,8 +540,11 @@ revision，选项只保存目标 chat ID，名称和目标通过 `form_value` �
 从当前 exact active、materialized Parent Binding 创建
 `thread_fork(parent_id, ephemeral=True)`。Parent 普通 Turn 正在 running 时允许，
 stopping、Goal、compaction、lifecycle unknown、外部 active 或 Lazy Binding 拒绝。
-fork 后读取 exact ID/ephemeral/parent shape，并通过固定 Side Adapter 注入不可由用户
-修改的边界。Parent active pointer 或配置后续变化不传播到已创建 Side；Side 保存创建
+fork 后读取 exact ID/ephemeral/parent shape，并通过固定 Side Adapter 在继承历史之后、
+首轮用户问题之前一次性注入边界。固定模板保留继承历史仅供参考的隔离说明，并包含已
+核验的 Parent 与 Side 完整 native Thread ID，以及用户要求回传时使用该 Parent ID 的
+说明；不要求自动汇报，不开放任意上下文注入。Parent ID 固定为创建时身份。
+Parent active pointer 或配置后续变化不传播到已创建 Side；Side 保存创建
 时解析出的 Binding Turn Settings 快照，在同一个 ephemeral Thread 上重复用于后续新
 Turn。Parent 和多个 Side 可并发，共享来源实际 cwd 而不增加 Project 锁。
 
@@ -869,6 +872,10 @@ close/expiry 或 idle -> running -> idle ABA。Side 内只允许 Prompt、`//`�
 嵌套 Side 均拒绝。创建时还在 Parent admission 中冻结并复核 Turn Settings 与 Task
 Feedback revision，后续 Parent 配置不传播。`/stop` interrupt/clean 当前 Side Turn 后仍
 回到 idle，可继续多轮。
+
+Side 可作为[五个会话协作工具](#工具与可访问目录)的调用来源；关闭、取消与在途调用
+沿用 Side 通用工具处理，不增加专用协调器、在途登记、逐阶段来源复核或补偿撤销。
+普通目标已经接受的任务不随来源 Side 关闭而撤销。
 
 Side idle 两小时后过期；active Turn 完成后重新开始完整窗口。长期 timer 不进入普通
 `wait_idle()` task set。close 在 Side 锁内先切 `closing` 并快照 active，释放锁后才
@@ -1852,7 +1859,7 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 
 [ADR 0081](adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md) 定义这条入口。
 同一 ServiceCore 在启动 App Server 前绑定临时会话 MCP，复用 Scheduler 的同进程传输、
-可信调用 metadata、鉴权与有界停服机制，注册六个会话工具及三个受管 Worktree 工具；全部与普通输入共享 Store、
+可信调用 metadata、鉴权与有界停服机制，注册六个会话工具及两个受管 Worktree 工具；全部与普通输入共享 Store、
 Runtime、Channel 和 AsyncCodex。工具就绪前不开准入，关闭时先拒绝新调用再有界收尾。
 不写用户 `config.toml`、替换 MCP 表或额外注入 developer/base instructions。
 
@@ -1864,11 +1871,20 @@ Runtime、Channel 和 AsyncCodex。工具就绪前不开准入，关闭时先拒
 `title`；结果中的 `threadId` 是完整原生 Thread ID。发送成功仅说明输入已接受，后续
 read/wait 才提供任务结果；未知副作用与确定未接受分开反馈。
 
+来源取每次原生 MCP 调用的可信 `_meta.threadId`，与普通目标分别解析。本实例普通
+Binding 保留既有调用权限；运行时登记的本实例 Side 仅可调用 `list_threads`、
+`list_archived_threads`、`read_thread`、`wait_threads`、`send_message_to_thread`。
+Side 不能调用 `create_thread`、`list_worktrees` 或 `create_worktree`，也不接纳任意
+外部 ephemeral Thread。Side 来源使用现有内存身份与实例路由，不依赖 Parent 当前指针
+或 Binding 存续，不增加持久 native ID、普通 Binding 或独立授权配置。
+
 工具目标必须经完整 Native Thread ID 精确映射为本实例、当前飞书应用的普通 Binding。
 不自动登记外部 CLI/App Thread，不包含 Side 或原生子 agent。Binding ID、chat/topic、
 位置链接、是否 current 等通过明确 Netizen metadata 展示，不能覆盖原生 ID/状态。
 已有人工控制继续按 Binding 引用工作；短原生 ID、名称和话题链接不自动解析成操作目标。
 尚未物化的 Binding 没有可调用 Thread ID；查询不能触发物化。
+Side 即使能作为来源，也不成为 read/wait/send 目标；目标拒绝信息明确临时 Side 不支持
+这些操作，未知 ID 不被直接判定为 Side。父子关系不改变目标及访问范围规则。
 
 两个发现工具支持 `limit`（默认 10，上限 50）、可选 `searchTerm` 和 `cursor`，返回
 `nextCursor`。按原生更新时间降序分批查询所选目录，每批仅查询本实例匹配 ID，再按
@@ -1916,6 +1932,11 @@ UTF-8 字节限制。模型目录 ID 在 SDK 提交前解析为实际 model，�
 向 exact Thread 提交，由 Codex 在接收时选择 start/join。普通飞书、问题卡和定时输入
 保留原有 exact Turn 准入。Runtime 按实际返回的 Turn ID 复用既有消费者或建立新一轮
 消费者，不启动重复 `handle.run()`，不把旧轮结果改归属到新来信。
+
+Side 来信保留其真实 native Thread ID，飞书来源展示、origin 与执行归属均表达 Side，
+不借用 Parent 或虚构普通 Binding。兼容 `<codex_delegation>` 外层形状保持不变，
+Side 正文带固定来源说明，让接收方模型知道此来源 ID 不支持 read/wait/send；普通
+来源消息格式不变。Side 可主动读取或等待普通目标的反馈，不增加反向回信或自动汇报。
 
 目标非 current 时可以在允许范围内发现/读取，但发送不发布任务锚点也不提交输入；若
 发布期间目标切换，原生提交前拒绝并说明锚点未执行。归档、停止、Goal、压缩和无法确认

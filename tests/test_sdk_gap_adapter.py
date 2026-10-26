@@ -438,7 +438,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 subscription = AppServerThreadSubscriptionControl(codex)
                 self.assertFalse(hasattr(boundary, "request"))
                 self.assertFalse(hasattr(subscription, "request"))
-                await boundary.inject_boundary("thread-side")
+                await boundary.inject_boundary("thread-side", parent_thread_id="thread-parent")
                 status = await subscription.unsubscribe("thread-side")
             _close_probe_pipes(process)
             gc.collect()
@@ -448,6 +448,11 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         inject = next(
             item for item in messages if item.get("method") == "thread/inject_items"
         )
+        text = inject["params"]["items"][0]["content"][0]["text"]
+        self.assertTrue(text.startswith(SIDE_THREAD_BOUNDARY))
+        self.assertIn("Parent native Thread ID: thread-parent", text)
+        self.assertIn("Side native Thread ID: thread-side", text)
+        self.assertIn("send_message_to_thread", text)
         self.assertEqual(
             inject["params"],
             {
@@ -457,7 +462,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                         "type": "message",
                         "role": "user",
                         "content": [
-                            {"type": "input_text", "text": SIDE_THREAD_BOUNDARY}
+                            {"type": "input_text", "text": text}
                         ],
                     }
                 ],
@@ -520,7 +525,8 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                         else AppServerThreadSubscriptionControl(codex)
                     )
                     with self.assertRaises(expected_error):
-                        await getattr(control, operation)("thread-side")
+                        kwargs = {"parent_thread_id": "thread-parent"} if operation == "inject_boundary" else {}
+                        await getattr(control, operation)("thread-side", **kwargs)
                 finally:
                     with suppress(BrokenPipeError):
                         await codex.close()

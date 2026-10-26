@@ -210,7 +210,7 @@ class ThreadSubscriptionControl(Protocol):
 
 
 class SideBoundaryControl(Protocol):
-    async def inject_boundary(self, thread_id: str) -> None: ...
+    async def inject_boundary(self, thread_id: str, *, parent_thread_id: str) -> None: ...
 
 
 class AppServerSkillCatalog:
@@ -410,8 +410,19 @@ class AppServerSideBoundaryControl:
         self._client = client
         self._inject_response_model = inject_response_model
 
-    async def inject_boundary(self, thread_id: str) -> None:
+    async def inject_boundary(self, thread_id: str, *, parent_thread_id: str) -> None:
         _validate_thread_id(thread_id)
+        _validate_thread_id(parent_thread_id)
+        boundary = (
+            SIDE_THREAD_BOUNDARY
+            + f"\nParent native Thread ID: {parent_thread_id}"
+            + f"\nSide native Thread ID: {thread_id}"
+            + "\nWhen the user asks you to report to the parent conversation, use "
+              "send_message_to_thread with the Parent native Thread ID above. "
+              "The parent remains subject to ordinary target access and availability rules. "
+              "This Side cannot itself be a read, wait or message target; it can read/wait "
+              "for feedback in the parent conversation. Do not report automatically."
+        )
         try:
             await self._client.request(
                 _THREAD_INJECT_ITEMS_METHOD,
@@ -424,7 +435,7 @@ class AppServerSideBoundaryControl:
                             "content": [
                                 {
                                     "type": "input_text",
-                                    "text": SIDE_THREAD_BOUNDARY,
+                                    "text": boundary,
                                 }
                             ],
                         }

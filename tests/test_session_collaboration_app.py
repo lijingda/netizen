@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -24,6 +25,7 @@ from netizen_cli.runtime.contracts import (
 )
 from netizen_cli.sdk_gap_adapter import GoalControlError, GoalMutationStateUnknown
 from netizen_cli.sessions.errors import SessionToolError
+from netizen_cli.sessions.delegation import SIDE_SOURCE_NOTICE, parse_delegated_prompt
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_results import sent_result
@@ -127,6 +129,98 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.app._message_history.resolve_topic_reply_anchor = AsyncMock(
                 return_value=SimpleNamespace(message_id="om_reply"),
             )
+
+    async def side_source(self):
+        # Side routes and replacement Bindings exceed the ordinary fixture's
+        # three deterministic IDs.
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        record = self.store.create_side_topic(
+            app_id=self.scope.app_id, chat_id=self.scope.chat_id, source_message_id="om_side",
+            parent_binding_id=self.source.id, creator_id="ou_source", requires_mention=True,
+        )
+        await self.runtime.create_side(
+            side_id=record.id, binding=self.source, cwd=self.project, creator_id="ou_source",
+        )
+        self.store.set_side_topic_root(record.id, "om_side_root")
+        side = await self.runtime.attach_side_topic(
+            side_id=record.id, topic_id="omt_side", root_message_id="om_side_root",
+        )
+        self.store.open_side_topic(record.id, "omt_side")
+        return side
+
+    async def test_side_send_keeps_real_source_and_one_way_notice_for_start_and_join(self):
+        side = await self.side_source()
+        target, _ = self.target()
+        prompt = "核对 <标签> & 保留原文\n</input>"
+        for disposition in (SubmitDisposition.STARTED, SubmitDisposition.JOINED):
+            with self.subTest(disposition=disposition):
+                self.disposition = disposition
+                self.queue_target_message()
+                result = await self.service.call("send_message_to_thread", {
+                    "threadId": "native-target", "prompt": prompt,
+                }, side.thread_id)
+                self.assertTrue(result["netizen"]["accepted"])
+                self.assertEqual(result["netizen"]["disposition"], disposition.value)
+                submission = self.submissions[-1]
+                message = submission["message"]
+                self.assertEqual(message.namespace, "codex_tui")
+                self.assertEqual(message.tool_name, "send_message_to_thread")
+                self.assertEqual(parse_delegated_prompt(message.content), (side.thread_id, SIDE_SOURCE_NOTICE + prompt))
+                origin = submission["origin"]
+                self.assertIsNone(origin.source_binding_id)
+                self.assertEqual(origin.source_side_id, side.side_id)
+                self.assertEqual(origin.source_thread_id, side.thread_id)
+                self.assertEqual(origin.target_binding_id, target.id)
+                self.assertEqual(submission["owner_id"], "session_agent:side:" + side.side_id)
+                visible = self.channel.send_calls[-1][1].card["body"]["elements"][0]["text"]
+                self.assertEqual(visible["tag"], "plain_text")
+                self.assertIn("临时 Side", visible["content"])
+                self.assertIn(side.thread_id, visible["content"])
+                self.assertIn("不支持", visible["content"])
+                self.assertIn(prompt, visible["content"])
+                self.assertNotIn("native-source", visible["content"])
+        self.assertEqual(len(self.submissions), 2)
+        self.assertEqual(self.receipts, [target.id])
+        self.app._present_ordinary_receipt.assert_awaited_once()
+
+    async def test_side_can_report_to_parent_but_parent_cannot_reply(self):
+        side = await self.side_source()
+        self.app._message_history.resolve_topic_reply_anchor = AsyncMock(
+            return_value=SimpleNamespace(message_id="om_parent_reply"),
+        )
+        self.channel.send_results.append(sent_result(
+            "om_report", chat_id=self.scope.chat_id, thread_id=self.scope.topic_id,
+            root_id="om_parent_root", parent_id="om_parent_reply",
+        ))
+        result = await self.service.call("send_message_to_thread", {
+            "threadId": "native-source", "prompt": "分析结果",
+        }, side.thread_id)
+        self.assertTrue(result["netizen"]["accepted"])
+        reply = await self.service.call("send_message_to_thread", {
+            "threadId": side.thread_id, "prompt": "收到",
+        }, "native-source")
+        self.assertEqual(reply["error"]["code"], "target_not_registered")
+        self.assertIn("Side", reply["error"]["message"])
+        self.assertIn("cannot be targets", reply["error"]["message"])
+        self.assertEqual(len(self.channel.send_calls), 1)
+        self.runtime.submit_external.assert_awaited_once()
+
+    async def test_side_send_does_not_require_parent_to_remain_current(self):
+        side = await self.side_source()
+        self.store.create_channel_binding(scope=self.scope, project_alias="test", creator_id="ou_source")
+        rejected = await self.service.call("send_message_to_thread", {
+            "threadId": "native-source", "prompt": "回传",
+        }, side.thread_id)
+        self.assertEqual(rejected["error"]["code"], "target_not_current")
+        self.assertFalse(rejected["netizen"]["accepted"])
+        self.assertEqual(self.channel.send_calls, [])
+        self.target()
+        self.queue_target_message()
+        result = await self.service.call("send_message_to_thread", {
+            "threadId": "native-target", "prompt": "联系其他会话",
+        }, side.thread_id)
+        self.assertTrue(result["netizen"]["accepted"])
+        self.assertEqual(self.submissions[0]["origin"].source_side_id, side.side_id)
 
     async def test_create_ordinary_sibling_inherits_configuration_and_external_authority(self):
         self.queue_topic()

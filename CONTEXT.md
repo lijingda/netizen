@@ -63,8 +63,9 @@ Mention Context Mode、对应 revision、creator 和时间。它不复制 Codex 
 **Netizen Session Reference / Netizen 会话编号**：普通 Binding 的本地标识；界面可显示
 其短前缀，供当前 Scope 的人工选择与管理。尚未创建原生 Thread 的 Binding 也有此编号。
 
-**Session Agent Input / 会话协作来信**：一个普通会话经协作工具向另一普通会话提交的
-工具来源输入。飞书中的机器人消息是它的展示，不代表真人用户发言或新增用户授权。
+**Session Agent Input / 会话协作来信**：一个普通会话或 Side 经协作工具向普通会话提交的
+工具来源输入。Side 可以发送，但不能作为协作来信的接收目标。飞书中的机器人消息是它的
+展示，不代表真人用户发言或新增用户授权。
 
 **Session Defaults / 会话默认配置**：聊天中缺少当前会话时用于自动创建普通 Binding 的
 Project、worktree 使用方式与显式会话配置意图。配置属于聊天，生成的会话属于真实消息所在的 Scope。

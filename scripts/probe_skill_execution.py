@@ -282,7 +282,7 @@ async def _scenario(
                     if phase == "fork":
                         evidence["fork"] = _verify(await _turn(fork, fixture.prompt, args), fixture)
                     else:
-                        await AppServerSideBoundaryControl(codex).inject_boundary(fork.id)
+                        await AppServerSideBoundaryControl(codex).inject_boundary(fork.id, parent_thread_id=thread.id)
                         handle = await fork.turn([
                             TextInput(f"${fixture.name}\n{fixture.prompt}"),
                             SkillInput(name=fixture.name, path=str(fixture.skill_path)),

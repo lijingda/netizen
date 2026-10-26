@@ -296,8 +296,9 @@ from .turn_files import (
     turn_patch_summary,
 )
 from .schedules.models import Claim, ScheduleConflict, ScheduleError, ScheduleNotFound
-from .sessions.delegation import delegated_prompt
+from .sessions.delegation import SIDE_SOURCE_NOTICE, delegated_prompt
 from .sessions.errors import SessionToolError
+from .sessions.sources import SessionSource, resolve_session_source
 
 
 logger = logging.getLogger(__name__)
@@ -665,19 +666,25 @@ class ChannelApplication:
             })
         return binding, scope
 
-    async def _session_agent_card(self, source: ThreadBinding, prompt: str, *, title: str | None = None) -> OutboundCard:
+    async def _session_agent_card(self, source: SessionSource, prompt: str, *, title: str | None = None) -> OutboundCard:
         # The source is this tool's authenticated caller. Its title is display
         # attribution; neither it nor the prompt can manufacture Feishu @s.
-        source_title = source.short_id
-        try:
-            metadata = await self._runtime.thread_summary(source.native_thread_id)
-            source_title = _normalized_thread_text(metadata.name, max_chars=120) or source_title
-        except Exception:
-            pass
-        content = (
-            f"来自会话：{source_title}\nCodex 会话 ID：{source.native_thread_id}"
-            f"\nNetizen 会话编号：{source.short_id}\n\n{prompt}"
-        )
+        if isinstance(source, ThreadBinding):
+            source_title = source.short_id
+            try:
+                metadata = await self._runtime.thread_summary(source.native_thread_id)
+                source_title = _normalized_thread_text(metadata.name, max_chars=120) or source_title
+            except Exception:
+                pass
+            content = (
+                f"来自会话：{source_title}\nCodex 会话 ID：{source.native_thread_id}"
+                f"\nNetizen 会话编号：{source.short_id}\n\n{prompt}"
+            )
+        else:
+            content = (
+                f"来自临时 Side：{source.side_id[:8]}\nCodex 会话 ID：{source.thread_id}"
+                f"\nSide 不支持作为跨会话读取、等待或回信的目标。\n\n{prompt}"
+            )
         return OutboundCard(card={
             "schema": "2.0", "config": {"width_mode": "default"},
             "header": {"title": {"tag": "plain_text", "content": title or "会话协作来信"}},
@@ -685,10 +692,15 @@ class ChannelApplication:
         })
 
     @staticmethod
-    def _session_message(source: ThreadBinding, prompt: str, *, tool_name: str) -> ExternalMessage:
+    def _session_message(source: SessionSource, prompt: str, *, tool_name: str) -> ExternalMessage:
+        if isinstance(source, ThreadBinding):
+            thread_id = source.native_thread_id
+        else:
+            thread_id = source.thread_id
+            prompt = SIDE_SOURCE_NOTICE + prompt
         return ExternalMessage(
             namespace="codex_tui", tool_name=tool_name,
-            content=delegated_prompt(source.native_thread_id, prompt),
+            content=delegated_prompt(thread_id, prompt),
         )
 
     def _session_receipt(self, binding: ThreadBinding, scope: FeishuScope, submission: Submission) -> dict[str, Any]:
@@ -910,7 +922,13 @@ class ChannelApplication:
         model: str | None = None,
     ) -> dict[str, Any]:
         """Deliver an admitted session tool call to its still-current exact Thread."""
-        source, _ = self._session_tool_binding(source_thread_id)
+        source = resolve_session_source(self._bindings, self._runtime, self._app_id, source_thread_id)
+        if isinstance(source, ThreadBinding):
+            source_binding_id, source_side_id = source.id, None
+            owner_id = "session_agent:" + source.id
+        else:
+            source_binding_id, source_side_id = None, source.side_id
+            owner_id = "session_agent:side:" + source.side_id
         if source_thread_id == target_thread_id:
             raise SessionToolError("invalid_target", "不能向当前调用会话自身发送跨会话来信。")
         binding, scope = self._require_session_target(target_thread_id)
@@ -929,7 +947,10 @@ class ChannelApplication:
                     raise MessageHistoryUnavailable("话题消息读取能力不可用，本次未发送。")
                 reply_to = (await self._message_history.resolve_topic_reply_anchor(scope)).message_id
             card = await self._session_agent_card(source, prompt)
-            self._session_tool_binding(source_thread_id)
+            # Keep the existing ordinary-source recheck. Side tool cancellation
+            # and closure use the general Side lifecycle, without a send protocol.
+            if source_binding_id is not None:
+                self._session_tool_binding(source_thread_id)
             self._require_session_target(target_thread_id)
             call_id = uuid.uuid4().hex
             sent = await send_topic_message(self._channel, scope.chat_id, card, SendOpts(
@@ -943,13 +964,13 @@ class ChannelApplication:
                 raise TopicPublishError("来信消息不属于指定会话，本次未投递。", unknown=True)
             origin = SessionAgentOrigin(self._app_id, scope.chat_id, sent.message_id,
                 SessionAgentConversation(scope.chat_id, target.chat_kind, scope.topic_id),
-                source.id, source_thread_id, binding.id, call_id)
+                source_binding_id, source_thread_id, binding.id, call_id, source_side_id)
             binding, scope = self._require_session_target(target_thread_id)
             submission_attempted = True
             submission = await self._runtime.submit_external(
                 binding=binding, cwd=cwd,
                 message=self._session_message(source, prompt, tool_name="send_message_to_thread"),
-                owner_id="session_agent:" + source.id, origin=origin, model=model,
+                owner_id=owner_id, origin=origin, model=model,
             )
             await self._present_session_submission(submission, origin)
             return self._session_receipt(binding, scope, submission)

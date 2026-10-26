@@ -1283,7 +1283,7 @@ class CodexRuntime:
                 forked_from_id = getattr(native_fork, "forked_from_id", None)
                 if forked_from_id is not None and forked_from_id != current.native_thread_id:
                     raise RuntimeError("forked Side Thread parent identity mismatch")
-                await control.inject_boundary(thread.id)
+                await control.inject_boundary(thread.id, parent_thread_id=current.native_thread_id)
             except BaseException as error:
                 try:
                     await subscription_control.unsubscribe(thread.id)
@@ -1587,6 +1587,11 @@ class CodexRuntime:
 
     def side_snapshot(self, side_id: str) -> SideSessionSnapshot:
         return self._side_snapshot(self._require_side(side_id))
+
+    def side_snapshot_for_thread(self, thread_id: str) -> SideSessionSnapshot | None:
+        """Resolve a native caller without importing ephemeral Threads or their history."""
+        return next((self._side_snapshot(session) for session in self._sides.values()
+                     if session.thread.id == thread_id), None)
 
     def side_ids_for_projects(self, project_aliases: tuple[str, ...]) -> tuple[str, ...]:
         """Find live Side IDs by frozen ownership, including deleted Parents."""

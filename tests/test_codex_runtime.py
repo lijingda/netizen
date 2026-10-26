@@ -601,13 +601,15 @@ class FakeTerminalCleanup:
 class FakeSideThreadControl:
     def __init__(self) -> None:
         self.inject_calls: list[str] = []
+        self.inject_parents: dict[str, str] = {}
         self.unsubscribe_calls: list[str] = []
         self.inject_failures: list[BaseException] = []
         self.unsubscribe_failures: list[BaseException] = []
         self.unsubscribe_status = ThreadUnsubscribeStatus.UNSUBSCRIBED
 
-    async def inject_boundary(self, thread_id: str) -> None:
+    async def inject_boundary(self, thread_id: str, *, parent_thread_id: str) -> None:
         self.inject_calls.append(thread_id)
+        self.inject_parents[thread_id] = parent_thread_id
         if self.inject_failures:
             raise self.inject_failures.pop(0)
 
@@ -1175,6 +1177,9 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             [(binding.native_thread_id, {"ephemeral": True, "include_turns": False})],
         )
         self.assertEqual(self.side_control.inject_calls, [snapshot.thread_id])
+        self.assertEqual(self.side_control.inject_parents[snapshot.thread_id], binding.native_thread_id)
+        self.assertEqual(self.runtime.side_snapshot_for_thread(snapshot.thread_id), snapshot)
+        self.assertIsNone(self.runtime.side_snapshot_for_thread(binding.native_thread_id))
         self.assertEqual(snapshot.parent_binding_id, binding.id)
         self.assertEqual(snapshot.topic_id, record.topic_id)
         self.assertEqual(snapshot.state, SideSessionState.OPEN)

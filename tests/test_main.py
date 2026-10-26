@@ -1414,7 +1414,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 boundary_codex.append(codex)
                 self.codex = codex
 
-            async def inject_boundary(self, _thread_id: str) -> None:
+            async def inject_boundary(self, _thread_id: str, *, parent_thread_id: str) -> None:
                 return None
 
         class FakeSubscriptionControl:

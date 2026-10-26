@@ -43,6 +43,19 @@ Netizen 会在当前聊天中新建普通话题。来源已经是话题时，新
 当前 SDK 限制下，正在执行 Goal 的会话不能接收这类协作来信；真人在目标话题里的
 正常补充仍按原有规则处理。Goal 预检失败或状态未确认时，回执会明确说明来信未提交。
 
+## Side 向普通会话发送消息
+
+Side 可使用 `list_threads`、`list_archived_threads`、`read_thread`、`wait_threads`、
+`send_message_to_thread` 查找、读取、等待或联系普通会话。例如在 Side 中要求
+“把刚才的结论发给父会话”；Side 创建时已取得父会话的完整 Codex 会话 ID。
+父会话和其他目标使用相同访问规则；原父会话被切到后台或删除后，不会自动改投新的
+当前会话。Side 自身仍可联系其他符合规则的普通目标。
+
+这是单向能力：Side 不进入普通会话目录，也不能被这些工具读取、等待或接收回信。
+Side 来信会向接收方说明这一限制；需要后续反馈时，可让 Side 主动读取或等待普通
+目标。Side 不能调用 `create_thread`、`list_worktrees` 或 `create_worktree`。
+关闭 Side 不会撤销普通目标已经接受的任务。
+
 ## 管理可访问范围
 
 实例管理员在 Admin 设置两组独立范围，所有来源聊天共用：
