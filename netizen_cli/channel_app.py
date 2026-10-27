@@ -108,6 +108,7 @@ from .cards.scheduled import (
     schedule_navigation,
     schedule_query,
     schedule_retry_card,
+    schedule_trigger_instructions,
 )
 from .cards.chat_target import CHAT_SEARCH_LIMIT, ChatSearchSnapshot
 from .cards.questions import (
@@ -1027,13 +1028,20 @@ class ChannelApplication:
             trigger_label = "手动触发" if run.trigger_source == "manual" else "自动触发"
             # Plain text prevents instructions from manufacturing mentions in the card.
             description = _FEISHU_AT_TAG_START.sub("‹", plan.instructions)
+            hint = (
+                "成功完成且结果送达后自动归档；运行中可用 /stop 停止。"
+                if plan.auto_archive else
+                "运行中可用 /stop 停止，结束后可在本话题继续交流。"
+            )
             root_content = OutboundCard(card={
                 "schema": "2.0", "config": {"width_mode": "default", "update_multi": True},
                 "header": {"title": {"tag": "plain_text", "content": "定时任务 · " + plan.name}, "template": "blue"},
-                "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content":
-                    f"{trigger_label} · {local_due} · {plan.schedule.timezone}\n\n"
-                    + description[:3000] + ("…" if len(description) > 3000 else "")
-                    + "\n\n本次使用独立普通会话，可在话题中继续交流或使用 /stop。"}}]},
+                "body": {"elements": [
+                    {"tag": "div", "text": {"tag": "plain_text", "content":
+                        f"{trigger_label} · {local_due} · {plan.schedule.timezone}"}},
+                    *schedule_trigger_instructions(description),
+                    {"tag": "div", "text": {"tag": "plain_text", "content": hint}},
+                ]},
             })
             publishing_started = True
             root = await send_topic_message(self._channel, run.chat_id, root_content, SendOpts(receive_id_type="chat_id", uuid=run.root_uuid))
@@ -1175,9 +1183,10 @@ class ChannelApplication:
             anchor_content = OutboundCard(card={
                 "schema": "2.0", "config": {"width_mode": "default"},
                 "header": {"title": {"tag": "plain_text", "content": "定时任务 · " + plan.name}},
-                "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content":
-                    f"{trigger} · {local_due}\n\n" + plan.instructions[:3000]
-                    + ("…" if len(plan.instructions) > 3000 else "")}}]},
+                "body": {"elements": [
+                    {"tag": "div", "text": {"tag": "plain_text", "content": f"{trigger} · {local_due}"}},
+                    *schedule_trigger_instructions(plan.instructions),
+                ]},
             })
             sent = await send_topic_message(self._channel, scope.chat_id, anchor_content, SendOpts(
                 receive_id_type="chat_id", reply_to=reply_to,

@@ -80,9 +80,9 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.history = self.fixture.message_history
 
 
-    def claim(self, instructions="检查明确资源", *, session_settings=SessionSettings()):
+    def claim(self, instructions="检查明确资源", *, session_settings=SessionSettings(), auto_archive=False):
         result = self.store.schedules.create(workspace=WorkspacePolicy(), name="日报", instructions=instructions, project_alias="work", app_id="app", chat_id="oc_group",
-            schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create-plan", now=100, session_settings=session_settings)
+            schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create-plan", now=100, session_settings=session_settings, auto_archive=auto_archive)
         claimed = self.store.schedules.claim_due(result.plan_id, app_id="app", now=160)
         self.assertIsNotNone(claimed)
         return claimed
@@ -125,7 +125,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.channel.send_calls[0][2].reply_to)
 
     async def test_manual_trigger_uses_same_topic_origin_and_saved_request_without_human_attribution(self):
-        claim = self.claim("$reports 使用已保存的明确资源")
+        claim = self.claim("$reports 使用已保存的明确资源\n\n" + "保留完整指令" * 600)
         claim = replace(claim, run=replace(claim.run, trigger_source="manual"))
         group = FeishuScope("app", "oc_group", ScopeKind.GROUP)
         previous = self.store.create_channel_binding(scope=group, project_alias="work", creator_id="ou_user")
@@ -136,6 +136,12 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("手动触发", str(root[1].card))
         self.assertIn("手动触发", seed[1])
         self.assertNotIn("自动", str(root[1].card) + seed[1])
+        body = root[1].card["body"]["elements"]
+        self.assertIn("手动触发", body[0]["text"]["content"])
+        panel, = _elements(root[1].card, "collapsible_panel")
+        self.assertFalse(panel["expanded"])
+        self.assertEqual(panel["elements"][0]["text"]["content"], claim.plan.instructions[:3000] + "…")
+        self.assertEqual(body[-1]["text"]["content"], "运行中可用 /stop 停止，结束后可在本话题继续交流。")
         submission, = self.submissions
         metadata = json.loads(submission["input"].split("<scheduled_plan>\n")[1].split("\n</scheduled_plan>")[0])
         self.assertEqual(metadata["trigger_source"], "manual")
@@ -150,6 +156,27 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submission["origin"].message_id, "om_seed")
         self.assertIsInstance(submission["origin"], ScheduledOrigin)
         self.assertEqual(self.receipts, [claim.run.id])
+
+    async def test_trigger_card_keeps_claimed_content_and_auto_archive_hint_after_plan_edit(self):
+        claim = self.claim("首行\n\n第三行\n" + "任务内容" * 800, auto_archive=True)
+        self.store.schedules.update(claim.plan.id, expected_revision=claim.plan.revision,
+            request_id="edit-after-claim", changes={"instructions": "后续的新内容", "auto_archive": False}, now=160)
+        self.queue_topic()
+
+        await self.app.dispatch_scheduled_run(claim)
+
+        card = self.channel.send_calls[0][1].card
+        self.assertEqual(card["header"]["title"]["content"], "定时任务 · 日报")
+        body = card["body"]["elements"]
+        self.assertEqual(body[0]["text"]["content"], "自动触发 · 1970-01-01T00:02+00:00 · UTC")
+        self.assertEqual(body[1]["text"]["content"], "内容预览\n首行\n\n第三行…")
+        panel, = _elements(card, "collapsible_panel")
+        self.assertFalse(panel["expanded"])
+        self.assertEqual(panel["elements"][0]["text"]["content"], claim.plan.instructions[:3000] + "…")
+        self.assertEqual(body[-1]["text"]["content"], "成功完成且结果送达后自动归档；运行中可用 /stop 停止。")
+        self.assertNotIn("后续的新内容", str(card))
+        self.assertNotIn("继续交流", str(card))
+        self.assertEqual(self.submissions[0]["input"].split("\n\n<scheduled_plan>\n")[0], claim.plan.instructions)
 
     async def test_promotion_uses_distinct_stable_uuid_and_seed_completion_origin(self):
         claim = self.claim()

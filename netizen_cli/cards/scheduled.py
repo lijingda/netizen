@@ -292,6 +292,25 @@ def _fold(title: str, *items: dict[str, Any], expanded: bool = False) -> dict[st
     return {"tag": "collapsible_panel", "expanded": expanded, "header": {"title": _plain_text(title)}, "elements": list(items)}
 
 
+def schedule_trigger_instructions(instructions: str) -> list[dict[str, Any]]:
+    """Keep the trigger preview and bounded body on the original static card."""
+    preview_end = min(len(instructions), 120)
+    for line_number, newline in enumerate(re.finditer(r"\r\n|\r|\n", instructions), start=1):
+        if line_number == 3:
+            preview_end = min(preview_end, newline.start())
+            break
+    # Do not split a Windows line ending at the character boundary.
+    if instructions[preview_end - 1:preview_end + 1] == "\r\n":
+        preview_end -= 1
+    if preview_end == len(instructions):
+        return [_plain(instructions)]
+    visible = instructions[:3000] + ("…" if len(instructions) > 3000 else "")
+    return [
+        _plain("内容预览\n" + instructions[:preview_end] + "…"),
+        _fold("查看完整任务内容", _plain(visible)),
+    ]
+
+
 def _form_name(scope: FeishuScope, kind: str, nonce: str) -> str:
     # Feishu caps each component name at 100 characters. Keep the common
     # identity small; edit revision / rule evidence travels on its own field.
