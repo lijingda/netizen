@@ -33,6 +33,7 @@ REQUIRED_WHEEL_FILES = frozenset({
     "netizen_cli/resources/skills/netizen-user-guide/SKILL.md",
     "netizen_cli/resources/skills/netizen-runtime-guidance/SKILL.md",
     "netizen_cli/admin/static/index.html",
+    "netizen_cli/admin/static/netizen.svg",
 })
 
 

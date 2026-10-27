@@ -2176,7 +2176,7 @@ Runtime 之前以 closed admission 绑定；Feishu、Store、Runtime 和管理 a
 后，主 loop 才通过 `channel.schedule(...)` 在 background loop 打开它并打印 ready marker。
 HTTP 使用 exact-pin `h11` 的公开状态机和受限 `asyncio` transport：最多 32 条连接，header
 absolute deadline 5 秒、keep-alive 15 秒、request/header line 8 KiB、headers 32 KiB、body
-64 KiB，并拒绝 pipelining 和 upload。未认证内容仅有登录 HTML/JS/CSS、浏览器绑定的
+64 KiB，并拒绝 pipelining 和 upload。未认证内容仅有登录 HTML/JS/CSS、共享静态品牌图标、浏览器绑定的
 设备授权 start/state/cancel/二维码与无细节 readiness；未认证 GET 已知 Admin 页面路径
 只返回 303 到 `/login`，携带经校验的回跳地址。管理 HTML、JavaScript、API 和其他资源
 仍要求 session；API、受保护资源和未知路径未认证时返回 401，不改成登录 HTML。

@@ -20,7 +20,9 @@ body.time-range-modal-open { overflow: hidden; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 12px clamp(20px, 4vw, 56px); background: #10213f; color: white; }
-.topbar-brand { flex: 1; min-width: 0; }
+.topbar-brand { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
+.topbar-brand-text { min-width: 0; }
+.brand-logo { display: block; flex: none; }
 .topbar h1 { font-size: 24px; line-height: 1.2; }
 .topbar .instance-root { margin: 4px 0 0; line-height: 1.4; }
 .topbar .identity-toolbar { flex-wrap: nowrap; max-width: 50%; }
@@ -203,6 +205,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .login-body { min-height: 100vh; min-height: 100svh; display: grid; place-items: center; padding: clamp(12px, 3vw, 24px); }
 .login-card { width: min(420px, 100%); min-width: 0; margin: 0; padding: clamp(20px, 5vw, 28px); border: 1px solid var(--line); border-radius: 14px; background: var(--paper); box-shadow: 0 8px 28px rgb(23 39 68 / 6%); font-size: 14px; line-height: 1.6; }
 .login-heading h1 { font-size: 28px; line-height: 1.2; }
+.login-heading .brand-logo { margin-bottom: 12px; }
 .login-heading p { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 .login-instance { margin: 20px 0; padding: 10px 12px; border-radius: 8px; background: var(--wash); }
 .login-instance > span { color: var(--muted); font-size: 12px; }

@@ -26,7 +26,7 @@ class DeploymentAssetsTest(unittest.TestCase):
 
         self.assertEqual(
             project["tool"]["setuptools"]["package-data"]["netizen_cli.admin"],
-            ["static/*.html", "static/*.css", "static/*.js"],
+            ["static/*.html", "static/*.css", "static/*.js", "static/*.svg"],
         )
 
     def test_local_documentation_links_and_anchors_resolve(self) -> None:
