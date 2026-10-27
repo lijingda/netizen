@@ -36,6 +36,7 @@ from netizen_cli.message_history import (
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.schedules.models import ScheduleRule
+from tests.support.channel_cards import elements
 from tests.support.channel_messages import FakeChannel, FakeMessage, FakeMessageHistory
 from tests.support.channel_results import sent_result
 from tests.test_codex_runtime import FakeCodex, FakeGoalControl, FakeTerminalCleanup, FakeThread
@@ -202,6 +203,24 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.channel.replies, [("om_first", "检查完成")])
         self.assertEqual(len(self.outcomes), 1)
+
+    async def test_long_trigger_card_is_folded_without_shortening_binding_input(self):
+        scope, binding = self.binding()
+        claim = self.claim(binding, "检查原会话\n\n第三行\n" + "完整执行指令" * 600)
+        self.queue_anchor(scope)
+
+        await self.app.dispatch_scheduled_run(claim)
+
+        card = self.channel.send_calls[0][1].card
+        body = card["body"]["elements"]
+        self.assertEqual(body[0]["text"]["content"], "定时触发 · 1970-01-01T00:02+00:00")
+        self.assertEqual(body[1]["text"]["content"], "内容预览\n检查原会话\n\n第三行…")
+        panel, = elements(card, "collapsible_panel")
+        self.assertFalse(panel["expanded"])
+        self.assertEqual(panel["elements"][0]["text"]["content"], claim.plan.instructions[:3000] + "…")
+        self.assertNotIn("自动归档", str(card))
+        self.assertEqual(self.codex.turn_inputs[0][1].split("\n\n<scheduled_plan>\n")[0], claim.plan.instructions)
+        await self.finish()
 
     async def test_steering_human_task_retains_original_origin_and_completion_mention(self):
         scope, binding = self.binding()
