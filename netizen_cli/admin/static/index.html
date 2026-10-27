@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Netizen Admin</title>
+  <link rel="icon" type="image/svg+xml" href="/static/netizen.svg">
   <link rel="stylesheet" href="/static/admin.css">
   <link rel="stylesheet" href="/static/chat-picker.css">
   <script src="/static/chat-picker.js" defer></script>
@@ -16,8 +17,11 @@
 <body>
   <header class="topbar">
     <div class="topbar-brand">
-      <h1>Netizen Admin</h1>
-      <p id="instance-root" class="instance-root">__NETIZEN_INSTANCE_ROOT__</p>
+      <img class="brand-logo" src="/static/netizen.svg" width="40" height="40" alt="">
+      <div class="topbar-brand-text">
+        <h1>Netizen Admin</h1>
+        <p id="instance-root" class="instance-root">__NETIZEN_INSTANCE_ROOT__</p>
+      </div>
     </div>
     <div class="identity-toolbar"><div id="current-user" class="person" aria-label="当前管理员"></div><button id="logout" class="quiet">退出登录</button></div>
   </header>

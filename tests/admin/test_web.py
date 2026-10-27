@@ -1055,6 +1055,8 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
     async def test_bound_closed_readiness_then_login_security_headers(self) -> None:
         status, _headers, _body = await self.request("GET", "/health/ready")
         self.assertEqual(status, 503)
+        status, _, _ = await self.request("GET", "/static/netizen.svg")
+        self.assertEqual(status, 503)
         self.runner.open_admission()
         status, _headers, _body = await self.request("GET", "/health/ready")
         self.assertEqual(status, 204)
@@ -1063,6 +1065,12 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(dict(headers)["content-type"], "text/css; charset=utf-8")
         self.assertIn(b".login-card", stylesheet)
+
+        status, headers, logo = await self.request("GET", "/static/netizen.svg")
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(headers)["content-type"], "image/svg+xml")
+        self.assertEqual(dict(headers)["x-content-type-options"], "nosniff")
+        self.assertIn(b"<svg", logo)
 
         status, login_headers, login_page = await self.request("GET", "/login")
         self.assertEqual(status, 200)
@@ -1083,6 +1091,10 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         mapped = dict(headers)
         self.assertEqual(mapped["cache-control"], "no-store")
         self.assertIn("frame-ancestors 'none'", mapped["content-security-policy"])
+        for page in (login_page, body):
+            parser = _AdminAssetParser()
+            parser.feed(page.decode("utf-8"))
+            self.assertEqual(parser.icons, ["/static/netizen.svg"])
 
     async def test_old_secret_login_cannot_issue_session_or_echo_credentials(self) -> None:
         self.runner.open_admission()
@@ -2698,6 +2710,7 @@ class _AdminAssetParser(HTMLParser):
         super().__init__()
         self.scripts: list[str | None] = []
         self.stylesheets: list[str | None] = []
+        self.icons: list[str | None] = []
         self.ids: set[str] = set()
         self.inline_script_text = ""
         self._in_script = False
@@ -2711,6 +2724,8 @@ class _AdminAssetParser(HTMLParser):
             self._in_script = True
         if tag == "link" and values.get("rel") == "stylesheet":
             self.stylesheets.append(values.get("href"))
+        if tag == "link" and values.get("rel") == "icon":
+            self.icons.append(values.get("href"))
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "script":

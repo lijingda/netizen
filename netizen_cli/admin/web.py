@@ -432,6 +432,8 @@ class AdminWebApplication:
             return Response(204 if self._ready else 503)
         if not self._ready:
             raise AdminWebError(503, "not_ready", "管理服务尚未就绪。")
+        if context.path == "/static/netizen.svg" and context.method == "GET":
+            return Response(200, ((b"Content-Type", b"image/svg+xml"),), self._assets["netizen.svg"])
         if context.path == "/static/admin.css" and context.method == "GET":
             # The login page reuses the same inert stylesheet.  Keep HTML,
             # JavaScript, API routes, and all instance state authenticated.
@@ -2761,7 +2763,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js"):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js", "netizen.svg"):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 

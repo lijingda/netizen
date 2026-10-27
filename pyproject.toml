@@ -34,4 +34,4 @@ include = ["netizen_cli*"]
 build_py = "_build.BuildPy"
 
 [tool.setuptools.package-data]
-"netizen_cli.admin" = ["static/*.html", "static/*.css", "static/*.js"]
+"netizen_cli.admin" = ["static/*.html", "static/*.css", "static/*.js", "static/*.svg"]

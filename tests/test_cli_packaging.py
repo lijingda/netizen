@@ -72,6 +72,8 @@ class BuiltArtifactTests(unittest.TestCase):
                              (ROOT / "config.example.yaml").read_bytes())
             self.assertIn("netizen_cli/service_launcher.py", names)
             self.assertIn("netizen_cli/admin/static/index.html", names)
+            self.assertEqual(wheel.read("netizen_cli/admin/static/netizen.svg"),
+                             (ROOT / "netizen_cli/admin/static/netizen.svg").read_bytes())
             self.assertFalse(any(name.startswith("netizen/") for name in names))
             entrypoint = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
             self.assertIn("netizen = netizen_cli.cli:main", wheel.read(entrypoint).decode())
@@ -84,6 +86,8 @@ class BuiltArtifactTests(unittest.TestCase):
             "import json,sys; sys.path.insert(0,sys.argv[1]); "
             "from netizen_cli.builtin_skills import builtin_skill_root; "
             "from netizen_cli.package_resources import resource_path; "
+            "from importlib.resources import files; "
+            "assert files('netizen_cli.admin').joinpath('static/netizen.svg').read_bytes().startswith(b'<svg'); "
             "print(json.dumps([str(builtin_skill_root()),str(resource_path('config.example.yaml'))]))"
         )
         result = subprocess.run(
@@ -106,8 +110,9 @@ class BuiltArtifactTests(unittest.TestCase):
         self._build(source_root, "build_wheel")
         rebuilt = next((source_root / "dist").glob("*.whl"))
         with zipfile.ZipFile(self.wheel) as direct, zipfile.ZipFile(rebuilt) as indirect:
-            resources = {name for name in direct.namelist() if name.startswith("netizen_cli/resources/")}
-            self.assertEqual(resources, {name for name in indirect.namelist() if name.startswith("netizen_cli/resources/")})
+            prefixes = ("netizen_cli/resources/", "netizen_cli/admin/static/")
+            resources = {name for name in direct.namelist() if name.startswith(prefixes)}
+            self.assertEqual(resources, {name for name in indirect.namelist() if name.startswith(prefixes)})
             for name in resources:
                 self.assertEqual(direct.read(name), indirect.read(name))
 
