@@ -1,4 +1,4 @@
-"""Best-effort, single-attempt completion reminders anchored to result cards."""
+"""Best-effort, single-attempt completion reminders with a fixed reply anchor."""
 
 from __future__ import annotations
 
@@ -20,16 +20,20 @@ async def send_completion_mention(
     channel: ReplyChannel,
     *,
     scope: FeishuScope,
-    card_message_id: str,
+    card_message_id: str | None,
     user_id: str,
     operation_id: str,
+    source_message_id: str | None = None,
 ) -> bool:
-    """Keep the result-card anchor and scope; never fall back or resend."""
+    """Use the card, or an explicit source when no card exists; never re-anchor."""
+    anchor_id = card_message_id if card_message_id is not None else source_message_id
+    if not anchor_id:
+        return False
     identity = json.dumps(
-        [scope.key, operation_id, card_message_id, user_id], ensure_ascii=True,
+        [scope.key, operation_id, anchor_id, user_id], ensure_ascii=True,
     )
     opts = SendOpts(
-        receive_id_type="chat_id", reply_to=card_message_id,
+        receive_id_type="chat_id", reply_to=anchor_id,
         reply_in_thread=scope.kind is ScopeKind.TOPIC, reply_target_gone="fail",
         uuid="completion-" + hashlib.sha256(identity.encode()).hexdigest()[:32],
     )
@@ -44,7 +48,7 @@ async def send_completion_mention(
         if (
             not sent.root_id or not sent.parent_id
             or sent.thread_id != scope.topic_id
-            or (scope.kind is not ScopeKind.TOPIC and sent.parent_id != card_message_id)
+            or (scope.kind is not ScopeKind.TOPIC and sent.parent_id != anchor_id)
         ):
             raise TopicPublishError("completion reminder reply was not confirmed", unknown=True)
         return True
@@ -55,6 +59,6 @@ async def send_completion_mention(
         # trigger result recovery; notification delivery never changes execution.
         logger.warning(
             "completion reminder reply was not confirmed; not retrying",
-            extra={"message_id": card_message_id, "operation_id": operation_id},
+            extra={"message_id": anchor_id, "operation_id": operation_id},
         )
         return False

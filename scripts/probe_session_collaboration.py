@@ -599,6 +599,100 @@ async def mcp_registration_case(root: Path) -> dict[str, Any]:
         await existing.close()
 
 
+async def suppress_reply_case(root: Path) -> dict[str, Any]:
+    """Native physical-Turn metadata and natural completion after a silent tool."""
+    from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
+
+    source_root = str(Path(__file__).resolve().parents[1])
+    if source_root not in sys.path:
+        sys.path.insert(0, source_root)
+    from netizen_cli.sessions.mcp import SessionMcpRunner
+
+    runner = SessionMcpRunner()
+    calls: list[dict[str, Any]] = []
+
+    async def callback(name: str, arguments: dict[str, Any], source_id: str,
+                       *, source_turn_id: str) -> dict[str, Any]:
+        calls.append({"name": name, "arguments": arguments,
+                      "source_thread_id": source_id, "source_turn_id": source_turn_id})
+        return {"suppressed": True, "scope": "current_physical_turn", "instruction":
+                "Suppression is recorded for this physical Turn only. Finish naturally with an empty final reply. "
+                "This result does not complete the Turn, stop a Goal, or affect later Turns."}
+
+    runner.attach(callback)
+    try:
+        await runner.bind()
+        runner.open_admission()
+        call_id = "native-suppress-reply"
+        call = {"type": "response.output_item.done", "item": {
+            "type": "function_call", "call_id": call_id, "name": "suppress_reply",
+            "namespace": "mcp__" + runner.namespace, "arguments": "{}",
+        }}
+        with mock_provider([
+            (200, response_events("suppress-tool", call)),
+            (200, response_events("empty-final")),
+        ]) as provider:
+            finish_gate = threading.Event()
+            provider.response_gates = {2: finish_gate}
+            cwd, env = isolated_config(root, provider)
+            env.pop("HOME", None)
+            config_path = Path(env["CODEX_HOME"]) / "config.toml"
+            original_config = config_path.read_bytes()
+            config = CodexConfig(cwd=str(cwd), env={**env, **runner.app_server_env},
+                                 config_overrides=runner.config_overrides)
+            async with AsyncCodex(config) as codex:
+                thread = await codex.thread_start(
+                    cwd=str(cwd), approval_mode=ApprovalMode.deny_all, sandbox=Sandbox.read_only,
+                )
+                handle = await thread.turn("NATIVE-SUPPRESS-REPLY-PROBE: use suppress_reply, then end silently.")
+                consumer = asyncio.create_task(handle.run())
+                try:
+                    await until(lambda: len(provider.requests) == 2)
+                    assert calls == [{"name": "suppress_reply", "arguments": {},
+                                      "source_thread_id": thread.id, "source_turn_id": handle.id}], calls
+                    outputs = [item for item in provider.requests[1]["body"]["input"]
+                               if item.get("type") == "function_call_output" and item.get("call_id") == call_id]
+                    assert len(outputs) == 1 and "Suppression is recorded for this physical Turn only." in json.dumps(outputs[0]), outputs
+                    running = native_json(await thread.read(include_turns=True))["thread"]
+                    assert len(running["turns"]) == 1 and running["turns"][0]["id"] == handle.id, running
+                    assert running["turns"][0]["status"] == "inProgress" and not consumer.done(), running
+                    finish_gate.set()
+                    result = await consumer
+                    assert result.id == handle.id and result.status.value == "completed", result
+                    assert result.final_response in (None, ""), result
+                    snapshot = native_json(await thread.read(include_turns=True))["thread"]
+                    assert snapshot["status"]["type"] == "idle", snapshot
+                    assert len(snapshot["turns"]) == 1 and snapshot["turns"][0]["id"] == handle.id, snapshot
+                    turn = snapshot["turns"][0]
+                    assert turn["status"] == "completed", turn
+                    native_calls = [item for item in turn["items"] if item.get("type") == "mcpToolCall"]
+                    assert len(native_calls) == 1 and native_calls[0]["status"] == "completed", native_calls
+                    assert native_calls[0]["server"] == runner.namespace and native_calls[0]["tool"] == "suppress_reply", native_calls
+                    assert not any(item.get("type") == "agentMessage" for item in turn["items"]), turn
+                    assert not provider.errors and not provider.replies and len(provider.requests) == 2, provider.errors
+                    assert config_path.read_bytes() == original_config, "process override changed user config file"
+                    return {
+                        "scenario": "suppress_reply_native_empty_completion", "passed": True,
+                        "thread_id": thread.id, "turn_id": handle.id, "callback_calls": calls,
+                        "real_native_thread_and_physical_turn_metadata": True,
+                        "tool_success_left_native_turn_in_progress": True,
+                        "tool_result_delivered_to_model": True,
+                        "native_terminal_status": turn["status"], "thread_status": snapshot["status"]["type"],
+                        "final_response": result.final_response, "final_agent_message_count": 0,
+                        "normal_completion_without_interrupt": True,
+                        "config_file_unchanged": True, "application_callback_fixture": True,
+                        "model_request_count": len(provider.requests),
+                    }
+                finally:
+                    finish_gate.set()
+                    if not consumer.done():
+                        consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+    finally:
+        runner.close_admission()
+        await runner.close()
+
+
 async def run_probe(selected: str = "all") -> dict[str, Any]:
     from codex_cli_bin import bundled_codex_path
 
@@ -608,13 +702,15 @@ async def run_probe(selected: str = "all") -> dict[str, Any]:
     cases = []
     with tempfile.TemporaryDirectory(prefix="netizen-session-collaboration-") as directory:
         names = ("sdk_create_idle", "sdk_join", "runtime_join", "runtime_terminal_race",
-                 "runtime_external_name", "runtime_external_title", "session_mcp") if selected == "all" else (selected,)
+                 "runtime_external_name", "runtime_external_title", "session_mcp", "suppress_reply") if selected == "all" else (selected,)
         for name in names:
             root = Path(directory) / name
             root.mkdir()
             async with asyncio.timeout(45):
                 if name == "session_mcp":
                     cases.append(await mcp_registration_case(root))
+                elif name == "suppress_reply":
+                    cases.append(await suppress_reply_case(root))
                 elif name in {"runtime_external_name", "runtime_external_title"}:
                     cases.append(await runtime_naming_case(root, supplied_title=name == "runtime_external_title"))
                 elif name.startswith("runtime_"):
@@ -633,7 +729,7 @@ async def run_probe(selected: str = "all") -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=("all", "sdk_create_idle", "sdk_join", "runtime_join", "runtime_terminal_race",
-                                          "runtime_external_name", "runtime_external_title", "session_mcp"), default="all")
+                                          "runtime_external_name", "runtime_external_title", "session_mcp", "suppress_reply"), default="all")
     parser.add_argument("--output", type=Path, help="Optional JSON evidence file")
     args = parser.parse_args()
     result = asyncio.run(run_probe(args.case))

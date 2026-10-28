@@ -260,6 +260,10 @@ Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认�
 展示独立。发起人由任务开始时确定，执行中追加消息不改变对象；它不等同于客户端
 已展示通知的证明。
 
+**Reply Suppression / 结果静默**：Agent 对当前物理 Turn 正常结束时的最终结果作出的
+省略选择；保留完成反馈与已开启的结束提及，不改变执行状态，也不延续到下一 Turn。
+阶段性答案和异常处理不受该选择限制。
+
 **Native Compaction / 原生压缩**：`/compact` 对已有历史的 idle Binding 调用公开
 Codex compaction。start 空响应不是完成；Netizen 临时保留 `compacting` 槽位，直到
 公开 Thread history 出现唯一的新 terminal `contextCompaction` Turn。多个 candidate

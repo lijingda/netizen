@@ -53,12 +53,14 @@ class SessionService:
     def __init__(self, *, bindings: BindingStore, runtime: Any, codex: Any, app_id: str,
                  policy: SessionPolicyService, create_thread: Callable[..., Awaitable[dict[str, Any]]],
                  send_message: Callable[..., Awaitable[dict[str, Any]]],
-                 history: ThreadHistory | None = None, worktrees: Any = None) -> None:
+                 history: ThreadHistory | None = None, worktrees: Any = None,
+                 suppress_reply: Callable[..., Awaitable[dict[str, Any]]] | None = None) -> None:
         self._bindings, self._runtime, self._codex = bindings, runtime, codex
         self._app_id, self._policy = app_id, policy
         self._create, self._send = create_thread, send_message
         self._history = history
         self._worktrees = worktrees
+        self._suppress_reply = suppress_reply
 
     def _binding(self, thread_id: str | None, *, source: bool = False) -> tuple[Any, Any]:
         binding = self._bindings.find_by_native_thread_id(thread_id) if thread_id else None
@@ -94,12 +96,22 @@ class SessionService:
                 "projectAlias": binding.project_alias, "isCurrent": scope.active_binding_id == binding.id,
                 "materialized": binding.native_thread_id is not None}
 
-    async def call(self, tool_name: str, arguments: Mapping[str, Any], native_thread_id: str | None) -> dict[str, Any]:
+    async def call(self, tool_name: str, arguments: Mapping[str, Any], native_thread_id: str | None,
+                   *, source_turn_id: str | None = None) -> dict[str, Any]:
         mutation = tool_name in {"create_thread", "send_message_to_thread", "create_worktree"}
         fit = _fit_worktree_result if tool_name in _WORKTREE_TOOLS else fit_result
         invoked = False
         try:
             data = validate_arguments(tool_name, arguments)
+            if tool_name == "suppress_reply":
+                if any(not isinstance(value, str) or not value.strip() for value in (native_thread_id, source_turn_id)):
+                    raise SessionToolError("invalid_call_context", "Native per-call Thread and physical Turn IDs are required.")
+                if self._suppress_reply is None:
+                    raise SessionToolError("unavailable", "Reply suppression is not ready.")
+                # This changes only the caller's presentation. Its exact active
+                # ownership is checked by Channel, independently of session access.
+                invoked = True
+                return fit(await self._suppress_reply(source_thread_id=native_thread_id, source_turn_id=source_turn_id))
             if tool_name in SIDE_SESSION_TOOLS:
                 resolve_session_source(self._bindings, self._runtime, self._app_id, native_thread_id)
             else:
@@ -165,6 +177,9 @@ class SessionService:
         except Exception:
             # Native exception text may include prompts or sensitive SDK payloads.
             logger.warning("Session tool failed (%s)", tool_name)
+            if tool_name == "suppress_reply":
+                return {"error": {"code": "outcome_unknown" if invoked else "unavailable",
+                                  "message": "Could not confirm reply suppression for the current physical Turn. This does not end the Turn."}}
             return {"error": {"code": "outcome_unknown" if mutation and invoked else "unavailable",
                               "message": "Operation outcome is unknown; inspect the exact target before taking further action. Do not automatically retry." if mutation and invoked else "Session information is unavailable. Retry this read later."},
                     **({"threadId": data["threadId"]} if mutation and "threadId" in locals().get("data", {}) else {}),

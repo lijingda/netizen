@@ -837,10 +837,24 @@ Node.js 24.18.1；wheel/sdist 隔离构建与资源加载包含在门禁中。�
   --output /tmp/netizen-session-collaboration-evidence.json
 ```
 
-`--case sdk_create_idle|sdk_join|runtime_join|runtime_terminal_race|session_mcp|runtime_external_name|runtime_external_title` 可选择
+`--case sdk_create_idle|sdk_join|runtime_join|runtime_terminal_race|session_mcp|suppress_reply|runtime_external_name|runtime_external_title` 可选择
 受影响场景。脚本复用现有本地 Responses mock provider，运行真正 bundled App Server，
 只使用临时 Codex 目录与 loopback，不调用真实模型账号或发送飞书消息。Runtime 竞态
 只延迟一次真实公开 history read 的返回，不伪造原生 Turn ID 或完成结果。
+
+`suppress_reply` 的工具 metadata 或结束交接调整时，运行对应 case（外部 70 秒 deadline）：
+它验证生产 MCP 收到准确 Thread/物理 Turn，工具成功后 Turn 仍在运行，以及后续空模型
+响应使原生正常 completed、Thread idle、SDK final 为空。2026-10-28 在固定 SDK/bundled
+App Server `0.163.0` 上通过；证据保存在忽略目录
+`docs/research/compatibility/suppress-reply-native-20261028.json`。该 case 使用回调 fixture 和
+本地模拟模型，不代表真实模型决策或飞书客户端展示验收。完成表情、原卡折叠、无卡 @
+及结果未投递的真实客户端验收仍须在明确授权的测试会话单独执行。
+
+同日另以生产 MCP → SessionService → ChannelApplication → Runtime 验证普通任务与
+Goal 的准确来源登记及工具成功，证据为忽略目录中的
+`docs/research/compatibility/suppress-reply-readiness-20261028.json`。人工延迟真实启动响应
+交接时，尚未登记的来源被明确拒绝，不误报静默成功；沿用既有归属边界，不新增等待或
+准入机制。该证据同样使用本地模拟模型，不包含真实飞书投递。
 
 2026-10-26 Side 来源扩展通过 `make check`：3,674 项测试、15 项条件跳过，编译、依赖及
 SDK synthetic probes 通过。另用真实 bundled App Server `0.163.0`、临时

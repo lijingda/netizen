@@ -816,6 +816,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             async def send_session_message(self, **kwargs: object) -> dict:
                 raise AssertionError("recovery cannot submit a session input")
 
+            async def suppress_reply(self, **kwargs: object) -> dict:
+                raise AssertionError("recovery cannot suppress a reply")
+
         with tempfile.TemporaryDirectory() as raw:
             core = self._make_core(Path(raw))
             with (
@@ -974,6 +977,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     core._session_mcp.callback, core._session_service.call,
                 )
+                self.assertEqual(core._session_service._suppress_reply, core.application.suppress_reply)
                 self.assertNotIn("mcp:open", self.session_events)
                 self.assertEqual(core._management._updates.product_root, instance_root)
                 self.assertNotIn("admin:open", events)

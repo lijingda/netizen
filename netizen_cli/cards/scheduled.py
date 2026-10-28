@@ -489,7 +489,7 @@ def _runs_panel(scope: FeishuScope, result: dict[str, Any], *, plan_id: str, nav
         items.append(_plain("还没有触发记录。"))
     for run in runs:
         delivery = ("反馈：随目标 Agent 会话当前任务交付" if run.get("target_kind") == "binding" else
-            f"结果投递：{ {'sent': '已投递', 'failed': '投递失败', 'unknown': '待确认'}.get(run.get('delivery_state'), '尚未投递')}")
+            f"结果投递：{ {'sent': '已投递', 'suppressed': '已按本轮选择省略', 'failed': '投递失败', 'unknown': '待确认'}.get(run.get('delivery_state'), '尚未投递')}")
         items.append(_plain(
             f"时间：{run.get('due_local') or _utc_time(run.get('due_at'))}\n"
             f"来源：{_trigger_source(run.get('trigger_source'))}\n"
