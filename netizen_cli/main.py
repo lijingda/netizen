@@ -369,6 +369,7 @@ class ServiceCore:
                 policy=self._session_policy,
                 create_thread=self.application.create_session_thread,
                 send_message=self.application.send_session_message,
+                suppress_reply=self.application.suppress_reply,
                 history=AppServerThreadHistory(self._codex),
                 worktrees=worktrees,
             )

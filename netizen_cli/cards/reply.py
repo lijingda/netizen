@@ -553,17 +553,23 @@ def turn_progress_card(
     deletions: int | None = None,
     completion_mention_user_id: str | None = None,
     partial_answers: tuple[_PartialAnswerLike, ...] | None = None,
+    include_result: bool = True,
 ) -> OutboundCard:
     """Render one replaceable Phase 1 Turn progress card.
 
     The activity panel reads only the bounded, safety-projected status,
     commentary, generic operations, and checklist.  It never inspects
     reasoning, tool arguments, or tool output.
-    A terminal render always collapses that panel and appends the authoritative
-    final response plus the existing optional Turn-file controls.
+    A terminal render collapses that panel. Normal result omission can leave
+    only Activity and partial answers, without inventing a result.
     """
 
     normalized_terminal_status = _terminal_progress_status(terminal_status)
+    if not include_result and (
+        normalized_terminal_status != "completed" or final_response is not None
+        or files or completion_mention_user_id is not None
+    ):
+        raise ValueError("only a completed progress card without result content may omit Result")
     partial_answer = _partial_answer_module(
         getattr(snapshot, "partial_answers", ())
         if partial_answers is None else partial_answers
@@ -611,7 +617,7 @@ def turn_progress_card(
             deletions=deletions,
         )
     result = None
-    if normalized_terminal_status is not None:
+    if normalized_terminal_status is not None and include_result:
         result = ReplyCardResultModule(
             final_response or _default_terminal_response(normalized_terminal_status),
             completion_mention_user_id=completion_mention_user_id,

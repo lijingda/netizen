@@ -21,6 +21,7 @@ from lark_channel import (
 )
 
 from netizen_cli.channel import reply_presenter
+from netizen_cli.channel.completion_mentions import send_completion_mention
 from netizen_cli.channel_app import _outcome_completion_mention_user_id
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.codex_runtime import (
@@ -825,6 +826,102 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("消息发送失败", str(contents[2]))
         self.assertEqual(_elements(contents[2], "at"), [])
         driver.create_message.assert_not_awaited()
+
+
+class CompletionMentionAnchorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_no_card_uses_explicit_source_in_exact_scope(self):
+        for kind in ScopeKind:
+            with self.subTest(kind=kind):
+                topic_id = "omt_existing" if kind is ScopeKind.TOPIC else None
+                scope = FeishuScope("cli_test", "oc_chat", kind, topic_id)
+                channel = SimpleNamespace(send=AsyncMock(return_value=sent_result(
+                    "om_notice", chat_id=scope.chat_id, thread_id=topic_id,
+                    root_id="om_older_root", parent_id="om_source",
+                )))
+                self.assertTrue(await send_completion_mention(
+                    channel, scope=scope, card_message_id=None,
+                    source_message_id="om_source", user_id="ou_initiator",
+                    operation_id="turn-one",
+                ))
+                channel.send.assert_awaited_once()
+                chat_id, content, opts = channel.send.call_args.args
+                self.assertEqual(chat_id, scope.chat_id)
+                self.assertIsInstance(content, OutboundText)
+                self.assertEqual(content.text, "本轮任务已结束。")
+                self.assertEqual(content.mentions, [Identity(open_id="ou_initiator")])
+                self.assertEqual(opts.reply_to, "om_source")
+                self.assertEqual(opts.receive_id_type, "chat_id")
+                self.assertEqual(opts.reply_target_gone, "fail")
+                self.assertIs(opts.reply_in_thread, kind is ScopeKind.TOPIC)
+                self.assertTrue(opts.uuid)
+
+    async def test_missing_anchor_never_sends(self):
+        channel = SimpleNamespace(send=AsyncMock())
+        for card_id, source_id in ((None, None), (None, ""), ("", "om_source")):
+            with self.subTest(card_id=card_id, source_id=source_id):
+                self.assertFalse(await send_completion_mention(
+                    channel, scope=FeishuScope("cli_test", "oc_chat", ScopeKind.DIRECT),
+                    card_message_id=card_id, source_message_id=source_id,
+                    user_id="ou_initiator", operation_id="turn-one",
+                ))
+        channel.send.assert_not_awaited()
+
+    async def test_failed_card_notification_never_moves_to_available_source(self):
+        channel = SimpleNamespace(send=AsyncMock(side_effect=TimeoutError("response lost")))
+        with self.assertLogs("netizen_cli.channel.completion_mentions", level="WARNING"):
+            self.assertFalse(await send_completion_mention(
+                channel, scope=FeishuScope("cli_test", "oc_chat", ScopeKind.DIRECT),
+                card_message_id="om_card", source_message_id="om_source",
+                user_id="ou_initiator", operation_id="turn-one",
+            ))
+        channel.send.assert_awaited_once()
+        self.assertEqual(channel.send.call_args.args[2].reply_to, "om_card")
+
+    async def test_no_card_unconfirmed_delivery_never_retries_or_changes_anchor(self):
+        receipts = (
+            (ScopeKind.DIRECT, TimeoutError("response lost")),
+            (ScopeKind.DIRECT, retryable_sent_result()),
+            (ScopeKind.DIRECT, sent_result("om_notice", chat_id="oc_wrong",
+                root_id="om_source", parent_id="om_source")),
+            (ScopeKind.GROUP, sent_result("om_notice", chat_id="oc_chat",
+                root_id="om_root", parent_id="om_wrong")),
+            (ScopeKind.GROUP, sent_result("om_notice", chat_id="oc_chat",
+                thread_id="omt_new", root_id="om_source", parent_id="om_source")),
+            (ScopeKind.TOPIC, sent_result("om_notice", chat_id="oc_chat",
+                thread_id="omt_other", root_id="om_source", parent_id="om_source")),
+            (ScopeKind.TOPIC, sent_result("om_notice", chat_id="oc_chat",
+                thread_id="omt_existing", root_id="om_source")),
+        )
+        for kind, receipt in receipts:
+            with self.subTest(kind=kind, receipt=receipt):
+                topic_id = "omt_existing" if kind is ScopeKind.TOPIC else None
+                channel = SimpleNamespace(send=AsyncMock(
+                    side_effect=receipt if isinstance(receipt, Exception) else None,
+                    return_value=receipt,
+                ))
+                with self.assertLogs("netizen_cli.channel.completion_mentions", level="WARNING"):
+                    self.assertFalse(await send_completion_mention(
+                        channel, scope=FeishuScope("cli_test", "oc_chat", kind, topic_id),
+                        card_message_id=None, source_message_id="om_source",
+                        user_id="ou_initiator", operation_id="turn-one",
+                    ))
+                channel.send.assert_awaited_once()
+                self.assertEqual(channel.send.call_args.args[2].reply_to, "om_source")
+
+    async def test_no_card_uuid_is_stable_and_bound_to_source(self):
+        uuids = []
+        for source_id in ("om_source", "om_source", "om_other_source"):
+            channel = SimpleNamespace(send=AsyncMock(return_value=sent_result(
+                "om_notice", chat_id="oc_chat", root_id="om_root", parent_id=source_id,
+            )))
+            self.assertTrue(await send_completion_mention(
+                channel, scope=FeishuScope("cli_test", "oc_chat", ScopeKind.DIRECT),
+                card_message_id=None, source_message_id=source_id,
+                user_id="ou_initiator", operation_id="turn-one",
+            ))
+            uuids.append(channel.send.call_args.args[2].uuid)
+        self.assertEqual(uuids[0], uuids[1])
+        self.assertNotEqual(uuids[0], uuids[2])
 
 
 if __name__ == "__main__":

@@ -20,13 +20,10 @@ def native_thread_id(meta: dict[str, Any] | None) -> str | None:
     """Read only native per-call metadata, never arguments or connection state."""
     if meta is None:
         return None
+    if not isinstance(meta, dict):
+        raise ValueError("Invalid native call metadata")
     thread_id = meta.get("threadId")
-    turn_metadata = meta.get("x-codex-turn-metadata")
-    if isinstance(turn_metadata, str):
-        turn_metadata = json.loads(turn_metadata)
-    if turn_metadata is not None and not isinstance(turn_metadata, dict):
-        raise ValueError("Invalid native turn metadata")
-    other_id = (turn_metadata or {}).get("thread_id")
+    other_id = _native_turn_metadata(meta).get("thread_id")
     for value in (thread_id, other_id):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError("Invalid native Thread ID")
@@ -34,6 +31,34 @@ def native_thread_id(meta: dict[str, Any] | None) -> str | None:
         raise ValueError("Conflicting native Thread IDs")
     # The second metadata form is a cross-check, not an alternative source.
     return thread_id
+
+
+def native_turn_id(meta: dict[str, Any] | None) -> str | None:
+    """Read the physical Turn from native per-call metadata, with Thread cross-checks."""
+    native_thread_id(meta)
+    turn_id = _native_turn_metadata(meta).get("turn_id")
+    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id.strip()):
+        raise ValueError("Invalid native Turn ID")
+    return turn_id
+
+
+def native_subagent_kind(meta: dict[str, Any] | None) -> str | None:
+    """Read Codex's caller classification, never a model-supplied argument."""
+    kind = _native_turn_metadata(meta).get("subagent_kind")
+    if kind is not None and (not isinstance(kind, str) or not kind.strip()):
+        raise ValueError("Invalid native subagent kind")
+    return kind
+
+
+def _native_turn_metadata(meta: dict[str, Any] | None) -> dict[str, Any]:
+    if meta is None:
+        return {}
+    turn_metadata = meta.get("x-codex-turn-metadata")
+    if isinstance(turn_metadata, str):
+        turn_metadata = json.loads(turn_metadata)
+    if turn_metadata is not None and not isinstance(turn_metadata, dict):
+        raise ValueError("Invalid native turn metadata")
+    return turn_metadata or {}
 
 
 class _EmbeddedServer(uvicorn.Server):

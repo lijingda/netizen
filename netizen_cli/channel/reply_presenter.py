@@ -284,6 +284,13 @@ class _ReplyCardPresenter:
         }
         return (not answers or bool(identities)) and identities <= delivery.confirmed_partials
 
+    def has_card(
+        self, *, owner_id: str, thread_id: str, turn_id: str, side: bool = False,
+    ) -> bool:
+        sessions = self._side_sessions if side else self._sessions
+        session = sessions.get((owner_id, thread_id, turn_id))
+        return session is not None and session.message_id is not None
+
     async def _deliver_partial_answers(
         self,
         session: _PartialAnswerDelivery | _TurnProgressCardSession | _SideTurnProgressCardSession,

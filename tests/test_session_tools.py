@@ -207,6 +207,55 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.catalog.items["source"]["cwd"], "/project")
 
+    async def test_suppression_routes_exact_caller_turn_without_cross_session_access(self):
+        async def suppress(**kwargs):
+            self.calls.append(("suppress", kwargs))
+            return {"suppressed": True, "scope": "current_physical_turn"}
+        self.service._suppress_reply = suppress
+        self.policy.discovery = self.policy.read_send = set()
+        # Channel owns ordinary/Goal/Side presentation identity, so the service
+        # must not substitute an ordinary Binding or parent identity here.
+        with patch.object(self.policy, "snapshot", side_effect=AssertionError("unrelated access policy")):
+            for source in ("source", "side-source"):
+                result = await self.service.call("suppress_reply", {}, source, source_turn_id="physical-turn")
+                self.assertEqual(result, {"suppressed": True, "scope": "current_physical_turn"})
+        self.assertEqual(self.calls, [
+            ("suppress", {"source_thread_id": source, "source_turn_id": "physical-turn"})
+            for source in ("source", "side-source")
+        ])
+        self.assertEqual(self.catalog.reads, [])
+
+    async def test_suppression_rejects_missing_identity_and_target_arguments_before_dispatch(self):
+        async def suppress(**kwargs):
+            self.calls.append(kwargs)
+            return {"suppressed": True}
+        self.service._suppress_reply = suppress
+        for source, turn_id in ((None, "turn"), ("", "turn"), ("source", None), ("source", " "), ("source", 1)):
+            with self.subTest(source=source, turn=turn_id):
+                result = await self.service.call("suppress_reply", {}, source, source_turn_id=turn_id)
+                self.assertEqual(result["error"]["code"], "invalid_call_context")
+        for arguments in ({"threadId": "parent"}, {"turnId": "different"}, {"reason": "done"}):
+            result = await self.service.call("suppress_reply", arguments, "source", source_turn_id="turn")
+            self.assertEqual(result["error"]["code"], "invalid_arguments")
+        self.assertEqual(self.calls, [])
+
+    async def test_suppression_retains_channel_rejection_and_does_not_claim_completion(self):
+        result = await self.service.call("suppress_reply", {}, "source", source_turn_id="turn")
+        self.assertEqual(result["error"]["code"], "unavailable")
+        async def reject(**kwargs):
+            raise SessionToolError("invalid_call_context", "No independently owned reply for this Turn.")
+        self.service._suppress_reply = reject
+        result = await self.service.call("suppress_reply", {}, "subagent", source_turn_id="turn")
+        self.assertEqual(result["error"]["code"], "invalid_call_context")
+        async def fail(**kwargs):
+            raise OSError("sensitive error details")
+        self.service._suppress_reply = fail
+        with self.assertLogs("netizen_cli.sessions.service", level="WARNING"):
+            result = await self.service.call("suppress_reply", {}, "source", source_turn_id="turn")
+        self.assertEqual(result["error"]["code"], "outcome_unknown")
+        self.assertNotIn("suppressed", result)
+        self.assertNotIn("sensitive", json.dumps(result))
+
     async def test_worktree_discovery_and_creation_keep_independent_access(self):
         calls = self.worktree_service()
         self.policy.discovery = set()
@@ -1093,6 +1142,88 @@ class SessionMcpTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await self.call("list_threads", {}, meta)).is_error)
         values = await asyncio.gather(*(self.call("list_threads", {}, {"threadId": identifier}) for identifier in ("a", "b")))
         self.assertEqual({value.structured_content["threadId"] for value in values}, {"a", "b"})
+        self.assertEqual(self.runner._calls, set())
+
+    async def test_suppression_forwards_native_physical_turn_per_call(self):
+        async def suppress(name, arguments, source, *, source_turn_id):
+            self.calls.append((name, arguments, source, source_turn_id))
+            await asyncio.sleep(0)
+            return {"suppressed": True, "scope": "current_physical_turn"}
+        self.runner._callback = suppress
+        values = await asyncio.gather(*(self.call("suppress_reply", {}, {
+            "threadId": source,
+            "x-codex-turn-metadata": encode({"thread_id": source, "turn_id": turn_id}),
+        }) for source, turn_id, encode in (("a", "turn-a", json.dumps), ("b", "turn-b", lambda value: value))))
+        self.assertTrue(all(not value.is_error and value.structured_content["suppressed"] for value in values))
+        self.assertEqual(set((source, turn_id) for _, _, source, turn_id in self.calls), {("a", "turn-a"), ("b", "turn-b")})
+        self.assertTrue(all(name == "suppress_reply" and arguments == {} for name, arguments, _, _ in self.calls))
+        self.assertEqual(self.runner._calls, set())
+
+    async def test_suppression_requires_valid_native_thread_and_turn_metadata(self):
+        invalid = [
+            None, {}, [],
+            {"threadId": "source"},
+            {"threadId": "source", "turnId": "untrusted-alternative"},
+            {"x-codex-turn-metadata": {"thread_id": "source", "turn_id": "turn"}},
+            {"threadId": "source", "x-codex-turn-metadata": {"thread_id": "other", "turn_id": "turn"}},
+        ]
+        invalid.extend({"threadId": "source", "x-codex-turn-metadata": value}
+                       for value in ("{", "[]", [], 1, True, {"turn_id": None}, {"turn_id": 1}, {"turn_id": " "}))
+        invalid.extend({"threadId": "source", "x-codex-turn-metadata": {"turn_id": "turn", "subagent_kind": kind}}
+                       for kind in ("", " ", False, 1, [], {}))
+        for meta in invalid:
+            with self.subTest(meta=meta):
+                result = await self.call("suppress_reply", {}, meta)
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["error"]["code"], "invalid_call_context")
+        self.assertEqual(self.calls, [])
+
+    async def test_subagent_suppression_is_rejected_before_callback(self):
+        for encode in (json.dumps, lambda value: value):
+            for kind in ("thread_spawn", "review", "compact", "other"):
+                with self.subTest(kind=kind, encode=encode):
+                    result = await self.call("suppress_reply", {}, {
+                        "threadId": "child",
+                        "x-codex-turn-metadata": encode({
+                            "thread_id": "child", "turn_id": "child-turn", "subagent_kind": kind,
+                        }),
+                    })
+                    self.assertTrue(result.is_error)
+                    self.assertEqual(result.structured_content["error"]["code"], "invalid_call_context")
+                    self.assertIn("Subagents must not call", result.structured_content["error"]["message"])
+        self.assertEqual(self.calls, [])
+        # The restriction belongs only to suppress_reply, not all session tools.
+        result = await self.call("list_threads", {}, {
+            "threadId": "child", "x-codex-turn-metadata": {"subagent_kind": "thread_spawn"},
+        })
+        self.assertFalse(result.is_error)
+        self.assertEqual(self.calls, [("list_threads", {"limit": 10}, "child")])
+
+    async def test_suppression_has_no_arguments_and_mutates_only_presentation(self):
+        listed = {tool.name: tool for tool in (await self.runner._list_tools(None, None)).tools}
+        self.assertEqual(listed["suppress_reply"].input_schema["properties"], {})
+        self.assertFalse(listed["suppress_reply"].annotations.read_only_hint)
+        self.assertEqual(validate_arguments("suppress_reply", {}), {})
+        for field in ("threadId", "turnId", "source_thread_id", "source_turn_id", "reason"):
+            with self.subTest(field=field), self.assertRaises(SessionToolError):
+                validate_arguments("suppress_reply", {field: "other"})
+        self.runner._url = "http://127.0.0.1:12345/mcp"
+        config = tomllib.loads(self.runner.config_overrides[0])["mcp_servers"][self.runner.namespace]
+        self.assertEqual(config["default_tools_approval_mode"], "approve")
+        self.assertNotIn("suppress_reply", config["tools"])
+
+    async def test_suppression_callback_exception_never_claims_success(self):
+        async def fail(*args, **kwargs):
+            raise OSError("sensitive output")
+        self.runner._callback = fail
+        with self.assertLogs("netizen_cli.sessions.mcp", level="WARNING"):
+            result = await self.call("suppress_reply", {}, {
+                "threadId": "source", "x-codex-turn-metadata": {"turn_id": "turn"},
+            })
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["error"]["code"], "outcome_unknown")
+        self.assertNotIn("suppressed", result.structured_content)
+        self.assertNotIn("sensitive", json.dumps(result.structured_content))
         self.assertEqual(self.runner._calls, set())
 
     async def test_config_preserves_native_approval_and_wait_timeout(self):
