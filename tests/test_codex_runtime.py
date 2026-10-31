@@ -6,7 +6,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from openai_codex import (
     CodexError,
@@ -105,6 +105,8 @@ from netizen_cli.domain import (
     ScopeKind,
 )
 from netizen_cli.model_settings import ModelCatalogError
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.channel.reply_suppression import ReplySuppression
 from netizen_cli.sdk_gap_adapter import (
     DiscoveredSkill,
     GoalMutationRejected,
@@ -147,6 +149,21 @@ class FakeStatus:
 
 
 _STREAM_END = object()
+
+
+def reply_suppression_app(runtime, store, app_id):
+    suppression = ReplySuppression()
+    runtime.set_input_received_handler(suppression.discard_physical_turn)
+    return SimpleNamespace(
+        _runtime=runtime, _bindings=store, _app_id=app_id,
+        _reply_suppression=suppression,
+    )
+
+
+async def suppress_current_reply(app, thread_id, physical_turn_id):
+    return await ChannelApplication.suppress_reply(
+        app, source_thread_id=thread_id, source_turn_id=physical_turn_id,
+    )
 
 
 class FakeTurnHandle:
@@ -1053,6 +1070,8 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             side_idle_seconds=60,
             automatic_thread_naming=False,
         )
+        self.input_received = Mock()
+        self.runtime.set_input_received_handler(self.input_received)
         self.cwd_context = tempfile.TemporaryDirectory()
         self.cwd = Path(self.cwd_context.name)
         self.scope = FeishuScope("cli_test", "oc_side", ScopeKind.DIRECT)
@@ -1249,6 +1268,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
         self.assertEqual(self.codex.handles[-1].steers, ["adjust"])
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
         await self.finish_side_turn(first, response="one")
 
         second = await self.runtime.submit_side(
@@ -1279,6 +1299,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(not item.stop_requested for item in side_outcomes))
         self.assertTrue(all(handle.run_calls == 1 for handle in self.codex.handles))
         self.assertTrue(all(handle.stream_calls == 0 for handle in self.codex.handles))
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
 
     async def test_side_submission_admission_rejects_idle_running_idle_aba(self) -> None:
         _binding, record, _snapshot = await self.open_side()
@@ -1300,6 +1321,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 admission=stale,
             )
         self.assertEqual(len(self.codex.turn_calls), 1)
+        self.input_received.assert_not_called()
 
     async def test_side_submission_rechecks_global_admission_inside_lock(self) -> None:
         _binding, record, _snapshot = await self.open_side()
@@ -1324,6 +1346,67 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeClosed):
             await pending
         self.assertEqual(self.codex.turn_calls, [])
+
+    async def test_received_side_input_clears_suppression_before_native_receipt(self) -> None:
+        _, record, _ = await self.open_side()
+        first = await self.runtime.submit_side(
+            side_id=record.id, input="first", owner_id="ou_owner", origin=object(),
+        )
+        app = reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        await suppress_current_reply(app, first.thread_id, first.turn_id)
+        handle = self.codex.handles[-1]
+        handle.steer_gate = asyncio.Event()
+        pending = asyncio.create_task(self.runtime.submit_side(
+            side_id=record.id, input="adjust", owner_id="ou_owner", origin=object(),
+        ))
+        try:
+            await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+            self.assertFalse(app._reply_suppression.is_suppressed(first.thread_id, first.turn_id, first.turn_id))
+            result = await suppress_current_reply(app, first.thread_id, first.turn_id)
+            self.assertTrue(result["suppressed"])
+        finally:
+            handle.steer_gate.set()
+        await pending
+        self.assertTrue(app._reply_suppression.is_suppressed(first.thread_id, first.turn_id, first.turn_id))
+        await self.finish_side_turn(first)
+
+    async def test_received_side_input_failure_and_cancellation_do_not_restore_suppression(self) -> None:
+        _, record, _ = await self.open_side()
+        first = await self.runtime.submit_side(
+            side_id=record.id, input="first", owner_id="ou_owner", origin=object(),
+        )
+        first.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        app = reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        for failure in (TransportClosedError("response lost"), asyncio.CancelledError()):
+            with self.subTest(failure=type(failure).__name__):
+                await suppress_current_reply(app, first.thread_id, first.turn_id)
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def steer(_input):
+                    entered.set()
+                    await release.wait()
+                    raise failure
+
+                with patch.object(handle, "steer", side_effect=steer):
+                    pending = asyncio.create_task(self.runtime.submit_side(
+                        side_id=record.id, input="adjust", owner_id="ou_owner", origin=object(),
+                    ))
+                    try:
+                        await asyncio.wait_for(entered.wait(), timeout=1)
+                        self.assertFalse(app._reply_suppression.is_suppressed(
+                            first.thread_id, first.turn_id, first.turn_id,
+                        ))
+                    finally:
+                        if isinstance(failure, asyncio.CancelledError):
+                            pending.cancel()
+                        else:
+                            release.set()
+                    with self.assertRaises(type(failure)):
+                        await pending
+                self.assertFalse(app._reply_suppression.is_suppressed(first.thread_id, first.turn_id, first.turn_id))
+        handle.complete()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
 
     async def test_cancelled_side_steer_closes_service_admission(self) -> None:
         _binding, record, _snapshot = await self.open_side()
@@ -1356,6 +1439,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(RuntimeClosed):
             await self.runtime.capture_side_submission_admission(record.id)
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
 
     async def test_side_steer_error_preserves_running_side_and_other_inputs(self) -> None:
         binding, record, _ = await self.open_side()
@@ -1375,6 +1459,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime._sides[record.id].active.steer_count, 0)
         self.assertEqual(self.runtime.side_snapshot(record.id).turn_id, first.turn_id)
         self.assertTrue(self.runtime._accepting)
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
         parent = await self.runtime.submit(
             binding=binding, cwd=self.cwd, input="independent input",
             owner_id="ou_owner", origin=object(),
@@ -2291,6 +2376,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handle.run_calls, 1)
         self.assertEqual(len(self.outcomes), 1)
         self.assertEqual(self.outcomes[0].result.final_response, "first result")
+        self.input_received.assert_called_once_with(started.thread_id, started.turn_id, started.turn_id)
 
         # The remembered notification belongs only to that physical Turn.
         following = await self.runtime.submit_side(
@@ -4046,6 +4132,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             on_completion=capture,
             poll_interval_seconds=0,
         )
+        self.input_received = Mock()
+        self.runtime.set_input_received_handler(self.input_received)
         self.scope = FeishuScope("cli_test", "oc_chat", ScopeKind.DIRECT)
         self.cwd_context = tempfile.TemporaryDirectory()
         self.cwd = Path(self.cwd_context.name)
@@ -5680,6 +5768,48 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.handles[0].complete()
         self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
 
+    async def assert_steer_notifies_before_failed_context_commit(self, *, goal: bool) -> None:
+        binding = self.catch_up_binding()
+        if goal:
+            binding, handle, started = await self.start_fake_goal(binding)
+            handle.rollover("physical-adjustment")
+            reply_turn_id = started.logical_turn_id
+        else:
+            initial = await self.runtime.capture_submission_admission(binding.id)
+            started = await self.submit(binding, "first", initial, ContextCursorCommit(
+                initial.context_revision, MessageContextAnchor("om-first", 1_500),
+            ))
+            started.release_receipt_attempt()
+            binding = self.store.get(binding.id)
+            handle = self.codex.handles[-1]
+            reply_turn_id = started.turn_id
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        observed = []
+        self.input_received.side_effect = lambda *_: observed.append((
+            self.runtime._lock(binding.id).locked(), self.store.get(binding.id).context_anchor,
+        ))
+        with (
+            patch.object(self.store, "commit_context_anchor", side_effect=BindingConflict("CAS failed")),
+            self.assertRaises(ContextBoundaryCommitFailed),
+        ):
+            await self.submit(binding, "accepted adjustment", admission, ContextCursorCommit(
+                admission.context_revision, MessageContextAnchor("om-adjustment", 2_000),
+            ))
+        self.input_received.assert_called_once_with(started.thread_id, reply_turn_id, admission.turn_id)
+        self.assertEqual(observed, [(True, binding.context_anchor)])
+        self.assertFalse(self.runtime._accepting)
+        if goal:
+            handle.finish()
+        else:
+            handle.complete()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_ordinary_received_input_notified_before_failed_context_commit(self) -> None:
+        await self.assert_steer_notifies_before_failed_context_commit(goal=False)
+
+    async def test_goal_received_input_notified_before_failed_context_commit(self) -> None:
+        await self.assert_steer_notifies_before_failed_context_commit(goal=True)
+
     async def test_public_turn_stream_tracks_completed_context_usage(self) -> None:
         binding = self.binding()
         self.assertIsNone(self.runtime.context_window_usage(binding.id))
@@ -6195,6 +6325,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             *inputs, SkillInput("code-review", "/tmp/code-review/SKILL.md"),
         ])])
         self.assertEqual(handle.wait_terminal_calls, 1)
+        self.input_received.assert_called_once_with(handle.thread_id, handle.id, "physical-turn-2")
         self.assertEqual(self.codex.turn_calls, [])
         self.assertEqual(self.codex.model_calls, 0)
         self.assertEqual(catalog.calls, [(self.cwd, True)])
@@ -6222,6 +6353,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handle.steers, [])
         self.assertEqual(self.codex.turn_calls, [])
         self.assertTrue(self.runtime._accepting)
+        self.input_received.assert_not_called()
 
     async def test_goal_skill_preparation_does_not_retarget_next_physical_turn(self) -> None:
         binding, handle, _ = await self.start_fake_goal()
@@ -6276,6 +6408,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 admission.context_revision, upper,
             ))
         self.assertEqual(self.store.get(binding.id).context_anchor, first_anchor)
+        self.input_received.assert_called_once_with(handle.thread_id, handle.id, admission.turn_id)
+        self.input_received.reset_mock()
         handle.steer_error = None
         handle.steer_gate = asyncio.Event()
         handle.steer_started.clear()
@@ -6286,8 +6420,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         ))
         await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
         self.assertEqual(self.store.get(binding.id).context_anchor, first_anchor)
+        self.input_received.assert_called_once_with(handle.thread_id, handle.id, admission.turn_id)
         handle.steer_gate.set()
         await pending
+        self.input_received.assert_called_once_with(handle.thread_id, handle.id, admission.turn_id)
         self.assertEqual(self.store.get(binding.id).context_anchor, upper)
         self.assertEqual(
             self.store.get(binding.id).context_revision,
@@ -6302,6 +6438,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         pending.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await pending
+        self.input_received.assert_called_once_with(handle.thread_id, handle.id, goal.logical_turn_id)
         with self.assertRaises(RuntimeClosed):
             await self.submit(binding, "must not retry")
         self.assertEqual(handle.steers, [(goal.logical_turn_id, "unknown acceptance")])
@@ -6331,6 +6468,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ContextCursorCommit(admission.context_revision, MessageContextAnchor("om-later", 2_000)),
             )
         self.assertIs(caught.exception, failure)
+        self.input_received.assert_called_once_with(handle.thread_id, handle.id, admission.turn_id)
         self.assertEqual(handle.steers, [(goal.logical_turn_id, "adjust")])
         self.assertEqual(self.runtime.active_goal(binding.id).state, GoalOperationState.RUNNING)
         self.assertEqual(self.store.get(binding.id).context_anchor, binding.context_anchor)
@@ -6357,6 +6495,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.steer_gate.set()
         with self.assertRaises(GoalStateUnknown):
             await pending
+        self.input_received.assert_called_once_with(handle.thread_id, handle.id, goal.logical_turn_id)
         self.assertEqual(
             self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN,
         )
@@ -6581,6 +6720,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.rollover("physical-turn-2")
         handle.steer_gate.set()
         steered = await pending
+        self.input_received.assert_called_once_with(handle.thread_id, handle.id, expected_turn_id)
         self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
         self.assertEqual(steered.turn_id, expected_turn_id)
         self.assertEqual(handle.steers, [(expected_turn_id, "accepted on original turn")])
@@ -9197,6 +9337,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         steering.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await steering
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
 
         with self.assertRaisesRegex(RuntimeClosed, "服务正在停止"):
             await self.submit(binding, "must not submit after unknown steer")
@@ -9224,6 +9365,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIs(caught.exception, failure)
             steer.assert_awaited_once_with("adjust")
         self.assertEqual(self.store.get(binding.id).context_anchor, binding.context_anchor)
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
         self.assertEqual(self.runtime._active[binding.id].steer_count, 0)
         self.assertEqual(self.runtime.active_turn(binding.id).turn_id, first.turn_id)
         self.assertTrue(self.runtime._accepting)
@@ -9448,7 +9590,170 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(second.disposition, SubmitDisposition.STEERED)
         self.assertEqual(second.turn_id, first.turn_id)
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
         self.assertEqual(self.codex.handles[0].steers, ["change direction"])
+        self.assertEqual(len(self.codex.handles), 1)
+        await self.finish(self.codex.handles[0], first)
+
+    async def assert_received_input_clears_suppression_before_receipt(self, *, goal: bool) -> None:
+        if goal:
+            binding, handle, _ = await self.start_fake_goal()
+        else:
+            binding = self.binding()
+            first = await self.submit(binding, "first")
+            first.release_receipt_attempt()
+            handle = self.codex.handles[-1]
+        app = reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        await suppress_current_reply(app, handle.thread_id, handle.id)
+        handle.steer_gate = asyncio.Event()
+        pending = asyncio.create_task(self.submit(binding, "adjustment"))
+        try:
+            await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+            self.assertFalse(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, handle.id))
+            result = await suppress_current_reply(app, handle.thread_id, handle.id)
+            self.assertTrue(result["suppressed"])
+        finally:
+            handle.steer_gate.set()
+        await pending
+        self.assertTrue(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, handle.id))
+        if goal:
+            handle.finish()
+        else:
+            handle.complete()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_received_ordinary_input_clears_suppression_before_native_receipt(self) -> None:
+        await self.assert_received_input_clears_suppression_before_receipt(goal=False)
+
+    async def test_received_goal_input_clears_suppression_before_native_receipt(self) -> None:
+        await self.assert_received_input_clears_suppression_before_receipt(goal=True)
+
+    async def test_received_ordinary_input_failure_and_cancellation_do_not_restore_suppression(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "first")
+        first.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        app = reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        for failure, expected in (
+            (InvalidRequestError(-32600, "rejected"), SteerRace),
+            (TransportClosedError("response lost"), TransportClosedError),
+            (asyncio.CancelledError(), asyncio.CancelledError),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                await suppress_current_reply(app, handle.thread_id, handle.id)
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def steer(_input):
+                    entered.set()
+                    await release.wait()
+                    raise failure
+
+                with patch.object(handle, "steer", side_effect=steer):
+                    pending = asyncio.create_task(self.submit(binding, "adjust"))
+                    try:
+                        await asyncio.wait_for(entered.wait(), timeout=1)
+                        self.assertFalse(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, handle.id))
+                    finally:
+                        if isinstance(failure, asyncio.CancelledError):
+                            pending.cancel()
+                        else:
+                            release.set()
+                    with self.assertRaises(expected):
+                        await pending
+                self.assertFalse(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, handle.id))
+        handle.complete()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_received_goal_input_unknown_does_not_restore_suppression(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        app = reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        await suppress_current_reply(app, handle.thread_id, handle.id)
+        handle.steer_gate = asyncio.Event()
+        handle.steer_error = GoalMutationStateUnknown("wrong physical Turn receipt")
+        pending = asyncio.create_task(self.submit(binding, "unknown acceptance"))
+        try:
+            await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+            self.assertFalse(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, handle.id))
+        finally:
+            handle.steer_gate.set()
+        with self.assertRaises(GoalStateUnknown):
+            await pending
+        self.assertFalse(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, handle.id))
+        self.assertEqual(self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN)
+        handle.finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_received_goal_input_clears_only_original_physical_turn_on_rollover(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        app = reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        first_physical_id = handle.current_physical_turn_id()
+        await suppress_current_reply(app, handle.thread_id, first_physical_id)
+        handle.steer_accept_before_wait = True
+        handle.steer_gate = asyncio.Event()
+        pending = asyncio.create_task(self.submit(binding, "input for first physical Turn"))
+        try:
+            await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+            self.assertFalse(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, first_physical_id))
+            handle.rollover("physical-next")
+            handle.emit_activity(TurnActivityNotificationProjection(
+                turn_id="physical-next", turn_started=True,
+            ))
+            result = await suppress_current_reply(app, handle.thread_id, "physical-next")
+            self.assertTrue(result["suppressed"])
+        finally:
+            handle.steer_gate.set()
+        await pending
+        self.assertFalse(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, first_physical_id))
+        self.assertTrue(app._reply_suppression.is_suppressed(handle.thread_id, handle.id, "physical-next"))
+        handle.finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_received_input_notification_precedes_concurrent_completion(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "first")
+        first.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        handle.steer_gate = asyncio.Event()
+        stream_drained = asyncio.Event()
+        original_stream = handle.stream
+        events = []
+
+        async def observe_drain():
+            async for notification in original_stream():
+                yield notification
+            stream_drained.set()
+
+        async def complete(outcome):
+            events.append("completion")
+            self.outcomes.append(outcome)
+
+        handle.stream = observe_drain
+        self.runtime.set_completion_handler(complete)
+        self.input_received.side_effect = lambda *_: events.append((
+            "received", self.runtime._lock(binding.id).locked(),
+        ))
+        pending = asyncio.create_task(self.submit(binding, "adjustment"))
+        await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+        handle.complete()
+        await asyncio.wait_for(stream_drained.wait(), timeout=1)
+        self.assertEqual(events, [("received", True)])
+        handle.steer_gate.set()
+        steered = await pending
+        self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertEqual(events, [("received", True), "completion"])
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
+
+    async def test_received_input_notification_failure_does_not_change_receipt(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "first")
+        self.input_received.side_effect = RuntimeError("presentation unavailable")
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
+            second = await self.submit(binding, "accepted adjustment")
+        self.assertEqual(second.disposition, SubmitDisposition.STEERED)
+        self.assertEqual(second.turn_id, first.turn_id)
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.codex.handles[0].steers, ["accepted adjustment"])
         self.assertEqual(len(self.codex.handles), 1)
         await self.finish(self.codex.handles[0], first)
 
@@ -9516,6 +9821,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(SteerRace):
             await self.submit(binding, "too late")
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
 
         progress = self.runtime.turn_progress(binding.id)
         assert progress is not None
@@ -10392,6 +10698,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.codex.handles[1].steers, [])
         await self.finish(self.codex.handles[1], second)
+        self.input_received.assert_not_called()
 
     async def test_stop_invalidates_admission_and_rejects_prepared_input(self) -> None:
         binding = self.binding()
@@ -10440,6 +10747,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.codex.start_kwargs, [])
         self.assertEqual(self.codex.turn_inputs, [])
+        self.input_received.assert_not_called()
 
     async def test_closed_runtime_rejects_captured_admission(self) -> None:
         binding = self.binding()

@@ -1588,6 +1588,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             def set_question_handler(self, _handler: object) -> None:
                 return None
 
+            def set_input_received_handler(self, _handler: object) -> None:
+                return None
+
             def close_admission(self) -> None:
                 return None
 

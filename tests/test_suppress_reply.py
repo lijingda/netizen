@@ -64,7 +64,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
             binding_id=self.binding.id, thread_id="native-one", turn_id="turn-one",
             owner_id="ou_initiator", origin=self.origin, cwd=self.fixture.project,
             task_feedback=self.feedback,
-            result=completed_turn_result(final_response="private result"),
+            result=completed_turn_result(final_response=""),
         )
         values.update(changes)
         return TurnOutcome(**values)
@@ -75,10 +75,32 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
             owner_id="ou_initiator", origin=self.origin, cwd=self.fixture.project,
             task_feedback=self.feedback, goal=native_goal(GoalStatus.COMPLETE),
             final_physical_turn_id="goal-turn-final", final_turn_status="completed",
-            final_response="private Goal result",
+            final_response="",
         )
         values.update(changes)
         return GoalOutcome(**values)
+
+    def side_outcome(self, *, final_response=""):
+        route = self.fixture.store.create_side_topic(
+            app_id="cli_test", chat_id="oc_direct", source_message_id="om_side_source",
+            parent_binding_id=self.binding.id, creator_id="ou_initiator", requires_mention=False,
+        )
+        self.fixture.store.set_side_topic_root(route.id, "om_side_root")
+        self.fixture.store.open_side_topic(route.id, "omt_side")
+        self.runtime.side_snapshots[route.id] = SideSessionSnapshot(
+            side_id=route.id, parent_binding_id=self.binding.id, parent_thread_id="native-one",
+            thread_id="native-side", project_alias="test", cwd=self.fixture.project,
+            creator_id="ou_initiator", state=SideSessionState.OPEN,
+            topic_id="omt_side", root_message_id="om_side_root", turn_id="side-turn",
+            turn_state=ActiveState.RUNNING, last_activity=0,
+        )
+        return SideTurnOutcome(
+            side_id=route.id, parent_binding_id=self.binding.id, thread_id="native-side",
+            turn_id="side-turn", owner_id="ou_initiator",
+            origin=FakeMessage("side work", message_id="om_side", thread_id="omt_side"),
+            cwd=self.fixture.project, task_feedback=self.feedback,
+            result=completed_turn_result(final_response=final_response),
+        )
 
     async def suppress(self, outcome):
         if isinstance(outcome, GoalOutcome):
@@ -186,8 +208,8 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(response["suppressed"])
 
-    async def test_normal_completion_omits_nonempty_empty_and_missing_final_without_creating_card(self):
-        for index, final in enumerate(("private result", "", None)):
+    async def test_normal_completion_omits_empty_and_missing_final_without_creating_card(self):
+        for index, final in enumerate(("", None)):
             for progress in (False, True):
                 with self.subTest(final=final, progress=progress):
                     outcome = self.outcome(
@@ -200,13 +222,45 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(self.channel.updates, [])
                     self.assertEqual(self.channel.send_calls, [])
                     self.assert_cleaned(outcome)
-        self.assertEqual(self.channel.reactions, [(self.origin.id, "DONE")] * 6)
+        self.assertEqual(self.channel.reactions, [(self.origin.id, "DONE")] * 4)
 
-    async def test_final_files_and_images_are_not_prepared_or_delivered(self):
+    async def test_nonempty_final_preserves_normal_delivery_with_and_without_existing_progress(self):
+        for progress in (False, True):
+            for final in ("answer requested after suppression", " "):
+                with self.subTest(progress=progress, final=final):
+                    presentations = []
+                    for silent in (False, True):
+                        self.channel.replies.clear()
+                        self.channel.updates.clear()
+                        self.channel.reactions.clear()
+                        outcome = self.outcome(
+                            result=completed_turn_result(final_response=final),
+                            task_feedback=replace(self.feedback, progress_card_enabled=progress),
+                        )
+                        if progress:
+                            outcome = await self.start_progress(outcome)
+                        if silent:
+                            await self.suppress(outcome)
+                        await self.app.handle_completion(outcome)
+                        if progress:
+                            self.assertEqual(len(self.channel.replies), 1)
+                            self.assertEqual(len(self.channel.updates), 1)
+                            self.assertEqual(self.channel.updates[0][0], "om_progress")
+                            self.assertIn(final, str(self.channel.updates[0][1]))
+                        else:
+                            self.assertEqual(self.channel.replies, [(self.origin.id, final)])
+                            self.assertEqual(self.channel.updates, [])
+                        presentations.append((
+                            list(self.channel.replies), list(self.channel.updates), list(self.channel.reactions),
+                        ))
+                        self.assert_cleaned(outcome)
+                    self.assertEqual(presentations[0], presentations[1])
+
+    async def test_empty_final_suppresses_files_and_images_without_preparing_or_delivering_them(self):
         (self.fixture.project / "secret.txt").write_text("private file")
         (self.fixture.project / "secret.png").write_bytes(PNG)
         outcome = self.outcome(
-            result=completed_turn_result(file_change_item("secret.txt"), final_response="![secret](secret.png)"),
+            result=completed_turn_result(file_change_item("secret.txt", "secret.png"), final_response=""),
         )
         await self.suppress(outcome)
         await self.app.handle_completion(outcome)
@@ -214,6 +268,42 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.replies, [])
         self.assertEqual(self.channel.send_calls, [])
         self.assert_cleaned(outcome)
+
+    async def test_nonempty_final_preserves_images_and_files_with_and_without_existing_progress(self):
+        (self.fixture.project / "result.txt").write_text("task file")
+        (self.fixture.project / "result.png").write_bytes(PNG)
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                self.channel.replies.clear()
+                self.channel.updates.clear()
+                self.channel.upload_calls.clear()
+                outcome = self.outcome(
+                    result=completed_turn_result(
+                        file_change_item("result.txt"), final_response="visible answer\n\n![image](result.png)",
+                    ),
+                    task_feedback=replace(self.feedback, progress_card_enabled=progress),
+                )
+                if progress:
+                    outcome = await self.start_progress(outcome)
+                await self.suppress(outcome)
+                await self.app.handle_completion(outcome)
+                self.assertEqual(len(self.channel.upload_calls), 1)
+                self.assertEqual(self.channel.upload_calls[0][0].buffer, PNG)
+                if progress:
+                    self.assertEqual(len(self.channel.replies), 1)
+                    self.assertEqual(len(self.channel.updates), 1)
+                    self.assertEqual(self.channel.updates[0][0], "om_progress")
+                    card = self.channel.updates[0][1]
+                else:
+                    self.assertEqual(len(self.channel.replies), 1)
+                    self.assertIsInstance(self.channel.replies[0][1], OutboundCard)
+                    card = self.channel.replies[0][1].card
+                rendered = str(card)
+                self.assertIn("visible answer", rendered)
+                self.assertIn("img_uploaded_1", rendered)
+                self.assertIn("result.txt", rendered)
+                self.assertTrue(_elements(card, "button"))
+                self.assert_cleaned(outcome)
 
     async def test_partial_answers_after_tool_and_terminal_catchup_keep_existing_delivery(self):
         self.app._progress_cards._poll_seconds = 0.001
@@ -266,14 +356,14 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(self.channel.replies), 2)
                     self.assertEqual(rendered.count(first.text), 1)
                     self.assertEqual(rendered.count(later.text), 1)
-                self.assertNotIn("private result", rendered)
+                self.assertNotIn("未产生文本回复", rendered)
                 self.assert_cleaned(outcome)
 
     async def test_existing_progress_finishes_collapsed_without_result_files_or_new_card(self):
         (self.fixture.project / "secret.txt").write_text("private file")
         outcome = await self.start_progress(self.outcome(
             task_feedback=replace(self.feedback, progress_card_enabled=True),
-            result=completed_turn_result(file_change_item("secret.txt"), final_response="private result"),
+            result=completed_turn_result(file_change_item("secret.txt"), final_response=""),
         ))
         await self.suppress(outcome)
         await self.app.handle_completion(outcome)
@@ -282,7 +372,6 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         message_id, card = self.channel.updates[0]
         self.assertEqual(message_id, "om_progress")
         visible = json.dumps(card, ensure_ascii=False)
-        self.assertNotIn("private result", visible)
         self.assertNotIn("secret.txt", visible)
         self.assertNotIn("未产生文本回复", visible)
         self.assertEqual(_elements(card, "button"), [])
@@ -324,16 +413,17 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                         presentations.append(list(self.channel.replies))
                     self.assertEqual(presentations[0], presentations[1])
 
-    async def test_unconfirmed_partial_with_nonempty_final_keeps_existing_suppression(self):
+    async def test_unconfirmed_partial_with_nonempty_final_delivers_final_answer(self):
         outcome = self.outcome(
+            result=completed_turn_result(final_response="visible final answer"),
             partial_answers=(PartialAnswer("native-one", "turn-one", "answer", "partial"),),
         )
         await self.suppress(outcome)
         self.channel.reply_results.append(retryable_sent_result())
         with self.assertLogs("netizen_cli.channel_app", "WARNING"):
             await self.app.handle_completion(outcome)
-        self.assertEqual(len(self.channel.replies), 1)
-        self.assertNotIn("private result", str(self.channel.replies))
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertEqual(self.channel.replies[-1], (self.origin.id, "visible final answer"))
         self.assertNotIn("投递未确认", str(self.channel.replies))
         self.assert_cleaned(outcome)
 
@@ -359,7 +449,6 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(chat_id, "oc_direct")
                 self.assertIsInstance(content, OutboundText)
                 self.assertEqual(content.mentions, [Identity(open_id="ou_initiator")])
-                self.assertNotIn("private result", content.text)
                 self.assertEqual(opts.reply_to, anchor)
                 self.assertFalse(opts.reply_in_thread)
                 self.assertEqual(opts.reply_target_gone, "fail")
@@ -405,17 +494,63 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(first)
         second = self.outcome(turn_id="turn-two")
         await self.app.handle_completion(second)
-        self.assertEqual(self.channel.replies, [(self.origin.id, "private result")])
+        self.assertEqual(self.channel.replies, [(self.origin.id, "任务已结束，未产生文本回复。")])
 
-    async def test_accepted_input_in_same_physical_turn_does_not_reset_suppression(self):
+    async def test_received_input_clears_only_the_exact_physical_turn_suppression(self):
         outcome = self.outcome()
         await self.suppress(outcome)
-        self.runtime.turn_activity_values[self.binding.id] = replace(
-            self.runtime.turn_activity_values[self.binding.id], revision=2, steer_count=1,
-        )
+        for thread_id, reply_id, physical_id in (
+            ("another-thread", "turn-one", "turn-one"),
+            ("native-one", "another-reply", "turn-one"),
+            ("native-one", "turn-one", "another-turn"),
+        ):
+            with self.subTest(thread_id=thread_id, reply_id=reply_id, physical_id=physical_id):
+                self.runtime.input_received_handler(thread_id, reply_id, physical_id)
+                self.assertTrue(self.app._reply_suppression.is_suppressed("native-one", "turn-one", "turn-one"))
+        self.runtime.input_received_handler("native-one", "turn-one", "turn-one")
+        self.assertFalse(self.app._reply_suppression.is_suppressed("native-one", "turn-one", "turn-one"))
+        await self.app.handle_completion(outcome)
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertIn("未产生文本回复", str(self.channel.replies))
+        self.assert_cleaned(outcome)
+
+    async def test_received_input_allows_a_fresh_suppression_decision(self):
+        outcome = self.outcome()
+        await self.suppress(outcome)
+        self.runtime.input_received_handler("native-one", "turn-one", "turn-one")
+        self.assertFalse(self.app._reply_suppression.is_suppressed("native-one", "turn-one", "turn-one"))
+        await self.suppress(outcome)
         await self.app.handle_completion(outcome)
         self.assertEqual(self.channel.replies, [])
         self.assert_cleaned(outcome)
+
+    async def test_goal_received_input_clears_current_physical_turn_but_preserves_other_turn_choice(self):
+        first = self.goal_outcome(final_physical_turn_id="goal-turn-one")
+        await self.suppress(first)
+        second = replace(first, final_physical_turn_id="goal-turn-two")
+        await self.suppress(second)
+        self.runtime.input_received_handler("native-one", "goal-one", "goal-turn-two")
+        self.assertTrue(self.app._reply_suppression.is_suppressed("native-one", "goal-one", "goal-turn-one"))
+        self.assertFalse(self.app._reply_suppression.is_suppressed("native-one", "goal-one", "goal-turn-two"))
+        await self.app.handle_completion(second)
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assert_cleaned(first)
+        self.assert_cleaned(second)
+
+    async def test_side_received_input_clears_side_suppression_without_touching_parent(self):
+        parent = self.outcome()
+        side = self.side_outcome()
+        await self.suppress(parent)
+        await self.suppress(side)
+        self.runtime.input_received_handler(side.thread_id, side.turn_id, side.turn_id)
+        self.assertFalse(self.app._reply_suppression.is_suppressed(side.thread_id, side.turn_id, side.turn_id))
+        self.assertTrue(self.app._reply_suppression.is_suppressed(parent.thread_id, parent.turn_id, parent.turn_id))
+        await self.app.handle_completion(side)
+        self.assertEqual(len(self.channel.replies), 1)
+        await self.app.handle_completion(parent)
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assert_cleaned(parent)
+        self.assert_cleaned(side)
 
     async def test_exception_paths_preserve_existing_rendering_and_reactions(self):
         cases = (
@@ -424,8 +559,10 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
             (None, TerminalStateUnknown("terminal state unknown")),
         )
         for progress in (False, True):
-            for status, error in cases:
-                with self.subTest(progress=progress, status=status, error=error):
+            for status, error, final in (
+                (status, error, final) for status, error in cases for final in ("", "original answer")
+            ):
+                with self.subTest(progress=progress, status=status, error=error, final=final):
                     presentations = []
                     for suppress in (False, True):
                         self.channel.replies.clear()
@@ -433,7 +570,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                         self.channel.reactions.clear()
                         outcome = self.outcome(
                             error=error,
-                            result=SimpleNamespace(status=status, final_response="original answer", items=()),
+                            result=SimpleNamespace(status=status, final_response=final, items=()),
                             task_feedback=replace(self.feedback, progress_card_enabled=progress),
                             partial_answers=(PartialAnswer("native-one", "turn-one", "answer", "original partial answer"),),
                         )
@@ -458,30 +595,33 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         replies = list(self.channel.replies)
         await self.app.handle_completion(outcome)
         self.assertEqual(self.channel.replies, replies)
-        self.assertNotIn("private result", str(self.channel.replies))
         self.assert_cleaned(outcome)
 
     async def test_failed_progress_update_restores_original_answer_image_files_and_partial_fallback(self):
         (self.fixture.project / "secret.txt").write_text("private file")
         (self.fixture.project / "secret.png").write_bytes(PNG)
-        outcome = await self.start_progress(self.outcome(
-            result=completed_turn_result(
-                file_change_item("secret.txt"), final_response="original answer\n\n![image](secret.png)",
-            ),
-            partial_answers=(PartialAnswer("native-one", "turn-one", "late", "original partial answer"),),
-            task_feedback=replace(self.feedback, progress_card_enabled=True),
-        ))
-        await self.suppress(outcome)
-        self.channel.card_update_results.extend(retryable_sent_result() for _ in range(3))
-        with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
-            await self.app.handle_completion(outcome)
-        self.assertEqual(len(self.channel.upload_calls), 1)
-        rendered = str(self.channel.replies[1:])
-        self.assertIn("original answer", rendered)
-        self.assertIn("original partial answer", rendered)
-        self.assertIn("secret.txt", rendered)
-        self.assertTrue(any(isinstance(content, OutboundCard) for _, content in self.channel.replies[1:]))
-        self.assert_cleaned(outcome)
+        for final in ("", "original answer\n\n![image](secret.png)"):
+            with self.subTest(final=final):
+                self.channel.replies.clear()
+                self.channel.updates.clear()
+                self.channel.upload_calls.clear()
+                outcome = await self.start_progress(self.outcome(
+                    result=completed_turn_result(file_change_item("secret.txt"), final_response=final),
+                    partial_answers=(PartialAnswer("native-one", "turn-one", "late", "original partial answer"),),
+                    task_feedback=replace(self.feedback, progress_card_enabled=True),
+                ))
+                await self.suppress(outcome)
+                self.channel.card_update_results.extend(retryable_sent_result() for _ in range(3))
+                with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
+                    await self.app.handle_completion(outcome)
+                self.assertEqual(len(self.channel.upload_calls), int(bool(final)))
+                rendered = str(self.channel.replies[1:])
+                if final:
+                    self.assertIn("original answer", rendered)
+                self.assertIn("original partial answer", rendered)
+                self.assertIn("secret.txt", rendered)
+                self.assertTrue(any(isinstance(content, OutboundCard) for _, content in self.channel.replies[1:]))
+                self.assert_cleaned(outcome)
 
     async def test_goal_final_physical_turn_is_suppressed_and_existing_logical_card_finishes(self):
         outcome = await self.start_progress(self.goal_outcome(
@@ -491,21 +631,43 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(outcome)
         self.assertEqual(len(self.channel.replies), 1)
         self.assertEqual(len(self.channel.updates), 1)
-        self.assertNotIn("private Goal result", str(self.channel.updates))
+        self.assertNotIn("未产生文本回复", str(self.channel.updates))
         self.assertTrue(all(not item["expanded"] for item in _elements(self.channel.updates[0][1], "collapsible_panel")))
         self.assert_cleaned(outcome)
+
+    async def test_nonempty_goal_final_preserves_normal_delivery(self):
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                self.channel.replies.clear()
+                self.channel.updates.clear()
+                outcome = self.goal_outcome(
+                    final_response="visible Goal answer",
+                    task_feedback=replace(self.feedback, progress_card_enabled=progress),
+                )
+                if progress:
+                    outcome = await self.start_progress(outcome)
+                await self.suppress(outcome)
+                await self.app.handle_completion(outcome)
+                if progress:
+                    self.assertEqual(len(self.channel.replies), 1)
+                    self.assertEqual(len(self.channel.updates), 1)
+                    self.assertEqual(self.channel.updates[0][0], "om_progress")
+                    self.assertIn("visible Goal answer", str(self.channel.updates[0][1]))
+                else:
+                    self.assertEqual(self.channel.replies, [(self.origin.id, "visible Goal answer")])
+                self.assert_cleaned(outcome)
 
     async def test_goal_rollover_does_not_inherit_silence_or_emit_early_completion(self):
         first = self.goal_outcome(final_physical_turn_id="goal-turn-one")
         await self.suppress(first)
         self.assertEqual(self.channel.replies, [])
         self.assertEqual(self.channel.reactions, [])
-        second = replace(first, final_physical_turn_id="goal-turn-two", final_response="visible next Turn result")
+        second = replace(first, final_physical_turn_id="goal-turn-two")
         self.runtime.goal_activity_values[self.binding.id] = replace(
             self.runtime.goal_activity_values[self.binding.id], physical_turn_id=second.final_physical_turn_id,
         )
         await self.app.handle_completion(second)
-        self.assertEqual(self.channel.replies, [(self.origin.id, "visible next Turn result")])
+        self.assertEqual(self.channel.replies, [(self.origin.id, "任务已结束，未产生文本回复。")])
         self.assert_cleaned(first)
 
     async def test_completed_goal_uses_terminal_status_with_or_without_stale_stopping_activity(self):
@@ -524,7 +686,6 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.runtime.goal_activity_values[self.binding.id] = snapshot
                 await self.app.handle_completion(replace(outcome, activity=snapshot if progress else None))
-                self.assertNotIn(outcome.final_response, str(self.channel.replies) + str(self.channel.updates))
                 self.assertEqual(len(self.channel.replies), int(progress))
                 self.assertEqual(len(self.channel.updates), int(progress))
                 self.assert_cleaned(outcome)
@@ -538,56 +699,48 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.channel.replies), 2)
         self.assertIn(earlier.text, self.channel.replies[0][1].markdown)
         self.assertIn(current.text, self.channel.replies[1][1].markdown)
-        self.assertNotIn(outcome.final_response, str(self.channel.replies))
         self.assert_cleaned(outcome)
 
     async def test_goal_control_and_finalization_errors_restore_original_answer_and_files(self):
         (self.fixture.project / "goal.txt").write_text("goal output")
-        for error, finalization, finalization_error in (
+        cases = (
             (RuntimeError("control receipt unknown"), GoalFinalizationStatus.NOT_APPLICABLE, None),
             (None, GoalFinalizationStatus.UNKNOWN, RuntimeError("automatic clear unknown")),
+        )
+        for error, finalization, finalization_error, final in (
+            (*case, final) for case in cases for final in ("", "private Goal result")
         ):
-            with self.subTest(error=error, finalization=finalization):
+            with self.subTest(error=error, finalization=finalization, final=final):
                 self.channel.replies.clear()
                 outcome = self.goal_outcome(
                     error=error, finalization=finalization, finalization_error=finalization_error,
                     final_items=(file_change_item("goal.txt"),),
+                    final_response=final,
                 )
                 await self.suppress(outcome)
                 await self.app.handle_completion(outcome)
                 rendered = str(self.channel.replies)
-                self.assertIn("private Goal result", rendered)
+                if final:
+                    self.assertIn(final, rendered)
                 self.assertIn("goal.txt", rendered)
                 self.assertIn(str(error or finalization_error), rendered)
                 self.assert_cleaned(outcome)
 
     async def test_open_side_suppresses_only_its_own_turn(self):
-        route = self.fixture.store.create_side_topic(
-            app_id="cli_test", chat_id="oc_direct", source_message_id="om_side_source",
-            parent_binding_id=self.binding.id, creator_id="ou_initiator", requires_mention=False,
-        )
-        self.fixture.store.set_side_topic_root(route.id, "om_side_root")
-        self.fixture.store.open_side_topic(route.id, "omt_side")
-        self.runtime.side_snapshots[route.id] = SideSessionSnapshot(
-            side_id=route.id, parent_binding_id=self.binding.id, parent_thread_id="native-one",
-            thread_id="native-side", project_alias="test", cwd=self.fixture.project,
-            creator_id="ou_initiator", state=SideSessionState.OPEN,
-            topic_id="omt_side", root_message_id="om_side_root", turn_id="side-turn",
-            turn_state=ActiveState.RUNNING, last_activity=0,
-        )
-        side = SideTurnOutcome(
-            side_id=route.id, parent_binding_id=self.binding.id, thread_id="native-side",
-            turn_id="side-turn", owner_id="ou_initiator",
-            origin=FakeMessage("side work", message_id="om_side", thread_id="omt_side"),
-            cwd=self.fixture.project, task_feedback=self.feedback,
-            result=completed_turn_result(final_response="private side result"),
-        )
+        side = self.side_outcome()
         await self.suppress(side)
         self.assertFalse(self.app._reply_suppression.is_suppressed("native-one", "turn-one", "turn-one"))
         await self.app.handle_completion(side)
         self.assertEqual(self.channel.replies, [])
         await self.app.handle_completion(self.outcome())
-        self.assertEqual(self.channel.replies, [(self.origin.id, "private result")])
+        self.assertEqual(self.channel.replies, [(self.origin.id, "任务已结束，未产生文本回复。")])
+        self.assert_cleaned(side)
+
+    async def test_nonempty_side_final_preserves_normal_delivery(self):
+        side = self.side_outcome(final_response="visible side answer")
+        await self.suppress(side)
+        await self.app.handle_completion(side)
+        self.assertEqual(self.channel.replies, [(side.origin.id, "visible side answer")])
         self.assert_cleaned(side)
 
     async def test_native_discard_and_app_close_release_suppression_state(self):
@@ -662,7 +815,7 @@ class ScheduledSuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 binding_id=request["binding"].id, thread_id=thread_id, turn_id="turn-initial",
                 owner_id=request["owner_id"], origin=request["origin"], cwd=request["cwd"],
                 task_feedback=settings.task_feedback,
-                result=completed_turn_result(final_response="" if partial_failure else "private scheduled result"),
+                result=completed_turn_result(final_response=""),
                 partial_answers=(
                     (PartialAnswer(thread_id, "turn-initial", "answer", "partial"),) if partial_failure else ()
                 ),
@@ -673,6 +826,6 @@ class ScheduledSuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         if partial_failure:
             self.assertIn("任务已完成，但阶段性答案投递未确认。", str(fixture.channel.replies[-1]))
         self.assertEqual(len(fixture.channel.updates), int(progress))
-        self.assertNotIn("private scheduled result", str(fixture.channel.updates))
+        self.assertNotIn("未产生文本回复", str(fixture.channel.updates))
         self.assertEqual(len(fixture.channel.send_calls), 1)
         archive.assert_not_awaited()

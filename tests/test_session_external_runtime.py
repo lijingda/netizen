@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from openai_codex import ExternalMessage, InvalidRequestError
 
@@ -91,6 +91,8 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
             progress_card_defaults=lambda: self.progress_card_defaults,
             poll_interval_seconds=0,
         )
+        self.input_received = Mock()
+        self.runtime.set_input_received_handler(self.input_received)
 
     async def asyncTearDown(self):
         self.runtime.close_admission()
@@ -127,6 +129,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         first_settings = ProgressCardSettings(organization="time")
         self.progress_card_defaults = first_settings
         first = await self.send(owner="original", origin=origin)
+        self.input_received.assert_not_called()
         self.progress_card_defaults = ProgressCardSettings(operation_limit=16)
         active = self.runtime._active[self.binding.id]
         task = active.task
@@ -137,6 +140,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
             owner_id="new", origin=object(),
         )
         self.assertEqual(second.disposition, SubmitDisposition.JOINED)
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
         self.assertEqual((second.thread_id, second.turn_id), (first.thread_id, first.turn_id))
         self.assertIsNone(second.release_receipt_attempt)
         self.assertEqual(second.task_feedback.progress_card_settings, first_settings)
@@ -149,6 +153,77 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.outcomes[0].owner_id, "original")
         self.assertIs(self.outcomes[0].origin, origin)
 
+    async def test_external_input_clears_old_suppression_before_rpc_and_preserves_fresh_choice(self):
+        first = await self.send()
+        app = fixtures.reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        await fixtures.suppress_current_reply(app, first.thread_id, first.turn_id)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = ExternalThread.turn
+
+        async def join(thread, input, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original(thread, input, **kwargs)
+
+        with patch.object(ExternalThread, "turn", new=join):
+            pending = asyncio.create_task(self.send())
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                self.assertFalse(app._reply_suppression.is_suppressed(
+                    first.thread_id, first.turn_id, first.turn_id,
+                ))
+                result = await fixtures.suppress_current_reply(app, first.thread_id, first.turn_id)
+                self.assertTrue(result["suppressed"])
+            finally:
+                release.set()
+            joined = await pending
+        self.assertEqual(joined.disposition, SubmitDisposition.JOINED)
+        self.assertTrue(app._reply_suppression.is_suppressed(first.thread_id, first.turn_id, first.turn_id))
+        await self.finish(first)
+
+    async def assert_external_input_failure_does_not_restore_suppression(self, *, cancelled):
+        first = await self.send()
+        app = fixtures.reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        cases = ((asyncio.CancelledError(), asyncio.CancelledError),) if cancelled else (
+            (InvalidRequestError(-32600, "input rejected"), InvalidRequestError),
+            (ConnectionError("join response lost"), TurnStartFailed),
+        )
+        for failure, expected in cases:
+            with self.subTest(failure=type(failure).__name__):
+                await fixtures.suppress_current_reply(app, first.thread_id, first.turn_id)
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def join(_thread, _input, **_kwargs):
+                    entered.set()
+                    await release.wait()
+                    raise failure
+
+                with patch.object(ExternalThread, "turn", new=join):
+                    pending = asyncio.create_task(self.send())
+                    try:
+                        await asyncio.wait_for(entered.wait(), timeout=1)
+                        self.assertFalse(app._reply_suppression.is_suppressed(
+                            first.thread_id, first.turn_id, first.turn_id,
+                        ))
+                    finally:
+                        if cancelled:
+                            pending.cancel()
+                        else:
+                            release.set()
+                    with self.assertRaises(expected):
+                        await pending
+                self.assertFalse(app._reply_suppression.is_suppressed(
+                    first.thread_id, first.turn_id, first.turn_id,
+                ))
+                self.assertEqual(self.runtime.active_turn(self.binding.id).turn_id, first.turn_id)
+        await self.finish(first)
+
+    async def test_external_input_failure_does_not_restore_suppression(self):
+        await self.assert_external_input_failure_does_not_restore_suppression(cancelled=False)
+
+    async def test_external_input_cancellation_does_not_restore_suppression(self):
+        await self.assert_external_input_failure_does_not_restore_suppression(cancelled=True)
+
     async def test_native_next_turn_keeps_previous_result_without_removing_new_active(self):
         first_origin, second_origin = object(), object()
         worktree = self.cwd / "worktree"
@@ -159,6 +234,10 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
             owner_id="agent", origin=first_origin,
         )
         first.release_receipt_attempt()
+        app = fixtures.reply_suppression_app(self.runtime, self.store, self.scope.app_id)
+        self.input_received.side_effect = app._reply_suppression.discard_physical_turn
+        self.runtime.set_input_received_handler(self.input_received)
+        await fixtures.suppress_current_reply(app, first.thread_id, first.turn_id)
         first_settings = first.task_feedback.progress_card_settings
         self.progress_card_defaults = ProgressCardSettings(organization="time")
         self.codex.advance_on_external = True
@@ -167,6 +246,9 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         # directory for this already materialized, locally active Thread.
         second = await self.send(origin=second_origin)
         second.release_receipt_attempt()
+        self.input_received.assert_called_once_with(first.thread_id, first.turn_id, first.turn_id)
+        self.assertFalse(app._reply_suppression.is_suppressed(first.thread_id, first.turn_id, first.turn_id))
+        self.input_received.reset_mock()
         self.assertEqual(second.disposition, SubmitDisposition.STARTED)
         self.assertEqual(second.task_feedback.progress_card_settings, self.progress_card_defaults)
         self.assertNotEqual(second.turn_id, first.turn_id)
@@ -180,6 +262,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
             skill_names=("code-review",), owner_id="user", origin=object(),
         )
         self.assertEqual(steered.turn_id, second.turn_id)
+        self.input_received.assert_called_once_with(second.thread_id, second.turn_id, second.turn_id)
         self.assertEqual(catalog.calls, [(worktree, True)])
         self.assertEqual(len(self.codex.read_calls), read_count)
         self.assertEqual(self.codex.resume_calls, [])
