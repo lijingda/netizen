@@ -858,6 +858,21 @@ Goal 的准确来源登记及工具成功，证据为忽略目录中的
 交接时，尚未登记的来源被明确拒绝，不误报静默成功；沿用既有归属边界，不新增等待或
 准入机制。该证据同样使用本地模拟模型，不包含真实飞书投递。
 
+2026-10-31 静默使用原则与展示调整：收到并确认属于当前任务的新输入后，在原生提交
+前立即撤销旧静默；失败、取消或结果未知不恢复旧选择。输入提交期间仍可重新静默，
+迟到回执不再次撤销；非空 final 沿正常路径交付。确定性行为测试覆盖 ordinary、Side、
+Goal、ExternalMessage 四条输入路径、失败结果和 Goal 换轮隔离。
+固定 SDK/bundled App Server `0.163.0` 的生产 MCP → SessionService → ChannelApplication
+→ Runtime 隔离探针通过普通 steer 与 ExternalMessage join：原生调用前旧标记已清，
+延迟真实接纳回执期间再次静默成功，回执返回后新选择仍保留；空 final 正常 completed、
+Thread idle、无结果投递。证据 `/tmp/netizen-suppression-simple-native.json` 对应当时
+未提交工作区，使用临时 Codex 目录、loopback mock provider 与 FakeChannel。
+本次原生探针未覆盖 Goal/Side 和失败路径；这些由本地行为测试覆盖。以上不代表真实
+模型的静默决策改善或飞书客户端已验收，也未部署运行实例。
+简化后的 `make check` 通过：3,785 项测试完成（15 项平台或可选环境条件跳过），编译、
+依赖一致性及全部 SDK synthetic probes 通过；日志
+`/tmp/netizen-suppression-simple-make-check.log`。
+
 2026-10-26 Side 来源扩展通过 `make check`：3,674 项测试、15 项条件跳过，编译、依赖及
 SDK synthetic probes 通过。另用真实 bundled App Server `0.163.0`、临时
 HOME/CODEX_HOME/数据库和 loopback mock provider 验证：实际 Runtime Side 经 MCP

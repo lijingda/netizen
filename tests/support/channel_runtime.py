@@ -171,6 +171,9 @@ class StubRuntime:
     def set_question_handler(self, handler) -> None:
         self.questions = handler
 
+    def set_input_received_handler(self, handler) -> None:
+        self.input_received_handler = handler
+
     async def active_binding_changed(
         self,
         previous_binding_id: str | None,

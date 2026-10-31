@@ -214,6 +214,7 @@ _NAMING_PREPARATION_TIMEOUT_SECONDS = 10.0
 _QUESTION_DELIVERY_TIMEOUT_SECONDS = 20.0
 
 QuestionHandler = Callable[[QuestionTarget, object, QuestionRequest], Awaitable[None]]
+InputReceivedHandler = Callable[[str, str, str], None]
 
 
 class _TurnViewUnverified(RuntimeError):
@@ -493,6 +494,7 @@ class CodexRuntime:
         self._progress_card_defaults = progress_card_defaults
         self._on_completion = on_completion
         self._on_question: QuestionHandler | None = None
+        self._on_input_received: InputReceivedHandler | None = None
         self._poll_interval_seconds = poll_interval_seconds
         self._compaction_timeout_seconds = compaction_timeout_seconds
         self._side_idle_seconds = side_idle_seconds
@@ -542,6 +544,23 @@ class CodexRuntime:
 
     def set_question_handler(self, handler: QuestionHandler) -> None:
         self._on_question = handler
+
+    def set_input_received_handler(self, handler: InputReceivedHandler) -> None:
+        self._on_input_received = handler
+
+    def _notify_input_received(
+        self, thread_id: str, reply_turn_id: str, physical_turn_id: str,
+    ) -> None:
+        """Clear the prior display choice before submitting a targeted new input."""
+        if self._on_input_received is None:
+            return
+        try:
+            self._on_input_received(thread_id, reply_turn_id, physical_turn_id)
+        except Exception:
+            logger.exception(
+                "received input presentation notification failed",
+                extra={"thread_id": thread_id, "turn_id": physical_turn_id},
+            )
 
     def _deliver_question(
         self,
@@ -1716,6 +1735,9 @@ class CodexRuntime:
                 if active.task_feedback.progress_card_enabled:
                     self._refresh_turn_activity(active)
                 stale_after_cursor = active.plan_cursor
+                self._notify_input_received(
+                    active.handle.thread_id, active.handle.id, active.handle.id,
+                )
                 try:
                     await self._steer_turn(
                         active.handle.steer(native_input),
@@ -3640,6 +3662,10 @@ class CodexRuntime:
                     input=native_input,
                     context_commit=context_commit,
                 )
+            if active is not None:
+                self._notify_input_received(
+                    active.handle.thread_id, active.handle.id, active.handle.id,
+                )
             if active is not None and not external:
                 self._mark_thread_subscribed_locked(binding, active.thread)
                 self._refresh_turn_activity(active)
@@ -5116,6 +5142,7 @@ class CodexRuntime:
     ) -> Submission:
         handle = active.handle
         assert handle is not None
+        self._notify_input_received(active.thread_id, handle.id, expected_turn_id)
         try:
             await self._steer_turn(
                 handle.steer(input, expected_turn_id=expected_turn_id),

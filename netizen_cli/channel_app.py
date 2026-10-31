@@ -652,6 +652,7 @@ class ChannelApplication:
         self._progress_cards = _ReplyCardPresenter(channel, runtime)
         runtime.set_completion_handler(self.handle_completion)
         runtime.set_question_handler(self.handle_questions)
+        runtime.set_input_received_handler(self._reply_suppression.discard_physical_turn)
 
     async def close(self) -> None:
         """Close Channel presentation resources; ServiceCore owns management."""
@@ -708,8 +709,11 @@ class ChannelApplication:
             "suppressed": True,
             "scope": "current_physical_turn",
             "instruction": (
-                "Final result delivery for this physical Turn is suppressed. "
-                "Finish naturally with an empty final response now. This tool has not ended the Turn. "
+                "Suppression is recorded for this physical Turn. "
+                "Finish naturally with an empty final reply. Suppression applies only on normal "
+                "completion with an empty final reply; a non-empty final reply is delivered normally. "
+                "New input for this Turn clears prior suppression before delivery to the model. "
+                "This tool has not ended the Turn. "
                 "Existing error handling and completion notifications remain unchanged. "
                 "This does not stop a Goal or suppress any later Turn."
             ),
@@ -2374,6 +2378,7 @@ class ChannelApplication:
     ) -> None:
         """Present one ordinary or SDK logical execution through the same reply path."""
         silent = (allow_suppression and outcome.error is None and outcome.status == "completed"
+                  and not outcome.final_response
                   and self._reply_suppression.is_suppressed(
                       outcome.thread_id, outcome.turn_id, file_turn_id or outcome.turn_id,
                   ))

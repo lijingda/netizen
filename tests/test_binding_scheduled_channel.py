@@ -204,6 +204,28 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.replies, [("om_first", "检查完成")])
         self.assertEqual(len(self.outcomes), 1)
 
+    async def test_scheduled_followup_revokes_suppression_before_empty_completion(self):
+        scope, binding = self.binding(kind=ScopeKind.DIRECT)
+        first = self.claim(binding)
+        self.queue_anchor(scope, "om_first")
+        await self.app.dispatch_scheduled_run(first)
+        handle = self.codex.handles[0]
+        result = await self.app.suppress_reply(
+            source_thread_id=handle.thread_id, source_turn_id=handle.id,
+        )
+        self.assertTrue(result["suppressed"])
+        second = self.next_claim(first.plan.id, due=220)
+        self.queue_anchor(scope, "om_second")
+
+        await self.app.dispatch_scheduled_run(second)
+        handle.complete()
+        handle.record.items.clear()
+        self.assertTrue(await self.runtime.wait_idle(timeout=5))
+
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(self.channel.replies, [("om_first", "任务已结束，未产生文本回复。")])
+        self.assertEqual(len(self.outcomes), 1)
+
     async def test_long_trigger_card_is_folded_without_shortening_binding_input(self):
         scope, binding = self.binding()
         claim = self.claim(binding, "检查原会话\n\n第三行\n" + "完整执行指令" * 600)

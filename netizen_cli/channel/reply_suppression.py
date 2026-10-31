@@ -16,6 +16,15 @@ class ReplySuppression:
     def is_suppressed(self, thread_id: str, reply_turn_id: str, physical_turn_id: str) -> bool:
         return physical_turn_id in self._replies.get((thread_id, reply_turn_id), ())
 
+    def discard_physical_turn(self, thread_id: str, reply_turn_id: str, physical_turn_id: str) -> None:
+        """A received new input supersedes only this physical Turn's choice."""
+        key = (thread_id, reply_turn_id)
+        turns = self._replies.get(key)
+        if turns is not None:
+            turns.discard(physical_turn_id)
+            if not turns:
+                self._replies.pop(key)
+
     def discard(self, thread_id: str, reply_turn_id: str) -> None:
         self._replies.pop((thread_id, reply_turn_id), None)
 
