@@ -1117,13 +1117,28 @@ def rename_binding_card(
     binding_id: str,
     short_id: str,
     project_alias: str,
-    current_title: str,
+    current_title: str | None = None,
+    generated_name: str = "",
+    generating: bool = False,
+    notice: str | None = None,
 ) -> OutboundCard:
     builder = _builder("重命名当前会话", f"Netizen 会话编号：{short_id} · {project_alias}")
-    builder.markdown(
-        f"当前名称：`{_md_code(current_title)}`\n"
-        "名称直接写入原生 Codex Thread，并同步显示在 Codex App/CLI。"
-    )
+    if current_title is not None:
+        builder.markdown(f"当前名称：`{_md_code(current_title)}`")
+    builder.markdown("保存后名称同步显示在 Codex App/CLI。自动生成会清空当前输入，生成后可修改再保存。")
+    if notice:
+        builder.raw(_notice(notice, error=True))
+    if generating:
+        builder.raw(_notice("正在生成中…"))
+        return OutboundCard(card=builder.to_dict())
+    # Keep this outside the form so an empty required name cannot block it.
+    builder.raw(_repeatable_callback_button(
+        label="自动生成",
+        value=_envelope(
+            scope, CardControlName.GENERATE_BINDING_NAME,
+            binding_id=_binding_reference(binding_id),
+        ),
+    ))
     builder.raw(
         {
             "tag": "form",
@@ -1136,6 +1151,7 @@ def rename_binding_card(
                     "label": _plain_text("新名称"),
                     "placeholder": _plain_text("输入新的会话名称"),
                     "max_length": MAX_THREAD_NAME_CHARS,
+                    "default_value": generated_name,
                 },
                 _form_submit_button(
                     name="binding_rename_submit_v1",
@@ -2007,6 +2023,7 @@ def decode_button_action(
             "expected_revision",
         },
         CardControlName.ARCHIVE_BINDING: {"binding_id"},
+        CardControlName.GENERATE_BINDING_NAME: {"binding_id"},
         CardControlName.ARCHIVE_EXACT_BINDING: {
             "binding_id",
             "page",

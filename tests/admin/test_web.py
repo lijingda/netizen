@@ -450,6 +450,10 @@ class FakeManagement:
         self.calls.append(("rename", values))
         return RenamedBinding(self.native, values["name"])
 
+    async def generate_exact_binding_name(self, **values):
+        self.calls.append(("generate-name", values))
+        return SimpleNamespace(binding=self.native, name="Generated candidate")
+
     async def archive_exact_binding(self, **values):
         self.calls.append(("archive", values))
         return self.native
@@ -1445,6 +1449,61 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             "/api/v1/sessions?inventoryState=active", session,
         )
         self.assertEqual(status, 200)
+
+    async def test_name_generation_uses_separate_exact_single_use_authorization(self):
+        self.runner.open_admission()
+        session = await self.login()
+        _, _, page = await self.json_get("/api/v1/sessions?inventoryState=active", session)
+        item = next(row for row in page["items"] if row["bindingId"] == "binding-native")
+        payload = _action_payload(item["actions"]["generateName"])
+        path = "/api/v1/sessions/generate-name"
+        for invalid, expected in (
+            ({**payload, "csrfToken": "invalid"}, 403),
+            ({**payload, "name": "untrusted input"}, 400),
+            ({**payload, "target": {**payload["target"], "targetId": "binding-archived"}}, 409),
+            (_action_payload(item["actions"]["rename"]), 409),
+        ):
+            status, _, _ = await self.json_post(path, session, invalid)
+            self.assertEqual(status, expected)
+        self.assertFalse(self.management.calls)
+        status, _, result = await self.json_post(path, session, payload)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["name"], "Generated candidate")
+        self.assertEqual(result["bindingId"], item["bindingId"])
+        self.assertEqual([name for name, _ in self.management.calls], ["generate-name"])
+        target = self.management.calls[0][1]["target"]
+        self.assertEqual(target.binding_id, item["bindingId"])
+        self.assertEqual(target.scope_key, item["scopeKey"])
+        status, _, _ = await self.json_post(path, session, payload)
+        self.assertEqual(status, 409)
+        # Producing a candidate neither renames nor consumes the independent save grant.
+        status, _, result = await self.json_post(
+            "/api/v1/sessions/rename", session,
+            _action_payload(item["actions"]["rename"], name="Edited candidate"),
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.management.calls[-1][0], "rename")
+
+    async def test_name_generation_rejects_cross_session_origin_and_unavailable_targets(self):
+        self.runner.open_admission()
+        session = await self.login()
+        other_session = await self.login()
+        _, _, page = await self.json_get("/api/v1/sessions?inventoryState=active", session)
+        item = next(row for row in page["items"] if row["bindingId"] == "binding-native")
+        payload = _action_payload(item["actions"]["generateName"])
+        path = "/api/v1/sessions/generate-name"
+        status, _, _ = await self.json_post(path, other_session, payload)
+        self.assertEqual(status, 409)
+        status, _, _ = await self.request("POST", path, headers=(
+            ("Cookie", f"netizen_admin_session={session}"),
+            ("Content-Type", "application/json"), ("Origin", "http://untrusted.example"),
+        ), body=json.dumps(payload).encode())
+        self.assertEqual(status, 403)
+        self.assertFalse(self.management.calls)
+        for inventory_state in ("lazy", "archived"):
+            _, _, page = await self.json_get(f"/api/v1/sessions?inventoryState={inventory_state}", session)
+            for row in page["items"]:
+                self.assertNotIn("generateName", row["actions"])
 
     async def test_session_configuration_prefills_and_submits_full_settings_with_server_revisions(self):
         self.runner.open_admission()

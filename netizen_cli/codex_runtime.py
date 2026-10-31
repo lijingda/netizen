@@ -56,7 +56,7 @@ from .partial_answers import PartialAnswer, partial_answers_from_items
 from .progress_card_settings import ProgressCardSettings
 from .error_messages import describe_error, native_turn_failure
 from .runtime.name_writes import ThreadNameWrites
-from .runtime.thread_naming import NamingJob, ThreadNamer
+from .runtime.thread_naming import NamingJob, ThreadNameGenerationError, ThreadNamer
 # Preserve existing public imports as aliases of the shared contract types.
 from .runtime.contracts import (
     NativeTurnHandle,
@@ -210,6 +210,7 @@ _PREPARED_CWD_READ_TIMEOUT_SECONDS = 5.0
 _SIDE_IDLE_SECONDS = 2 * 60 * 60
 _ORDINARY_THREAD_IDLE_SECONDS = 15 * 60
 _NAMING_SHUTDOWN_WAIT_SECONDS = 1.0
+_NAMING_PREPARATION_TIMEOUT_SECONDS = 10.0
 _QUESTION_DELIVERY_TIMEOUT_SECONDS = 20.0
 
 QuestionHandler = Callable[[QuestionTarget, object, QuestionRequest], Awaitable[None]]
@@ -515,6 +516,8 @@ class CodexRuntime:
         self._side_idle_tasks: set[asyncio.Task[None]] = set()
         self._subscription_idle_tasks: set[asyncio.Task[None]] = set()
         self._name_writes = ThreadNameWrites()
+        self._name_generation_requests: dict[str, asyncio.Event] = {}
+        self._automatic_thread_naming = automatic_thread_naming
         self._accepting = True
         self._shutdown_requested = False
         self._thread_namer = (
@@ -524,7 +527,7 @@ class CodexRuntime:
                 subscription_control=thread_subscription_control,
                 commit=self._commit_automatic_thread_name,
             )
-            if automatic_thread_naming and thread_subscription_control is not None
+            if thread_subscription_control is not None
             else None
         )
 
@@ -1544,7 +1547,7 @@ class CodexRuntime:
         blocking unrelated Bindings, before an absent Side session is terminal.
         """
 
-        self._invalidate_automatic_name(binding_id)
+        self._invalidate_name_generation(binding_id)
         async with self._lock(binding_id):
             pass
 
@@ -2491,6 +2494,68 @@ class CodexRuntime:
             archived=True,
         )
 
+    async def generate_name_exact(self, binding_id: str) -> str:
+        """Generate a candidate from the exact Thread without resuming or renaming it."""
+        if self._thread_namer is None:
+            raise ThreadLifecycleError("当前实例的名称生成能力不可用。")
+        async with self._lock(binding_id):
+            binding = self._require_name_generation_binding(binding_id)
+            if binding_id in self._name_generation_requests or self._thread_namer.has_pending(binding_id):
+                raise ThreadLifecycleError("上一次名称生成仍在执行或收尾，请稍后重试。")
+            invalidated = asyncio.Event()
+            self._name_generation_requests[binding_id] = invalidated
+        try:
+            settings = None
+            if binding.turn_settings is not None:
+                try:
+                    async with asyncio.timeout(_NAMING_PREPARATION_TIMEOUT_SECONDS):
+                        settings = await self.resolve_model_settings(
+                            model_id=binding.turn_settings.model_id,
+                            effort_id=binding.turn_settings.effort_id,
+                            service_tier_id=binding.turn_settings.service_tier_id,
+                        )
+                except TimeoutError as error:
+                    raise ThreadLifecycleError("读取名称生成的模型配置超时，请重试。") from error
+                except ModelCatalogError as error:
+                    raise ThreadLifecycleError(str(error)) from error
+                except Exception as error:
+                    raise ThreadLifecycleError("无法读取名称生成的模型配置，请重试。") from error
+            async with self._lock(binding_id):
+                current = self._require_name_generation_binding(binding_id)
+                if (
+                    current.native_thread_id != binding.native_thread_id
+                    or current.settings_revision != binding.settings_revision
+                    or invalidated.is_set()
+                ):
+                    raise ThreadLifecycleError("会话身份或模型配置已变化，请重新生成名称。")
+            # Constructing this public handle does no I/O and does not resume
+            # or subscribe the parent. generate() reserves its native owner
+            # before yielding; every RPC runs outside the Binding lock.
+            assert binding.native_thread_id is not None
+            parent = AsyncThread(self._codex, binding.native_thread_id)
+            try:
+                name = await self._thread_namer.generate(binding_id, parent, settings)
+            except ThreadNameGenerationError as error:
+                raise ThreadLifecycleError(str(error)) from error
+            async with self._lock(binding_id):
+                current = self._require_name_generation_binding(binding_id)
+                if current.native_thread_id != binding.native_thread_id or invalidated.is_set():
+                    raise ThreadLifecycleError("会话状态已变化，本次生成结果已失效。")
+            return name
+        finally:
+            if self._name_generation_requests.get(binding_id) is invalidated:
+                self._name_generation_requests.pop(binding_id)
+
+    def _require_name_generation_binding(self, binding_id: str) -> ThreadBinding:
+        if not self._accepting:
+            raise RuntimeClosed("服务正在停止，暂不能生成名称。")
+        self._guard_no_lifecycle_locked(binding_id)
+        binding = self._bindings.get(binding_id)
+        self._bindings.require_project_not_deleting(binding.project_alias)
+        if binding.native_thread_id is None:
+            raise ThreadNotMaterialized("当前会话尚未创建原生 Codex Thread，请先发送一条真实任务。")
+        return binding
+
     async def rename_exact(
         self,
         binding_id: str,
@@ -2573,7 +2638,9 @@ class CodexRuntime:
         preferred_title: str | None = None,
         external_input: ExternalMessage | None = None,
     ) -> None:
-        if self._thread_namer is None or not self._accepting:
+        if self._thread_namer is None or not self._automatic_thread_naming or not self._accepting:
+            return
+        if binding_id in self._name_generation_requests:
             return
         try:
             self._thread_namer.start(binding_id, thread, turn_id, settings,
@@ -2584,7 +2651,11 @@ class CodexRuntime:
             # apparent submission failure. Do not log user content or titles.
             logger.warning("automatic naming setup failed", extra={"binding_id": binding_id})
 
-    def _invalidate_automatic_name(self, binding_id: str) -> None:
+    def _invalidate_name_generation(self, binding_id: str) -> None:
+        # Cover model preparation and delivery as well as the native job.
+        request = self._name_generation_requests.get(binding_id)
+        if request is not None:
+            request.set()
         if self._thread_namer is not None:
             self._thread_namer.invalidate(binding_id)
 
@@ -5218,7 +5289,7 @@ class CodexRuntime:
         state: ThreadLifecycleState,
     ) -> _ActiveThreadLifecycle:
         self._guard_no_lifecycle_locked(binding.id)
-        self._invalidate_automatic_name(binding.id)
+        self._invalidate_name_generation(binding.id)
         active = _ActiveThreadLifecycle(
             binding_id=binding.id,
             thread_id=binding.native_thread_id,

@@ -687,6 +687,7 @@ class AdminWebApplication:
             "/api/v1/sessions/activate": self._session_activate,
             "/api/v1/sessions/configure": self._session_configure,
             "/api/v1/sessions/rename": self._session_rename,
+            "/api/v1/sessions/generate-name": self._session_generate_name,
             "/api/v1/sessions/archive": self._session_archive,
             "/api/v1/sessions/unarchive": self._session_unarchive,
             "/api/v1/sessions/delete-lazy": self._session_delete_lazy,
@@ -1470,6 +1471,9 @@ class AdminWebApplication:
             actions["rename"] = self._grant(
                 context, "sessions.rename", target, preconditions
             )
+            actions["generateName"] = self._grant(
+                context, "sessions.generate-name", target, preconditions
+            )
             if status.can_release:
                 actions["release"] = self._grant(
                     context, "sessions.release", target, preconditions
@@ -1933,6 +1937,20 @@ class AdminWebApplication:
             200,
             _binding_result(context.request.request_id, binding),
         )
+
+    async def _session_generate_name(self, context: _RequestContext) -> Response:
+        _payload, grant = self._redeem(
+            context, "sessions.generate-name", expected_resource="binding",
+        )
+        generated = await self._mutation(
+            context, "sessions.generate-name", grant.target.target_id,
+            self._management.generate_exact_binding_name(target=_binding_target(grant)),
+        )
+        return _json_response(200, {
+            "requestId": context.request.request_id,
+            "bindingId": generated.binding.id,
+            "name": generated.name,
+        })
 
     async def _session_rename(self, context: _RequestContext) -> Response:
         payload, grant = self._redeem(

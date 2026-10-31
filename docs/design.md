@@ -417,6 +417,12 @@ Settings。`/delete` 为 Lazy Binding 显示只删本地记录的确认卡；mat
 管理入口固定 exact 目标后释放 Scope，后续切换不重定向已接受的请求。实际写入 worker
 拥有名称锁，外层取消不会提前释放；锁不持久化。归档/删除使旧生成结果失效，自动写入
 失败不产生 lifecycle UNKNOWN。
+`/rename` 卡片和 Admin 重命名弹窗提供“自动生成”，共享 ADR 0067 的临时 fork、
+结构化标题校验与清理。显式生成允许已有名称，只返回候选；保存才写入名称。
+点击即放弃原输入，生成期间不可编辑或保存，成功回填可编辑候选，失败留空并提示重试。
+两端不保存草稿；后台补名与显式生成共用每 Binding 单任务占位。模型 I/O 不持
+Scope/Binding 锁，不阻塞主会话；生命周期操作使旧生成失效，关闭/保存后的迟到响应
+不覆盖界面。飞书先更新生成中卡片并后台执行，Admin 使用独立一次性生成授权。
 普通 `/sessions` 显式读取 `thread_list(archived=False)`，`/sessions archived` 显式读取
 `archived=True`，归档状态与名称都不进 Channel Database。`/resume`、普通列表卡片的
 “设为当前”和 Admin 同类动作共用 exact activation：保留本地身份、lifecycle 和消息边界
@@ -2698,7 +2704,8 @@ Channel SDK 尚未透传的单选 change option，也不读取原始回调。Pro
 SDK safety 层被当成旧投递。Netizen 因此只在可重复动作的公共按钮出口加入每次渲染新建的
 32 位十六进制 `nonce`：Settings 分区导航/刷新、普通与归档会话列表的翻页/返回、会话切换、
 两类删除确认页导航、exact Turn 重新检查、Goal 暂停/恢复、Side 关闭重试和文件分页均走
-这一出口。`/status` 命令别名按钮也复用同一出口；处理后只重绘 callback 携带的只读展示
+这一出口；`/rename` 的“自动生成”也走这一出口，使重新生成可再次触发。
+`/status` 命令别名按钮也复用同一出口；处理后只重绘 callback 携带的只读展示
 快照以更新 nonce，不重新查询状态或重复命令。新增 Project 的 submit 没有 callback value，因此把同一类 nonce 编入必填的
 Project mode option value；`/new` 只读“加载 worktree 选项”在其 submit 按钮的公开 callback value 中携带 nonce，
 不改写 Project option。

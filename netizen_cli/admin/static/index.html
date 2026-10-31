@@ -205,6 +205,19 @@
       </div>
     </section>
 
+    <dialog id="session-rename-dialog" class="rename-dialog" aria-labelledby="session-rename-title" aria-describedby="session-rename-identity">
+      <form id="session-rename-editor" class="card-form drawer-form">
+        <div class="drawer-head"><h3 id="session-rename-title">重命名会话</h3><button id="session-rename-close" class="drawer-close" type="button" aria-label="关闭重命名表单">×</button></div>
+        <div class="drawer-body">
+          <p id="session-rename-identity" class="hint"></p>
+          <label>会话名称<input id="session-rename-name" name="name" maxlength="120" required autocomplete="off"></label>
+          <p class="hint">自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。</p>
+          <p id="session-rename-status" class="status" role="status" aria-live="polite"></p>
+        </div>
+        <div class="drawer-footer"><button id="session-rename-cancel" class="drawer-cancel" type="button">取消</button><button id="session-rename-generate" class="drawer-cancel" type="button">自动生成</button><button id="session-rename-save" type="submit">保存新名称</button></div>
+      </form>
+    </dialog>
+
     <dialog id="session-settings-drawer" class="editor-drawer" aria-labelledby="session-settings-title" aria-describedby="session-settings-identity">
       <form id="session-settings-editor" class="card-form drawer-form" hidden>
         <div class="drawer-head"><div><p class="eyebrow">SESSION SETTINGS</p><h3 id="session-settings-title">配置 Session</h3></div><button id="session-settings-close" class="drawer-close" type="button" aria-label="关闭会话配置表单">×</button></div>

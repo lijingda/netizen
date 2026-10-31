@@ -1,4 +1,4 @@
-"""Best-effort titles from private ephemeral forks of ordinary Threads.
+"""Generate titles from private ephemeral forks of ordinary Threads.
 
 Nothing here owns a Binding, user-visible Turn, or native admission. Resource
 acquisition RPCs survive cancellation of the useful work: the async SDK wraps
@@ -43,10 +43,11 @@ NAMING_OUTPUT_SCHEMA = {
 class NamingJob:
     binding_id: str
     parent: NativeThread
-    turn_id: str
+    turn_id: str | None
     settings: TurnModelSettings | None
     preferred_title: str | None = None
     external_input: ExternalMessage | None = None
+    candidate: asyncio.Future[str] | None = None
     invalidated: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
     thread: NativeThread | None = None
@@ -60,6 +61,10 @@ class NamingJob:
 
 class _Invalidated(Exception):
     pass
+
+
+class ThreadNameGenerationError(RuntimeError):
+    """An explicit candidate request failed without changing the native name."""
 
 
 class ThreadNamer:
@@ -102,11 +107,49 @@ class ThreadNamer:
             return
         job = NamingJob(binding_id, parent, turn_id, settings,
                         preferred_title=preferred_title, external_input=external_input)
+        self._schedule(job)
+
+    async def generate(
+        self,
+        binding_id: str,
+        parent: NativeThread,
+        settings: TurnModelSettings | None = None,
+    ) -> str:
+        """Generate a fresh candidate without writing the parent's name.
+
+        The request owns only its result wait. The background owner retains
+        acquisition and cleanup, including late native identities, after expiry
+        or cancellation. An existing attempt is never joined or queued.
+        """
+        if self._closed:
+            raise ThreadNameGenerationError("服务正在停止，无法生成名称。")
+        if binding_id in self._jobs:
+            raise ThreadNameGenerationError("上一次名称生成仍在执行或收尾，请稍后重试。")
+        candidate = asyncio.get_running_loop().create_future()
+        job = NamingJob(binding_id, parent, None, settings, candidate=candidate)
+        self._schedule(job)
+        try:
+            return await asyncio.shield(candidate)
+        except asyncio.CancelledError:
+            job.invalidated.set()
+            # Cancelling this private result future leaves the acquisition and
+            # cleanup owner alive, and avoids an unobserved later exception.
+            candidate.cancel()
+            if not candidate.cancelled():
+                candidate.exception()
+            raise
+
+    def _schedule(self, job: NamingJob) -> None:
+        binding_id, parent = job.binding_id, job.parent
         self._jobs[binding_id] = job
         task = asyncio.create_task(self._generate(job), name=f"thread-name:{parent.id}")
         job.task = task
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def has_pending(self, binding_id: str) -> bool:
+        """Include invalidated jobs whose native resources are still owned."""
+        return binding_id in self._jobs
 
     def is_current(self, job: NamingJob) -> bool:
         return (
@@ -119,11 +162,13 @@ class ThreadNamer:
         job = self._jobs.get(binding_id)
         if job is not None:
             job.invalidated.set()
+            self._fail_candidate(job, "会话状态已变化，本次名称生成已失效。")
 
     def close(self) -> None:
         self._closed = True
         for job in self._jobs.values():
             job.invalidated.set()
+            self._fail_candidate(job, "服务正在停止，名称生成已取消。")
 
     async def shutdown(self) -> None:
         """Bound shutdown without cancelling a worker that may acquire a resource."""
@@ -168,12 +213,20 @@ class ThreadNamer:
     async def _expire(self, job: NamingJob) -> None:
         await asyncio.sleep(self._timeout_seconds)
         job.invalidated.set()
+        self._fail_candidate(job, "名称生成超时，请稍后重试。")
+
+    @staticmethod
+    def _fail_candidate(job: NamingJob, message: str) -> None:
+        if job.candidate is not None and not job.candidate.done():
+            job.candidate.set_exception(ThreadNameGenerationError(message))
 
     async def _generate(self, job: NamingJob) -> None:
         watchdog = asyncio.create_task(self._expire(job))
         try:
             self._require_current(job)
-            if not await self._input_visible(job):
+            # An explicit request forks at this click, even for an already
+            # named Thread. It must not wait for a new accepted user input.
+            if job.candidate is None and not await self._input_visible(job):
                 return
             self._require_current(job)
             if job.preferred_title is not None:
@@ -213,19 +266,27 @@ class ThreadNamer:
                 getattr(result, "id", None) != handle.id
                 or status != "completed"
             ):
+                self._fail_candidate(job, "名称生成未成功完成，请重试。")
                 return
             title = _title_from_response(getattr(result, "final_response", None))
             if title is None:
+                self._fail_candidate(job, "生成的名称格式无效，请重试。")
                 return
             self._require_current(job)
-            await self._observe(job, self._worker(job, self._commit(job, title)))
+            if job.candidate is not None:
+                if not job.candidate.done():
+                    job.candidate.set_result(title)
+            else:
+                await self._observe(job, self._worker(job, self._commit(job, title)))
         except _Invalidated:
-            pass
+            self._fail_candidate(job, "会话状态已变化，本次名称生成已失效。")
         except asyncio.CancelledError:
             job.invalidated.set()
+            self._fail_candidate(job, "名称生成已取消。")
             raise
         except Exception as error:
-            logger.warning("automatic Thread naming failed error_type=%s", type(error).__name__)
+            logger.warning("Thread naming failed error_type=%s", type(error).__name__)
+            self._fail_candidate(job, "名称生成失败，请重试。")
         finally:
             job.invalidated.set()
             watchdog.cancel()

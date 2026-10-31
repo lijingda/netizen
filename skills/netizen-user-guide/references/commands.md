@@ -17,7 +17,7 @@ control 或一个 prompt，不能串联多个命令。群聊中的命令同样�
 | `/sessions archived` | 查看归档会话，恢复或经确认永久删除 | [归档管理](sessions.md#归档恢复和删除) |
 | `/resume <短 ID>` | 恢复并切换当前 Scope 的普通会话，不停止其他会话的任务 | [查找与切换](sessions.md#查找切换和命名会话) |
 | `/fork` | 从当前空闲会话另建持久分支话题，可选当前聊天、群聊或填写聊天 ID | [持久分支](fork-side-goal.md#fork-持久分支) |
-| `/rename [名称]` | 重命名当前原生 Thread；省略名称打开卡片 | [命名会话](sessions.md#查找切换和命名会话) |
+| `/rename [名称]` | 重命名当前原生 Thread；省略名称打开卡片，可自动生成候选后编辑保存 | [命名会话](sessions.md#查找切换和命名会话) |
 | `/compact` | 压缩当前空闲普通会话的上下文 | [压缩说明](status-and-control.md#compact) |
 | `/release` | 取消当前空闲会话的本连接订阅，保留历史；不保证立即释放 writer | [订阅释放](sessions.md#查找切换和命名会话) |
 | `/archive` | 确认后归档当前会话，保留历史并清空当前指针 | [归档与恢复](sessions.md#归档恢复和删除) |

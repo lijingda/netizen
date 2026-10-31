@@ -10,7 +10,7 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -604,6 +604,15 @@ class _ScheduledCompletion:
     delivery_state: str | None = None
 
 
+@dataclass(slots=True)
+class _RenameNameGeneration:
+    """Only an in-flight presentation; no saved draft or card session."""
+
+    task: asyncio.Task[None] | None = None
+    invalidated: bool = False
+    update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
 class ChannelApplication:
     def __init__(
         self,
@@ -637,6 +646,7 @@ class ChannelApplication:
         # Only the final send writes the aggregate Scheduled Run receipt. Keep
         # this completion's receipt through pruning of the persisted Run.
         self._scheduled_completions: dict[str, _ScheduledCompletion] = {}
+        self._rename_name_generations: dict[str, _RenameNameGeneration] = {}
         self._reactions = _ReactionController(channel)
         self._reply_suppression = ReplySuppression()
         self._progress_cards = _ReplyCardPresenter(channel, runtime)
@@ -646,12 +656,24 @@ class ChannelApplication:
     async def close(self) -> None:
         """Close Channel presentation resources; ServiceCore owns management."""
         try:
-            await self._progress_cards.close()
+            generations = tuple(self._rename_name_generations.values())
+            for generation in generations:
+                generation.invalidated = True
+                if generation.task is not None:
+                    generation.task.cancel()
+            await asyncio.gather(
+                *(item.task for item in generations if item.task is not None),
+                return_exceptions=True,
+            )
         finally:
+            self._rename_name_generations.clear()
             try:
-                await self._reactions.close()
+                await self._progress_cards.close()
             finally:
-                self._reply_suppression.clear()
+                try:
+                    await self._reactions.close()
+                finally:
+                    self._reply_suppression.clear()
 
     async def suppress_reply(self, *, source_thread_id: str, source_turn_id: str) -> dict[str, Any]:
         """Record a caller's exact physical Turn choice without changing execution."""
@@ -5115,6 +5137,66 @@ class ChannelApplication:
         if not result.success:
             logger.error("Turn file callback feedback was not confirmed")
 
+    async def _generate_rename_name(
+        self,
+        intent: CardControlIntent,
+        binding: ThreadBinding,
+        generation: _RenameNameGeneration,
+    ) -> None:
+        async def redraw(*, generating: bool = False, name: str = "", notice: str | None = None) -> bool:
+            async with generation.update_lock:
+                if generation.invalidated:
+                    return True
+                async with asyncio.timeout(5):
+                    return await self._safe_update_card(
+                        intent.source_id,
+                        rename_binding_card(
+                            scope=intent.scope, binding_id=binding.id,
+                            short_id=binding.short_id, project_alias=binding.project_alias,
+                            generating=generating, generated_name=name, notice=notice,
+                        ),
+                    )
+
+        try:
+            if not await redraw(generating=True):
+                await self._safe_reply_to_card(
+                    intent, "生成中卡片未能更新，本次未生成名称；请重新发送 /rename。",
+                )
+                return
+            if generation.invalidated:
+                return
+            name = ""
+            notice = None
+            try:
+                generated = await self._management.generate_current_binding_name(
+                    target=CurrentBindingTarget(intent.scope.key, binding.id),
+                )
+                current = self._bindings.active_binding(intent.scope.key)
+                if (current is None or current.id != binding.id
+                        or current.native_thread_id != binding.native_thread_id
+                        or self._runtime.lifecycle_state(binding.id) is not None):
+                    raise CardActionError("会话已切换或正在归档/删除，生成结果已失效；请重新发送 /rename。")
+                name = generated.name
+            except (NoCurrentBinding, CurrentBindingChanged, BindingNotFound):
+                notice = "名称生成失败：会话已切换、归档或删除，生成结果已失效；请重新发送 /rename。"
+            except CardActionError as error:
+                notice = f"名称生成失败：{error}"
+            except Exception as error:
+                notice = f"名称生成失败：{describe_error(error)}。可以重新生成或手动填写。"
+            if not await redraw(name=name, notice=notice):
+                await self._safe_reply_to_card(
+                    intent, "名称生成已结束，但卡片更新失败；原会话名称未改变。请重新发送 /rename。",
+                )
+        except Exception:
+            logger.exception("rename name generation presentation failed")
+            if not generation.invalidated:
+                await self._safe_reply_to_card(
+                    intent, "名称生成卡片未能更新；原会话名称未改变。请重新发送 /rename。",
+                )
+        finally:
+            if self._rename_name_generations.get(intent.source_id) is generation:
+                self._rename_name_generations.pop(intent.source_id)
+
     async def _card_control(self, intent: CardControlIntent) -> None:
         if intent.name is CardControlName.SIDE_CLOSE:
             assert intent.side_id is not None
@@ -5370,9 +5452,33 @@ class ChannelApplication:
                     "会话后续每条新 Turn 都会应用。",
                 )
             return
+        if intent.name is CardControlName.GENERATE_BINDING_NAME:
+            assert intent.binding_id is not None
+            if intent.source_id in self._rename_name_generations:
+                return
+            binding = self._bindings.get(intent.binding_id)
+            current = self._bindings.active_binding(intent.scope.key)
+            if current is None or current.id != binding.id:
+                raise CardActionError("active 会话已切换，本重命名卡片未执行；请重新发送 /rename。")
+            generation = _RenameNameGeneration()
+            self._rename_name_generations[intent.source_id] = generation
+            # The SDK serializes card actions by chat. Release its callback
+            # before model I/O so other controls and ordinary input can proceed.
+            generation.task = asyncio.create_task(
+                self._generate_rename_name(intent, binding, generation),
+                name=f"rename-name:{intent.source_id}",
+            )
+            return
         if intent.name is CardControlName.RENAME_BINDING:
             assert intent.binding_id is not None
             assert intent.thread_name is not None
+            generation = self._rename_name_generations.get(intent.source_id)
+            if generation is not None:
+                generation.invalidated = True
+                # Drain any in-flight redraw before either the success or
+                # shared error receipt. Invalidated jobs cannot redraw again.
+                async with generation.update_lock:
+                    pass
             try:
                 renamed = await self._management.rename_current_binding(
                     target=CurrentBindingTarget(
