@@ -161,6 +161,7 @@ class CardCodecTest(unittest.TestCase):
         repeatable_buttons = {
             CardControlName.OPEN_SETTINGS_SECTION,
             CardControlName.REFRESH_SETTINGS,
+            CardControlName.GENERATE_BINDING_NAME,
             CardControlName.PREPARE_EXACT_DELETE_BINDING,
             CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
             CardControlName.ACTIVATE_BINDING,
@@ -319,6 +320,7 @@ class CardCodecTest(unittest.TestCase):
     def test_lifecycle_buttons_and_rename_form_are_strict_typed_controls(self) -> None:
         for raw_intent, expected in (
             ("binding.archive", CardControlName.ARCHIVE_BINDING),
+            ("binding.name.generate", CardControlName.GENERATE_BINDING_NAME),
             ("binding.delete", CardControlName.DELETE_BINDING),
             ("binding.unarchive", CardControlName.UNARCHIVE_BINDING),
         ):

@@ -247,6 +247,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 body.schedule-drawer-open, body.defaults-drawer-open, body.session-settings-drawer-open, body.workspace-drawer-open { overflow: hidden; }
 .editor-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; padding: 0; width: min(720px, 100vw); max-width: 100vw; height: 100dvh; max-height: 100dvh; border: 0; color: var(--ink); background: var(--paper); box-shadow: -12px 0 40px rgb(23 39 68 / 16%); }
 .editor-drawer::backdrop { background: rgb(16 33 63 / 35%); }
+.rename-dialog { width: min(520px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: 12px; color: var(--ink); background: var(--paper); box-shadow: 0 12px 40px rgb(23 39 68 / 16%); }
+.rename-dialog::backdrop { background: rgb(16 33 63 / 35%); }
 #schedule-editor { height: 100%; display: flex; flex-direction: column; border: 0; border-radius: 0; padding: 0; margin: 0; }
 .schedule-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 22px 24px; border-bottom: 1px solid var(--line); }
 .schedule-editor-head h3 { margin: 0; font-size: 22px; }

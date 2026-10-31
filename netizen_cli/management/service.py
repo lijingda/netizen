@@ -473,6 +473,12 @@ class CreatedBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class GeneratedBindingName:
+    binding: ThreadBinding
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
 class RenamedBinding:
     binding: ThreadBinding
     name: str
@@ -576,6 +582,9 @@ class ManagementRuntimePort:
             effort_id=resolved.effort_id,
             service_tier_id=resolved.service_tier_id,
         )
+
+    async def generate_name_exact(self, binding_id: str) -> str:
+        return await self.__runtime.generate_name_exact(binding_id)
 
     async def rename_exact(self, binding_id: str, name: str) -> str:
         return await self.__runtime.rename_exact(binding_id, name)
@@ -1792,6 +1801,18 @@ class InstanceManagementService:
                 context_anchor=context_anchor,
             )
 
+    async def generate_current_binding_name(
+        self, *, target: CurrentBindingTarget,
+    ) -> GeneratedBindingName:
+        async with self._scope_coordinator.hold(target.scope_key):
+            binding = self._require_current(target)
+        name = await self._runtime.generate_name_exact(binding.id)
+        async with self._scope_coordinator.hold(target.scope_key):
+            current = self._require_current(target)
+            if current.native_thread_id != binding.native_thread_id:
+                raise CurrentBindingChanged(target.binding_id)
+        return GeneratedBindingName(binding=current, name=name)
+
     async def rename_current_binding(
         self,
         *,
@@ -1937,6 +1958,18 @@ class InstanceManagementService:
                 message_context_mode=message_context_mode,
                 context_anchor=None,
             )
+
+    async def generate_exact_binding_name(
+        self, *, target: ExactBindingTarget,
+    ) -> GeneratedBindingName:
+        async with self._scope_coordinator.hold(target.scope_key):
+            binding, _ = self._require_exact(target)
+        name = await self._runtime.generate_name_exact(binding.id)
+        async with self._scope_coordinator.hold(target.scope_key):
+            current, _ = self._require_exact(target)
+            if current.native_thread_id != binding.native_thread_id:
+                raise CurrentBindingChanged(target.binding_id)
+        return GeneratedBindingName(binding=current, name=name)
 
     async def rename_exact_binding(
         self,

@@ -574,6 +574,8 @@ Runtime synthetic 门禁须覆盖 steer 前刷新先读取 exact completion 并�
 本轮唯一标记、命名输出无工具调用、临时分支在 active/archived × rollout/state-db
 四视图均 absent、成功和中断路径取消订阅，以及父会话
 续聊、历史和统计保持独立。独立的中断检查复用同一探针 Parent；不另建一套成功命名流程。
+随后在同一已命名 Parent 的新上下文上调用生产候选生成入口，验证继承最近项目标识、
+无工具输出、临时分支清理与目录不可见，候选返回不改名、显式保存后才更新名称。
 `--runtime-only` 可用于只验证生产路径的局部修改，完整命名兼容门禁仍使用默认模式。
 固定 `0.154.0` 的原生验证已确认首轮 ACK 早于输入落盘的竞态；生产只在后台有界等待 exact Turn 输入，
 不把 `turn/start` ACK 或 `include_turns=False` 当作上下文已经可 fork 的证明。取消订阅

@@ -248,6 +248,7 @@ class CardControlName(str, Enum):
     PREPARE_NEW_WORKSPACE = "binding.workspace.prepare"
     CONFIGURE_BINDING = "binding.configure"
     RENAME_BINDING = "binding.rename"
+    GENERATE_BINDING_NAME = "binding.name.generate"
     ARCHIVE_BINDING = "binding.archive"
     DELETE_BINDING = "binding.delete"
     PREPARE_EXACT_DELETE_BINDING = "binding.delete.exact.prepare"

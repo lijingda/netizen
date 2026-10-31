@@ -96,6 +96,8 @@ class FakeManagementRuntime:
         self.missing: set[str] = set()
         self.rename_entered: asyncio.Event | None = None
         self.rename_release: asyncio.Event | None = None
+        self.generation_entered: asyncio.Event | None = None
+        self.generation_release: asyncio.Event | None = None
         self.archive_entered: asyncio.Event | None = None
         self.archive_release: asyncio.Event | None = None
         self.side_missing = False
@@ -132,6 +134,14 @@ class FakeManagementRuntime:
             binding_id=binding.id,
             context_anchor=context_anchor,
         )
+
+    async def generate_name_exact(self, binding_id: str) -> str:
+        self.calls.append(("generate-name", binding_id))
+        if self.generation_entered is not None:
+            self.generation_entered.set()
+        if self.generation_release is not None:
+            await self.generation_release.wait()
+        return "Suggested"
 
     async def rename_exact(self, binding_id: str, name: str) -> str:
         self.calls.append(("rename", binding_id))
@@ -927,6 +937,50 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                         )
                 self.assertEqual(self.runtime.calls, [("activate", binding.id)])
                 self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
+
+    async def test_name_generation_entries_return_candidates_without_renaming(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-parent")
+        generated = await self.service.generate_current_binding_name(
+            target=CurrentBindingTarget(self.scope.key, binding.id),
+        )
+        other = await self._create()
+        inactive = await self.service.generate_exact_binding_name(
+            target=ExactBindingTarget(self.scope.key, binding.id, other.id),
+        )
+        self.assertEqual((generated.binding.id, generated.name), (binding.id, "Suggested"))
+        self.assertEqual((inactive.binding.id, inactive.name), (binding.id, "Suggested"))
+        self.assertEqual([call for call in self.runtime.calls if call[0] in {"generate-name", "rename"}],
+                         [("generate-name", binding.id), ("generate-name", binding.id)])
+        self.assertEqual(self.store.active_binding(self.scope.key).id, other.id)
+
+    async def test_name_generation_releases_scope_and_rejects_changed_current(self) -> None:
+        binding = await self._create()
+        self.runtime.generation_entered = asyncio.Event()
+        self.runtime.generation_release = asyncio.Event()
+        request = asyncio.create_task(self.service.generate_current_binding_name(
+            target=CurrentBindingTarget(self.scope.key, binding.id),
+        ))
+        await asyncio.wait_for(self.runtime.generation_entered.wait(), 1)
+        replacement = await asyncio.wait_for(self._create(), 1)
+        self.assertFalse(request.done())
+        self.runtime.generation_release.set()
+        with self.assertRaises(CurrentBindingChanged):
+            await asyncio.wait_for(request, 1)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, replacement.id)
+
+    async def test_name_generation_rejects_stale_and_cross_scope_targets(self) -> None:
+        first = await self._create()
+        second = await self._create()
+        with self.assertRaises(CurrentBindingChanged):
+            await self.service.generate_current_binding_name(
+                target=CurrentBindingTarget(self.scope.key, first.id),
+            )
+        with self.assertRaises(BindingScopeMismatch):
+            await self.service.generate_exact_binding_name(
+                target=ExactBindingTarget(self.other_scope.key, first.id, None),
+            )
+        self.assertFalse(any(call[0] == "generate-name" for call in self.runtime.calls))
 
     async def test_name_writer_wait_does_not_block_same_or_other_scope(self) -> None:
         first = await self._create()

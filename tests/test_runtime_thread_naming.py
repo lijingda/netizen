@@ -5,12 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from openai_codex import ExternalMessage
 
-from netizen_cli.bindings import BindingStore
-from netizen_cli.codex_runtime import CodexRuntime, SubmitDisposition
+from netizen_cli.bindings import BindingStore, BindingTurnSettings
+from netizen_cli.codex_runtime import (
+    CodexRuntime, SubmitDisposition, ThreadLifecycleError, ThreadNotMaterialized,
+)
+from netizen_cli.model_settings import TurnModelSettings
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management.coordination import ScopeCoordinator
 from netizen_cli.management.service import (
@@ -179,6 +182,214 @@ class RuntimeThreadNamingTest(unittest.IsolatedAsyncioTestCase):
         if submission.release_receipt_attempt is not None:
             submission.release_receipt_attempt()
         return submission
+
+    async def test_explicit_candidate_for_cold_named_thread_does_not_resume_or_write(self):
+        self.store.assign_native_thread_id(self.binding.id, "cold-parent")
+        self.codex.names["cold-parent"] = "Original"
+        request = asyncio.create_task(self.runtime.generate_name_exact(self.binding.id))
+        child = await self.naming_handle()
+        child.complete(response='{"title":"Suggested"}')
+        self.assertEqual(await asyncio.wait_for(request, 1), "Suggested")
+        await eventually(lambda: not self.runtime._thread_namer._jobs)
+        self.assertEqual(self.codex.fork_calls, [
+            ("cold-parent", {"ephemeral": True, "include_turns": False}),
+        ])
+        self.assertEqual(self.codex.resume_calls, [])
+        self.assertFalse(any(thread_id == "cold-parent" for thread_id, _ in self.codex.read_calls))
+        self.assertEqual(self.codex.set_name_calls, [])
+        self.assertEqual(self.codex.names["cold-parent"], "Original")
+        self.assertEqual(self.runtime._subscriptions, {})
+        self.assertEqual(self.outcomes, [])
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_explicit_generation_requires_materialized_thread(self):
+        with self.assertRaises(ThreadNotMaterialized):
+            await self.runtime.generate_name_exact(self.binding.id)
+        self.assertEqual(self.codex.fork_calls, [])
+
+    async def test_explicit_generation_allows_project_disabled_before_or_during_request(self):
+        self.store.assign_native_thread_id(self.binding.id, "cold-parent")
+        self.codex.names["cold-parent"] = "Original"
+        for disable_before in (True, False):
+            with self.subTest(disable_before=disable_before):
+                project = self.store.get_project("test")
+                project = self.store.set_project_enabled(
+                    alias=project.alias, enabled=not disable_before,
+                    expected_revision=project.revision,
+                )
+                previous_handles = len(self.codex.handles)
+                request = asyncio.create_task(self.runtime.generate_name_exact(self.binding.id))
+                await eventually(lambda: len(self.codex.handles) > previous_handles or request.done())
+                if request.done():
+                    await request
+                child = await self.naming_handle()
+                if not disable_before:
+                    self.store.set_project_enabled(
+                        alias=project.alias, enabled=False, expected_revision=project.revision,
+                    )
+                child.complete(response='{"title":"Suggested"}')
+                self.assertEqual(await asyncio.wait_for(request, 1), "Suggested")
+                await eventually(lambda: not self.runtime._thread_namer._jobs)
+                self.assertFalse(self.store.get_project("test").enabled)
+                self.assertEqual(self.codex.names["cold-parent"], "Original")
+                self.assertEqual(self.codex.set_name_calls, [])
+
+    async def test_explicit_generation_uses_current_binding_settings_without_writing(self):
+        settings = BindingTurnSettings("selected", "high", "priority")
+        binding = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="user", turn_settings=settings,
+        )
+        self.store.assign_native_thread_id(binding.id, "cold-parent")
+        resolved = TurnModelSettings("selected", "wire-model", "high", "high", "priority", "Fast")
+        with patch.object(self.runtime, "resolve_model_settings", AsyncMock(return_value=resolved)) as resolve:
+            request = asyncio.create_task(self.runtime.generate_name_exact(binding.id))
+            child = await self.naming_handle()
+            child.complete(response='{"title":"Suggested"}')
+            self.assertEqual(await asyncio.wait_for(request, 1), "Suggested")
+        resolve.assert_awaited_once_with(model_id="selected", effort_id="high", service_tier_id="priority")
+        kwargs = self.codex.turn_calls[-1][2]
+        self.assertEqual((kwargs["model"], kwargs["effort"], kwargs["service_tier"]),
+                         ("wire-model", "high", "priority"))
+        self.assertEqual(self.codex.set_name_calls, [])
+
+    async def test_explicit_generation_does_not_block_parent_steering(self):
+        self.codex.names["native-1"] = "Original"
+        first = await self.submit()
+        await eventually(lambda: not self.runtime._thread_namer._jobs)
+        request = asyncio.create_task(self.runtime.generate_name_exact(self.binding.id))
+        child = await self.naming_handle()
+        self.assertFalse(self.runtime._lock(self.binding.id).locked())
+        self.assertIsNone(self.runtime.lifecycle_state(self.binding.id))
+        steered = await asyncio.wait_for(self.submit(text="keep working"), 1)
+        self.assertIs(steered.disposition, SubmitDisposition.STEERED)
+        child.complete(response='{"title":"Suggested"}')
+        self.assertEqual(await asyncio.wait_for(request, 1), "Suggested")
+        self.assertEqual(self.codex.names[first.thread_id], "Original")
+        await self.finish_parent(first.turn_id)
+
+    async def test_explicit_generation_is_invalidated_by_manual_rename(self):
+        self.store.assign_native_thread_id(self.binding.id, "cold-parent")
+        request = asyncio.create_task(self.runtime.generate_name_exact(self.binding.id))
+        await self.naming_handle()
+        self.assertEqual(await self.runtime.rename_exact(self.binding.id, "Manual"), "Manual")
+        with self.assertRaisesRegex(ThreadLifecycleError, "失效"):
+            await asyncio.wait_for(request, 1)
+        await eventually(lambda: not self.runtime._thread_namer._jobs)
+        self.assertEqual(self.codex.names["cold-parent"], "Manual")
+
+    async def test_explicit_generation_is_invalidated_by_archive(self):
+        self.store.assign_native_thread_id(self.binding.id, "cold-parent")
+        request = asyncio.create_task(self.runtime.generate_name_exact(self.binding.id))
+        await self.naming_handle()
+        await asyncio.wait_for(self.runtime.archive_exact(self.binding.id), 1)
+        with self.assertRaises(ThreadLifecycleError):
+            await asyncio.wait_for(request, 1)
+        self.assertEqual(self.codex.set_name_calls, [])
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_archive_during_model_preparation_prevents_fork(self):
+        binding = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="user",
+            turn_settings=BindingTurnSettings("selected", "high", "default"),
+        )
+        self.store.assign_native_thread_id(binding.id, "cold-parent")
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def resolve(**kwargs):
+            entered.set()
+            await release.wait()
+            return TurnModelSettings("selected", "wire", "high", "high", "default", "Standard")
+
+        with patch.object(self.runtime, "resolve_model_settings", side_effect=resolve):
+            request = asyncio.create_task(self.runtime.generate_name_exact(binding.id))
+            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(self.runtime.archive_exact(binding.id), 1)
+            release.set()
+            with self.assertRaises(ThreadLifecycleError):
+                await asyncio.wait_for(request, 1)
+        self.assertEqual(self.codex.fork_calls, [])
+
+    async def test_model_preparation_reserves_generation_and_cancellation_releases_it(self):
+        binding = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="user",
+            turn_settings=BindingTurnSettings("selected", "high", "default"),
+        )
+        self.store.assign_native_thread_id(binding.id, "cold-parent")
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def resolve(**kwargs):
+            entered.set()
+            await release.wait()
+            return TurnModelSettings("selected", "wire", "high", "high", "default", "Standard")
+
+        with patch.object(self.runtime, "resolve_model_settings", side_effect=resolve) as resolver:
+            first = asyncio.create_task(self.runtime.generate_name_exact(binding.id))
+            await asyncio.wait_for(entered.wait(), 1)
+            with self.assertRaisesRegex(ThreadLifecycleError, "执行或收尾"):
+                await asyncio.wait_for(self.runtime.generate_name_exact(binding.id), 1)
+            self.assertEqual(resolver.await_count, 1)
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            self.assertEqual(self.codex.fork_calls, [])
+            release.set()
+            retry = asyncio.create_task(self.runtime.generate_name_exact(binding.id))
+            child = await self.naming_handle()
+            child.complete(response='{"title":"Suggested"}')
+            self.assertEqual(await asyncio.wait_for(retry, 1), "Suggested")
+        self.assertEqual(len(self.codex.fork_calls), 1)
+
+    async def test_generation_preparation_does_not_start_competing_automatic_job(self):
+        binding = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="user",
+            turn_settings=BindingTurnSettings("selected", "high", "default"),
+        )
+        self.store.assign_native_thread_id(binding.id, "cold-parent")
+        entered, release = asyncio.Event(), asyncio.Event()
+        resolved = TurnModelSettings("selected", "wire", "high", "high", "default", "Standard")
+        calls = 0
+
+        async def resolve(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+            return resolved
+
+        with patch.object(self.runtime, "resolve_model_settings", side_effect=resolve):
+            request = asyncio.create_task(self.runtime.generate_name_exact(binding.id))
+            await asyncio.wait_for(entered.wait(), 1)
+            submitted = await asyncio.wait_for(self.submit(binding), 1)
+            self.assertIs(submitted.disposition, SubmitDisposition.STARTED)
+            self.assertEqual(self.codex.fork_calls, [])
+            release.set()
+            child = await self.naming_handle()
+            child.complete(response='{"title":"Suggested"}')
+            self.assertEqual(await asyncio.wait_for(request, 1), "Suggested")
+        self.assertEqual(len(self.codex.fork_calls), 1)
+        self.assertEqual(self.codex.set_name_calls, [])
+
+    async def test_manual_generation_remains_available_when_automatic_naming_disabled(self):
+        runtime = CodexRuntime(
+            codex=self.codex, bindings=self.store, terminal_cleanup=self.cleanup,
+            thread_subscription_control=self.subscription,
+            on_completion=AsyncMock(), automatic_thread_naming=False,
+        )
+        try:
+            submission = await runtime.submit(
+                binding=self.binding, cwd=self.cwd, input="request", owner_id="user", origin=object(),
+            )
+            submission.release_receipt_attempt()
+            self.assertEqual(self.codex.fork_calls, [])
+            request = asyncio.create_task(runtime.generate_name_exact(self.binding.id))
+            child = await self.naming_handle()
+            child.complete(response='{"title":"Suggested"}')
+            self.assertEqual(await asyncio.wait_for(request, 1), "Suggested")
+            self.assertEqual(self.codex.set_name_calls, [])
+        finally:
+            await runtime.interrupt_all()
+            await runtime.cancel_tasks()
 
     async def test_external_preferred_title_is_background_and_manual_name_remains_last(self):
         gate = self.codex.manual_write_gates["Chosen"] = asyncio.Event()

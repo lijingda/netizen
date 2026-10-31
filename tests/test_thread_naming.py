@@ -11,7 +11,12 @@ from openai_codex import ExternalMessage, InternalRpcError, InvalidRequestError
 from openai_codex.types import ThreadItem
 
 from netizen_cli.model_settings import TurnModelSettings
-from netizen_cli.runtime.thread_naming import NAMING_PROMPT, NamingJob, ThreadNamer
+from netizen_cli.runtime.thread_naming import (
+    NAMING_PROMPT,
+    NamingJob,
+    ThreadNameGenerationError,
+    ThreadNamer,
+)
 
 
 class NamingHandle:
@@ -245,6 +250,184 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.commits, [])
         self.assertEqual(self.parent.summary_read_count, 1)
         self.assertEqual(self.parent.full_read_count, 0)
+
+    async def test_manual_candidate_forks_named_parent_without_waiting_for_input_or_writing(self) -> None:
+        self.parent.native.name = "现有名称"
+        self.parent.native.turns = []
+        settings = TurnModelSettings(
+            model_id="model-id", model="model-wire", effort_id="low",
+            effort="low", service_tier_id="default", service_tier_name="Standard",
+        )
+        request = asyncio.create_task(self.namer.generate("binding", self.parent, settings))
+        await self.running()
+        self.codex.child.handle.finished.set()
+        self.assertEqual(await asyncio.wait_for(request, timeout=1), "会话自动命名")
+        await self.drain()
+        self.assertEqual(self.parent.summary_read_count, 0)
+        self.assertEqual(self.parent.full_read_count, 0)
+        self.assertEqual(self.parent.native.name, "现有名称")
+        self.assertEqual(self.commits, [])
+        self.assertEqual(self.codex.fork_calls, [
+            ("parent", {"ephemeral": True, "include_turns": False}),
+        ])
+        prompt, kwargs = self.codex.child.turn_calls[0]
+        self.assertEqual(prompt, NAMING_PROMPT)
+        self.assertEqual(kwargs["model"], "model-wire")
+        self.assertEqual(kwargs["effort"], "low")
+        self.assertEqual(kwargs["service_tier"], "default")
+        self.assertIn("output_schema", kwargs)
+        self.assert_child_cleanup()
+
+    async def test_manual_generation_rejects_existing_automatic_attempt_without_joining(self) -> None:
+        self.start()
+        await self.running()
+        with self.assertRaisesRegex(ThreadNameGenerationError, "仍在执行或收尾"):
+            await self.namer.generate("binding", self.parent)
+        self.assertEqual(len(self.codex.fork_calls), 1)
+        self.codex.child.handle.finished.set()
+        await self.drain()
+        self.assertEqual(len(self.commits), 1)
+
+    async def test_manual_generation_rejects_duplicates_and_later_click_forks_again(self) -> None:
+        request = asyncio.create_task(self.namer.generate("binding", self.parent))
+        await self.running()
+        with self.assertRaisesRegex(ThreadNameGenerationError, "仍在执行或收尾"):
+            await self.namer.generate("binding", self.parent)
+        self.start()
+        self.assertEqual(len(self.codex.fork_calls), 1)
+        self.codex.child.handle.finished.set()
+        await request
+        await self.drain()
+        self.codex.child.handle.result.final_response = '{"title":"另一个候选名称"}'
+        self.assertEqual(await self.namer.generate("binding", self.parent), "另一个候选名称")
+        await self.drain()
+        self.assertEqual(len(self.codex.fork_calls), 2)
+        self.assertEqual(self.commits, [])
+
+    async def test_manual_timeout_reports_before_late_fork_and_retains_cleanup_owner(self) -> None:
+        self.namer._timeout_seconds = 0.1
+        self.codex.fork_gate = asyncio.Event()
+        request = asyncio.create_task(self.namer.generate("binding", self.parent))
+        await self.codex.fork_entered.wait()
+        with self.assertRaisesRegex(ThreadNameGenerationError, "超时"):
+            await asyncio.wait_for(request, timeout=1)
+        with self.assertRaisesRegex(ThreadNameGenerationError, "仍在执行或收尾"):
+            await self.namer.generate("binding", self.parent)
+        self.assertFalse(self.codex.fork_cancelled)
+        self.codex.fork_gate.set()
+        await self.drain()
+        self.assertEqual(self.codex.child.turn_calls, [])
+        self.assertNotIn("binding", self.namer._jobs)
+        self.assert_child_cleanup()
+
+    async def test_manual_cancellation_preserves_late_turn_acquisition_and_cleanup(self) -> None:
+        self.codex.child.turn_gate = asyncio.Event()
+        request = asyncio.create_task(self.namer.generate("binding", self.parent))
+        await self.codex.child.turn_entered.wait()
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        with self.assertRaisesRegex(ThreadNameGenerationError, "仍在执行或收尾"):
+            await self.namer.generate("binding", self.parent)
+        self.codex.child.turn_gate.set()
+        await self.drain()
+        self.assertEqual(self.commits, [])
+        self.assertEqual(self.codex.child.handle.run_calls, 1)
+        self.assertIn(("interrupt", "private-fork"), self.events)
+        self.assert_child_cleanup()
+
+    async def test_manual_invalidation_reports_without_waiting_for_late_acquisition(self) -> None:
+        self.codex.fork_gate = asyncio.Event()
+        request = asyncio.create_task(self.namer.generate("binding", self.parent))
+        await self.codex.fork_entered.wait()
+        self.namer.invalidate("binding")
+        with self.assertRaisesRegex(ThreadNameGenerationError, "已失效"):
+            await asyncio.wait_for(request, timeout=1)
+        self.codex.fork_gate.set()
+        await self.drain()
+        self.assertEqual(self.codex.child.turn_calls, [])
+        self.assertEqual(self.commits, [])
+        self.assert_child_cleanup()
+
+    async def test_manual_generation_reports_invalid_output_and_failed_terminal(self) -> None:
+        handle = self.codex.child.handle
+        for response, status, error in (
+            ('{"title":""}', "completed", "格式无效"),
+            ('{"title":"第一行\\n第二行"}', "completed", "格式无效"),
+            ('{"title":"name","extra":true}', "completed", "格式无效"),
+            ('{"title":"name"}', "failed", "未成功完成"),
+            ('{"title":"name"}', "interrupted", "未成功完成"),
+        ):
+            with self.subTest(response=response, status=status):
+                handle.result.final_response = response
+                handle.result.status = status
+                handle.finished.set()
+                with self.assertRaisesRegex(ThreadNameGenerationError, error):
+                    await self.namer.generate("binding", self.parent)
+                await self.drain()
+                self.assertNotIn("binding", self.namer._jobs)
+                self.assertEqual(self.commits, [])
+
+    async def test_manual_fork_error_reports_and_unknown_identity_blocks_further_attempts(self) -> None:
+        self.codex.fork_error = RuntimeError("lost private response")
+        with self.assertRaisesRegex(ThreadNameGenerationError, "生成失败"):
+            await self.namer.generate("binding", self.parent)
+        await self.drain()
+        with self.assertRaisesRegex(ThreadNameGenerationError, "仍在执行或收尾"):
+            await self.namer.generate("binding", self.parent)
+        self.assertEqual(len(self.codex.fork_calls), 1)
+        self.assertTrue(self.namer._jobs["binding"].acquisition_unknown)
+        self.assertEqual(self.commits, [])
+
+    async def test_manual_wrong_terminal_cannot_return_candidate_or_release_slot(self) -> None:
+        self.codex.child.handle.result.id = "another-turn"
+        self.codex.child.handle.finished.set()
+        with self.assertRaisesRegex(ThreadNameGenerationError, "未成功完成"):
+            await self.namer.generate("binding", self.parent)
+        await self.drain()
+        with self.assertRaisesRegex(ThreadNameGenerationError, "仍在执行或收尾"):
+            await self.namer.generate("binding", self.parent)
+        self.assertFalse(self.namer._jobs["binding"].terminal_observed)
+        self.assertEqual(self.commits, [])
+        self.assert_child_cleanup()
+
+    async def test_manual_consumer_error_reports_without_recovering_title_from_cleanup_read(self) -> None:
+        self.codex.child.handle.error = RuntimeError("model execution failed")
+        self.codex.child.handle.finished.set()
+        self.codex.child.native.turns = [SimpleNamespace(
+            id="name-turn", status="completed", final_response='{"title":"不要恢复这个标题"}',
+        )]
+        with self.assertRaisesRegex(ThreadNameGenerationError, "生成失败"):
+            await self.namer.generate("binding", self.parent)
+        await self.drain()
+        self.assertEqual(self.codex.child.full_read_count, 1)
+        self.assertNotIn("binding", self.namer._jobs)
+        self.assertEqual(self.commits, [])
+        self.assert_child_cleanup()
+
+    async def test_manual_candidate_returns_while_cleanup_retains_shared_slot(self) -> None:
+        self.cleanup.gate = asyncio.Event()
+        self.codex.child.handle.finished.set()
+        self.assertEqual(await self.namer.generate("binding", self.parent), "会话自动命名")
+        await asyncio.wait_for(self.subscriptions.entered.wait(), timeout=1)
+        with self.assertRaisesRegex(ThreadNameGenerationError, "仍在执行或收尾"):
+            await self.namer.generate("binding", self.parent)
+        self.cleanup.gate.set()
+        await self.drain()
+        self.assertNotIn("binding", self.namer._jobs)
+        self.assert_child_cleanup()
+
+    async def test_close_reports_to_manual_waiter_and_rejects_new_request(self) -> None:
+        request = asyncio.create_task(self.namer.generate("binding", self.parent))
+        await self.running()
+        self.namer.close()
+        with self.assertRaisesRegex(ThreadNameGenerationError, "服务正在停止"):
+            await asyncio.wait_for(request, timeout=1)
+        with self.assertRaisesRegex(ThreadNameGenerationError, "服务正在停止"):
+            await self.namer.generate("binding", self.parent)
+        await self.drain()
+        self.assertEqual(self.commits, [])
+        self.assert_child_cleanup()
 
     async def test_preferred_title_writes_without_fork_or_input_history(self) -> None:
         self.parent.native.turns = []

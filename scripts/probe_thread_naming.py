@@ -275,9 +275,13 @@ async def _runtime_scenario(
                 codex, first.thread_id, cleanup, subscriptions,
             )
             expected_released.add(result["interrupted"]["fork_thread_id"])
+        manual_marker = f"RENAME-{uuid.uuid4().hex[:12]}"
         after = await runtime.submit(
             binding=store.get(binding.id), cwd=project, owner_id="probe-owner",
-            origin=object(), input="不要调用工具，只回复 RUNTIME-NAMING-AFTER。",
+            origin=object(), input=(
+                f"会话现在改为讨论项目 {manual_marker}，后续会话名称应体现这个完整项目标识。"
+                "不要调用工具，只回复 RUNTIME-NAMING-AFTER。"
+            ),
         )
         if after.release_receipt_attempt is not None:
             after.release_receipt_attempt()
@@ -297,6 +301,44 @@ async def _runtime_scenario(
             raise AssertionError("named followup changed the title or completion count")
         if set(subscriptions.released) != expected_released:
             raise AssertionError("named followup generated another naming fork")
+
+        _progress("explicit candidate from updated named Thread starting")
+        request = asyncio.create_task(runtime.generate_name_exact(binding.id))
+        async with asyncio.timeout(150):
+            while binding.id not in namer._jobs:
+                if request.done():
+                    await request
+                    raise AssertionError("explicit generation did not reserve a naming job")
+                await asyncio.sleep(0)
+            manual_job = namer._jobs[binding.id]
+            candidate = await request
+            while namer._jobs:
+                await asyncio.sleep(0.05)
+        if manual_job.thread is None or manual_job.run is None:
+            raise AssertionError("explicit candidate did not own a private fork and consumer")
+        manual_title, manual_item_types = _validate_title(manual_job.run.result(), manual_marker)
+        if candidate != manual_title:
+            raise AssertionError("explicit candidate differed from exact completed response")
+        await _prove_ephemeral(codex, manual_job.thread, first.thread_id)
+        candidate_parent = (await job.parent.read(include_turns=True)).thread
+        if candidate_parent.name != native.name:
+            raise AssertionError("explicit generation changed the name before saving")
+        if {turn.id for turn in candidate_parent.turns} != {first.turn_id, after.turn_id}:
+            raise AssertionError("explicit generation polluted the parent history")
+        expected_released.add(manual_job.thread.id)
+        if set(subscriptions.released) != expected_released or len(outcomes) != 2:
+            raise AssertionError("explicit generation leaked subscriptions or main outcomes")
+        await runtime.rename_exact(binding.id, candidate)
+        if (await job.parent.read(include_turns=False)).thread.name != candidate:
+            raise AssertionError("saving the explicit candidate did not update the native name")
+        result["explicit_candidate"] = {
+            "latest_context_inherited": True,
+            "name_unchanged_until_save": True,
+            "saved_candidate": True,
+            "fork_thread_id": manual_job.thread.id,
+            "naming_item_types": manual_item_types,
+            "unsubscribe_status": subscriptions.released[manual_job.thread.id],
+        }
         result.update({
             "parent_thread_id": first.thread_id,
             "fork_thread_id": job.thread.id,
@@ -310,7 +352,7 @@ async def _runtime_scenario(
             "parent_continued_after_cleanup": True,
             "completion_count": 2,
         })
-        _progress("production Runtime automatic naming passed")
+        _progress("production Runtime automatic naming and explicit candidate passed")
     finally:
         try:
             await asyncio.wait_for(runtime.interrupt_all(), timeout=30)

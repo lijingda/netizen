@@ -57,6 +57,7 @@ function expireAdminSession() {
   state.authExpired = true;
   invalidateSessionListRequest();
   stopUpdatePolling();
+  closeSessionRenameEditor({ expired: true });
   window.NetizenSelect?.close();
   // Release these modal drawers so the page's login link remains reachable.
   // Inputs stay in memory, but expired actions can never be submitted again.
@@ -2211,10 +2212,10 @@ function wireSessionActions(actions, session) {
   }
   if (a.stop) actions.append(actionButton("停止", () => window.confirm("停止这个 exact 会话的当前运行？") && mutate("/api/v1/sessions/stop", a.stop), true));
   if (a.activate) actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
-  if (a.rename) secondary.append(actionButton("重命名", async () => {
-    const name = window.prompt("新的原生会话名称");
-    if (name) await mutate("/api/v1/sessions/rename", a.rename, { name });
-  }));
+  if (a.rename) {
+    const button = actionButton("重命名", () => openSessionRenameEditor(session, button));
+    secondary.append(button);
+  }
   if (a.archive) secondary.append(actionButton("归档", () => window.confirm("确认归档？") && mutate("/api/v1/sessions/archive", a.archive), true));
   if (a.unarchive) actions.append(actionButton("恢复", () => mutate("/api/v1/sessions/unarchive", a.unarchive, { actionKind: a.unarchive.actionKind })));
   if (a.unarchiveCurrent) actions.append(actionButton("恢复并设为当前", () => mutate("/api/v1/sessions/unarchive", a.unarchiveCurrent, { actionKind: a.unarchiveCurrent.actionKind })));
@@ -2314,6 +2315,123 @@ function rowByIdentity(selector, key, value) {
     if (row.dataset[key] === value) return row;
   }
   return null;
+}
+
+let sessionRenameEditor = null;
+const sessionRenameInput = (name) => document.querySelector(`#session-rename-${name}`);
+
+function renderSessionRenameEditor() {
+  const editor = sessionRenameEditor;
+  if (!editor) return;
+  const busy = editor.generating || editor.saving;
+  sessionRenameInput("name").disabled = busy;
+  sessionRenameInput("generate").disabled = busy || !editor.session.actions.rename || state.authExpired;
+  sessionRenameInput("save").disabled = busy || !editor.session.actions.rename
+    || !sessionRenameInput("name").value.trim() || state.authExpired;
+  sessionRenameInput("cancel").disabled = editor.saving;
+  sessionRenameInput("close").disabled = editor.saving;
+  sessionRenameInput("status").textContent = editor.generating ? "正在生成中…"
+    : editor.saving ? "正在保存…" : editor.error;
+  sessionRenameInput("status").classList.toggle("error", Boolean(editor.error));
+  sessionRenameInput("editor").setAttribute("aria-busy", String(busy));
+}
+
+function openSessionRenameEditor(session, returnFocus) {
+  if (sessionRenameEditor?.saving || !session.actions.rename || state.authExpired) return;
+  closeSessionRenameEditor();
+  sessionRenameEditor = { session, returnFocus,
+    generating: false, saving: false, error: "" };
+  sessionRenameInput("identity").textContent = `${session.nativeTitle || "未命名会话"} · ${session.shortId} · ${session.projectAlias}`;
+  sessionRenameInput("name").value = session.nativeTitle || "";
+  renderSessionRenameEditor();
+  sessionRenameInput("dialog").showModal();
+  sessionRenameInput("name").focus();
+}
+
+function closeSessionRenameEditor({ expired = false } = {}) {
+  const editor = sessionRenameEditor;
+  if (!editor || (editor.saving && !expired)) return;
+  sessionRenameEditor = null;
+  sessionRenameInput("dialog").close();
+  sessionRenameInput("name").value = "";
+  editor.returnFocus?.focus();
+}
+
+async function generateSessionName() {
+  const editor = sessionRenameEditor;
+  if (!editor || editor.generating || editor.saving || !editor.session.actions.rename || state.authExpired) return;
+  editor.generating = true;
+  editor.error = "";
+  sessionRenameInput("name").value = "";
+  renderSessionRenameEditor();
+  try {
+    const actions = editor.session.actions;
+    if (!actions.generateName) {
+      // Refresh the form's unused grants together for the original identity.
+      const query = new URLSearchParams({ identity: editor.session.bindingId, inventoryState: "active" });
+      const page = await api(`/api/v1/sessions?${query}`);
+      if (sessionRenameEditor !== editor) return;
+      const current = page.items.find((item) => item.bindingId === editor.session.bindingId
+        && item.scopeKey === editor.session.scopeKey && item.nativeThreadId === editor.session.nativeThreadId);
+      if (!current?.actions.generateName || !current.actions.rename) {
+        throw new Error("会话状态已变化，请关闭表单并刷新 Sessions。");
+      }
+      Object.assign(actions, { generateName: current.actions.generateName, rename: current.actions.rename });
+    }
+    const action = actions.generateName;
+    actions.generateName = null;
+    const result = await api("/api/v1/sessions/generate-name", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(action)),
+    });
+    if (sessionRenameEditor !== editor) return;
+    if (result.bindingId !== editor.session.bindingId) throw new Error("生成结果与当前会话不匹配。");
+    sessionRenameInput("name").value = result.name;
+  } catch (error) {
+    if (sessionRenameEditor !== editor) return;
+    editor.error = error.message;
+  } finally {
+    if (sessionRenameEditor === editor) {
+      editor.generating = false;
+      renderSessionRenameEditor();
+      sessionRenameInput("name").focus();
+    }
+  }
+}
+
+async function saveSessionName(event) {
+  event.preventDefault();
+  const editor = sessionRenameEditor;
+  const name = sessionRenameInput("name").value.trim();
+  if (!editor || editor.generating || editor.saving || !editor.session.actions.rename || !name || state.authExpired) return;
+  const action = editor.session.actions.rename;
+  editor.session.actions.rename = null;
+  editor.returnFocus.disabled = true;
+  editor.saving = true;
+  editor.error = "";
+  renderSessionRenameEditor();
+  try {
+    await api("/api/v1/sessions/rename", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(action, { name })),
+    });
+  } catch (error) {
+    if (sessionRenameEditor !== editor) return;
+    editor.error = `${error.message} 请关闭表单，刷新 Sessions 后核对名称。`;
+    editor.saving = false;
+    renderSessionRenameEditor();
+    return;
+  }
+  if (sessionRenameEditor !== editor) return;
+  editor.saving = false;
+  closeSessionRenameEditor();
+  if (await refresh("sessions")) {
+    setStatus("会话名称已保存。");
+    if (!sessionRenameEditor && state.tab === "sessions") {
+      const row = rowByIdentity("#sessions-body", "bindingId", editor.session.bindingId);
+      Array.from(row?.querySelectorAll("button") || []).find((button) => button.textContent === "重命名")?.focus();
+    }
+  } else setStatus("会话名称已保存，但 Sessions 列表刷新失败，请手动刷新。", true);
 }
 
 let sessionSettingsEditor = null;
@@ -3108,12 +3226,13 @@ function hasUnsavedEditors() {
 // Navigation asks once before closing any editor. Busy submissions retain the
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
 function confirmDiscardEditors() {
-  if (projectEditor?.saving || sessionSettingsEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
+  if (projectEditor?.saving || sessionSettingsEditor?.saving || sessionRenameEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
       || window.NetizenSessionAccess?.busy() || window.NetizenProgressCard?.busy()
       || window.NetizenWorktrees?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
   closeProjectEditor({ confirmed: true });
   closeSessionSettingsEditor({ confirmed: true });
+  closeSessionRenameEditor();
   closeDefaultEditor({ confirmed: true });
   if (scheduleEditor) closeScheduleEditor({ confirmed: true });
   cancelScheduleSelection({ confirmed: true });
@@ -4796,6 +4915,15 @@ document.querySelector("#sessions-next").addEventListener("click", () => moveSes
 document.querySelector("#sides-previous").addEventListener("click", () => moveSidePage("previous"));
 document.querySelector("#sides-next").addEventListener("click", () => moveSidePage("next"));
 sessionSettingsInput("cancel").addEventListener("click", closeSessionSettingsEditor);
+sessionRenameInput("cancel").addEventListener("click", closeSessionRenameEditor);
+sessionRenameInput("close").addEventListener("click", closeSessionRenameEditor);
+sessionRenameInput("dialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeSessionRenameEditor();
+});
+sessionRenameInput("name").addEventListener("input", renderSessionRenameEditor);
+sessionRenameInput("generate").addEventListener("click", generateSessionName);
+sessionRenameInput("editor").addEventListener("submit", saveSessionName);
 sessionSettingsInput("close").addEventListener("click", closeSessionSettingsEditor);
 sessionSettingsInput("drawer").addEventListener("cancel", (event) => {
   event.preventDefault();

@@ -61,6 +61,7 @@ _REPEATABLE_CARD_CONTROL_NAMES = frozenset(
     {
         CardControlName.OPEN_SETTINGS_SECTION,
         CardControlName.REFRESH_SETTINGS,
+        CardControlName.GENERATE_BINDING_NAME,
         CardControlName.PREPARE_EXACT_DELETE_BINDING,
         CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
         CardControlName.ACTIVATE_BINDING,

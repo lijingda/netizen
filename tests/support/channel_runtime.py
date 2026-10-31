@@ -137,6 +137,7 @@ class StubRuntime:
         self.recheck_calls: list[tuple[str, int, str]] = []
         self.lifecycle_states: dict[str, object] = {}
         self.rename_binding_calls: list[tuple[str, str]] = []
+        self.generate_name_calls: list[str] = []
         self.archive_binding_calls: list[str] = []
         self.archive_binding_error: BaseException | None = None
         self.delete_binding_calls: list[str] = []
@@ -426,6 +427,12 @@ class StubRuntime:
             or actual_turn_id != expected_turn_id
         ):
             raise ThreadLifecycleError("会话运行状态已经变化。")
+
+    async def generate_name_exact(self, binding_id: str) -> str:
+        assert self.binding_store is not None
+        self.binding_store.get(binding_id)
+        self.generate_name_calls.append(binding_id)
+        return "自动生成的名称"
 
     async def rename_exact(self, binding_id: str, name: str) -> str:
         assert self.binding_store is not None
