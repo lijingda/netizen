@@ -518,23 +518,29 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_global_search_pagination_filters_before_limiting(self):
         self.policy.discovery = {"selected"}
         expected = set()
-        for index in range(62):
+        for index in range(112):
             identifier = f"thread-{index}"
             self.binding("selected", identifier, title=f"searchable {index}", updated=100 + index)
             expected.add(identifier)
         self.catalog.items["external"] = thread("external", "searchable external", updated=9999)
-        found, cursor = set(), None
-        while True:
-            args = {"searchTerm": "searchable", "limit": 10, **({"cursor": cursor} if cursor else {})}
-            value = await self.call("list_threads", args)
-            self.assertNotIn("error", value)
-            ids = {item["id"] for item in value["threads"]}
-            self.assertFalse(found & ids)
-            found.update(ids)
-            cursor = value["nextCursor"]
-            if not cursor:
-                break
-        self.assertEqual(found, expected)
+        for name in ("list_threads", "list_archived_threads"):
+            with self.subTest(name=name):
+                self.catalog.archived = expected.copy() if name == "list_archived_threads" else set()
+                found, cursor = set(), None
+                while True:
+                    args = {"searchTerm": "searchable", "limit": 100, **({"cursor": cursor} if cursor else {})}
+                    value = await self.call(name, args)
+                    self.assertNotIn("error", value)
+                    self.assertLessEqual(result_bytes(value), 8000)
+                    ids = {item["id"] for item in value["threads"]}
+                    self.assertEqual(len(ids), len(value["threads"]))
+                    self.assertFalse(found & ids)
+                    found.update(ids)
+                    cursor = value["nextCursor"]
+                    if not cursor:
+                        break
+                self.assertEqual(found, expected)
+        self.catalog.archived.clear()
         self.assertTrue(all(not include_turns for _, include_turns in self.catalog.reads))
         first = await self.call("list_threads", {"limit": 1})
         cursor = first["nextCursor"]
@@ -569,7 +575,7 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         lazy = self.binding("chat-lazy")
         found, lazy_ids, cursor = [], [], None
         for _ in range(20):
-            result = await self.call("list_threads", {"limit": 50, **({"cursor": cursor} if cursor else {})})
+            result = await self.call("list_threads", {"limit": 100, **({"cursor": cursor} if cursor else {})})
             self.assertNotIn("error", result)
             self.assertLessEqual(result_bytes(result), 8000)
             found.extend(item["id"] for item in result["threads"] if item["id"] is not None)
@@ -1136,6 +1142,99 @@ class SessionMcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(validate_arguments("create_thread", {"prompt": "ok", "title": "  title\n name "})["title"], "title name")
         with self.assertRaises(SessionToolError):
             validate_arguments("send_message_to_thread", {"prompt": "ok", "threadId": "target", "title": "extra"})
+
+    async def test_list_limits_match_published_schema_and_reject_before_dispatch(self):
+        listed = {tool.name: tool for tool in (await self.runner._list_tools(None, None)).tools}
+        for name in ("list_threads", "list_archived_threads"):
+            schema = listed[name].input_schema
+            limit = schema["properties"]["limit"]
+            self.assertEqual((limit["minimum"], limit["maximum"], limit["default"]), (1, 100, 10))
+            for arguments, expected in (({}, 10), ({"limit": 1}, 1), ({"limit": 100}, 100)):
+                with self.subTest(name=name, arguments=arguments):
+                    Draft202012Validator(schema).validate(arguments)
+                    result = await self.call(name, arguments, {"threadId": "source"})
+                    self.assertFalse(result.is_error)
+                    self.assertEqual(self.calls[-1], (name, {"limit": expected}, "source"))
+            accepted_calls = list(self.calls)
+            for value, detail in ((0, "at least 1"), (101, "at most 100"), (True, "integer"),
+                                  (1.5, "integer"), ("100", "integer"), (None, "integer")):
+                with self.subTest(name=name, value=value):
+                    result = await self.call(name, {"limit": value}, {"threadId": "source"})
+                    self.assertTrue(result.is_error)
+                    data = result.structured_content
+                    self.assertEqual(data["error"]["code"], "invalid_arguments")
+                    self.assertEqual(data["fields"], ["limit"])
+                    self.assertIn("limit:", data["error"]["message"])
+                    self.assertIn(detail, data["error"]["message"])
+                    self.assertNotIn("prompt", data["error"]["message"])
+            self.assertEqual(self.calls, accepted_calls)
+
+    async def test_argument_errors_explain_constraints_without_echoing_inputs(self):
+        private = "PRIVATE_INPUT_MARKER"
+        cases = (
+            ("list_threads", {"cursor": private * 200}, ["cursor"], ("cursor:", "2048", "characters")),
+            ("list_archived_threads", {"searchTerm": private * 20}, ["searchTerm"], ("searchTerm:", "200", "characters")),
+            ("read_thread", {"threadId": private, "turnLimit": 11, "includeOutputs": private},
+             ["includeOutputs", "turnLimit"], ("turnLimit:", "10", "includeOutputs:", "boolean")),
+            ("wait_threads", {"targets": [{"threadId": private}], "timeoutMs": -1}, ["timeoutMs"], ("timeoutMs:", "at least 0")),
+            ("wait_threads", {"targets": [{}]}, ["targets"], ("targets[0].threadId:", "required")),
+            ("wait_threads", {"targets": [private]}, ["targets"], ("targets[0]:", "object")),
+            ("wait_threads", {"targets": []}, ["targets"], ("targets:", "at least 1", "items")),
+            ("wait_threads", {"targets": [{"threadId": private}] * 9}, ["targets"], ("targets:", "at most 8", "items")),
+            ("create_worktree", {"allowAsync": False}, ["allowAsync"], ("allowAsync:", "true")),
+            ("list_worktrees", {"limit": 51}, ["limit"], ("limit:", "at most 50")),
+        )
+        for name, arguments, fields, details in cases:
+            with self.subTest(name=name, fields=fields):
+                result = await self.call(name, arguments, {"threadId": "source"})
+                self.assertTrue(result.is_error)
+                data = result.structured_content
+                self.assertEqual(data["error"]["code"], "invalid_arguments")
+                self.assertEqual(data["fields"], fields)
+                for detail in details:
+                    self.assertIn(detail, data["error"]["message"])
+                self.assertNotIn(private, json.dumps(data))
+                self.assertNotIn("prompt", data["error"]["message"])
+        self.assertEqual(self.calls, [])
+
+    async def test_prompt_validation_feedback_uses_byte_limit_and_never_echoes_prompt(self):
+        for name in ("create_thread", "send_message_to_thread"):
+            target = {"threadId": "target"} if name == "send_message_to_thread" else {}
+            for prompt in ("", " \n ", "中" * 334, "PRIVATE_PROMPT" * 100):
+                with self.subTest(name=name, size=len(prompt)):
+                    result = await self.call(name, {**target, "prompt": prompt}, {"threadId": "source"})
+                    self.assertTrue(result.is_error)
+                    data = result.structured_content
+                    self.assertEqual(data["fields"], ["prompt"])
+                    self.assertIn("prompt:", data["error"]["message"])
+                    self.assertIn("1,000 UTF-8 bytes", data["error"]["message"])
+                    self.assertIn("non-whitespace", data["error"]["message"])
+                    self.assertNotIn("PRIVATE_PROMPT", json.dumps(data))
+                    self.assertNotIn("中", json.dumps(data, ensure_ascii=False))
+            self.assertEqual(validate_arguments(name, {**target, "prompt": "中" * 333})["prompt"], "中" * 333)
+        self.assertEqual(self.calls, [])
+
+    async def test_argument_errors_hide_unknown_field_names_and_malformed_objects(self):
+        private = "PRIVATE_UNKNOWN_FIELD"
+        for name, arguments in (
+            ("list_threads", {private: "PRIVATE_VALUE"}),
+            ("wait_threads", {"targets": [{"threadId": "target", private: "PRIVATE_VALUE"}]}),
+        ):
+            with self.subTest(name=name):
+                result = await self.call(name, arguments, {"threadId": "source"})
+                self.assertTrue(result.is_error)
+                data = result.structured_content
+                self.assertIn("Unexpected argument", data["error"]["message"])
+                self.assertNotIn("PRIVATE", json.dumps(data))
+        for arguments in ("PRIVATE_VALUE", ["PRIVATE_VALUE"], 42):
+            with self.assertRaises(SessionToolError) as caught:
+                validate_arguments("list_threads", arguments)
+            data = caught.exception.result()
+            self.assertEqual(data["error"]["code"], "invalid_arguments")
+            self.assertEqual(data["fields"], [])
+            self.assertIn("object", data["error"]["message"])
+            self.assertNotIn("PRIVATE", json.dumps(data))
+        self.assertEqual(self.calls, [])
 
     async def test_trusted_metadata_is_per_call_and_required(self):
         for meta in (None, {}, {"x-codex-turn-metadata": '{"thread_id":"spoof"}'}, {"threadId": "a", "x-codex-turn-metadata": '{"thread_id":"b"}'}):

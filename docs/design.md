@@ -1953,11 +1953,13 @@ Side 不能调用 `create_thread`、`list_worktrees` 或 `create_worktree`，也
 Side 即使能作为来源，也不成为 read/wait/send 目标；目标拒绝信息明确临时 Side 不支持
 这些操作，未知 ID 不被直接判定为 Side。父子关系不改变目标及访问范围规则。
 
-两个发现工具支持 `limit`（默认 10，上限 50）、可选 `searchTerm` 和 `cursor`，返回
+两个发现工具支持 `limit`（整数 1–100，默认 10）、可选 `searchTerm` 和 `cursor`，返回
 `nextCursor`。按原生更新时间降序分批查询所选目录，每批仅查询本实例匹配 ID，再按
 目标范围和元信息搜索过滤；填满当页即停，由模型决定是否继续。游标保留原生页内偏移，
 既不局限近期第一页，也不预加载全部候选。游标绑定查询和范围版本；下一次调用遇到权限变化时旧游标失效。只允许发现时不交付
 preview、summary 或回答正文。名称有歧义由模型与用户澄清，不新增文本 mention 别名。
+响应字节预算可能使一页少于 `limit`；模型应沿 `nextCursor` 继续，直到它为 null，不能因短页或空页判断结束。
+参数说明同时写明范围、默认值与分页规则；校验失败反馈已知字段和具体约束，不回显输入值或未知字段名。
 
 read 保留 `turnLimit`（默认 1，上限 10）、`includeOutputs`、每项输出预算与分页游标。
 公开 SDK 尚无历史分页 facade，按 ADR 0083 使用同一连接的固定只读分页适配：metadata
