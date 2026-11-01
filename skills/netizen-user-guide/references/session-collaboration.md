@@ -20,6 +20,10 @@ Netizen 会在当前聊天中新建普通话题。来源已经是话题时，新
 候选仅包括当前 Netizen 实例登记的普通会话，可以跨聊天、跨 Project；同名且无法唯一
 确定时需要澄清。独立 CLI/App 创建而未登记到本实例的会话、Side 和子 agent 不在目录中。
 
+`list_threads` 查询未归档会话，`list_archived_threads` 查询已归档会话。两者的 `limit`
+均为 1–100 的整数，默认 10；实际每页可能因响应大小限制而更少。统计或查找全部候选时，
+应沿返回的 `nextCursor` 继续查询，直到它为 null，不能只按第一页数量得出总数。
+
 可以直接提供完整 **Codex 会话 ID（Thread ID）**，例如“读取 Codex 会话 `<完整 ID>`
 最近的回答”。在 `/status` 详情、`/sessions`、归档列表或 Admin 的标识区域取得完整值；
 查看 ID 不需要把目标切回当前。不要把 **Netizen 会话编号（Binding ID）** 或飞书聊天/
