@@ -44,8 +44,8 @@ class StatusCardTest(unittest.TestCase):
         self.assertNotIn("24,500", details)
         self.assertNotIn("Model：", details)
         buttons = _elements(card, "button")
-        self.assertEqual([button["text"]["content"] for button in buttons], ["查看状态", "停止", "会话配置", "会话列表"])
-        for button, command in zip(buttons, (ControlName.STATUS, ControlName.STOP, ControlName.CONFIG, ControlName.SESSIONS)):
+        self.assertEqual([button["text"]["content"] for button in buttons], ["查看状态", "停止", "会话配置", "会话列表", "归档"])
+        for button, command in zip(buttons, (ControlName.STATUS, ControlName.STOP, ControlName.CONFIG, ControlName.SESSIONS, ControlName.ARCHIVE)):
             decoded = decode_status_command(
                 scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
                 message_id="om_status", sender_id="ou_clicker",
@@ -112,6 +112,12 @@ class StatusCardTest(unittest.TestCase):
                 )
                 self.assertEqual(close.command.name, ControlName.SIDE)
                 self.assertEqual(close.command.arguments, ("close",))
+                with self.assertRaises(CardActionError):
+                    decode_status_command(
+                        scope=FeishuScope("cli_test", "oc_direct", ScopeKind.TOPIC, "omt_side"),
+                        message_id="om_status", sender_id="ou_clicker",
+                        value={**buttons[-1]["behaviors"][0]["value"], "command": "archive"},
+                    )
 
     def test_renewal_changes_only_transport_nonces(self):
         cwd = "工作目录：/srv/project"

@@ -24,6 +24,7 @@ _BINDING_COMMANDS = (
     ("停止", ControlName.STOP, ()),
     ("会话配置", ControlName.CONFIG, ()),
     ("会话列表", ControlName.SESSIONS, ()),
+    ("归档", ControlName.ARCHIVE, ()),
 )
 _SIDE_COMMANDS = (
     ("查看状态", ControlName.STATUS, ()),

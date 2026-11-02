@@ -16,7 +16,7 @@ from lark_channel.channel.channel import _card_action_identity
 from netizen_cli.bindings import BindingTaskFeedback, SideTopicState
 from netizen_cli.codex_runtime import ActiveTurnSnapshot, StopDisposition
 from netizen_cli.domain import ActiveState
-from tests.support.channel_cards import _card_button_value, _elements
+from tests.support.channel_cards import _card_button_value, _elements, direct_button_event
 from tests.support.channel_fixtures import side_channel_fixture
 from tests.support.channel_messages import FakeMessage
 
@@ -76,7 +76,7 @@ class StatusCommandsTest(unittest.IsolatedAsyncioTestCase):
     async def assert_ordinary_aliases_match_slash(self):
         scope, card = await self.panel()
         for label, text in (("查看状态", "/status"), ("停止", "/stop"),
-                            ("会话配置", "/config"), ("会话列表", "/sessions")):
+                            ("会话配置", "/config"), ("会话列表", "/sessions"), ("归档", "/archive")):
             with self.subTest(command=text):
                 self.channel.replies.clear()
                 await self.app.handle_message(FakeMessage(text, message_id="om_slash"))
@@ -118,20 +118,62 @@ class StatusCommandsTest(unittest.IsolatedAsyncioTestCase):
                 )
                 _, card = await self.panel(create=False)
                 self.assertEqual([item["text"]["content"] for item in _elements(card.card, "button")],
-                                 ["查看状态", "停止", "会话配置", "会话列表"])
+                                 ["查看状态", "停止", "会话配置", "会话列表", "归档"])
                 await self.app.handle_card_action(self.event(card, "停止"))
                 self.assertIn("当前没有正在执行的任务", self.channel.replies[-1][1])
 
     async def test_switching_or_removing_current_session_rejects_every_old_button(self):
         scope, card = await self.panel()
         await self.fixture.create_binding(scope)
-        for label in ("查看状态", "停止", "会话配置", "会话列表"):
+        for label in ("查看状态", "停止", "会话配置", "会话列表", "归档"):
             with self.subTest(label=label):
                 self.channel.replies.clear()
                 await self.app.handle_card_action(self.event(card, label))
                 self.assertEqual(len(self.channel.replies), 1)
                 self.assertIn("当前会话已切换", self.channel.replies[0][1])
         self.assertEqual(self.runtime.stop_calls, [])
+        self.assertEqual(self.runtime.archive_binding_calls, [])
+
+    async def test_archive_opens_existing_confirmation_before_mutating(self):
+        scope, card = await self.panel()
+        binding = self.store.active_binding(scope.key)
+        await self.app.handle_card_action(self.event(card, "归档"))
+        self.assertIn("Lazy 会话没有原生历史可归档", self.channel.replies[-1][1])
+        self.assertEqual(self.runtime.archive_binding_calls, [])
+        self.runtime.materialize(binding.id, "native-one", cwd=self.fixture.project)
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding.id, "native-one", "turn-one", "ou_owner", ActiveState.RUNNING,
+        )
+        await self.app.handle_message(FakeMessage("/archive", message_id="om_slash_archive"))
+        expected = self.channel.replies[-1][1]
+        # The old Lazy snapshot must not control current archive eligibility.
+        await self.app.handle_card_action(self.event(card, "归档"))
+        confirmation = self.channel.replies[-1][1]
+        self.assertEqual(confirmation, expected)
+        self.assertEqual(self.runtime.archive_binding_calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, binding.id)
+        await self.app.handle_card_action(direct_button_event(
+            _card_button_value(confirmation, "确认归档当前会话"), message_id="om_archive_confirmation",
+        ))
+        self.assertEqual(self.runtime.archive_binding_calls, [binding.id])
+        self.assertEqual(self.runtime.stop_calls, [])
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-one")
+
+    async def test_switch_after_status_archive_preparation_rejects_confirmation(self):
+        scope, card = await self.panel()
+        binding = self.store.active_binding(scope.key)
+        self.runtime.materialize(binding.id, "native-one", cwd=self.fixture.project)
+        await self.app.handle_card_action(self.event(card, "归档"))
+        confirmation = self.channel.replies[-1][1]
+        await self.fixture.create_binding(scope)
+        replacement = self.store.active_binding(scope.key)
+        await self.app.handle_card_action(direct_button_event(
+            _card_button_value(confirmation, "确认归档当前会话"), message_id="om_stale_archive_confirmation",
+        ))
+        self.assertEqual(self.runtime.archive_binding_calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, replacement.id)
+        self.assertIn("active 会话已切换", str(self.channel.updates[-1][1]))
 
     async def test_lazy_panel_survives_materialization_and_stops_the_current_turn(self):
         scope, card = await self.panel()

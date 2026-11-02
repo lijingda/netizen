@@ -98,11 +98,11 @@ async function fetch(path, options = {}) {
   const actions = document.createElement("div");
   wireSessionActions(actions, session);
   assert.deepEqual(actions.children.filter((child) => child.tagName === "button").map((button) => button.textContent),
-    ["配置", "停止", "设为当前", "恢复", "恢复并设为当前"]);
+    ["配置", "停止", "设为当前", "归档", "恢复", "恢复并设为当前"]);
   const more = actions.querySelector("details");
   assert(!more.open);
   assert.deepEqual(more.querySelectorAll("button").map((button) => button.textContent),
-    ["创建定时任务", "重命名", "归档", "删除 Lazy", "删除", "释放订阅"]);
+    ["创建定时任务", "重命名", "删除 Lazy", "删除", "释放订阅"]);
   const button = (label) => actions.querySelectorAll("button").find((item) => item.textContent === label);
   button("配置").click();
   await flush();
@@ -123,6 +123,16 @@ async function fetch(path, options = {}) {
   assert.equal(mutations.at(-1).body.actionToken, session.actions.deleteMaterialized.actionToken);
   button("停止").click(); await flush();
   assert.equal(mutations.at(-1).body.actionToken, session.actions.stop.actionToken);
+  accepted = false;
+  const beforeArchive = mutations.length;
+  button("归档").click(); await flush();
+  assert.equal(mutations.length, beforeArchive);
+  assert.match(confirmations.at(-1), /归档/);
+  accepted = true;
+  button("归档").click(); await flush();
+  assert.equal(mutations.length, beforeArchive + 1);
+  assert.equal(mutations.at(-1).path, "/api/v1/sessions/archive");
+  assert.equal(mutations.at(-1).body.actionToken, session.actions.archive.actionToken);
   more.open = true;
   more.dispatch("keydown", { key: "Escape" });
   assert.equal(more.open, false);
