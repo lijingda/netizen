@@ -74,6 +74,11 @@ class BuiltArtifactTests(unittest.TestCase):
             self.assertIn("netizen_cli/admin/static/index.html", names)
             self.assertEqual(wheel.read("netizen_cli/admin/static/netizen.svg"),
                              (ROOT / "netizen_cli/admin/static/netizen.svg").read_bytes())
+            for path in (ROOT / "netizen_cli/admin/static/vendor/ace").iterdir():
+                self.assertEqual(wheel.read(path.relative_to(ROOT).as_posix()), path.read_bytes())
+            for name in ("project-files.js", "project-files.css"):
+                self.assertEqual(wheel.read("netizen_cli/admin/static/" + name),
+                                 (ROOT / "netizen_cli/admin/static" / name).read_bytes())
             self.assertFalse(any(name.startswith("netizen/") for name in names))
             entrypoint = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
             self.assertIn("netizen = netizen_cli.cli:main", wheel.read(entrypoint).decode())
@@ -88,6 +93,8 @@ class BuiltArtifactTests(unittest.TestCase):
             "from netizen_cli.package_resources import resource_path; "
             "from importlib.resources import files; "
             "assert files('netizen_cli.admin').joinpath('static/netizen.svg').read_bytes().startswith(b'<svg'); "
+            "assert files('netizen_cli.admin').joinpath('static/vendor/ace/ace.js').read_bytes(); "
+            "assert files('netizen_cli.admin').joinpath('static/vendor/ace/LICENSE').read_text(); "
             "print(json.dumps([str(builtin_skill_root()),str(resource_path('config.example.yaml'))]))"
         )
         result = subprocess.run(

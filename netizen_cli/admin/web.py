@@ -20,7 +20,7 @@ from datetime import datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 from .auth import (
     ActionCsrfRejected,
@@ -36,6 +36,7 @@ from .auth import (
     StaleActionGrant,
 )
 from .errors import AdminWebError
+from .file_previews import PreviewUnavailable, render_markdown
 from .credentials import AdminCredentials
 from .feishu import AuthExpired, FeishuClient, FeishuError
 from .login import AdminLogin
@@ -160,6 +161,7 @@ from ..projects import (
     StaleProject,
     UnknownProject,
 )
+from ..project_files import FileBrowseError
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 from ..defaults import DefaultConfigurationError
 from ..session_settings import SessionSettings, SessionSettingsError
@@ -185,6 +187,12 @@ _MAX_QUERY_FIELDS = 256
 _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 _AUTO_PORTS = range(8787, 8887)
+_FILE_VIEWER_ASSETS = (
+    "project-files.js", "project-files.css",
+    "vendor/ace/ace.js",
+    "vendor/ace/mode-python.js", "vendor/ace/mode-javascript.js",
+    "vendor/ace/mode-json.js", "vendor/ace/mode-markdown.js",
+)
 _ADMIN_PAGE_PATHS = frozenset({
     "/", "/projects", "/sessions/ordinary", "/sessions/temporary",
     "/schedules", "/defaults", "/maintenance", "/system", "/worktrees",
@@ -564,6 +572,15 @@ class AdminWebApplication:
 
     async def _dispatch_authenticated(self, context: _RequestContext) -> Response:
         route = (context.method, context.path)
+        if context.method == "GET" and context.path.removeprefix("/static/") in _FILE_VIEWER_ASSETS and context.path.startswith("/static/"):
+            name = context.path.removeprefix("/static/")
+            mime = b"text/css; charset=utf-8" if name.endswith(".css") else b"text/javascript; charset=utf-8"
+            return Response(200, ((b"Content-Type", mime),), self._assets[name])
+        if context.method == "GET" and context.path in {
+            "/api/v1/project-files/root", "/api/v1/project-files/directory",
+            "/api/v1/project-files/content", "/api/v1/project-files/image",
+        }:
+            return await self._project_files(context)
         if context.method == "GET" and context.path in _ADMIN_PAGE_PATHS:
             return Response(
                 200,
@@ -703,6 +720,77 @@ class AdminWebApplication:
         if handler is not None:
             return await handler(context)
         raise AdminWebError(404, "not_found", "管理接口不存在。")
+
+    async def _project_files(self, context: _RequestContext) -> Response:
+        operation = context.path.rsplit("/", 1)[1]
+        allowed = {"project", "worktree"}
+        if operation != "root":
+            allowed |= {"identity", "path"}
+        if operation == "image":
+            allowed.add("version")
+        _require_query_keys(context.query, allowed)
+        project = _optional_text_query(context.query, "project", maximum=64)
+        worktree = _optional_text_query(context.query, "worktree", maximum=256)
+        if not project:
+            raise AdminWebError(400, "invalid_query", "请选择 Project。")
+        version = _optional_text_query(context.query, "version", maximum=128) if operation == "image" else None
+        args = {"project": project, "worktree": worktree}
+        deadline = asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS
+        try:
+            if operation == "root":
+                data = await self._management.files.root(**args, deadline=deadline)
+            else:
+                identity = _optional_text_query(context.query, "identity", maximum=128)
+                paths = context.query.get("path", [""])
+                if not identity or len(paths) != 1 or len(paths[0].encode("utf-8")) > 4096:
+                    raise AdminWebError(400, "invalid_query", "目录身份或相对路径无效，请重新打开文件查看。")
+                path = paths[0]
+                read_args = {**args, "identity": identity, "path": path, "deadline": deadline}
+                if operation == "directory":
+                    data = await self._management.files.directory(**read_args)
+                else:
+                    if operation == "image":
+                        preview = await self._management.files.content(**read_args)
+                        if preview.kind != "image":
+                            raise FileBrowseError("unsupported_file", "该文件不支持图片预览。")
+                        if version is not None and version != preview.version:
+                            raise FileBrowseError("file_changed", "图片已变化，请刷新后重新查看。")
+                        self._authenticate(context)
+                        return Response(200, ((b"Content-Type", preview.mime.encode("ascii")),), preview.data)
+                    query = {"project": project, "identity": identity}
+                    if worktree is not None:
+                        query["worktree"] = worktree
+
+                    def image_url(relative: str) -> str:
+                        return "/api/v1/project-files/image?" + urlencode({**query, "path": relative})
+
+                    def content_data(preview):
+                        data = {"path": path, "kind": preview.kind, "size": preview.size,
+                                "modifiedAt": preview.modified_at, "version": preview.version}
+                        if preview.kind == "image":
+                            data["imageUrl"] = image_url(path) + "&" + urlencode({"version": preview.version})
+                        else:
+                            suffix = Path(path).suffix.lower()
+                            language = {".py": "python", ".pyw": "python", ".js": "javascript",
+                                ".mjs": "javascript", ".cjs": "javascript", ".json": "json",
+                                ".md": "markdown", ".markdown": "markdown"}.get(suffix, "text")
+                            data.update(text=preview.text, language=language)
+                            if language == "markdown":
+                                try:
+                                    data["markdownHtml"] = render_markdown(
+                                        preview.text, path=path, image_url=image_url,
+                                    )
+                                except PreviewUnavailable as error:
+                                    data["previewMessage"] = str(error)
+                        return data
+
+                    data = await self._management.files.content(**read_args, transform=content_data)
+        except (TimeoutError, BlockingIOResultUnknown) as error:
+            raise AdminWebError(504, "read_timeout", "文件读取超时，请稍后重试。") from error
+        except BlockingIOExecutorClosed as error:
+            raise AdminWebError(503, "read_unavailable", "文件查看暂不可用。") from error
+        self._authenticate(context)
+        return _json_response(200, {**data, "requestId": context.request.request_id})
 
     def _updates_response(
         self, context: _RequestContext, status: dict[str, Any]
@@ -2781,7 +2869,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js", "netizen.svg"):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js", "netizen.svg", *_FILE_VIEWER_ASSETS):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 
@@ -3201,6 +3289,12 @@ _UPDATE_HTTP_ERRORS = {
 
 
 def _map_error(error: BaseException) -> AdminWebError | None:
+    if isinstance(error, FileBrowseError):
+        status = {"invalid_path": 400, "unsafe_path": 403, "permission_denied": 403,
+            "not_found": 404, "root_changed": 409, "file_changed": 409,
+            "preview_too_large": 413, "unsupported_file": 415, "invalid_encoding": 415,
+            "invalid_image": 415}.get(error.code, 503)
+        return AdminWebError(status, error.code, str(error))
     if isinstance(error, WorktreeError):
         status = {"invalid_arguments": 400, "not_git": 400, "not_found": 404,
             "unavailable": 503, "outcome_unknown": 503, "configuration_unavailable": 503}.get(error.code, 409)

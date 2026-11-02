@@ -67,6 +67,10 @@ their cited ADRs before changing that boundary.
   Admin Web: [queries and actions](docs/design.md#管理查询与操作), including
   [Feishu administrator identities](docs/adr/0080-authenticate-admins-with-feishu-identities.md) and
   [runtime polling](docs/design.md#运行态投影与轮询).
+  Read-only Project file browsing follows
+  [ADR 0089](docs/adr/0089-browse-current-project-files-through-admin.md):
+  current-directory identity, bounded descriptor-relative reads, inert previews,
+  and no download endpoint; keep it separate from exact-Turn Files evidence.
   Project deletion uses the exact inventory, tombstone and lifecycle boundaries
   in [the current contract](docs/design.md#project-删除与交接) and
   [ADR 0060](docs/adr/0060-delete-projects-with-exact-session-inventory.md).

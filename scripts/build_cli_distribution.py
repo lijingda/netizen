@@ -34,6 +34,15 @@ REQUIRED_WHEEL_FILES = frozenset({
     "netizen_cli/resources/skills/netizen-runtime-guidance/SKILL.md",
     "netizen_cli/admin/static/index.html",
     "netizen_cli/admin/static/netizen.svg",
+    "netizen_cli/admin/static/project-files.js",
+    "netizen_cli/admin/static/project-files.css",
+    "netizen_cli/admin/static/vendor/ace/ace.js",
+    "netizen_cli/admin/static/vendor/ace/mode-python.js",
+    "netizen_cli/admin/static/vendor/ace/mode-javascript.js",
+    "netizen_cli/admin/static/vendor/ace/mode-json.js",
+    "netizen_cli/admin/static/vendor/ace/mode-markdown.js",
+    "netizen_cli/admin/static/vendor/ace/LICENSE",
+    "netizen_cli/admin/static/vendor/ace/README.md",
 })
 
 

@@ -73,6 +73,7 @@ function expireAdminSession() {
   window.NetizenSessionAccess?.expire();
   window.NetizenProgressCard?.expire();
   window.NetizenWorktrees?.expire();
+  window.NetizenProjectFiles?.expire();
   setStatus("登录已过期，请重新登录。", true);
 }
 
@@ -718,6 +719,7 @@ async function loadProjects(cursor = undefined) {
     cell(row, `${project.bindingCount}（Lazy ${project.lazyBindingCount}）`);
     cell(row, project.lastActivatedAt);
     const actions = actionsCell(row);
+    if (!project.deleting) actions.append(actionButton("查看文件", () => window.NetizenProjectFiles?.open(project)));
     if (project.actions.setEnabled) {
       actions.append(actionButton(
         project.enabled ? "停用" : "启用",
@@ -4910,6 +4912,7 @@ document.querySelector("#side-page-size").addEventListener("change", () => {
 document.querySelector("#projects-previous").addEventListener("click", () => moveListPage("projects", "previous"));
 document.querySelector("#projects-next").addEventListener("click", () => moveListPage("projects", "next"));
 window.NetizenWorktrees?.init({ api, actionPayload, setStatus, queryProjectOptions, isExpired: () => state.authExpired });
+window.NetizenProjectFiles?.init({ api, isExpired: () => state.authExpired });
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-previous").addEventListener("click", () => moveSidePage("previous"));

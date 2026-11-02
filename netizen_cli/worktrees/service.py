@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..admin.port_config import AdminPortConfigurationError
-from ..bindings import BindingNotFound, ProjectNotFound, SideTopicQuery, SideTopicState
+from ..bindings import BindingNotFound, ProjectConflict, ProjectNotFound, SideTopicQuery, SideTopicState
 from ..projects import ProjectError
 from .errors import WorktreeError
 from .git import GitError, NotGitRepository, WorktreeGit, WorktreeIdentity, WorktreeState
@@ -212,6 +212,25 @@ class WorktreeService:
             reason = {"missing": "worktree 目录缺失", "replaced": "worktree 身份已被替换",
                       "unknown": "worktree 状态暂时无法确认"}.get(state.status, "worktree 不可用")
             raise WorktreeError("unavailable", reason + "，请刷新；不会切回项目目录。")
+        return record
+
+    async def resolve_for_browse(self, *, project_alias: str, worktree_id: str) -> WorktreeRecord:
+        """Read a current managed cwd, including disabled Projects, without binding it."""
+        try:
+            project = self._bindings.get_project(project_alias)
+            self._bindings.require_project_not_deleting(project_alias)
+            record = self._store.get(worktree_id)
+            self._store.require_not_deleting(record.id)
+        except (ProjectNotFound, ProjectConflict, WorktreeNotFound, WorktreeConflict) as error:
+            raise WorktreeError("root_changed", "Project 或 worktree 已不可用，请重新选择目录。") from error
+        if (record.project_alias != project_alias or record.project_generation != project.generation
+                or record.creation_state != "ready"):
+            raise WorktreeError("root_changed", "worktree 不属于当前 Project 登记或尚未就绪，请重新选择目录。")
+        state = await self._state(record)
+        if state.status in {"missing", "replaced"}:
+            raise WorktreeError("root_changed", "worktree 目录缺失或身份已变化，请重新选择目录。")
+        if state.status != "ready":
+            raise WorktreeError("unavailable", "暂时无法确认 worktree 状态，请稍后重试。")
         return record
 
     async def validate_policy(

@@ -7,11 +7,13 @@
   <link rel="icon" type="image/svg+xml" href="/static/netizen.svg">
   <link rel="stylesheet" href="/static/admin.css">
   <link rel="stylesheet" href="/static/chat-picker.css">
+  <link rel="stylesheet" href="/static/project-files.css">
   <script src="/static/chat-picker.js" defer></script>
   <script src="/static/identity.js" defer></script>
   <script src="/static/session-access.js" defer></script>
   <script src="/static/progress-card.js" defer></script>
   <script src="/static/worktrees.js" defer></script>
+  <script src="/static/project-files.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
 <body>
@@ -81,6 +83,57 @@
         </div>
         <div class="drawer-footer"><button id="project-cancel" class="drawer-cancel" type="button">取消</button><button id="project-submit" type="submit">登记 Project</button></div>
       </form>
+    </dialog>
+
+    <dialog id="project-files-drawer" class="project-files-drawer" aria-labelledby="project-files-title">
+      <div class="project-files-shell">
+        <header class="project-files-head">
+          <div><p class="eyebrow">PROJECT FILES <span class="project-files-readonly">只读</span></p><h3 id="project-files-title">查看文件</h3></div>
+          <button id="project-files-close" class="drawer-close" type="button" aria-label="关闭文件查看">×</button>
+        </header>
+        <div class="project-files-roots">
+          <label for="project-files-root">工作目录</label>
+          <select id="project-files-root" aria-label="选择 Project 或 managed worktree"></select>
+          <button id="project-files-more-roots" type="button" hidden>更多 worktree</button>
+          <button id="project-files-refresh" type="button">刷新</button>
+        </div>
+        <p id="project-files-cwd" class="project-files-cwd"></p>
+        <p id="project-files-root-note" class="project-files-note" role="status" aria-live="polite"></p>
+        <nav id="project-files-breadcrumbs" class="project-files-breadcrumbs" aria-label="文件目录路径"></nav>
+        <div class="project-files-body">
+          <aside class="project-files-sidebar" aria-label="项目文件树">
+            <div class="project-files-tree-tools">
+              <label for="project-files-filter" class="project-files-sr-only">筛选已加载的文件</label>
+              <input id="project-files-filter" type="search" placeholder="筛选已加载的文件…" autocomplete="off">
+              <button id="project-files-collapse" type="button" title="收起所有目录" aria-label="收起所有目录"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M5 3V1.8h9.2V11H13"></path><rect x="1.8" y="4.8" width="9.4" height="9.4" rx="1"></rect><path d="M4 9.5h5"></path></svg></button>
+            </div>
+            <div class="project-files-tree-scroll">
+              <div id="project-files-entries" class="project-files-entries" role="tree" aria-label="项目文件"></div>
+              <p id="project-files-directory-note" class="project-files-note" role="status" aria-live="polite"></p>
+            </div>
+          </aside>
+          <section class="project-files-viewer" aria-label="文件内容">
+            <div class="project-files-file-head"><strong id="project-files-filename">选择文件查看</strong><span id="project-files-meta"></span></div>
+            <div id="project-files-tools" class="project-files-tools" hidden>
+              <form id="project-files-search-form" class="project-files-search"><label for="project-files-search" class="project-files-sr-only">查找文本</label><input id="project-files-search" type="search" placeholder="查找文本" autocomplete="off"><button type="submit">查找下一个</button></form>
+              <form id="project-files-line-form" class="project-files-line"><label for="project-files-line">行</label><input id="project-files-line" type="number" min="1" value="1" aria-label="跳转行号"><button type="submit">跳转</button></form>
+              <button id="project-files-wrap" type="button" aria-pressed="true">自动折行</button>
+              <button id="project-files-copy" type="button">复制全文</button>
+              <button id="project-files-markdown-toggle" type="button" aria-pressed="false" hidden>预览 Markdown</button>
+            </div>
+            <p id="project-files-note" class="project-files-note" role="status" aria-live="polite"></p>
+            <div id="project-files-empty" class="project-files-empty">
+              <span class="project-files-empty-icon" aria-hidden="true"></span>
+              <h4>浏览项目文件</h4>
+              <p>展开目录，选择文件查看内容。</p>
+              <span>支持代码、文本、Markdown 和图片</span>
+            </div>
+            <div id="project-files-editor" class="project-files-editor" aria-label="只读文件内容" hidden></div>
+            <article id="project-files-markdown" class="project-files-markdown" hidden></article>
+            <div id="project-files-image-wrap" class="project-files-image-wrap" hidden><img id="project-files-image" alt=""></div>
+          </section>
+        </div>
+      </div>
     </dialog>
 
     <section id="worktrees" class="panel" aria-labelledby="worktrees-heading" hidden>
