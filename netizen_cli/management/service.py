@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn
 
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
+from .project_files import ProjectFileService
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .chat_directory import AvailableChat, AvailableChatPage, ChatDirectory, ChatDirectoryError
 from ..chat_targets import ValidatedChatTarget
@@ -833,6 +834,7 @@ class InstanceManagementService:
         self.schedules: ScheduleService | None = None
         self.defaults: SessionDefaultsService | None = None
         self.worktrees: WorktreeService | None = None
+        self.files = ProjectFileService(self)
         self._default_creations: dict[str, asyncio.Future[CreatedBinding]] = {}
         self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
 
@@ -903,6 +905,7 @@ class InstanceManagementService:
         self._summary_reads_closed = True
         if self.schedules is not None:
             self.schedules.close_admission()
+        await self.files.close(deadline=deadline)
         if self.worktrees is not None:
             await self.worktrees.close(deadline=deadline)
         await self._updates.close(deadline=deadline)

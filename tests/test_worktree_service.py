@@ -15,7 +15,7 @@ from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import InstanceManagementService, ScopeCoordinator
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.worktrees.errors import WorktreeError
-from netizen_cli.worktrees.git import GitError
+from netizen_cli.worktrees.git import GitError, WorktreeState
 from netizen_cli.worktrees.models import WorktreeConflict, WorktreeNotFound
 from netizen_cli.worktrees.settings import WorktreeSettings, WorktreeSettingsService
 
@@ -390,6 +390,73 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["id"], resource["id"])
         self.assertFalse(item["orphaned"])
         self.assertFalse(item["available"])
+
+    async def test_browse_distinguishes_changed_worktree_identity_from_unknown_state(self):
+        resource = await self.resource()
+        project = self.store.get_project("repo")
+        self.store.set_project_enabled(alias="repo", enabled=False, expected_revision=project.revision)
+        record = await self.service.resolve_for_browse(project_alias="repo", worktree_id=resource["id"])
+        self.assertEqual(record.cwd, resource["cwd"])
+        for status, code in (("missing", "root_changed"), ("replaced", "root_changed"),
+                             ("unknown", "unavailable")):
+            with self.subTest(status=status), \
+                    patch.object(self.service, "_state", return_value=WorktreeState(status)), \
+                    self.assertRaises(WorktreeError) as caught:
+                await self.service.resolve_for_browse(project_alias="repo", worktree_id=resource["id"])
+            self.assertEqual(caught.exception.code, code)
+
+    async def test_browse_invalidates_missing_registration_and_delete_reservations(self):
+        resource = await self.resource()
+        for alias, worktree_id in (("missing", resource["id"]), ("repo", "missing")):
+            with self.subTest(alias=alias, worktree_id=worktree_id), self.assertRaises(WorktreeError) as caught:
+                await self.service.resolve_for_browse(project_alias=alias, worktree_id=worktree_id)
+            self.assertEqual(caught.exception.code, "root_changed")
+
+        snapshot = self.store.worktrees.preview_delete(resource["id"])
+        self.store.worktrees.reserve_delete(resource["id"], expected_fingerprint=snapshot.fingerprint)
+        try:
+            with self.assertRaises(WorktreeError) as caught:
+                await self.service.resolve_for_browse(project_alias="repo", worktree_id=resource["id"])
+            self.assertEqual(caught.exception.code, "root_changed")
+        finally:
+            self.store.worktrees.release_delete(resource["id"])
+
+        snapshot = self.store.preview_project_delete("repo")
+        reserved = self.store.begin_project_delete(alias="repo", expected_revision=snapshot.project.revision,
+            expected_inventory_fingerprint=snapshot.fingerprint)
+        try:
+            with self.assertRaises(WorktreeError) as caught:
+                await self.service.resolve_for_browse(project_alias="repo", worktree_id=resource["id"])
+            self.assertEqual(caught.exception.code, "root_changed")
+        finally:
+            self.store.release_project_delete(alias="repo", expected_revision=reserved.project.revision)
+
+    async def test_browse_invalidates_foreign_unready_and_old_generation_resources(self):
+        resource = await self.resource()
+        self.projects.register(alias="other", path=str(self.repo), create_directory=False)
+        with self.assertRaises(WorktreeError) as caught:
+            await self.service.resolve_for_browse(project_alias="other", worktree_id=resource["id"])
+        self.assertEqual(caught.exception.code, "root_changed")
+
+        pending = self.store.worktrees.register(project_alias="repo",
+            expected_project_revision=self.store.get_project("repo").revision,
+            root=str(self.root / "pending"), cwd=str(self.root / "pending"), common_dir=str(self.repo / ".git"))
+        try:
+            with self.assertRaises(WorktreeError) as caught:
+                await self.service.resolve_for_browse(project_alias="repo", worktree_id=pending.id)
+            self.assertEqual(caught.exception.code, "root_changed")
+        finally:
+            self.store.worktrees.discard_unstarted(pending)
+
+        snapshot = self.store.preview_project_delete("repo")
+        reserved = self.store.begin_project_delete(alias="repo", expected_revision=snapshot.project.revision,
+            expected_inventory_fingerprint=snapshot.fingerprint)
+        self.store.finish_project_delete(alias="repo", expected_revision=reserved.project.revision,
+            expected_inventory_fingerprint=reserved.fingerprint)
+        self.projects.register(alias="repo", path=str(self.repo), create_directory=False)
+        with self.assertRaises(WorktreeError) as caught:
+            await self.service.resolve_for_browse(project_alias="repo", worktree_id=resource["id"])
+        self.assertEqual(caught.exception.code, "root_changed")
 
     async def test_repository_timeout_is_explicitly_unavailable_not_non_git(self):
         with patch.object(self.service._git, "inspect_repository", side_effect=TimeoutError):
