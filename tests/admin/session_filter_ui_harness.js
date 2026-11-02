@@ -281,7 +281,7 @@ async function fetch(path) {
     sessionSettings: { turn_settings: null, message_context_mode: "current-only",
       reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true },
     runtime: { primaryStatus: "running", primaryStatusResolution: "local" },
-    actions: { stop: {} },
+    actions: { stop: {}, archive: {} },
   };
   let sessionResponse = { items: [unknown], nextCursor: null };
   answer = (path) => path.startsWith("/api/v1/projects/options?")
@@ -291,7 +291,7 @@ async function fetch(path) {
   assert.match(rows.textContent, /Read summary.*状态未确认.*running/);
   assert.doesNotMatch(rows.textContent, /Lazy Session|原生会话缺失/);
   const actions = rows.querySelector(".actions");
-  assert.deepEqual(actions.children.filter((child) => child.tagName === "button").map((button) => button.textContent), ["停止"]);
+  assert.deepEqual(actions.children.filter((child) => child.tagName === "button").map((button) => button.textContent), ["停止", "归档"]);
   const more = actions.querySelector("details");
   assert(!more.open, "secondary actions start collapsed");
   const createSchedule = rows.querySelectorAll("button").find((button) => button.textContent === "创建定时任务");

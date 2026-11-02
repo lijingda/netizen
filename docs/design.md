@@ -2617,8 +2617,8 @@ ADR 0037/0049/0078 的 delete primitive，由原生返回决定结果。
 action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
 任意筛选结果的批量 native mutation route。
 
-普通会话按可用能力将“配置”“停止”“设为当前”及恢复操作直接展示；创建定时任务、
-重命名、归档、删除和释放订阅收入“更多”。危险操作不新增独立分组，
+普通会话按可用能力将“配置”“停止”“设为当前”“归档”及恢复操作直接展示；创建定时任务、
+重命名、删除和释放订阅收入“更多”。危险操作不新增独立分组，
 保留原有颜色、二次确认和 exact grant 校验；临时会话少量操作继续直接展示。
 
 临时会话按共享能力展示停止和结束操作。停止只中断当前 Side Turn，Side 保留并可继续；
@@ -2872,9 +2872,10 @@ Credits/月度额度按原生含义简短显示，只有这些字段时也可展
 Project/状态及 Effort/Speed 分栏显示，完整 Thread ID 和订阅信息默认折叠。
 Side 状态使用同类卡片，分别展示 Side 生命周期与当前 Turn 状态。卡片仅为本次查询快照，
 不自动刷新状态。普通会话（包含 Lazy 和持久分支）提供 `/status`、`/stop`、`/config`、
-`/sessions` 四个命令别名；Side 提供 `/status`、`/stop`、`/side close`。按钮不随快照中的
+`/sessions`、`/archive` 五个命令别名；Side 提供 `/status`、`/stop`、`/side close`。按钮不随快照中的
 运行态隐藏，点击时复用对应 slash 命令的准入、处理和回复；`/status` 别名仍新发状态卡，
-`/config` 仍新发配置卡或原有拒绝原因，不为面板实现另一套业务动作或独有的重新检查。
+`/config` 仍新发配置卡或原有拒绝原因；`/archive` 仍先发当前会话归档确认卡，Lazy 沿用无原生
+历史的拒绝反馈，不为面板实现另一套业务动作或独有的重新检查。
 
 回调从真实卡片消息确认 App/chat/topic 和聊天类型，使用实际点击者构造 typed ControlIntent，
 不伪造用户消息或提交 Prompt。普通按钮绑定 exact Scope/Binding，执行入口同步验证该
