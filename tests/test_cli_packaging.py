@@ -8,10 +8,12 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 import zipfile
 
 from netizen_cli.package_resources import resource_path
+from scripts.build_cli_distribution import verify_sdist, verify_wheel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +43,7 @@ class BuiltArtifactTests(unittest.TestCase):
             shutil.copyfile(ROOT / name, cls.source / name)
         for name in ("netizen_cli", "skills"):
             shutil.copytree(ROOT / name, cls.source / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        cls.version = tomllib.loads((cls.source / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
         cls._build(cls.source, "build_wheel")
         cls.wheel = next((cls.source / "dist").glob("*.whl"))
 
@@ -62,6 +65,7 @@ class BuiltArtifactTests(unittest.TestCase):
             )
 
     def test_wheel_contains_runtime_resources_and_no_legacy_import_package(self) -> None:
+        verify_wheel(self.wheel, self.version)
         with zipfile.ZipFile(self.wheel) as wheel:
             names = set(wheel.namelist())
             for path in (ROOT / "skills").rglob("*"):
@@ -76,7 +80,7 @@ class BuiltArtifactTests(unittest.TestCase):
                              (ROOT / "netizen_cli/admin/static/netizen.svg").read_bytes())
             for path in (ROOT / "netizen_cli/admin/static/vendor/ace").iterdir():
                 self.assertEqual(wheel.read(path.relative_to(ROOT).as_posix()), path.read_bytes())
-            for name in ("file-browser.js", "project-files.js", "attachment-files.js", "project-files.css"):
+            for name in ("content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js"):
                 self.assertEqual(wheel.read("netizen_cli/admin/static/" + name),
                                  (ROOT / "netizen_cli/admin/static" / name).read_bytes())
             self.assertFalse(any(name.startswith("netizen/") for name in names))
@@ -109,6 +113,7 @@ class BuiltArtifactTests(unittest.TestCase):
     def test_sdist_rebuild_has_the_same_resource_bytes(self) -> None:
         self._build(self.source, "build_sdist")
         archive = next((self.source / "dist").glob("*.tar.gz"))
+        verify_sdist(archive, self.version)
         extracted = self.directory / "sdist"
         with tarfile.open(archive) as source:
             # This archive was just produced from the private synthetic checkout.

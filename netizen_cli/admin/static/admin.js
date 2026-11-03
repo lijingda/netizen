@@ -2245,20 +2245,41 @@ function closeLatestAnswer() {
   latestAnswerRequest += 1;
   const previous = latestAnswerView;
   latestAnswerView = null;
+  document.body.classList.toggle("session-answer-open", false);
+  answerNode("content").replaceChildren();
+  answerNode("source").textContent = "";
+  answerNode("metadata").textContent = "";
   if (answerNode("drawer").open) answerNode("drawer").close();
   if (!state.authExpired && previous?.returnFocus?.isConnected !== false) previous?.returnFocus?.focus();
 }
 
 async function openLatestAnswer(session) {
   if (state.authExpired || !session.canReadLatestAnswer) return;
-  latestAnswerView = { session, returnFocus: document.activeElement };
+  latestAnswerView = { session, returnFocus: document.activeElement, preview: true, result: null };
   answerNode("title").textContent = "最近一轮回答";
   answerNode("identity").textContent = `${session.nativeTitle || "未命名会话"} · ${session.shortId}`;
   answerNode("content").textContent = "";
   answerNode("content").hidden = true;
+  answerNode("source").textContent = "";
+  answerNode("source").hidden = true;
+  answerNode("toggle").hidden = true;
+  answerNode("preview-note").textContent = "";
+  answerNode("details").open = false;
   answerNode("metadata").textContent = "";
+  document.body.classList.toggle("session-answer-open", true);
   answerNode("drawer").showModal();
   await refreshLatestAnswer();
+}
+
+function renderLatestAnswer(view) {
+  const result = view.result;
+  const hasAnswer = Boolean(result?.answer);
+  const hasPreview = hasAnswer && typeof result.markdownHtml === "string";
+  answerNode("content").hidden = !hasPreview || !view.preview;
+  answerNode("source").hidden = !hasAnswer || (hasPreview && view.preview);
+  answerNode("toggle").hidden = !hasPreview;
+  answerNode("toggle").textContent = view.preview ? "查看原文" : "排版预览";
+  answerNode("toggle").setAttribute("aria-pressed", String(!view.preview));
 }
 
 async function refreshLatestAnswer() {
@@ -2267,6 +2288,7 @@ async function refreshLatestAnswer() {
   const request = ++latestAnswerRequest;
   const isCurrent = () => latestAnswerView === view && request === latestAnswerRequest && !state.authExpired;
   answerNode("refresh").disabled = true;
+  answerNode("drawer").setAttribute("aria-busy", "true");
   answerNode("note").textContent = "正在读取最近一轮…";
   answerNode("note").classList.toggle("error", false);
   try {
@@ -2276,8 +2298,11 @@ async function refreshLatestAnswer() {
     const status = { completed: "已完成", interrupted: "已停止", failed: "失败", inProgress: "运行中" }[result.status] || "状态未知";
     answerNode("note").textContent = result.turnId
       ? `本轮${status}${result.answer ? "" : "，暂无最终回答。"}` : "会话尚无执行轮次。";
-    answerNode("content").textContent = result.answer || "";
-    answerNode("content").hidden = !result.answer;
+    view.result = result;
+    window.NetizenContentPreview.renderMarkdown(answerNode("content"), result.answer ? result.markdownHtml : null);
+    answerNode("source").textContent = result.answer || "";
+    answerNode("preview-note").textContent = result.previewMessage || "";
+    renderLatestAnswer(view);
     const metadata = [`读取于 ${sessionDateLabel(result.readAt)}`];
     if (result.turnId) metadata.unshift(`轮次 ${result.turnId.slice(0, 12)}`);
     if (result.startedAt != null) metadata.push(`开始 ${nativeSessionDateLabel(result.startedAt)}`);
@@ -2288,7 +2313,10 @@ async function refreshLatestAnswer() {
     answerNode("note").textContent = `${error.message}${answerNode("metadata").textContent ? " 当前仍显示上次读取的快照。" : ""}`;
     answerNode("note").classList.toggle("error", true);
   } finally {
-    if (isCurrent()) answerNode("refresh").disabled = false;
+    if (isCurrent()) {
+      answerNode("refresh").disabled = false;
+      answerNode("drawer").setAttribute("aria-busy", "false");
+    }
   }
 }
 
@@ -5021,6 +5049,11 @@ for (const button of document.querySelectorAll("[data-project-mode]")) {
 answerNode("close").addEventListener("click", closeLatestAnswer);
 answerNode("drawer").addEventListener("cancel", (event) => { event.preventDefault(); closeLatestAnswer(); });
 answerNode("refresh").addEventListener("click", refreshLatestAnswer);
+answerNode("toggle").addEventListener("click", () => {
+  if (!latestAnswerView) return;
+  latestAnswerView.preview = !latestAnswerView.preview;
+  renderLatestAnswer(latestAnswerView);
+});
 for (const control of document.querySelectorAll("[data-session-layout]")) {
   control.addEventListener("change", () => applySessionLayout(control.dataset.sessionLayout));
 }

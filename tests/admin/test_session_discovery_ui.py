@@ -25,6 +25,7 @@ class SessionDiscoveryUiTest(unittest.TestCase):
         before, after = (fixtures / "session_discovery_ui_harness.js").read_text().split("// SHIPPED_ADMIN_PAGE\n")
         script = "const initialSearch = ''; const htmlTree = " + json.dumps(tree.root) + ";\n"
         script += (fixtures / "dom_harness.js").read_text() + bootstrap + before
-        script += (static / "chat-picker.js").read_text() + (static / "admin.js").read_text() + after
+        script += (static / "chat-picker.js").read_text() + (static / "content-preview.js").read_text()
+        script += (static / "admin.js").read_text() + after
         result = subprocess.run([node], input=script, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

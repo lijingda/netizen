@@ -850,11 +850,11 @@ class InstanceManagementService:
         self.schedules: ScheduleService | None = None
         self.defaults: SessionDefaultsService | None = None
         self.worktrees: WorktreeService | None = None
-        file_io = BoundedBlockingIOExecutor(
+        self.file_reads = BoundedBlockingIOExecutor(
             max_workers=2, capacity=4, thread_name_prefix="netizen-file-preview",
         )
-        self.files = ProjectFileService(self, io=file_io)
-        self.attachments = AttachmentFileService(attachment_store, file_io)
+        self.files = ProjectFileService(self, io=self.file_reads)
+        self.attachments = AttachmentFileService(attachment_store, self.file_reads)
         self._default_creations: dict[str, asyncio.Future[CreatedBinding]] = {}
         self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
 

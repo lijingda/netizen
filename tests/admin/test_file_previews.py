@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 import unittest
+from unittest.mock import patch
 from urllib.parse import quote
 
 from netizen_cli.admin.file_previews import (
@@ -56,6 +57,24 @@ class FilePreviewsTest(unittest.TestCase):
         self.assertFalse(any(tag in {"script", "img", "iframe"} for tag, _ in parsed.tags))
         self.assertIn('<script>alert(1)</script>', "".join(parsed.text))
         self.assertEqual(self.images, [])
+
+    def test_answer_preview_shares_tables_and_has_no_file_authority(self) -> None:
+        source = "# 回答\n\n| 项目 | 说明 |\n| --- | ---: |\n| **费用** | `<script>` |\n\n"
+        source += "[外链](https://example.org) [本地](docs/a.md) [绝对](/tmp/a.md) [危险](javascript:alert(1))\n\n"
+        source += '<script>alert(1)</script>\n\n![本地图](a.png) ![远程图](https://example.org/a.png)'
+        parsed = ParsedHTML(render_markdown(source))
+        for tag in ("h1", "table", "th", "td", "strong", "code"):
+            self.assertTrue(parsed.attributes(tag), tag)
+        self.assertEqual(parsed.attributes("script"), [])
+        self.assertEqual(parsed.attributes("img"), [])
+        links = parsed.attributes("a")
+        self.assertEqual([a["href"] for a in links if "href" in a], ["https://example.org"])
+        self.assertFalse(any("data-file-browser-path" in a for a in links))
+        self.assertIn("本地图", "".join(parsed.text))
+        self.assertIn("远程图", "".join(parsed.text))
+        self.assertTrue(self.render(source).attributes("table"), "file previews use the same table renderer")
+        self.assertEqual(parsed.attributes("td")[-1]["class"], "markdown-align-right")
+        self.assertFalse(any("style" in attrs for _, attrs in parsed.tags), "table alignment respects Admin CSP")
 
     def test_local_links_resolve_unicode_spaces_and_file_fragments(self) -> None:
         parsed = self.render('[一](../src/main.py#L5) [二](<参考 说明.md>) [三](./%E4%B8%AD%E6%96%87.md)')
@@ -183,6 +202,26 @@ class FilePreviewsTest(unittest.TestCase):
     def test_token_budget_rejects_excessive_small_elements(self) -> None:
         with self.assertRaisesRegex(PreviewUnavailable, "过于复杂"):
             self.render("*x* " * (MAX_MARKDOWN_TOKENS // 3 + 1))
+
+    def test_sparse_tables_stop_during_block_parsing_before_inline_expansion(self) -> None:
+        from netizen_cli.admin.file_previews import _MARKDOWN
+
+        table = "|".join(["h"] * 8) + "\n" + "|".join(["---"] * 8) + "\n"
+        table += "x\n" * 8
+        # A deliberately tiny budget proves early rejection with small input;
+        # never reproduce the original large allocation to test its limit.
+        with patch("netizen_cli.admin.file_previews.MAX_MARKDOWN_TOKENS", 100), \
+             patch.object(_MARKDOWN.inline, "parse", wraps=_MARKDOWN.inline.parse) as inline:
+            with self.assertRaisesRegex(PreviewUnavailable, "过于复杂"):
+                render_markdown(table)
+            inline.assert_not_called()
+
+    def test_table_token_budget_is_shared_across_tables(self) -> None:
+        table = "| a | b |\n| --- | --- |\n| x | y |\n"
+        with patch("netizen_cli.admin.file_previews.MAX_MARKDOWN_TOKENS", 70):
+            render_markdown(table)
+            with self.assertRaisesRegex(PreviewUnavailable, "过于复杂"):
+                render_markdown((table + "\n") * 4)
 
     def test_reference_link_expansion_is_bounded_before_rendering(self) -> None:
         text = "[a] " * 100 + "\n\n[a]: https://example.org/" + "x" * 20_000

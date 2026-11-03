@@ -2,14 +2,53 @@
 
 // A browser for one explicitly selected resource. Providers own business roots
 // and mutation authorization; requests and previews belong to this instance.
-window.NetizenFileBrowser = { create(dependencies) {
+window.NetizenFileBrowser = {
+  create(dependencies) {
   const node = (name) => name === "drawer" ? dependencies.container
     : dependencies.container.querySelector(`#file-browser-${name}`);
   const modes = new Set(["python", "json", "javascript", "markdown", "text"]);
+  const compact = window.matchMedia("(max-width: 720px)");
   let current = null;
   let aceLoading = null;
 
   function active(view) { return current === view && !dependencies.isExpired(); }
+  function renderLayout(view) {
+    node("drawer").dataset.screen = view.screen;
+    const reading = compact.matches && view.screen === "file";
+    node("title").textContent = reading
+      ? view.selectedFile?.displayName || view.selectedFile?.name || view.desiredFile?.split("/").at(-1) || view.provider.title
+      : view.provider.title;
+    node("back").hidden = !compact.matches || (!reading && !view.path);
+    node("back").textContent = reading ? "‹ 返回目录" : "‹ 上一级";
+    node("collapse").hidden = compact.matches;
+    node("filter").placeholder = compact.matches ? "筛选当前目录…" : "筛选已加载的文件…";
+    node("filter").setAttribute("aria-label", compact.matches ? "筛选当前目录" : "筛选已加载的文件");
+    node("entries").setAttribute("role", compact.matches ? "group" : "tree");
+  }
+  // Positions live with the bounded directory cache, never in a second history.
+  function rememberDirectory(view) {
+    const branch = view.tree.get(view.path);
+    if (compact.matches && view.screen === "directory" && branch) {
+      branch.position = { scroll: node("entries").parentElement.scrollTop,
+        focus: view.focusedPath, filter: view.filter };
+    }
+  }
+  function selectDirectory(view, path, focus = "") {
+    const position = view.tree.get(path)?.position;
+    view.path = path;
+    view.focusedPath = focus || position?.focus || "";
+    view.selectedPath = view.focusedPath;
+    view.filter = position?.filter || "";
+    node("filter").value = view.filter;
+  }
+  function restoreDirectory(view) {
+    const position = view.tree.get(view.path)?.position;
+    const row = treeRows().find((item) => item.dataset.path === view.focusedPath && !item.disabled);
+    const crumbs = node("breadcrumbs").children;
+    (row || crumbs[crumbs.length - 1])?.focus({ preventScroll: true });
+    node("entries").parentElement.scrollTop = position?.scroll || 0;
+    if (!position) row?.scrollIntoView?.({ block: "nearest" });
+  }
   function note(name, text, error = false) {
     node(name).textContent = text;
     node(name).classList.toggle("error", error);
@@ -22,6 +61,7 @@ window.NetizenFileBrowser = { create(dependencies) {
     for (const slot of Object.keys(view.requests)) stop(view, slot);
   }
   function clearFile(view) {
+    view.screen = "directory";
     view.file = null;
     view.selectedFile = null;
     view.fileSequence = (view.fileSequence || 0) + 1;
@@ -48,6 +88,7 @@ window.NetizenFileBrowser = { create(dependencies) {
     node("empty").hidden = false;
     note("note", "");
     renderActions(view);
+    renderLayout(view);
   }
   function clearRoot(view) {
     for (const slot of Object.keys(view.requests)) if (slot !== "roots") stop(view, slot);
@@ -174,7 +215,9 @@ window.NetizenFileBrowser = { create(dependencies) {
       });
       if (!result || !active(view) || view.identity !== identity) return;
       const parent = parentPath(file.path);
+      let returned = false;
       if (view.selectedFile?.path === file.path) {
+        returned = true;
         stop(view, "content");
         stop(view, "image-check");
         clearFile(view);
@@ -187,16 +230,26 @@ window.NetizenFileBrowser = { create(dependencies) {
         const root = view.tree.get("");
         if (root?.entries) root.entries = root.entries.filter((entry) => entry.path !== parent);
         if (view.path === parent || view.path.startsWith(`${parent}/`)) {
+          returned = true;
+          clearFile(view);
+          view.desiredFile = null;
           view.path = "";
           view.selectedPath = "";
         }
-      } else {
-        await loadDirectory(view, parent, true);
       }
+      if (returned && compact.matches) selectDirectory(view, view.path);
+      const navigation = view.navigation;
+      const filter = view.filter;
+      const focusBeforeLoad = document.activeElement;
+      if (!result.removedBatch) await loadDirectory(view, parent, true);
       if (!active(view) || view.identity !== identity) return;
       view.deleteNote = `已删除 ${file.displayName || file.name}。`;
+      const restoreFocus = document.activeElement === focusBeforeLoad && document.activeElement !== node("filter");
       renderBreadcrumbs(view);
       renderEntries(view);
+      renderLayout(view);
+      if (returned && compact.matches && view.screen === "directory" && view.navigation === navigation
+        && view.filter === filter && restoreFocus) restoreDirectory(view);
     } catch (error) {
       if (!active(view) || view.identity !== identity || error.name === "AbortError") return;
       if (error.code === "root_changed") { invalidateRoot(view, error); return; }
@@ -214,7 +267,7 @@ window.NetizenFileBrowser = { create(dependencies) {
   function treeRows() { return Array.from(node("entries").querySelectorAll("button[data-path]")); }
   function focusTree(view, path) {
     view.focusedPath = path;
-    for (const row of treeRows()) row.tabIndex = row.dataset.path === path && !row.disabled ? 0 : -1;
+    for (const row of treeRows()) row.tabIndex = (compact.matches || row.dataset.path === path) && !row.disabled ? 0 : -1;
     const row = treeRows().find((item) => item.dataset.path === path);
     row?.focus();
     row?.scrollIntoView?.({ block: "nearest" });
@@ -232,12 +285,13 @@ window.NetizenFileBrowser = { create(dependencies) {
     const oldScroll = entriesNode.parentElement.scrollTop;
     const fragment = document.createDocumentFragment();
     const visibleRows = [];
-    const root = view.tree.get("");
+    const root = view.tree.get(compact.matches ? view.path : "");
     const filter = view.filter.trim().toLocaleLowerCase();
     const matches = new Set();
     if (filter) {
-      for (const branch of view.tree.values()) for (const entry of branch.entries || []) {
-        if (!`${entry.path} ${entryLabel(view, entry)}`.toLocaleLowerCase().includes(filter)) continue;
+      for (const branch of compact.matches ? [root || {}] : view.tree.values()) for (const entry of branch.entries || []) {
+        const label = compact.matches ? entryLabel(view, entry) : `${entry.path} ${entryLabel(view, entry)}`;
+        if (!label.toLocaleLowerCase().includes(filter)) continue;
         let path = entry.path;
         while (path) { matches.add(path); path = parentPath(path); }
       }
@@ -254,20 +308,24 @@ window.NetizenFileBrowser = { create(dependencies) {
       for (const [index, entry] of entries.entries()) {
         const directoryEntry = entry.kind === "directory";
         const child = directoryEntry ? view.tree.get(entry.path) : null;
-        const expanded = directoryEntry && (filter ? Boolean(child?.entries || child?.loading || child?.error) : Boolean(child?.expanded));
-        const row = button("", () => directoryEntry ? toggleDirectory(view, entry.path) : content(view, entry.path), "file-browser-entry");
+        const expanded = !compact.matches && directoryEntry && (filter ? Boolean(child?.entries || child?.loading || child?.error) : Boolean(child?.expanded));
+        const row = button("", () => directoryEntry
+          ? compact.matches ? directory(view, entry.path) : toggleDirectory(view, entry.path)
+          : content(view, entry.path), "file-browser-entry");
         row.disabled = !directoryEntry && entry.kind !== "file";
         row.dataset.path = entry.path;
         row.dataset.kind = entry.kind;
         row.style.setProperty("--depth", depth);
-        row.setAttribute("role", "treeitem");
-        row.setAttribute("aria-level", String(depth + 1));
-        row.setAttribute("aria-posinset", String(index + 1));
-        row.setAttribute("aria-setsize", String(entries.length));
-        row.setAttribute("aria-selected", String(view.selectedPath === entry.path));
+        if (!compact.matches) {
+          row.setAttribute("role", "treeitem");
+          row.setAttribute("aria-level", String(depth + 1));
+          row.setAttribute("aria-posinset", String(index + 1));
+          row.setAttribute("aria-setsize", String(entries.length));
+          row.setAttribute("aria-selected", String(view.selectedPath === entry.path));
+        }
         row.setAttribute("aria-current", String(view.selectedFile?.path === entry.path));
         row.setAttribute("aria-label", entryLabel(view, entry));
-        if (directoryEntry) row.setAttribute("aria-expanded", String(expanded));
+        if (directoryEntry && !compact.matches) row.setAttribute("aria-expanded", String(expanded));
         if (child?.loading) row.setAttribute("aria-busy", "true");
         row.title = entry.kind === "symlink" ? `${entry.path} · 符号链接，不跟随`
           : entry.kind === "unsupported" ? `${entry.path} · 不支持预览` : entry.path;
@@ -300,13 +358,13 @@ window.NetizenFileBrowser = { create(dependencies) {
     const rows = visibleRows.filter((row) => !row.disabled);
     const focus = rows.find((row) => row.dataset.path === view.focusedPath)
       || rows.find((row) => row.dataset.path === view.selectedPath) || rows[0];
-    for (const row of visibleRows) row.tabIndex = row === focus ? 0 : -1;
+    for (const row of visibleRows) row.tabIndex = compact.matches || row === focus ? 0 : -1;
     entriesNode.replaceChildren(fragment);
     entriesNode.setAttribute("aria-busy", String(Boolean(root?.loading)));
     note("directory-note", root?.loading ? "正在加载文件…" : root?.error || (root?.entries
-      ? filter && !visibleRows.length ? "已加载的文件中没有匹配项。"
+      ? filter && !visibleRows.length ? compact.matches ? "当前目录没有匹配项。" : "已加载的文件中没有匹配项。"
       : !root.entries.length ? "此目录为空。"
-      : root.truncated ? "根目录条目较多，仅显示部分内容。" : "" : ""), Boolean(root?.error));
+      : root.truncated ? "目录条目较多，仅显示部分内容。" : "" : ""), Boolean(root?.error));
     if (restoreFocus && focus) focus.focus();
     entriesNode.parentElement.scrollTop = oldScroll;
   }
@@ -324,7 +382,8 @@ window.NetizenFileBrowser = { create(dependencies) {
     if (!force && previous?.entries) return previous;
     if (!force && previous?.pending) return previous.pending;
     if (force) discardBranch(view, path);
-    const branch = { path, entries: null, expanded: previous?.expanded ?? true, loading: true, error: "" };
+    const branch = { path, entries: null, expanded: previous?.expanded ?? true,
+      position: previous?.position, loading: true, error: "" };
     view.tree.set(path, branch);
     const epoch = view.treeEpoch;
     renderEntries(view);
@@ -333,7 +392,8 @@ window.NetizenFileBrowser = { create(dependencies) {
         const data = await request(view, `directory:${path}`, url(view, "directory", path));
         if (!data || view.treeEpoch !== epoch || view.tree.get(path) !== branch) return null;
         const count = Array.from(view.tree.values()).reduce((sum, value) => sum + (value.entries?.length || 0), 0);
-        if (count + data.entries.length > MAX_TREE_ENTRIES) throw new Error("已达到目录树加载上限，请收起所有目录后重试。");
+        if (count + data.entries.length > MAX_TREE_ENTRIES) throw new Error(compact.matches
+          ? "已达到目录树加载上限，请返回根目录并刷新后重试。" : "已达到目录树加载上限，请收起所有目录后重试。");
         branch.entries = data.entries;
         branch.truncated = data.truncated;
         return branch;
@@ -378,13 +438,36 @@ window.NetizenFileBrowser = { create(dependencies) {
     if (!active(view) || !view.identity) return;
     const navigation = ++view.navigation;
     const epoch = view.treeEpoch;
-    view.filter = "";
-    node("filter").value = "";
+    const browsing = compact.matches && selectedFile === null;
+    if (browsing) {
+      const returningFile = view.screen === "file" && parentPath(view.desiredFile || "") === path ? view.desiredFile : "";
+      rememberDirectory(view);
+      stop(view, "content");
+      stop(view, "image-check");
+      stop(view, "delete-options");
+      clearFile(view);
+      view.desiredFile = null;
+      selectDirectory(view, path, returningFile);
+    } else {
+      view.filter = "";
+      node("filter").value = "";
+    }
+    if (browsing) {
+      renderBreadcrumbs(view);
+      renderLayout(view);
+      renderEntries(view);
+      restoreDirectory(view);
+    }
+    const focusBeforeLoad = document.activeElement;
     let branch = await loadDirectory(view, "");
     const parts = path.split("/").filter(Boolean);
     let target = "";
     for (const part of parts) {
-      if (!branch || !active(view) || view.navigation !== navigation || view.treeEpoch !== epoch) return;
+      if (!active(view) || view.navigation !== navigation || view.treeEpoch !== epoch) return;
+      if (!branch) {
+        note("note", view.tree.get(target)?.error || "目录未能加载，请刷新重试。", true);
+        return;
+      }
       target += `${target ? "/" : ""}${part}`;
       if (!branch.entries.some((entry) => entry.path === target && entry.kind === "directory")) {
         note("note", "目标目录不在已加载的列表中，可能已移除或目录条目较多。", true);
@@ -394,7 +477,11 @@ window.NetizenFileBrowser = { create(dependencies) {
       if (known) known.expanded = true;
       branch = await loadDirectory(view, target);
     }
-    if (!branch || !active(view) || view.navigation !== navigation || view.treeEpoch !== epoch) return;
+    if (!active(view) || view.navigation !== navigation || view.treeEpoch !== epoch) return;
+    if (!branch) {
+      if (selectedFile !== null) note("note", view.tree.get(target)?.error || "目录未能加载，请刷新重试。", true);
+      return;
+    }
     branch.expanded = true;
     if (selectedFile !== null) {
       const entry = branch.entries.find((item) => item.path === selectedFile);
@@ -402,9 +489,17 @@ window.NetizenFileBrowser = { create(dependencies) {
       if (entry?.kind === "file") return content(view, entry.path);
       note("note", entry ? "此目录项暂不支持预览。" : "目标不在当前目录列表中，可能已移除或目录条目较多。", true);
     } else {
-      if (!view.desiredFile) { view.path = path; view.selectedPath = path; renderBreadcrumbs(view); }
+      // The user may have started typing while the directory was loading.
+      const restorePosition = compact.matches && document.activeElement === focusBeforeLoad;
+      if (!view.desiredFile) {
+        view.path = path;
+        if (!browsing) view.selectedPath = path;
+        renderBreadcrumbs(view);
+      }
       renderEntries(view);
-      if (path) focusTree(view, path);
+      if (browsing) {
+        if (restorePosition) restoreDirectory(view);
+      } else if (path) focusTree(view, path);
       else node("entries").parentElement.scrollTop = 0;
     }
   }
@@ -417,11 +512,18 @@ window.NetizenFileBrowser = { create(dependencies) {
     if (root?.entries) view.tree.set("", { ...root, expanded: true, loading: false, pending: null });
     view.filter = "";
     node("filter").value = "";
+    if (!view.desiredFile) {
+      view.path = "";
+      view.selectedPath = "";
+      renderBreadcrumbs(view);
+      renderLayout(view);
+    }
     renderEntries(view);
     if (!root?.entries) return directory(view, "");
   }
   async function refreshTree(view) {
     if (!active(view) || !view.identity) return chooseRoot(view);
+    rememberDirectory(view);
     view.deleteNote = "";
     view.deleteError = false;
     view.deleteUncertain = false;
@@ -432,17 +534,26 @@ window.NetizenFileBrowser = { create(dependencies) {
     stop(view, "content");
     stop(view, "image-check");
     clearFile(view);
+    if (compact.matches && file) {
+      view.screen = "file";
+      renderLayout(view);
+      note("note", "正在刷新文件…");
+    }
     const branch = await loadDirectory(view, path, true);
     if (!active(view) || view.treeEpoch !== epoch || view.navigation !== navigation) return;
     if (!branch) {
       // A removed batch (including a deletion whose response was lost) cannot
       // be refreshed in place. Reconcile one root listing without changing its
       // identity or scanning descendants; other read failures remain local.
-      if (!path || view.tree.get(path)?.errorCode !== "not_found") return;
+      if (!path || view.tree.get(path)?.errorCode !== "not_found") {
+        if (compact.matches && file) note("note", view.tree.get(path)?.error || "目录未能加载，请刷新重试。", true);
+        return;
+      }
       view.desiredFile = null;
       view.path = "";
       view.selectedPath = "";
       view.focusedPath = "";
+      clearFile(view);
       renderBreadcrumbs(view);
       const root = await loadDirectory(view, "", true);
       if (!root || !active(view) || view.treeEpoch !== epoch || view.navigation !== navigation) return;
@@ -472,11 +583,15 @@ window.NetizenFileBrowser = { create(dependencies) {
     const rows = treeRows().filter((item) => !item.disabled);
     const index = rows.indexOf(row);
     const path = row.dataset.path;
+    if (compact.matches) {
+      if (event.key === "ArrowLeft") return back(view);
+      if (event.key === "ArrowRight" && row.dataset.kind === "directory") return directory(view, path);
+    }
     if (event.key === "ArrowDown") return focusTree(view, rows[Math.min(index + 1, rows.length - 1)].dataset.path);
     if (event.key === "ArrowUp") return focusTree(view, rows[Math.max(index - 1, 0)].dataset.path);
     if (event.key === "Home") return focusTree(view, rows[0].dataset.path);
     if (event.key === "End") return focusTree(view, rows.at(-1).dataset.path);
-    if (event.key === "ArrowRight" && row.dataset.kind === "directory") {
+    if (!compact.matches && event.key === "ArrowRight" && row.dataset.kind === "directory") {
       if (row.getAttribute("aria-expanded") !== "true") return toggleDirectory(view, path);
       const next = rows[index + 1];
       if (next?.dataset.path.startsWith(`${path}/`)) focusTree(view, next.dataset.path);
@@ -535,17 +650,22 @@ window.NetizenFileBrowser = { create(dependencies) {
   }
   async function content(view, path) {
     if (!active(view) || !view.identity) return;
+    if (view.screen === "directory") view.focusedPath = path;
+    rememberDirectory(view);
     view.navigation += 1;
     stop(view, "image-check");
     clearFile(view);
     view.desiredFile = path;
     const entry = view.tree.get(parentPath(path))?.entries?.find((item) => item.path === path);
     view.selectedFile = entry ? { ...entry } : { path, name: path };
+    view.screen = "file";
     showMetadata(view.selectedFile);
     renderActions(view);
     node("empty").hidden = true;
     view.selectedPath = path;
     view.path = parentPath(path);
+    renderLayout(view);
+    if (compact.matches) node("back").focus({ preventScroll: true });
     renderBreadcrumbs(view);
     renderEntries(view);
     node("filename").textContent = entry?.displayName || path;
@@ -589,7 +709,7 @@ window.NetizenFileBrowser = { create(dependencies) {
       node("tools").hidden = false;
       node("markdown-toggle").hidden = typeof data.markdownHtml !== "string";
       // Only the server's bounded, sanitized Markdown projection enters HTML.
-      if (typeof data.markdownHtml === "string") node("markdown").innerHTML = data.markdownHtml;
+      window.NetizenContentPreview.renderMarkdown(node("markdown"), data.markdownHtml);
       renderMode(view);
       note("note", data.previewMessage || (data.text.length ? "" : "此文件为空。"));
     } catch (error) {
@@ -646,7 +766,7 @@ window.NetizenFileBrowser = { create(dependencies) {
     const view = current = { provider, rootId: provider.rootId, identity: null, path: "", file: null,
       selectedFile: null, desiredFile: null, requests: {}, deleting: false, deleteUncertain: false,
       rootIds: new Set(), nextCursor: null, wrap: true, editor: null, returnFocus: document.activeElement,
-      tree: new Map(), treeEpoch: 0, navigation: 0, selectedPath: "", focusedPath: "", filter: "" };
+      tree: new Map(), treeEpoch: 0, navigation: 0, selectedPath: "", focusedPath: "", filter: "", screen: "directory" };
     node("title").textContent = provider.title;
     node("eyebrow").textContent = provider.eyebrow;
     node("permission").textContent = provider.remove ? "可查看、删除" : "只读";
@@ -692,6 +812,7 @@ window.NetizenFileBrowser = { create(dependencies) {
   }
   function init() {
     node("close").addEventListener("click", close);
+    node("back").addEventListener("click", () => current && back(current));
     node("delete").addEventListener("click", () => current && deleteSelected(current));
     node("drawer").addEventListener("cancel", (event) => { event.preventDefault(); close(); });
     node("drawer").addEventListener("close", () => { if (!node("drawer").open) close(); });
@@ -745,6 +866,18 @@ window.NetizenFileBrowser = { create(dependencies) {
       return directory(current, parent, path);
     });
     window.addEventListener("resize", () => current?.editor?.resize());
+    compact.addEventListener("change", () => {
+      if (!current) return;
+      current.filter = "";
+      node("filter").value = "";
+      renderLayout(current);
+      renderEntries(current);
+      if (compact.matches && current.screen === "file") node("back").focus({ preventScroll: true });
+      current.editor?.resize();
+    });
+  }
+  function back(view) {
+    return directory(view, view.screen === "file" ? view.path : parentPath(view.path));
   }
   init();
   return { open, close, expire: close };

@@ -1,4 +1,4 @@
-"""Bounded, inert Markdown previews for the authenticated Project file browser."""
+"""Bounded, inert Markdown previews for authenticated Admin readers."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator, Sequence
 from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_core import StateCore
 from markdown_it.token import Token
 
 
@@ -18,11 +19,27 @@ _MARKDOWN = MarkdownIt("commonmark", {
     "html": False,
     "linkify": False,
     "maxNesting": 20,
-})
+}).enable("table")
 
 
 class PreviewUnavailable(ValueError):
     """The source remains viewable, but its rendered preview exceeds a budget."""
+
+
+class _BoundedBlockTokens(list[Token]):
+    def append(self, token: Token) -> None:
+        # Tables pad missing cells while parsing. Stop before that expansion can
+        # allocate an unbounded token graph, not merely after parse() returns.
+        if len(self) >= MAX_MARKDOWN_TOKENS:
+            raise PreviewUnavailable("Markdown 内容过于复杂，请查看源码。")
+        super().append(token)
+
+
+def _limit_block_tokens(state: StateCore) -> None:
+    state.tokens = _BoundedBlockTokens(state.tokens)
+
+
+_MARKDOWN.core.ruler.before("block", "preview_token_budget", _limit_block_tokens)
 
 
 def _unsafe_characters(value: str) -> bool:
@@ -139,8 +156,8 @@ def _check_render_budget(tokens: Sequence[Token]) -> None:
 def render_markdown(
     text: str,
     *,
-    path: str,
-    image_url: Callable[[str], str],
+    path: str | None = None,
+    image_url: Callable[[str], str] | None = None,
 ) -> str:
     """Render safe HTML; image_url maps a root-relative file to its Admin endpoint.
 
@@ -149,6 +166,7 @@ def render_markdown(
     carry ``data-file-browser-directory="true"``.
     Remote images and fragment-only links remain inert. No filesystem or network
     access occurs here; the file endpoint separately validates image contents.
+    Without a file context, local links and all images remain inert.
     """
     try:
         length = len(text.encode("utf-8"))
@@ -156,9 +174,9 @@ def render_markdown(
         raise PreviewUnavailable("文件包含无法预览的文本编码，请查看源码。") from exc
     if length > MAX_MARKDOWN_BYTES:
         raise PreviewUnavailable("Markdown 文件超过 256 KiB，请查看源码。")
-    if not path or _local_path(path, []) != path:
+    if path is not None and (not path or _local_path(path, []) != path):
         raise PreviewUnavailable("Markdown 文件路径无效，请查看源码。")
-    directory = path.split("/")[:-1]
+    directory = path.split("/")[:-1] if path is not None else []
     env: dict[str, object] = {}
     tokens = _MARKDOWN.parse(text, env)
     if sum(1 for _ in _tokens(tokens)) > MAX_MARKDOWN_TOKENS:
@@ -167,7 +185,13 @@ def render_markdown(
 
     images = 0
     for token in _tokens(tokens):
-        if token.type == "link_open":
+        if token.type in {"th_open", "td_open"}:
+            # The Admin CSP forbids inline style attributes; table alignment
+            # uses fixed classes from the shared preview stylesheet instead.
+            alignment = token.attrs.pop("style", None)
+            if alignment in {"text-align:left", "text-align:center", "text-align:right"}:
+                token.attrSet("class", "markdown-align-" + alignment.split(":")[1])
+        elif token.type == "link_open":
             target = _target(token.attrGet("href") or "", directory)
             token.attrs.pop("href", None)
             if target is None:
@@ -177,14 +201,16 @@ def render_markdown(
                 token.attrSet("href", value)
                 token.attrSet("rel", "noopener noreferrer")
                 token.attrSet("target", "_blank")
-            else:
+            elif path is not None:
                 token.attrSet("href", "#")
                 token.attrSet("data-file-browser-path", value)
                 if kind == "directory":
                     token.attrSet("data-file-browser-directory", "true")
         elif token.type == "image":
             target = _target(token.attrGet("src") or "", directory)
-            if target is None or target[0] != "local":
+            if path is None or image_url is None:
+                _replace_image(token, "此处不加载图片")
+            elif target is None or target[0] != "local":
                 _replace_image(token, "仅预览当前根目录内的相对路径图片")
             elif images >= MAX_MARKDOWN_IMAGES:
                 _replace_image(token, "本页最多预览 8 张图片")

@@ -7,13 +7,14 @@
   <link rel="icon" type="image/svg+xml" href="/static/netizen.svg">
   <link rel="stylesheet" href="/static/admin.css">
   <link rel="stylesheet" href="/static/chat-picker.css">
-  <link rel="stylesheet" href="/static/project-files.css">
+  <link rel="stylesheet" href="/static/content-preview.css">
   <script src="/static/chat-picker.js" defer></script>
   <script src="/static/identity.js" defer></script>
   <script src="/static/session-access.js" defer></script>
   <script src="/static/progress-card.js" defer></script>
   <script src="/static/question-notifications.js" defer></script>
   <script src="/static/worktrees.js" defer></script>
+  <script src="/static/content-preview.js" defer></script>
   <script src="/static/file-browser.js" defer></script>
   <script src="/static/project-files.js" defer></script>
   <script src="/static/attachment-files.js" defer></script>
@@ -91,14 +92,15 @@
     <dialog id="file-browser-drawer" class="file-browser-drawer" aria-labelledby="file-browser-title">
       <div class="file-browser-shell">
         <header class="file-browser-head">
+          <button id="file-browser-back" class="file-browser-back" type="button" hidden>‹ 返回目录</button>
           <div><p class="eyebrow"><span id="file-browser-eyebrow">FILES</span> <span id="file-browser-permission" class="file-browser-readonly">只读</span></p><h3 id="file-browser-title">查看文件</h3></div>
+          <button id="file-browser-refresh" type="button">刷新</button>
           <button id="file-browser-close" class="drawer-close" type="button" aria-label="关闭文件查看">×</button>
         </header>
         <div class="file-browser-roots">
           <label id="file-browser-root-label" for="file-browser-root">工作目录</label>
           <select id="file-browser-root" aria-label="选择 Project 或 managed worktree"></select>
           <button id="file-browser-more-roots" type="button" hidden>更多 worktree</button>
-          <button id="file-browser-refresh" type="button">刷新</button>
         </div>
         <p id="file-browser-cwd" class="file-browser-cwd"></p>
         <p id="file-browser-root-note" class="file-browser-note" role="status" aria-live="polite"></p>
@@ -133,7 +135,7 @@
               <span>支持代码、文本、Markdown 和图片</span>
             </div>
             <div id="file-browser-editor" class="file-browser-editor" aria-label="只读文件内容" hidden></div>
-            <article id="file-browser-markdown" class="file-browser-markdown" hidden></article>
+            <article id="file-browser-markdown" class="file-browser-markdown markdown-preview" hidden></article>
             <div id="file-browser-image-wrap" class="file-browser-image-wrap" hidden><img id="file-browser-image" alt=""></div>
           </section>
         </div>
@@ -280,15 +282,25 @@
       </form>
     </dialog>
 
-    <dialog id="session-answer-drawer" class="editor-drawer" aria-labelledby="session-answer-title">
-      <div class="drawer-form">
-        <div class="drawer-head"><h3 id="session-answer-title">最近一轮回答</h3><button id="session-answer-close" class="drawer-close" type="button" aria-label="关闭最近回答">×</button></div>
-        <div class="drawer-body">
-          <p id="session-answer-identity" class="id"></p><p id="session-answer-note" class="hint" role="status"></p>
-          <p id="session-answer-metadata" class="hint"></p><pre id="session-answer-content" class="session-answer-content" hidden></pre>
-          <p class="hint">只展示最近一轮的最终回答；没有回答时展示该轮状态，不回溯旧答案。Goal 的单轮回答不代表整个 Goal 已完成。</p>
+    <dialog id="session-answer-drawer" class="file-browser-drawer session-answer-drawer" aria-labelledby="session-answer-title">
+      <div class="file-browser-shell">
+        <header class="file-browser-head">
+          <div><h3 id="session-answer-title">最近一轮回答</h3><p id="session-answer-identity" class="session-answer-identity"></p></div>
+          <button id="session-answer-refresh" type="button">刷新</button>
+          <button id="session-answer-close" class="drawer-close" type="button" aria-label="关闭最近回答">×</button>
+        </header>
+        <div class="file-browser-tools session-answer-toolbar">
+          <p id="session-answer-note" class="file-browser-note" role="status" aria-live="polite"></p>
+          <button id="session-answer-toggle" type="button" aria-pressed="false" hidden>查看原文</button>
         </div>
-        <div class="drawer-footer"><button id="session-answer-refresh" type="button" class="refresh">刷新</button></div>
+        <details id="session-answer-details" class="session-answer-details">
+          <summary>本次读取详情</summary>
+          <p id="session-answer-metadata"></p>
+          <p>仅显示最近一轮的最终回答；无回答时不回溯旧答案。Goal 的单轮回答不代表整个 Goal 已完成。</p>
+        </details>
+        <p id="session-answer-preview-note" class="file-browser-note" role="status"></p>
+        <article id="session-answer-content" class="file-browser-markdown markdown-preview" aria-label="回答正文" hidden></article>
+        <pre id="session-answer-source" class="file-browser-markdown session-answer-source" aria-label="回答原文" hidden></pre>
       </div>
     </dialog>
 
