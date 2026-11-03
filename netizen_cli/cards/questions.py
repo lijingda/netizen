@@ -19,6 +19,7 @@ from ..user_questions import (
     format_question_answer,
     question_target_payload,
 )
+from ..completion_mention import valid_completion_mention_user_id
 from .callbacks import CardActionError, _builder, _notice, _plain, _plain_text
 from .reply import TURN_FILE_CARD_JSON_LIMIT_BYTES
 
@@ -169,13 +170,21 @@ def render_question_card(
     question_index: int,
     *,
     notice: str | None = None,
+    mention_user_id: str | None = None,
 ) -> OutboundCard:
     if type(question_index) is not int or not 0 <= question_index < len(request.questions):
         raise CardActionError("问题序号无效。")
-    return render_question_context_card(
+    rendered = render_question_context_card(
         QuestionCardContext(target, request.item_id, question_index, request.questions[question_index]),
         notice=notice,
     )
+    user_id = valid_completion_mention_user_id(mention_user_id)
+    if user_id is not None and notice is None:
+        rendered.card["body"]["elements"].insert(0, {
+            "tag": "markdown", "content": f"<at id={user_id}></at>",
+        })
+        return _bounded_question_card(rendered.card)
+    return rendered
 
 
 def render_question_context_card(

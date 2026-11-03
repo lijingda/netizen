@@ -46,6 +46,8 @@ class DistributionContractTest(unittest.TestCase):
                 "skills/netizen-lark/SKILL.md", "skills/netizen-user-guide/SKILL.md",
                 "skills/netizen-runtime-guidance/SKILL.md",
             )}
+            members.update({name: b"fixture" for name in distribution.REQUIRED_WHEEL_FILES
+                            if name.startswith("netizen_cli/admin/static/")})
             members["PKG-INFO"] = b"Metadata-Version: 2.1\nName: netizen-cli\nVersion: 1.2.3\n"
             with tarfile.open(output / "netizen_cli-1.2.3.tar.gz", "w:gz") as archive:
                 for name, body in members.items():
@@ -122,6 +124,26 @@ class DistributionContractTest(unittest.TestCase):
             wheel.writestr("netizen_cli/__init__.py", "")
         with self.assertRaisesRegex(distribution.DistributionError, "runtime resources"):
             distribution.verify_wheel(archive, "1.2.3")
+
+    def test_new_admin_assets_are_required_in_both_artifact_types(self) -> None:
+        self.build()
+        missing = "netizen_cli/admin/static/attachment-files.js"
+        original_wheel = next(self.output.glob("*.whl"))
+        incomplete_wheel = self.directory / "incomplete-assets.whl"
+        with zipfile.ZipFile(original_wheel) as source, zipfile.ZipFile(incomplete_wheel, "w") as target:
+            for name in source.namelist():
+                if name != missing:
+                    target.writestr(name, source.read(name))
+        with self.assertRaisesRegex(distribution.DistributionError, "runtime resources"):
+            distribution.verify_wheel(incomplete_wheel, "1.2.3")
+        original_sdist = next(self.output.glob("*.tar.gz"))
+        incomplete_sdist = self.directory / "incomplete-assets.tar.gz"
+        with tarfile.open(original_sdist) as source, tarfile.open(incomplete_sdist, "w:gz") as target:
+            for member in source.getmembers():
+                if not member.name.endswith("/" + missing):
+                    target.addfile(member, source.extractfile(member))
+        with self.assertRaisesRegex(distribution.DistributionError, "package or build resources"):
+            distribution.verify_sdist(incomplete_sdist, "1.2.3")
 
 
 class ReleaseWorkflowContractTest(unittest.TestCase):

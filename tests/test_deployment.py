@@ -51,13 +51,14 @@ class DeploymentAssetsTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            set(config), {"instance", "projects", "channel", "adminWeb", "sessionTools", "worktrees"}
+            set(config), {"instance", "projects", "channel", "adminWeb", "sessionTools", "worktrees", "questionNotifications"}
         )
         self.assertEqual(set(config["instance"]), {"dataDir", "projectRoot"})
         self.assertEqual(config["instance"]["projectRoot"], "/home/your-user/projects")
         self.assertEqual(config["projects"], {"test": "/home/your-user/projects/test"})
         self.assertEqual(config["channel"], {"securityMode": "audit"})
         self.assertEqual(config["worktrees"], {"fetchBeforeCreate": False})
+        self.assertEqual(config["questionNotifications"], {"mentionInitiator": False})
         self.assertEqual(config["sessionTools"], {
             "discovery": {"mode": "all", "chatIds": []},
             "readSend": {"mode": "all", "chatIds": []},

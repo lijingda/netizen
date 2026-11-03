@@ -1,7 +1,7 @@
 """Prepare native input from exact current, quoted and supplemental messages.
 
 The caller captures admission before preparation and owns submission, context
-cursor commits and receipts. This component only reads messages and images;
+cursor commits and receipts. This component reads messages and images and prepares attachments;
 prepared context anchors are data, not evidence of native acceptance.
 """
 
@@ -14,6 +14,8 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 from ..domain import FeishuScope, MessageContextAnchor, ScopeKind
+from ..attachments import AttachmentStore, PreparedAttachments
+from ..file_inputs import FileInputError, FileInputPreparer, file_references, render_file_attachments
 from ..image_inputs import (
     ImageDownloadChannel,
     ImageInputError,
@@ -86,13 +88,56 @@ class PreparedInput:
     native_input: str | list[Any]
     context_anchor: MessageContextAnchor | None = None
     context_stats: SupplementalContextStats | None = None
+    attachments: PreparedAttachments | None = None
 
 
 class MessageInputPreparer:
     """Own message preparation while callers retain operation identity and locks."""
 
-    def __init__(self, *, channel: MessageInputChannel) -> None:
+    def __init__(self, *, channel: MessageInputChannel,
+                 attachment_store: AttachmentStore | None = None) -> None:
         self._channel = channel
+        self._attachment_store = attachment_store
+        self._files = (FileInputPreparer(channel=channel, store=attachment_store)
+                       if attachment_store is not None else None)
+
+    @property
+    def supports_files(self) -> bool:
+        return self._files is not None
+
+    async def close(self) -> None:
+        if self._files is not None:
+            await self._files.close()
+
+    async def discard_attachments(self, prepared: PreparedInput) -> None:
+        if prepared.attachments is not None and self._attachment_store is not None:
+            await self._attachment_store.discard_files(prepared.attachments)
+
+    async def _attach_files(self, prepared: PreparedInput, *, source_message: Any,
+                            current: MessageInputProjection, quoted: Any = None) -> PreparedInput:
+        # Scheduled/card messages are feedback anchors, never attachment sources.
+        if self._files is None or not isinstance(current, CurrentMessageProjection):
+            return prepared
+        references = ((file_references(quoted, source="quoted_message") if quoted is not None else ())
+                      + file_references(source_message, source="current_message"))
+        batch = await self._files.prepare(references)
+        if batch is None:
+            return prepared
+        try:
+            annotation = render_file_attachments(batch, references)
+            native = prepared.native_input
+            if isinstance(native, str):
+                native = native + "\n\n" + annotation
+            else:
+                # Existing multimodal order ends in one complete text prompt.
+                from openai_codex import TextInput
+                if not native or not isinstance(native[-1], TextInput):
+                    raise PromptProjectionError("附件与消息输入不一致，本条消息未提交。")
+                native = [*native[:-1], TextInput(native[-1].text + "\n\n" + annotation)]
+            return replace(prepared, native_input=native, attachments=batch)
+        except BaseException:
+            await self._attachment_store.discard_files(batch)
+            raise
 
     async def prepare(
         self,
@@ -168,14 +213,14 @@ class MessageInputPreparer:
                     image_prompt_refs=prompt_image_refs,
                 )
 
-            return PreparedInput(
+            return await self._attach_files(PreparedInput(
                 native_input=compose_multimodal_input(
                     prompt_text,
                     images=prepared_images,
                     image_prompt_refs=prompt_image_refs,
                 ),
-            )
-        except (HistoricalMessageError, ImageInputError, PromptProjectionError):
+            ), source_message=source_message, current=current, quoted=quoted)
+        except (HistoricalMessageError, ImageInputError, PromptProjectionError, FileInputError):
             raise
         except TimeoutError as error:
             raise QuotedMessageUnavailable(
@@ -408,7 +453,7 @@ class MessageInputPreparer:
             current=rendered_current,
             image_prompt_refs=prompt_image_refs,
         )
-        return PreparedInput(
+        return await self._attach_files(PreparedInput(
             native_input=compose_multimodal_input(
                 context.text,
                 images=prepared_images,
@@ -416,7 +461,8 @@ class MessageInputPreparer:
             ),
             context_anchor=window.upper,
             context_stats=context.stats,
-        )
+        ), source_message=source_message, current=current,
+            quoted=quoted_input[0] if quoted_input is not None else None)
 
     async def _fetch_history_candidates(
         self,

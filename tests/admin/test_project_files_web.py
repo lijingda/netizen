@@ -111,7 +111,7 @@ class ProjectFilesWebTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_queries_images_and_vendor_assets_all_require_authentication(self):
         paths = [self.target(operation) for operation in ("root", "directory", "content", "image")]
-        assets = ("project-files.js", "project-files.css", "vendor/ace/ace.js",
+        assets = ("file-browser.js", "project-files.js", "attachment-files.js", "project-files.css", "vendor/ace/ace.js",
             "vendor/ace/mode-python.js")
         for path in [*paths, *("/static/" + asset for asset in assets)]:
             with self.subTest(path=path):
@@ -154,7 +154,7 @@ class ProjectFilesWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<h1>标题</h1>", rendered)
         self.assertNotIn("<script", rendered)
         self.assertNotIn('src="https://', rendered)
-        self.assertIn('data-project-file="hello.py"', rendered)
+        self.assertIn('data-file-browser-path="hello.py"', rendered)
         local_image = html.unescape(re.search(r'<img[^>]+src="([^"]+)"', rendered).group(1))
         status, headers, image = await self.request(local_image)
         self.assertEqual(status, 200, image)

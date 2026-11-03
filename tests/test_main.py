@@ -908,6 +908,10 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             root = Path(raw).resolve()
             instance_root = root / "explicit-instance"
             instance_root.mkdir()
+            # Unusable attachment storage must not prevent ordinary service
+            # startup. Only an operation that needs attachments should fail.
+            attachment_obstruction = instance_root / "attachments"
+            attachment_obstruction.write_bytes(b"unrelated material")
             AdminUsers(instance_root, "cli_test").add_initial("ou_admin")
             config_path = root / "development-config.yaml"
             snapshot = ConfigFileSnapshot(config_path, b"adminWeb: {}", ())
@@ -952,6 +956,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 patch("netizen_cli.main.AppServerAccountRateLimits") as account_limits,
             ):
                 await core.start()
+                self.assertEqual(attachment_obstruction.read_bytes(), b"unrelated material")
                 self.assertLess(events.index("admin:bind"), events.index("codex:init"))
                 self.assertLess(events.index("mcp:bind"), events.index("codex:init"))
                 self.assertLess(events.index("codex:enter"), events.index("admin:attach"))

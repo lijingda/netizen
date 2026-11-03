@@ -55,6 +55,8 @@ from .model_settings import ModelCatalog, ModelCatalogError, TurnModelSettings
 from .partial_answers import PartialAnswer, partial_answers_from_items
 from .progress_card_settings import ProgressCardSettings
 from .error_messages import describe_error, native_turn_failure
+from .thread_history import AppServerThreadHistory
+from .runtime.contracts import NativeLatestAnswer
 from .runtime.name_writes import ThreadNameWrites
 from .runtime.thread_naming import NamingJob, ThreadNameGenerationError, ThreadNamer
 # Preserve existing public imports as aliases of the shared contract types.
@@ -213,7 +215,7 @@ _NAMING_SHUTDOWN_WAIT_SECONDS = 1.0
 _NAMING_PREPARATION_TIMEOUT_SECONDS = 10.0
 _QUESTION_DELIVERY_TIMEOUT_SECONDS = 20.0
 
-QuestionHandler = Callable[[QuestionTarget, object, QuestionRequest], Awaitable[None]]
+QuestionHandler = Callable[[QuestionTarget, object, QuestionRequest, str], Awaitable[None]]
 InputReceivedHandler = Callable[[str, str, str], None]
 
 
@@ -590,11 +592,12 @@ class CodexRuntime:
             target_log = {"binding_id": active.binding_id}
         active.question_ids.add(identity)
         origin = active.origin
+        owner_id = active.owner_id
 
         async def deliver() -> None:
             try:
                 async with asyncio.timeout(_QUESTION_DELIVERY_TIMEOUT_SECONDS):
-                    await handler(target, origin, request)
+                    await handler(target, origin, request, owner_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -2134,6 +2137,36 @@ class CodexRuntime:
             except Exception:
                 return {"cwd": cwd, "status": "active" if local_busy else "unknown"}
 
+    async def latest_thread_answer(self, thread_id: str) -> NativeLatestAnswer:
+        """Read only the newest complete Turn, including archived history.
+
+        No resume, subscription, backward answer search or partial-item tail.
+        Legacy phase compatibility follows the existing terminal projection;
+        running Turn messages are not presented as a final answer.
+        """
+        try:
+            page = await AppServerThreadHistory(self._codex).list_turns(
+                thread_id, limit=1, items_view="full",
+            )
+        except InvalidRequestError as error:
+            # Verified fixed-SDK result for a newly created, zero-input Thread.
+            # Missing/deleted history and every other read error remain errors.
+            if error.message != (
+                f"thread {thread_id} is not materialized yet; "
+                "thread/turns/list is unavailable before first user message"
+            ):
+                raise
+            return NativeLatestAnswer(thread_id, None, None, None)
+        if not page.data:
+            return NativeLatestAnswer(thread_id, None, None, None)
+        turn = page.data[0]
+        status = _enum_value(turn.status)
+        items = list(turn.items) if status in {"completed", "failed", "interrupted"} else []
+        return NativeLatestAnswer(
+            thread_id, turn.id, status, _final_agent_response(items),
+            getattr(turn, "started_at", None), getattr(turn, "completed_at", None),
+        )
+
     async def thread_summary(
         self, thread_id: str,
     ) -> NativeThreadMetadata:
@@ -2283,6 +2316,7 @@ class CodexRuntime:
         sort_key: Literal["created_at", "updated_at"] = "updated_at",
         sort_direction: Literal["asc", "desc"] = "desc",
         deadline: float | None = None,
+        search_term: str | None = None,
     ) -> NativeThreadCatalogPage:
         """Read one native database page without expanding the whole catalog."""
 
@@ -2296,6 +2330,8 @@ class CodexRuntime:
             raise ValueError("sort_key must be created_at or updated_at")
         if sort_direction not in ("asc", "desc"):
             raise ValueError("sort_direction must be asc or desc")
+        if search_term is not None and (not isinstance(search_term, str) or not search_term.strip()):
+            raise ValueError("search_term must be a non-empty string")
         if deadline is not None and deadline <= asyncio.get_running_loop().time():
             raise ThreadCatalogDeadlineExceeded("native Thread catalog deadline elapsed")
         try:
@@ -2308,6 +2344,7 @@ class CodexRuntime:
                     use_state_db_only=True,
                     sort_key=sort_key,
                     sort_direction=sort_direction,
+                    **({"search_term": search_term} if search_term is not None else {}),
                 )
         except TimeoutError as error:
             raise ThreadCatalogDeadlineExceeded(

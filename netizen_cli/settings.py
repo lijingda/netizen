@@ -17,6 +17,7 @@ from .admin.port_config import ConfigFileSnapshot
 from .sessions.policy import SessionAccessPolicy, SessionPolicyError
 from .worktrees.settings import WorktreeSettings, WorktreeSettingsError
 from .progress_card_settings import ProgressCardSettings
+from .question_notifications import QuestionNotificationSettings
 
 
 class SettingsError(ValueError):
@@ -42,6 +43,7 @@ class Settings:
     session_tools: SessionAccessPolicy = SessionAccessPolicy()
     worktrees: WorktreeSettings = WorktreeSettings()
     progress_card: ProgressCardSettings = ProgressCardSettings()
+    question_notifications: QuestionNotificationSettings = QuestionNotificationSettings()
     config_path: Path | None = None
     config_snapshot: ConfigFileSnapshot | None = field(default=None, repr=False)
 
@@ -80,6 +82,10 @@ class Settings:
         try:
             progress_card = (ProgressCardSettings.from_dict(loaded["progressCard"])
                              if "progressCard" in loaded else ProgressCardSettings())
+            question_notifications = (
+                QuestionNotificationSettings.from_dict(loaded["questionNotifications"])
+                if "questionNotifications" in loaded else QuestionNotificationSettings()
+            )
         except ValueError as error:
             raise SettingsError(str(error)) from error
         raw_projects = loaded.get("projects", {})
@@ -128,6 +134,7 @@ class Settings:
             session_tools=session_tools,
             worktrees=worktrees,
             progress_card=progress_card,
+            question_notifications=question_notifications,
             config_path=config_path,
             config_snapshot=config_snapshot,
         )

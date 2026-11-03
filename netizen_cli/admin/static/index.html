@@ -12,8 +12,11 @@
   <script src="/static/identity.js" defer></script>
   <script src="/static/session-access.js" defer></script>
   <script src="/static/progress-card.js" defer></script>
+  <script src="/static/question-notifications.js" defer></script>
   <script src="/static/worktrees.js" defer></script>
+  <script src="/static/file-browser.js" defer></script>
   <script src="/static/project-files.js" defer></script>
+  <script src="/static/attachment-files.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
 <body>
@@ -85,52 +88,53 @@
       </form>
     </dialog>
 
-    <dialog id="project-files-drawer" class="project-files-drawer" aria-labelledby="project-files-title">
-      <div class="project-files-shell">
-        <header class="project-files-head">
-          <div><p class="eyebrow">PROJECT FILES <span class="project-files-readonly">只读</span></p><h3 id="project-files-title">查看文件</h3></div>
-          <button id="project-files-close" class="drawer-close" type="button" aria-label="关闭文件查看">×</button>
+    <dialog id="file-browser-drawer" class="file-browser-drawer" aria-labelledby="file-browser-title">
+      <div class="file-browser-shell">
+        <header class="file-browser-head">
+          <div><p class="eyebrow"><span id="file-browser-eyebrow">FILES</span> <span id="file-browser-permission" class="file-browser-readonly">只读</span></p><h3 id="file-browser-title">查看文件</h3></div>
+          <button id="file-browser-close" class="drawer-close" type="button" aria-label="关闭文件查看">×</button>
         </header>
-        <div class="project-files-roots">
-          <label for="project-files-root">工作目录</label>
-          <select id="project-files-root" aria-label="选择 Project 或 managed worktree"></select>
-          <button id="project-files-more-roots" type="button" hidden>更多 worktree</button>
-          <button id="project-files-refresh" type="button">刷新</button>
+        <div class="file-browser-roots">
+          <label id="file-browser-root-label" for="file-browser-root">工作目录</label>
+          <select id="file-browser-root" aria-label="选择 Project 或 managed worktree"></select>
+          <button id="file-browser-more-roots" type="button" hidden>更多 worktree</button>
+          <button id="file-browser-refresh" type="button">刷新</button>
         </div>
-        <p id="project-files-cwd" class="project-files-cwd"></p>
-        <p id="project-files-root-note" class="project-files-note" role="status" aria-live="polite"></p>
-        <nav id="project-files-breadcrumbs" class="project-files-breadcrumbs" aria-label="文件目录路径"></nav>
-        <div class="project-files-body">
-          <aside class="project-files-sidebar" aria-label="项目文件树">
-            <div class="project-files-tree-tools">
-              <label for="project-files-filter" class="project-files-sr-only">筛选已加载的文件</label>
-              <input id="project-files-filter" type="search" placeholder="筛选已加载的文件…" autocomplete="off">
-              <button id="project-files-collapse" type="button" title="收起所有目录" aria-label="收起所有目录"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M5 3V1.8h9.2V11H13"></path><rect x="1.8" y="4.8" width="9.4" height="9.4" rx="1"></rect><path d="M4 9.5h5"></path></svg></button>
+        <p id="file-browser-cwd" class="file-browser-cwd"></p>
+        <p id="file-browser-root-note" class="file-browser-note" role="status" aria-live="polite"></p>
+        <nav id="file-browser-breadcrumbs" class="file-browser-breadcrumbs" aria-label="文件目录路径"></nav>
+        <div class="file-browser-body">
+          <aside class="file-browser-sidebar" aria-label="文件树">
+            <div class="file-browser-tree-tools">
+              <label for="file-browser-filter" class="file-browser-sr-only">筛选已加载的文件</label>
+              <input id="file-browser-filter" type="search" placeholder="筛选已加载的文件…" autocomplete="off">
+              <button id="file-browser-collapse" type="button" title="收起所有目录" aria-label="收起所有目录"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M5 3V1.8h9.2V11H13"></path><rect x="1.8" y="4.8" width="9.4" height="9.4" rx="1"></rect><path d="M4 9.5h5"></path></svg></button>
             </div>
-            <div class="project-files-tree-scroll">
-              <div id="project-files-entries" class="project-files-entries" role="tree" aria-label="项目文件"></div>
-              <p id="project-files-directory-note" class="project-files-note" role="status" aria-live="polite"></p>
+            <div class="file-browser-tree-scroll">
+              <div id="file-browser-entries" class="file-browser-entries" role="tree" aria-label="文件"></div>
+              <p id="file-browser-directory-note" class="file-browser-note" role="status" aria-live="polite"></p>
             </div>
           </aside>
-          <section class="project-files-viewer" aria-label="文件内容">
-            <div class="project-files-file-head"><strong id="project-files-filename">选择文件查看</strong><span id="project-files-meta"></span></div>
-            <div id="project-files-tools" class="project-files-tools" hidden>
-              <form id="project-files-search-form" class="project-files-search"><label for="project-files-search" class="project-files-sr-only">查找文本</label><input id="project-files-search" type="search" placeholder="查找文本" autocomplete="off"><button type="submit">查找下一个</button></form>
-              <form id="project-files-line-form" class="project-files-line"><label for="project-files-line">行</label><input id="project-files-line" type="number" min="1" value="1" aria-label="跳转行号"><button type="submit">跳转</button></form>
-              <button id="project-files-wrap" type="button" aria-pressed="true">自动折行</button>
-              <button id="project-files-copy" type="button">复制全文</button>
-              <button id="project-files-markdown-toggle" type="button" aria-pressed="false" hidden>预览 Markdown</button>
+          <section class="file-browser-viewer" aria-label="文件内容">
+            <div class="file-browser-file-head"><strong id="file-browser-filename">选择文件查看</strong><span id="file-browser-meta"></span></div>
+            <div id="file-browser-actions" class="file-browser-actions" hidden><button id="file-browser-delete" type="button">删除附件</button><span id="file-browser-action-note" role="status" aria-live="polite"></span></div>
+            <div id="file-browser-tools" class="file-browser-tools" hidden>
+              <form id="file-browser-search-form" class="file-browser-search"><label for="file-browser-search" class="file-browser-sr-only">查找文本</label><input id="file-browser-search" type="search" placeholder="查找文本" autocomplete="off"><button type="submit">查找下一个</button></form>
+              <form id="file-browser-line-form" class="file-browser-line"><label for="file-browser-line">行</label><input id="file-browser-line" type="number" min="1" value="1" aria-label="跳转行号"><button type="submit">跳转</button></form>
+              <button id="file-browser-wrap" type="button" aria-pressed="true">自动折行</button>
+              <button id="file-browser-copy" type="button">复制全文</button>
+              <button id="file-browser-markdown-toggle" type="button" aria-pressed="false" hidden>预览 Markdown</button>
             </div>
-            <p id="project-files-note" class="project-files-note" role="status" aria-live="polite"></p>
-            <div id="project-files-empty" class="project-files-empty">
-              <span class="project-files-empty-icon" aria-hidden="true"></span>
-              <h4>浏览项目文件</h4>
-              <p>展开目录，选择文件查看内容。</p>
+            <p id="file-browser-note" class="file-browser-note" role="status" aria-live="polite"></p>
+            <div id="file-browser-empty" class="file-browser-empty">
+              <span class="file-browser-empty-icon" aria-hidden="true"></span>
+              <h4 id="file-browser-empty-title">浏览文件</h4>
+              <p id="file-browser-description">展开目录，选择文件查看内容。</p>
               <span>支持代码、文本、Markdown 和图片</span>
             </div>
-            <div id="project-files-editor" class="project-files-editor" aria-label="只读文件内容" hidden></div>
-            <article id="project-files-markdown" class="project-files-markdown" hidden></article>
-            <div id="project-files-image-wrap" class="project-files-image-wrap" hidden><img id="project-files-image" alt=""></div>
+            <div id="file-browser-editor" class="file-browser-editor" aria-label="只读文件内容" hidden></div>
+            <article id="file-browser-markdown" class="file-browser-markdown" hidden></article>
+            <div id="file-browser-image-wrap" class="file-browser-image-wrap" hidden><img id="file-browser-image" alt=""></div>
           </section>
         </div>
       </div>
@@ -194,6 +198,7 @@
       </div>
       <div id="sessions-ordinary" role="tabpanel" aria-labelledby="session-tab-ordinary">
       <form id="session-filter" class="filter-bar">
+        <label>会话搜索<input id="session-search" name="searchTerm" type="search" placeholder="名称、标题或预览" aria-describedby="session-search-help"></label>
         <fieldset class="multi-filter" data-session-multi="project"><legend>Project</legend></fieldset>
         <div id="session-chat-picker"></div>
         <input id="session-chat-filter" name="chatId" type="hidden">
@@ -214,6 +219,9 @@
         <button type="submit">筛选</button>
         <button type="button" id="session-filter-reset" class="refresh">重置</button>
       </form>
+      <p id="session-search-help" class="hint">搜索名称、标题和预览中的连续文本，英文区分大小写；与当前时间、归档等筛选共同生效。Lazy 不支持搜索。</p>
+      <div class="session-layout"><label>布局 <select id="session-layout" data-session-layout="session" aria-label="普通会话布局"><option value="compact">紧凑</option><option value="project">本页按项目分组</option></select></label><span id="session-group-note" class="hint" data-session-group-note="session" hidden>仅组织当前页，组内保持当前排序；同一项目可能出现在其他页。</span></div>
+      <p id="sessions-empty" class="hint" hidden>当前筛选范围内没有会话，可调整关键词、时间或归档等条件。</p>
       <p id="sessions-lazy-notice" class="hint" hidden>Lazy 会话尚未在 Codex 创建，按 Netizen 登记时间排序；创建时间和更新时间筛选不适用。</p>
       <p id="sessions-identity-notice" class="hint" hidden>按指定会话 ID 筛选；未找到时可切换会话状态。</p>
       <div id="session-schedule-selection" class="selection-notice" hidden>
@@ -245,6 +253,7 @@
           <button type="submit">筛选</button>
           <button type="button" id="side-filter-reset" class="refresh">重置</button>
         </form>
+        <div class="session-layout"><label>布局 <select id="side-layout" data-session-layout="side" aria-label="临时会话布局"><option value="compact">紧凑</option><option value="project">本页按项目分组</option></select></label><span id="side-group-note" class="hint" data-session-group-note="side" hidden>仅组织当前页，组内保持当前排序；同一项目可能出现在其他页。</span></div>
         <div class="table-wrap"><table><thead><tr>
           <th>飞书位置</th><th>来源会话</th><th>会话状态</th><th>运行态</th><th>Project</th>
           <th aria-sort="none"><button type="button" class="session-sort" data-session-sort="side" data-sort-by="createdAt" aria-label="按创建时间由近及远排序" title="临时会话创建时间；按浏览器本地时区显示">创建时间<span class="sort-indicator" aria-hidden="true">↕</span></button></th>
@@ -269,6 +278,18 @@
         </div>
         <div class="drawer-footer"><button id="session-rename-cancel" class="drawer-cancel" type="button">取消</button><button id="session-rename-generate" class="drawer-cancel" type="button">自动生成</button><button id="session-rename-save" type="submit">保存新名称</button></div>
       </form>
+    </dialog>
+
+    <dialog id="session-answer-drawer" class="editor-drawer" aria-labelledby="session-answer-title">
+      <div class="drawer-form">
+        <div class="drawer-head"><h3 id="session-answer-title">最近一轮回答</h3><button id="session-answer-close" class="drawer-close" type="button" aria-label="关闭最近回答">×</button></div>
+        <div class="drawer-body">
+          <p id="session-answer-identity" class="id"></p><p id="session-answer-note" class="hint" role="status"></p>
+          <p id="session-answer-metadata" class="hint"></p><pre id="session-answer-content" class="session-answer-content" hidden></pre>
+          <p class="hint">只展示最近一轮的最终回答；没有回答时展示该轮状态，不回溯旧答案。Goal 的单轮回答不代表整个 Goal 已完成。</p>
+        </div>
+        <div class="drawer-footer"><button id="session-answer-refresh" type="button" class="refresh">刷新</button></div>
+      </div>
     </dialog>
 
     <dialog id="session-settings-drawer" class="editor-drawer" aria-labelledby="session-settings-title" aria-describedby="session-settings-identity">
@@ -566,6 +587,13 @@
         <button id="system-tab-admins" class="session-tab" role="tab" data-system-tab="admins" aria-selected="true" aria-controls="system-admins" tabindex="0">管理员</button>
         <button id="system-tab-access" class="session-tab" role="tab" data-system-tab="access" aria-selected="false" aria-controls="system-access" tabindex="-1">跨会话工具权限<span id="session-access-unsaved" class="tab-unsaved" hidden>未保存</span></button>
         <button id="system-tab-progress" class="session-tab" role="tab" data-system-tab="progress" aria-selected="false" aria-controls="system-progress" tabindex="-1">过程卡<span id="global-card-unsaved" class="tab-unsaved" hidden>未保存</span></button>
+        <button id="system-tab-notifications" class="session-tab" role="tab" data-system-tab="notifications" aria-selected="false" aria-controls="system-notifications" tabindex="-1">提问通知<span id="question-notifications-unsaved" class="tab-unsaved" hidden>未保存</span></button>
+        <button id="system-tab-attachments" class="session-tab" role="tab" data-system-tab="attachments" aria-selected="false" aria-controls="system-attachments" tabindex="-1">文件附件</button>
+      </div>
+      <div id="system-attachments" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-attachments" hidden>
+        <h3>文件附件</h3>
+        <p class="defaults-help">查看本实例从飞书保存的输入原件。这里不包含项目文件和会话输出文件；删除附件可能影响正在执行或后续任务的读取，需要时可重新发送文件。</p>
+        <button id="attachment-files-open" class="action" type="button">浏览附件</button>
       </div>
       <div id="system-admins" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-admins">
         <div class="section-head"><h3>管理员</h3><button id="admin-user-add" class="action" aria-expanded="false" aria-controls="admin-user-panel" disabled>添加管理员</button></div>
@@ -616,6 +644,20 @@
           <div class="session-access-footer">
             <p id="session-access-note" class="defaults-field-help" role="status"></p>
             <div class="actions"><button id="session-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="session-access-save" class="action" type="submit" disabled>保存权限</button></div>
+          </div>
+        </form>
+      </div>
+      <div id="system-notifications" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-notifications" hidden>
+        <h3>提问通知</h3>
+        <p class="defaults-help">默认关闭。开启后，每张新问题卡都会 @ 本轮任务发起人；不影响问题卡显示和回答，与过程卡及结束提醒开关独立。</p>
+        <form id="question-notifications-form" class="card-form">
+          <fieldset id="question-notifications-fields" disabled>
+            <label><input id="question-notifications-enabled" type="checkbox">提问时 @ 发起人</label>
+            <p class="defaults-field-help">无明确发起人时不提醒。提醒不表示任务一定暂停等待回答。</p>
+          </fieldset>
+          <div class="session-access-footer">
+            <p id="question-notifications-note" class="defaults-field-help" role="status"></p>
+            <div class="actions"><button id="question-notifications-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="question-notifications-save" class="action" type="submit" disabled>保存配置</button></div>
           </div>
         </form>
       </div>

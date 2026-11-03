@@ -2675,7 +2675,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(handler.await_count, turn_number + 1)
                     self.assertEqual(
                         handler.await_args.args,
-                        (SideQuestionTarget(record.id), origin, request),
+                        (SideQuestionTarget(record.id), origin, request, "ou_owner"),
                     )
                     await self.finish_side_turn(started, items=(completed_question(request),))
                     self.assertEqual(handle.run_calls, 1)
@@ -2785,7 +2785,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(handle.stream_calls, 0)
                 self.assertEqual(
                     [call.args for call in handler.await_args_list],
-                    [(SideQuestionTarget(record.id), origin, request) for request in expected],
+                    [(SideQuestionTarget(record.id), origin, request, "ou_owner") for request in expected],
                 )
                 self.assertIsNone(self.outcomes[-1].error)
                 self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
@@ -2805,7 +2805,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.finish_side_turn(started, items=(malformed, completed_question(request)))
 
-        handler.assert_awaited_once_with(SideQuestionTarget(record.id), origin, request)
+        handler.assert_awaited_once_with(SideQuestionTarget(record.id), origin, request, "ou_owner")
         self.assertIsNone(self.outcomes[-1].error)
         self.assertEqual(self.outcomes[-1].result.status.value, "completed")
         self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
@@ -4317,6 +4317,16 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 }])
                 self.assertEqual(len(self.codex.thread_list_pages), 1)
         self.assertEqual(self.codex.resume_calls, [])
+
+    async def test_catalog_search_uses_public_native_search_term_without_history_reads(self) -> None:
+        self.codex.thread_list_pages = [SimpleNamespace(data=[], next_cursor=None)]
+        await self.runtime.thread_catalog_page(archived=True, search_term="SDK upgrade")
+        self.assertEqual(self.codex.thread_list_calls[-1]["search_term"], "SDK upgrade")
+        self.assertTrue(self.codex.thread_list_calls[-1]["use_state_db_only"])
+        self.assertEqual(self.codex.resume_calls, [])
+        for query in ("", " ", 2):
+            with self.assertRaises(ValueError):
+                await self.runtime.thread_catalog_page(archived=False, search_term=query)
 
     async def test_catalog_page_rejects_malformed_or_nonadvancing_responses(self) -> None:
         row = SimpleNamespace(id="native-1", name=None, preview="preview")
@@ -8067,6 +8077,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             [call.args[0] for call in handler.await_args_list],
             [BindingQuestionTarget(binding.id)] * 2,
         )
+        self.assertEqual([call.args[3] for call in handler.await_args_list], ["ou_user"] * 2)
         self.assertEqual(self.outcomes[-1].final_response, "final")
         self.assertIsNone(self.outcomes[-1].activity)
 
@@ -10045,13 +10056,17 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         received = asyncio.Event()
         requests = []
 
-        async def capture(target, origin, request):
-            requests.append((target, origin, request))
+        async def capture(target, origin, request, owner_id):
+            requests.append((target, origin, request, owner_id))
             received.set()
 
         self.runtime.set_question_handler(capture)
         binding = self.binding()
         submission = await self.submit(binding)
+        await self.runtime.submit(
+            binding=binding, cwd=self.cwd, input="another person's update",
+            owner_id="ou_steerer", origin=object(),
+        )
         request = QuestionRequest("question-one", (UserQuestion("Choose", ("A", "B")),))
         for _ in range(2):
             observer.append_question(
@@ -10068,7 +10083,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.runtime.active_turn(binding.id))
         self.assertEqual(self.outcomes, [])
         self.assertEqual(requests, [
-            (BindingQuestionTarget(binding.id), self.runtime._active[binding.id].origin, request),
+            (BindingQuestionTarget(binding.id), self.runtime._active[binding.id].origin, request, "ou_user"),
         ])
         await self.finish(self.codex.handles[0], submission)
         self.assertEqual(len(requests), 1)

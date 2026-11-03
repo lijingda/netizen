@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import json
 import logging
 
@@ -24,6 +25,7 @@ async def send_completion_mention(
     user_id: str,
     operation_id: str,
     source_message_id: str | None = None,
+    session_label: str | None = None,
 ) -> bool:
     """Use the card, or an explicit source when no card exists; never re-anchor."""
     anchor_id = card_message_id if card_message_id is not None else source_message_id
@@ -41,7 +43,13 @@ async def send_completion_mention(
         async with asyncio.timeout(5):
             result = await channel.send(
                 scope.chat_id,
-                OutboundText(text="本轮任务已结束。", mentions=[Identity(open_id=user_id)]),
+                OutboundText(
+                    # Feishu text messages recognize <at> markup; native names
+                    # are untrusted display text, never another mention source.
+                    text=(f"「{html.escape(session_label)}」" if session_label else "")
+                    + "本轮任务已结束。",
+                    mentions=[Identity(open_id=user_id)],
+                ),
                 opts,
             )
         sent = validate_topic_message(result, scope.chat_id)

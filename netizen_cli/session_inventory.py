@@ -64,6 +64,7 @@ async def query_native_sessions(
     updated_from: float | None = None,
     updated_before: float | None = None,
     match: Callable[[BindingInventoryRecord, NativeThreadMetadata], bool] | None = None,
+    search_term: str | None = None,
 ) -> NativeSessionPage:
     """Fill one page in native order without reading all local candidates.
 
@@ -89,6 +90,7 @@ async def query_native_sessions(
         page = await read_page(
             archived=archived, cursor=scan_cursor, limit=NATIVE_SESSION_PAGE_SIZE,
             sort_key=sort_key, sort_direction=sort_direction, deadline=deadline,
+            **({"search_term": search_term} if search_term is not None else {}),
         )
         if len(page.threads) > NATIVE_SESSION_PAGE_SIZE or (
             page.next_cursor is not None and page.next_cursor in seen_cursors

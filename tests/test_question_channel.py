@@ -15,6 +15,7 @@ from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAn
 from netizen_cli.message_history import MessageHistoryStats, MessageHistoryWindow
 from netizen_cli.runtime.contracts import ContextBoundaryCommitFailed, SteerRace, Submission, SubmitDisposition, TurnStartFailed
 from netizen_cli.sdk_gap_adapter import GoalControlError
+from netizen_cli.question_notifications import QuestionNotificationConfigService, QuestionNotificationSettings
 from netizen_cli.user_questions import BindingQuestionTarget, QuestionRequest, UserQuestion
 from tests.support.channel_cards import callback, elements, form_values
 from tests.support.channel_fixtures import channel_fixture
@@ -367,6 +368,35 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.channel.send_calls), 2)
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertNotEqual(self.channel.send_calls[0][2].uuid, self.channel.send_calls[1][2].uuid)
+
+    async def test_mentions_use_captured_owner_per_new_card_and_independent_global_switch(self):
+        from netizen_cli.bindings import BindingTaskFeedback
+        self.binding = self.fx.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="ou_creator",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=False, completion_mention_enabled=False),
+        )
+        for enabled, owner, expected in (
+            (False, "ou_owner", None), (True, "ou_owner", "ou_owner"),
+            (True, "", None), (True, "scheduled:plan", None), (True, "all", None),
+        ):
+            with self.subTest(enabled=enabled, owner=owner):
+                self.fx.management._question_notification_config = QuestionNotificationConfigService(
+                    QuestionNotificationSettings(mention_initiator=enabled),
+                )
+                self.channel.send_calls.clear()
+                self.channel.send_results.extend([
+                    sent_result("om_q1", chat_id=self.scope.chat_id),
+                    sent_result("om_q2", chat_id=self.scope.chat_id),
+                ])
+                await self.app.handle_questions(
+                    BindingQuestionTarget(self.binding.id),
+                    FakeMessage("go", message_id="om_start", sender_id="ou_not_owner"),
+                    self.request, owner,
+                )
+                self.assertEqual(len(self.channel.send_calls), 2)
+                for _, card, _ in self.channel.send_calls:
+                    markdown = [item["content"] for item in elements(card.card, "markdown")]
+                    self.assertEqual(markdown, [f"<at id={expected}></at>"] if expected else [])
 
     async def test_goal_question_uses_original_prompt_independently_of_management_card(self):
         self.channel.send_results.append(sent_result("om_q", chat_id=self.scope.chat_id))

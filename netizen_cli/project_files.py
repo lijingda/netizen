@@ -191,6 +191,9 @@ def list_directory(root: Path, path: str, *, identity: str, context: str) -> dic
                     "name": entry.name,
                     "path": "/".join((*parts, entry.name)),
                     "kind": kind,
+                    "size": info.st_size,
+                    "modifiedAt": _modified_at(info),
+                    "version": _file_version(info),
                 })
         after = os.fstat(fd)
         if (before.st_mtime_ns, before.st_ctime_ns) != (after.st_mtime_ns, after.st_ctime_ns):

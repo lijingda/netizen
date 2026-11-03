@@ -1,4 +1,4 @@
-const input = (id) => document.querySelector(`#project-files-${id}`);
+const input = (id) => document.querySelector(`#file-browser-${id}`);
 const trigger = async (id, kind = "click") => {
   const element = input(id);
   return element.listeners.get(kind)[0]({ target: element, currentTarget: element, preventDefault() {} });
@@ -86,7 +86,7 @@ const openFile = (path) => entry(path).listeners.get("click")[0]();
 // SHIPPED_PROJECT_FILES
 (async () => {
   const controller = window.NetizenProjectFiles;
-  controller.init({ api, isExpired: () => expired });
+  controller.init({ browser: window.NetizenFileBrowser.create({ container: input("drawer"), api, isExpired: () => expired }) });
   assert.equal(requests.length, 0, "the hidden browser does no background I/O");
   await controller.open(project);
   assert.equal(input("drawer").open, true);
@@ -136,7 +136,7 @@ const openFile = (path) => entry(path).listeners.get("click")[0]();
   assert.equal(input("editor").hidden, false);
   assert.equal(input("search-form").hidden, false);
   const localLink = document.createElement("a");
-  localLink.dataset.projectFile = "a.py";
+  localLink.dataset.fileBrowserPath = "a.py";
   localLink.closest = () => localLink;
   input("markdown").append(localLink);
   let prevented = false;
@@ -145,8 +145,8 @@ const openFile = (path) => entry(path).listeners.get("click")[0]();
   assert.equal(editors.at(-1).text, "print('hello')", "local Markdown links stay inside the selected workspace");
   async function markdownLink(path, directoryHint = false) {
     const anchor = document.createElement("a");
-    anchor.dataset.projectFile = path;
-    if (directoryHint) anchor.dataset.projectDirectory = "true";
+    anchor.dataset.fileBrowserPath = path;
+    if (directoryHint) anchor.dataset.fileBrowserDirectory = "true";
     anchor.closest = () => anchor;
     input("markdown").append(anchor);
     return input("markdown").listeners.get("click")[0]({ target: anchor, preventDefault() {} });

@@ -498,6 +498,16 @@ class NativeThreadMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeLatestAnswer:
+    thread_id: str
+    turn_id: str | None
+    status: str | None
+    answer: str | None
+    started_at: int | None = None
+    completed_at: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class NativeThreadCatalogPage:
     threads: tuple[NativeThreadMetadata, ...]
     next_cursor: str | None

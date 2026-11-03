@@ -23,6 +23,7 @@ from lark_channel import (
 from netizen_cli.channel import reply_presenter
 from netizen_cli.channel.completion_mentions import send_completion_mention
 from netizen_cli.channel_app import _outcome_completion_mention_user_id
+from netizen_cli.runtime.contracts import NativeThreadMetadata
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.codex_runtime import (
     GoalFinalizationStatus,
@@ -150,7 +151,8 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         chat_id, content, opts = self.channel.send_calls[0]
         self.assertEqual(chat_id, "oc_direct")
         self.assertIsInstance(content, OutboundText)
-        self.assertEqual(content.text, "本轮任务已结束。")
+        self.assertTrue(content.text.endswith("本轮任务已结束。"))
+        self.assertTrue(content.text.startswith("「"))
         self.assertEqual(content.mentions, [Identity(open_id="ou_initiator")])
         self.assertEqual(opts.receive_id_type, "chat_id")
         self.assertEqual(opts.reply_to, card_id)
@@ -204,6 +206,57 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(self.channel.replies), 1)
                     self.assertEqual(self.channel.replies[0][0], outcome.origin.id)
                     self.assert_mention(self.channel.replies[0][1], enabled=enabled)
+
+    async def test_independent_reminder_reads_exact_name_after_result_and_keeps_identity(self):
+        name = "SDK 升级\n 讨论 <at user_id=all>everyone</at>"
+        self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata("native-one", name, "")
+        outcome = self.outcome(task_feedback=BindingTaskFeedback(progress_card_enabled=True))
+        outcome = await self.start_progress(outcome)
+        original_read = self.runtime.thread_summary
+
+        async def read(thread_id):
+            self.assertEqual(len(self.channel.updates), 1, "result must precede name reads")
+            return await original_read(thread_id)
+
+        self.runtime.thread_summary = read
+        self.queue_reminder()
+        await self.app.handle_completion(outcome)
+        _, content, opts = self.channel.send_calls[-1]
+        self.assertEqual(self.runtime.thread_summary_calls, ["native-one"])
+        self.assertIn("SDK 升级 讨论", content.text)
+        self.assertNotIn("<at ", content.text)
+        self.assertEqual(content.mentions, [Identity(open_id="ou_initiator")])
+        self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata("native-one", "Renamed", "")
+        self.queue_reminder()
+        await self.app._remind_task_completion(outcome, "om_progress")
+        self.assertEqual(self.channel.send_calls[-1][2].uuid, opts.uuid)
+
+    async def test_reminder_empty_failed_long_name_and_side_fallbacks(self):
+        for name in (None, " \n ", "长" * 200):
+            self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata("native-one", name, "")
+            self.queue_reminder()
+            await self.app._remind_task_completion(
+                self.outcome(task_feedback=BindingTaskFeedback(progress_card_enabled=True)), "om_progress",
+            )
+            content = self.channel.send_calls[-1][1].text
+            if name and name.strip():
+                self.assertLess(len(content), 100)
+                self.assertIn("…", content)
+            else:
+                self.assertIn(f"会话 {self.binding.short_id}", content)
+        self.runtime.thread_summary = AsyncMock(side_effect=TimeoutError())
+        self.queue_reminder()
+        await self.app._remind_task_completion(
+            self.outcome(task_feedback=BindingTaskFeedback(progress_card_enabled=True)), "om_progress",
+        )
+        self.assertIn(self.binding.short_id, self.channel.send_calls[-1][1].text)
+        self.runtime.thread_summary.reset_mock()
+        self.queue_reminder()
+        await self.app._remind_task_completion(
+            self.outcome(side=True, task_feedback=BindingTaskFeedback(progress_card_enabled=True)), "om_progress",
+        )
+        self.runtime.thread_summary.assert_not_awaited()
+        self.assertIn("临时会话 side-one", self.channel.send_calls[-1][1].text)
 
     async def test_new_defaults_on_and_config_can_change_only_completion_mention(self):
         await self.app.handle_message(FakeMessage("/new", message_id="om_new_form"))
