@@ -330,7 +330,7 @@ class FilePreparerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_store_provides_published_stable_original_paths(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = AttachmentStore(Path(directory) / "attachments")
+            store = AttachmentStore(Path(directory).resolve() / "attachments")
             preparer = FileInputPreparer(Downloader({"a": b"original"}), store)
             batch = await preparer.prepare((ref("a", name="../report.txt"),))
             self.assertEqual(batch.files[0].path.read_bytes(), b"original")

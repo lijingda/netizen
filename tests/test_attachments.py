@@ -439,7 +439,7 @@ class AttachmentStoreTest(unittest.TestCase):
             original(value)
             old = self.root / "old-retained"
             self.store.retained.rename(old)
-            self.store.retained.mkdir()
+            self.store.retained.mkdir(mode=0o700)
             (old / batch.batch_id).rename(self.store.retained / batch.batch_id)
         with patch.object(self.store, "_require_identity", side_effect=swap):
             with self.assertRaises(FileBrowseError) as caught:

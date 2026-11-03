@@ -126,7 +126,7 @@ class AttachmentFilesWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((status, data["code"]), (409, "file_changed"))
         action = await self.grant(await self.entry())
         self.attachments.retained.rename(self.attachments.root / "old-retained")
-        self.attachments.retained.mkdir()
+        self.attachments.retained.mkdir(mode=0o700)
         status, _, data = await self.delete(action)
         self.assertEqual((status, data["code"]), (409, "root_changed"))
 

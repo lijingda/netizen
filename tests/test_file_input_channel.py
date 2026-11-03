@@ -63,7 +63,7 @@ class FileInputChannelTest(unittest.IsolatedAsyncioTestCase):
         self.app = self.fixture.app
         self.channel = self.fixture.channel
         self.runtime = self.fixture.runtime
-        self.attachments = AttachmentStore(self.fixture.project_root / "attachments")
+        self.attachments = AttachmentStore(self.fixture.project_root.resolve() / "attachments")
         self.app._input_preparer = MessageInputPreparer(
             channel=self.channel, attachment_store=self.attachments,
         )
@@ -411,7 +411,7 @@ class SideFileInputChannelTest(unittest.IsolatedAsyncioTestCase):
         self.app = self.fixture.app
         self.channel = self.fixture.channel
         self.runtime = self.fixture.runtime
-        self.attachments = AttachmentStore(self.fixture.project_root / "attachments")
+        self.attachments = AttachmentStore(self.fixture.project_root.resolve() / "attachments")
         self.app._input_preparer = MessageInputPreparer(
             channel=self.channel, attachment_store=self.attachments,
         )
