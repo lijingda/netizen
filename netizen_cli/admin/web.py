@@ -191,8 +191,8 @@ _MAX_QUERY_FIELDS = 256
 _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 _AUTO_PORTS = range(8787, 8887)
-_FILE_VIEWER_ASSETS = (
-    "project-files.js", "project-files.css", "file-browser.js", "attachment-files.js",
+_CONTENT_VIEWER_ASSETS = (
+    "content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js",
     "vendor/ace/ace.js",
     "vendor/ace/mode-python.js", "vendor/ace/mode-javascript.js",
     "vendor/ace/mode-json.js", "vendor/ace/mode-markdown.js",
@@ -579,7 +579,7 @@ class AdminWebApplication:
 
     async def _dispatch_authenticated(self, context: _RequestContext) -> Response:
         route = (context.method, context.path)
-        if context.method == "GET" and context.path.removeprefix("/static/") in _FILE_VIEWER_ASSETS and context.path.startswith("/static/"):
+        if context.method == "GET" and context.path.removeprefix("/static/") in _CONTENT_VIEWER_ASSETS and context.path.startswith("/static/"):
             name = context.path.removeprefix("/static/")
             mime = b"text/css; charset=utf-8" if name.endswith(".css") else b"text/javascript; charset=utf-8"
             return Response(200, ((b"Content-Type", mime),), self._assets[name])
@@ -1521,21 +1521,34 @@ class AdminWebApplication:
         thread_id = _optional_text_query(context.query, "threadId")
         if not binding_id or not thread_id:
             raise AdminWebError(400, "invalid_query", "需要准确的会话标识。")
+        deadline = asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS
         try:
             answer = await self._management.latest_binding_answer(
                 binding_id, thread_id=thread_id,
-                deadline=asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS,
+                deadline=deadline,
             )
         except TimeoutError as error:
             raise AdminWebError(504, "answer_timeout", "最近一轮读取超时，请手动重试。") from error
         except (CodexError, ThreadHistoryUnavailable, OSError) as error:
             raise AdminWebError(503, "answer_unavailable", "会话历史暂时不可读取，可能已删除或不可用。") from error
+        preview = {}
+        if answer.answer:
+            try:
+                preview["markdownHtml"] = await self._management.file_reads.submit(
+                    lambda: render_markdown(answer.answer), deadline=deadline,
+                )
+            except PreviewUnavailable:
+                preview["previewMessage"] = "回答超出排版预览限制，已显示原文。"
+            except (TimeoutError, BlockingIOResultUnknown, BlockingIOExecutorClosed, BlockingIOExecutorSaturated):
+                preview["previewMessage"] = "排版预览暂不可用，已显示原文。"
+        self._authenticate(context)
         return _json_response(200, {
             "requestId": context.request.request_id,
             "threadId": answer.thread_id, "turnId": answer.turn_id,
             "status": answer.status, "answer": answer.answer,
             "startedAt": answer.started_at, "completedAt": answer.completed_at,
             "readAt": datetime.now().astimezone().isoformat(),
+            **preview,
         })
 
     async def _sessions(self, context: _RequestContext) -> Response:
@@ -3014,7 +3027,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js", "question-notifications.js", "netizen.svg", *_FILE_VIEWER_ASSETS):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js", "question-notifications.js", "netizen.svg", *_CONTENT_VIEWER_ASSETS):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 

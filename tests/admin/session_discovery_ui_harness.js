@@ -1,5 +1,6 @@
 let latestAnswer = () => ({ threadId: "native", turnId: "turn-current", status: "completed",
-  answer: "<script>inert</script>\nfinal", startedAt: null, completedAt: null, readAt: "2026-11-03T08:00:00+00:00" });
+  answer: "<script>inert</script>\nfinal", markdownHtml: "<p>&lt;script&gt;inert&lt;/script&gt;\nfinal</p>",
+  startedAt: null, completedAt: null, readAt: "2026-11-03T08:00:00+00:00" });
 let labelsAnswer = async () => ({ items: [] });
 const priorFetch = fetch;
 fetch = async (path, options = {}) => {
@@ -77,7 +78,7 @@ fetch = async (path, options = {}) => {
     await flush();
     for (const [index, row] of rows.entries()) assert.equal(row.querySelector(".chat-link").textContent, `resolved-${index}`);
     control.value = "compact"; control.dispatch("change");
-    assert.deepEqual(body.children, rows);
+    assert(body.children.length === rows.length && body.children.every((row, index) => row === rows[index]), "layout retains row identities");
     assert.equal(requests.length, count);
   }
 
@@ -95,14 +96,36 @@ fetch = async (path, options = {}) => {
   assert.equal(answerRequest.query.get("bindingId"), archived.bindingId);
   assert.equal(answerRequest.query.get("threadId"), "native");
   assert.equal(answerRequest.options.method, undefined, "answer is a read-only GET");
-  assert.equal(answerNode("content").textContent, "<script>inert</script>\nfinal");
+  assert.equal(answerNode("source").textContent, "<script>inert</script>\nfinal");
+  assert.equal(answerNode("content").innerHTML, latestAnswer().markdownHtml);
+  assert.equal(answerNode("content").hidden, false);
+  assert.equal(answerNode("source").hidden, true);
   assert.equal(answerNode("content").querySelector("script"), null);
   assert(!answerNode("metadata").textContent.includes("开始"));
   const afterAnswer = requests.length;
-  await advanceTime(60000); assert.equal(requests.length, afterAnswer, "no answer polling");
+  answerNode("toggle").click();
+  assert.equal(answerNode("content").hidden, true);
+  assert.equal(answerNode("source").hidden, false);
+  answerNode("toggle").click();
+  assert.equal(answerNode("content").hidden, false);
+  assert.equal(requests.length, afterAnswer, "switching preview/source reuses the same snapshot");
+  latestAnswer = async () => { throw new Error("refresh failed"); };
+  await refreshLatestAnswer();
+  assert.equal(answerNode("content").hidden, false, "refresh failure retains the rendered snapshot");
+  assert.match(answerNode("note").textContent, /读取的快照/);
+  latestAnswer = () => ({ turnId: "newest", status: "completed", answer: "large source", previewMessage: "已显示原文", readAt: "now" });
+  await refreshLatestAnswer();
+  assert.equal(answerNode("source").textContent, "large source");
+  assert.equal(answerNode("source").hidden, false);
+  assert.equal(answerNode("toggle").hidden, true);
+  assert.equal(answerNode("preview-note").textContent, "已显示原文");
+  const afterRefresh = requests.length;
+  await advanceTime(60000); assert.equal(requests.length, afterRefresh, "no answer polling");
   latestAnswer = () => ({ turnId: "newest", status: "inProgress", answer: null, readAt: "2026-11-03T09:00:00Z" });
   await refreshLatestAnswer();
   assert.equal(answerNode("content").hidden, true);
+  assert.equal(answerNode("source").hidden, true);
+  assert.equal(answerNode("toggle").hidden, true);
   assert.match(answerNode("note").textContent, /运行中.*暂无最终回答/);
   latestAnswer = async () => { throw new Error("history unavailable"); };
   await refreshLatestAnswer();
@@ -111,7 +134,20 @@ fetch = async (path, options = {}) => {
   const pending = refreshLatestAnswer(); closeLatestAnswer();
   slow.resolve({ turnId: "stale", status: "completed", answer: "must not appear" }); await pending;
   assert.equal(answerNode("drawer").open, false);
+  assert.equal(answerNode("source").textContent, "");
   assert(!answerNode("content").textContent.includes("must not appear"));
   state.sessions = { items: [{ ...ordinary, canReadLatestAnswer: false }] }; renderSessions(state.sessions);
   assert(!document.querySelector("#sessions-body").querySelectorAll("button").some((button) => button.textContent === "查看最近回答"));
+  const otherPending = deferred(); latestAnswer = () => otherPending.promise;
+  const opening = openLatestAnswer(archived);
+  latestAnswer = () => ({ turnId: "other", status: "completed", answer: "new session", markdownHtml: "<p>new session</p>" });
+  await openLatestAnswer({ ...archived, bindingId: "other", nativeThreadId: "other" });
+  otherPending.resolve({ turnId: "stale", status: "completed", answer: "stale", markdownHtml: "<p>stale</p>" });
+  await opening;
+  assert.equal(answerNode("source").textContent, "new session");
+  assert.equal(answerNode("content").innerHTML, "<p>new session</p>");
+  expireAdminSession();
+  assert.equal(answerNode("drawer").open, false);
+  assert.equal(answerNode("source").textContent, "");
+  assert.equal(answerNode("content").textContent, "");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

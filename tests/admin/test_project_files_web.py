@@ -111,7 +111,7 @@ class ProjectFilesWebTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_queries_images_and_vendor_assets_all_require_authentication(self):
         paths = [self.target(operation) for operation in ("root", "directory", "content", "image")]
-        assets = ("file-browser.js", "project-files.js", "attachment-files.js", "project-files.css", "vendor/ace/ace.js",
+        assets = ("content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "vendor/ace/ace.js",
             "vendor/ace/mode-python.js")
         for path in [*paths, *("/static/" + asset for asset in assets)]:
             with self.subTest(path=path):

@@ -1936,14 +1936,19 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
     async def test_latest_answer_is_an_authenticated_exact_read_not_a_mutation(self) -> None:
         from netizen_cli.runtime.contracts import NativeLatestAnswer
         from netizen_cli.thread_history import ThreadHistoryUnavailable
+        from netizen_cli.management.blocking_io import BoundedBlockingIOExecutor
 
         self.runner.open_admission()
+        self.management.file_reads = BoundedBlockingIOExecutor(max_workers=2, capacity=4)
+        self.addAsyncCleanup(self.management.file_reads.aclose)
         session = await self.login()
         answer = NativeLatestAnswer("native", "turn", "completed", "<b>answer</b>")
         with patch.object(self.management, "latest_binding_answer", AsyncMock(return_value=answer), create=True) as read:
             status, _, result = await self.json_get("/api/v1/sessions/latest-answer?bindingId=binding&threadId=native", session)
             self.assertEqual(status, 200, result)
             self.assertEqual(result["answer"], "<b>answer</b>")
+            self.assertIn("&lt;b&gt;answer&lt;/b&gt;", result["markdownHtml"])
+            self.assertNotIn("<b>", result["markdownHtml"])
             self.assertIsNone(result["startedAt"])
             self.assertIn("readAt", result)
             self.assertEqual(read.call_args.args, ("binding",))
@@ -1960,6 +1965,32 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 400, result)
             self.assertEqual(read.await_count, 3)
         self.assertEqual(self.management.calls, [])
+
+    async def test_latest_answer_preview_failure_retains_source_and_empty_answer_skips_rendering(self) -> None:
+        from netizen_cli.runtime.contracts import NativeLatestAnswer
+        from netizen_cli.admin.file_previews import PreviewUnavailable
+        from netizen_cli.management.blocking_io import BlockingIOExecutorSaturated, BlockingIOExecutorClosed, BlockingIOResultUnknown
+
+        self.runner.open_admission()
+        session = await self.login()
+        render = AsyncMock()
+        self.management.file_reads = SimpleNamespace(submit=render)
+        answer = NativeLatestAnswer("native", "turn", "completed", "# answer")
+        with patch.object(self.management, "latest_binding_answer", AsyncMock(return_value=answer), create=True) as read:
+            for error in (PreviewUnavailable("limit"), TimeoutError(), BlockingIOExecutorSaturated(),
+                          BlockingIOExecutorClosed(), BlockingIOResultUnknown(deadline=0)):
+                render.side_effect = error
+                status, _, result = await self.json_get("/api/v1/sessions/latest-answer?bindingId=binding&threadId=native", session)
+                self.assertEqual(status, 200, result)
+                self.assertEqual(result["answer"], "# answer")
+                self.assertNotIn("markdownHtml", result)
+                self.assertIn("原文", result["previewMessage"])
+            render.reset_mock()
+            read.return_value = NativeLatestAnswer("native", "turn", "inProgress", None)
+            status, _, result = await self.json_get("/api/v1/sessions/latest-answer?bindingId=binding&threadId=native", session)
+            self.assertEqual(status, 200, result)
+            self.assertIsNone(result["answer"])
+            render.assert_not_awaited()
 
     async def test_session_multiselect_query_count_remains_bounded(self) -> None:
         self.runner.open_admission()
@@ -2851,9 +2882,9 @@ class AdminStaticAssetsTest(unittest.TestCase):
 
         self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js",
                                           "/static/session-access.js", "/static/progress-card.js", "/static/question-notifications.js", "/static/worktrees.js",
-                                          "/static/file-browser.js", "/static/project-files.js",
+                                          "/static/content-preview.js", "/static/file-browser.js", "/static/project-files.js",
                                           "/static/attachment-files.js", "/static/admin.js"])
-        self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css", "/static/project-files.css"])
+        self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css", "/static/content-preview.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates"} <= parser.ids)
         self.assertNotIn("side-topics", parser.ids)
