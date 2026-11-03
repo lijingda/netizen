@@ -2059,14 +2059,20 @@ class AdminWebApplication:
             "worktreeCount": len(snapshot.worktrees),
             "worktrees": [{"id": item.id, "root": item.root, "cwd": item.cwd} for item in snapshot.worktrees],
             "deleteWorktrees": delete_worktrees,
-            "actions": {"delete": self._grant(
-                context, "projects.delete", AdminActionTarget("project", project.alias),
-                _empty_preconditions(
-                    project_revision=ExpectedValue.expect(project.revision),
-                    inventory_fingerprint=ExpectedValue.expect(snapshot.fingerprint),
-                    cascade_delete=ExpectedValue.expect(delete_worktrees),
+            "actions": {
+                "previewDelete": self._grant(
+                    context, "projects.delete-preview", AdminActionTarget("project", project.alias),
+                    _empty_preconditions(project_revision=ExpectedValue.expect(project.revision)),
                 ),
-            )},
+                "delete": self._grant(
+                    context, "projects.delete", AdminActionTarget("project", project.alias),
+                    _empty_preconditions(
+                        project_revision=ExpectedValue.expect(project.revision),
+                        inventory_fingerprint=ExpectedValue.expect(snapshot.fingerprint),
+                        cascade_delete=ExpectedValue.expect(delete_worktrees),
+                    ),
+                ),
+            },
         })
 
     async def _project_delete(self, context: _RequestContext) -> Response:
