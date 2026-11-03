@@ -58,6 +58,7 @@ function expireAdminSession() {
   invalidateSessionListRequest();
   stopUpdatePolling();
   closeSessionRenameEditor({ expired: true });
+  closeProjectDeleteDialog();
   window.NetizenSelect?.close();
   // Release these modal drawers so the page's login link remains reachable.
   // Inputs stay in memory, but expired actions can never be submitted again.
@@ -589,6 +590,8 @@ function badge(value, active = false, warning = false) {
 }
 
 const pendingProjectDeletes = new Set();
+let projectDeleteDialog = null;
+const projectDeleteInput = (name) => document.querySelector(`#project-delete-${name}`);
 
 function showProjectDeleteResult(message, details = [], isError = false) {
   const panel = document.querySelector("#project-delete-result");
@@ -605,25 +608,104 @@ function showProjectDeleteResult(message, details = [], isError = false) {
   remaining.hidden = details.length === 0;
 }
 
-function confirmProjectDelete(preview) {
-  return window.confirm(
-    `删除 Project「${preview.project.alias}」及关联 Sessions？`
-    + `\n\n关联 Sessions：${preview.sessionCount}（Lazy ${preview.lazySessionCount}，已创建 Thread ${preview.materializedSessionCount}）`
-    + "\n范围包含所有归档会话，不受 Sessions 页面筛选影响。"
-    + `\n关联 Side：${preview.sideCount}，将结束并移除。`
-    + `\n关联定时计划：${preview.scheduledPlanCount || 0}；正在交接或未决的定时执行：${preview.scheduledRunCount || 0}。`
-    + "\n定时计划将被删除；后续会话清理失败也不会恢复计划。"
-    + "\n\n原生会话、派生子会话、Codex App/CLI 历史和本地会话登记将永久删除，无法恢复。"
-    + "\n全部会话删除确认成功后，才会删除 Project 登记；部分失败时会保留 Project 和剩余会话。"
-    + `\n关联受管 worktree：${preview.worktreeCount || 0}，${preview.deleteWorktrees ? "同时安全删除；失败项保留，不强制丢弃成果" : "保留目录，可在 worktree 页面处理；不会自动关联到同名新 Project"}。`
-    + (preview.deleteWorktrees && preview.worktrees?.length ? `\n将删除的 checkout 根目录：\n${preview.worktrees.map((item) => `${item.id} · ${item.root}`).join("\n")}` : "")
-    + `\n\n磁盘代码目录保留：${preview.project.cwd}`,
-  );
+function closeProjectDeleteDialog(preview = null) {
+  const view = projectDeleteDialog;
+  if (!view) return;
+  projectDeleteDialog = null;
+  projectDeleteInput("dialog").close();
+  document.body.classList.toggle("project-delete-open", false);
+  if (view.error && !state.authExpired) view.reject(view.error);
+  else view.resolve(preview);
 }
 
-async function deleteProject(project, deleteWorktrees = false) {
+function submitProjectDelete() {
+  const view = projectDeleteDialog;
+  if (!view || view.loading || !view.preview?.actions?.delete || state.authExpired
+      || view.preview.deleteWorktrees !== projectDeleteInput("worktrees").checked) return;
+  closeProjectDeleteDialog(view.preview);
+}
+
+async function refreshProjectDeletePreview() {
+  const view = projectDeleteDialog;
+  if (!view || view.loading || !view.envelope || state.authExpired) return;
+  const envelope = view.envelope;
+  const deleteWorktrees = projectDeleteInput("worktrees").checked;
+  const restoreChoiceFocus = document.activeElement === projectDeleteInput("worktrees");
+  view.envelope = null;
+  view.preview = null;
+  view.loading = true;
+  projectDeleteInput("confirm").disabled = true;
+  projectDeleteInput("worktrees").disabled = true;
+  projectDeleteInput("scope").hidden = true;
+  projectDeleteInput("paths").hidden = true;
+  projectDeleteInput("note").classList.toggle("error", false);
+  projectDeleteInput("note").textContent = "正在读取本次删除范围…";
+  try {
+    const preview = await api("/api/v1/projects/delete-preview", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(envelope, deleteWorktrees ? { deleteWorktrees: true } : {})),
+    });
+    if (projectDeleteDialog !== view || state.authExpired) return;
+    view.preview = preview;
+    view.envelope = preview.actions.previewDelete;
+    projectDeleteInput("sessions").textContent = `${preview.sessionCount}（Lazy ${preview.lazySessionCount}，已创建 ${preview.materializedSessionCount}）`;
+    projectDeleteInput("sides").textContent = String(preview.sideCount);
+    projectDeleteInput("plans").textContent = String(preview.scheduledPlanCount || 0);
+    projectDeleteInput("runs").textContent = String(preview.scheduledRunCount || 0);
+    projectDeleteInput("cwd").textContent = preview.project.cwd;
+    projectDeleteInput("scope").hidden = false;
+    projectDeleteInput("worktree-option").hidden = !preview.worktreeCount;
+    projectDeleteInput("worktree-label").textContent = `同时删除 ${preview.worktreeCount || 0} 个关联受管 worktree`;
+    projectDeleteInput("worktree-help").textContent = deleteWorktrees
+      ? "以下目录将随本次操作安全删除；检查未通过的工作区保留，不强制丢弃成果。仅包含本实例已知的受管工作区。"
+      : "默认保留目录和登记，之后可在 worktree 页面处理；不会自动关联到同名新 Project。";
+    const paths = projectDeleteInput("paths");
+    paths.replaceChildren();
+    if (deleteWorktrees) for (const worktree of preview.worktrees || []) {
+      const item = document.createElement("li");
+      item.textContent = worktree.root;
+      paths.append(item);
+    }
+    paths.hidden = !deleteWorktrees || !preview.worktrees?.length;
+    projectDeleteInput("note").textContent = "";
+    projectDeleteInput("confirm").disabled = !preview.actions.delete
+      || preview.deleteWorktrees !== deleteWorktrees;
+    projectDeleteInput("worktrees").disabled = !view.envelope;
+  } catch (error) {
+    if (projectDeleteDialog !== view || state.authExpired) return;
+    view.error = error;
+    projectDeleteInput("note").classList.toggle("error", true);
+    projectDeleteInput("note").textContent = `${error.status ? error.message : "无法读取删除范围，请检查连接。"} 未提交删除，请关闭弹窗后重新打开。`;
+  } finally {
+    view.loading = false;
+    // Disabling the active checkbox blurs it in browsers. Restore it only if
+    // the user has not moved to another control while the preview was loading.
+    if (projectDeleteDialog === view && !state.authExpired && restoreChoiceFocus
+        && (document.activeElement === document.body || document.activeElement === projectDeleteInput("dialog"))) {
+      const target = projectDeleteInput("worktrees").disabled || projectDeleteInput("worktree-option").hidden
+        ? "cancel" : "worktrees";
+      projectDeleteInput(target).focus();
+    }
+  }
+}
+
+function confirmProjectDelete(project, envelope) {
+  return new Promise((resolve, reject) => {
+    projectDeleteDialog = { envelope, resolve, reject, preview: null, loading: false };
+    projectDeleteInput("title").textContent = `删除 Project「${project.alias}」及关联会话`;
+    projectDeleteInput("worktrees").checked = false;
+    projectDeleteInput("worktree-option").hidden = true;
+    projectDeleteInput("dialog").showModal();
+    document.body.classList.toggle("project-delete-open", true);
+    projectDeleteInput("cancel").focus();
+    void refreshProjectDeletePreview();
+  });
+}
+
+async function deleteProject(project) {
   const envelope = project.actions.previewDelete;
-  if (!envelope || pendingProjectDeletes.has(project.alias)) return;
+  if (!envelope || pendingProjectDeletes.has(project.alias) || projectDeleteDialog || state.authExpired) return;
+  const returnFocus = document.activeElement;
   pendingProjectDeletes.add(project.alias);
   project.actions.previewDelete = null;
   for (const row of document.querySelectorAll("#projects-body tr")) {
@@ -637,12 +719,8 @@ async function deleteProject(project, deleteWorktrees = false) {
   showProjectDeleteResult(message);
   setStatus(message);
   try {
-    const preview = await api("/api/v1/projects/delete-preview", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(actionPayload(envelope, deleteWorktrees ? { deleteWorktrees: true } : {})),
-    });
-    if (!confirmProjectDelete(preview)) {
+    const preview = await confirmProjectDelete(project, envelope);
+    if (!preview || state.authExpired) {
       message = `已取消删除 Project「${project.alias}」，未提交删除。`;
       return;
     }
@@ -689,9 +767,17 @@ async function deleteProject(project, deleteWorktrees = false) {
   } finally {
     pendingProjectDeletes.delete(project.alias);
     const refreshed = await refresh("projects");
-    if (!refreshed) message += "\nProjects 刷新失败，请手动刷新查看最新状态。";
-    showProjectDeleteResult(message, details, isError);
-    setStatus(message, isError);
+    if (!state.authExpired) {
+      if (!refreshed) message += "\nProjects 刷新失败，请手动刷新查看最新状态。";
+      showProjectDeleteResult(message, details, isError);
+      setStatus(message, isError);
+      if (state.tab === "projects" && (!document.activeElement || document.activeElement === document.body
+          || document.activeElement === returnFocus)) {
+        const row = [...document.querySelectorAll("#projects-body tr")]
+          .find((item) => item.dataset.projectAlias === project.alias);
+        (row?.querySelector(".project-delete-trigger") || document.querySelector("#projects .refresh"))?.focus();
+      }
+    }
   }
 }
 
@@ -731,15 +817,11 @@ async function loadProjects(cursor = undefined) {
       ));
     }
     if (project.actions.previewDelete) {
-      const cascadeLabel = document.createElement("label");
-      cascadeLabel.className = "cascade-choice";
-      const cascade = document.createElement("input");
-      cascade.type = "checkbox";
-      cascadeLabel.append(cascade, document.createTextNode("同时删除关联受管 worktree"));
-      actions.append(cascadeLabel);
-      actions.append(actionButton(
-        "删除 Project 及关联 Sessions", () => deleteProject(project, cascade.checked), true,
-      ));
+      const button = actionButton("删除…", () => deleteProject(project), true);
+      button.className += " project-delete-trigger";
+      button.setAttribute("aria-haspopup", "dialog");
+      button.setAttribute("aria-label", `删除 Project「${project.alias}」及关联会话`);
+      actions.append(button);
     }
     if (project.deleting || pendingProjectDeletes.has(project.alias)) {
       for (const button of actions.querySelectorAll("button")) button.disabled = true;
@@ -2088,6 +2170,7 @@ async function loadSessionChatLabels(kind, data, page, request) {
   const showIdentity = kind !== "side";
   const finish = () => {
     for (const { item, cell } of targets) updateSessionLocationCell(cell, item, { showIdentity });
+    updateSessionGroupLabels(kind);
   };
   pendingSessionChatLabels = finish;
   for (const { item, cell } of targets) updateSessionLocationCell(cell, item, { showIdentity, loading: true });
@@ -2160,37 +2243,112 @@ async function loadSessions(page = state.sessionPage) {
   return loadSessionPage("session", page, renderSessions);
 }
 
+// Presentation choices live only in this page, independently for each list and
+// grouping mode. Keep current rows so folding never recreates action grants.
+const sessionGroupViews = Object.fromEntries(["session", "side"].map((kind) => [kind, {
+  project: new Set(), chat: new Set(), layout: "compact", groups: [],
+}]));
+
+function updateSessionGroupLabels(kind) {
+  const view = sessionGroupViews[kind];
+  if (view.layout !== "chat") return;
+  for (const group of view.groups) {
+    const first = group.items[0];
+    const named = group.items.find((item) => item.chatLabelResolved && item.chatLabel?.trim());
+    const known = group.items.find((item) => item.chatMode || item.chatType) || first;
+    group.title.textContent = named?.chatLabel || shortIdentity(first.chatId)
+      || `聊天不可用 · ${shortIdentity(first.bindingId || first.sideId)}`;
+    group.type.textContent = chatModeLabel(known.chatMode || known.chatType, known.scopeKind);
+    group.button.title = [group.title.textContent, first.chatId, first.appId].filter(Boolean).join("\n");
+  }
+}
+
+function updateSessionGroupControls(kind) {
+  const view = sessionGroupViews[kind];
+  document.querySelector(`#${kind}-group-actions`).hidden = view.layout === "compact";
+  document.querySelector(`#${kind}-groups-expand`).disabled = state.authExpired
+    || !view.groups.some((group) => view[view.layout].has(group.key));
+  document.querySelector(`#${kind}-groups-collapse`).disabled = state.authExpired
+    || !view.groups.some((group) => !view[view.layout].has(group.key));
+}
+
+function setSessionGroupsExpanded(kind, expanded, groups = sessionGroupViews[kind].groups) {
+  const view = sessionGroupViews[kind];
+  if (state.authExpired || view.layout === "compact") return;
+  for (const group of groups) {
+    if (expanded) view[view.layout].delete(group.key);
+    else view[view.layout].add(group.key);
+    group.button.setAttribute("aria-expanded", String(expanded));
+    for (const row of group.rows) row.hidden = !expanded;
+  }
+  updateSessionGroupControls(kind);
+}
+
 function applySessionLayout(kind) {
+  if (state.authExpired) return;
   const name = kind === "side" ? "sides" : "sessions";
   const identity = kind === "side" ? "sideId" : "bindingId";
   const body = document.querySelector(`#${name}-body`);
-  const grouped = document.querySelector(`#${kind}-layout`).value === "project";
+  const view = sessionGroupViews[kind];
+  const selected = document.querySelector(`#${kind}-layout`).value;
+  const layout = ["project", "chat"].includes(selected) ? selected : "compact";
+  const grouped = layout !== "compact";
+  view.layout = layout;
+  view.groups = [];
   document.querySelector(`#${kind}-group-note`).hidden = !grouped;
   const rows = new Map([...body.children].filter((row) => row.dataset[identity])
     .map((row) => [row.dataset[identity], row]));
   const items = state[name]?.items || [];
   const groups = new Map();
   for (const item of items) {
-    const key = grouped ? item.projectAlias || "项目不可用" : "";
+    const key = layout === "chat"
+      ? JSON.stringify(item.chatId ? ["chat", item.appId || "", item.chatId] : ["missing", item[identity]])
+      : layout === "project" ? JSON.stringify(item.projectAlias || null) : "";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(item);
   }
   body.replaceChildren();
-  for (const [project, group] of groups) {
+  for (const [key, groupItems] of groups) {
+    const groupRows = groupItems.map((item) => rows.get(item[identity])).filter(Boolean);
+    const expanded = !grouped || !view[layout].has(key);
     if (grouped) {
       const heading = document.createElement("tr");
-      heading.className = "session-project-group";
+      heading.className = "session-group-row";
       const label = document.createElement("th");
       label.setAttribute("colspan", kind === "side" ? "8" : "10");
-      label.textContent = project;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "session-group-toggle";
+      button.setAttribute("aria-expanded", String(expanded));
+      button.disabled = Boolean(state.authExpired);
+      const chevron = document.createElement("span");
+      chevron.className = "session-group-chevron";
+      chevron.setAttribute("aria-hidden", "true");
+      const title = document.createElement("span");
+      title.className = "session-group-title";
+      title.textContent = groupItems[0].projectAlias || "项目不可用";
+      const type = document.createElement("span");
+      type.className = "badge session-group-type";
+      type.hidden = layout !== "chat";
+      const count = document.createElement("span");
+      count.className = "session-group-count";
+      count.textContent = `本页 ${groupItems.length} 条`;
+      button.append(chevron, title, type, count);
+      const group = { key, items: groupItems, rows: groupRows, button, title, type };
+      view.groups.push(group);
+      button.addEventListener("click", () => setSessionGroupsExpanded(kind,
+        button.getAttribute("aria-expanded") !== "true", [group]));
+      label.append(button);
       heading.append(label);
       body.append(heading);
     }
-    for (const item of group) {
-      const row = rows.get(item[identity]);
-      if (row) body.append(row);
+    for (const row of groupRows) {
+      row.hidden = !expanded;
+      body.append(row);
     }
   }
+  updateSessionGroupLabels(kind);
+  updateSessionGroupControls(kind);
 }
 
 function renderSessions(data) {
@@ -3365,6 +3523,7 @@ function confirmDiscardEditors() {
       || window.NetizenWorktrees?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
   closeProjectEditor({ confirmed: true });
+  closeProjectDeleteDialog();
   closeSessionSettingsEditor({ confirmed: true });
   closeSessionRenameEditor();
   closeDefaultEditor({ confirmed: true });
@@ -4836,6 +4995,7 @@ function restorePageFilters(route) {
     if (kind === "session") document.querySelector("#sessions-empty").hidden = true;
     state[`${kind}RefreshedAt`] = null;
     document.querySelector(`#${name}-body`).replaceChildren();
+    applySessionLayout(kind);
     renderSessionPagination(kind);
     renderSessionSort(kind);
   } else if (tab === "schedules") {
@@ -5057,6 +5217,10 @@ answerNode("toggle").addEventListener("click", () => {
 for (const control of document.querySelectorAll("[data-session-layout]")) {
   control.addEventListener("change", () => applySessionLayout(control.dataset.sessionLayout));
 }
+for (const kind of ["session", "side"]) {
+  document.querySelector(`#${kind}-groups-expand`).addEventListener("click", () => setSessionGroupsExpanded(kind, true));
+  document.querySelector(`#${kind}-groups-collapse`).addEventListener("click", () => setSessionGroupsExpanded(kind, false));
+}
 
 document.querySelector("#session-inventory-state").addEventListener("change", updateSessionDateFilters);
 document.querySelector("#session-filter").addEventListener("submit", (event) => {
@@ -5087,6 +5251,14 @@ document.querySelector("#sides-previous").addEventListener("click", () => moveSi
 document.querySelector("#sides-next").addEventListener("click", () => moveSidePage("next"));
 sessionSettingsInput("cancel").addEventListener("click", closeSessionSettingsEditor);
 sessionRenameInput("cancel").addEventListener("click", closeSessionRenameEditor);
+projectDeleteInput("cancel").addEventListener("click", () => closeProjectDeleteDialog());
+projectDeleteInput("close").addEventListener("click", () => closeProjectDeleteDialog());
+projectDeleteInput("dialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeProjectDeleteDialog();
+});
+projectDeleteInput("worktrees").addEventListener("change", refreshProjectDeletePreview);
+projectDeleteInput("confirm").addEventListener("click", submitProjectDelete);
 sessionRenameInput("close").addEventListener("click", closeSessionRenameEditor);
 sessionRenameInput("dialog").addEventListener("cancel", (event) => {
   event.preventDefault();

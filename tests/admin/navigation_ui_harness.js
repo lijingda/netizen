@@ -31,6 +31,7 @@ window.history = {
 const baseFetch = fetch;
 let failPage = false;
 let expireResponse = false;
+let projectDeletePreviewGate = null;
 let selectorConfigGate = null;
 let selectorConfigs = 0;
 let selectorRenders = 0;
@@ -55,6 +56,11 @@ const scheduledPlan = () => ({
 });
 fetch = async (path, options = {}) => {
   const url = new URL(path, "https://admin");
+  if (url.pathname === "/api/v1/projects/delete-preview") {
+    requests.push({ path: url.pathname, query: url.searchParams, options });
+    const data = await projectDeletePreviewGate.promise;
+    return { ok: true, status: 200, json: async () => data };
+  }
   if (!["/api/v1/projects", "/api/v1/schedules", "/api/v1/defaults", "/logout", "/api/v1/identity",
     "/api/v1/admin-users", "/api/v1/admin-users/selector-config", "/api/v1/worktrees", "/api/v1/worktrees/settings",
     "/api/v1/session-tool-access", "/api/v1/session-tool-access/save", "/api/v1/progress-card/settings"].includes(url.pathname)) return baseFetch(path, options);
@@ -358,6 +364,35 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     assert.equal(defaultsInput("previous").disabled, true);
     assert.equal(defaultsInput("new").disabled, true);
     return;
+  }
+
+  // Back cancels an open deletion confirmation, including an in-flight preview;
+  // Forward must not restore the modal or submit its former delete grant.
+  if (initialUrl === "/projects") {
+    await selectTab("sessions", "ordinary");
+    await selectTab("projects");
+    const preview = { project: { alias: "首页", cwd: "/workspace/project" },
+      sessionCount: 0, lazySessionCount: 0, materializedSessionCount: 0, sideCount: 0,
+      worktreeCount: 0, deleteWorktrees: false,
+      actions: { delete: adminGrant, previewDelete: adminGrant } };
+    const dialog = document.querySelector("#project-delete-dialog");
+    for (const pending of [false, true]) {
+      projectDeletePreviewGate = deferred();
+      const deletion = deleteProject({ alias: "首页", actions: { previewDelete: adminGrant } });
+      await flush();
+      assert.equal(dialog.open, true);
+      if (!pending) { projectDeletePreviewGate.resolve(preview); await flush(); }
+      window.history.go(-1); await flush();
+      assert.equal(state.tab, "sessions");
+      assert.equal(dialog.open, false, "Back must dismiss deletion confirmation");
+      await deletion;
+      if (pending) { projectDeletePreviewGate.resolve(preview); await flush(); }
+      assert.equal(dialog.open, false, "late preview must not reopen the dialog");
+      window.history.go(1); await flush();
+      assert.equal(state.tab, "projects");
+      assert.equal(dialog.open, false, "Forward must not restore confirmation");
+      assert(!requests.some((request) => request.path === "/api/v1/projects/delete"));
+    }
   }
 
   // Failed next-page requests retain the current rows and cursor stack.

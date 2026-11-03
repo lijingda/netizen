@@ -71,7 +71,7 @@ fetch = async (path, options = {}) => {
     assert.equal(requests.length, count);
     assert.equal(state[name], facts); assert.equal(state[`${kind}Page`], page);
     assert.equal(state[`${kind}RefreshedAt`], freshness);
-    assert.deepEqual(body.children.filter((row) => row.className === "session-project-group").map((row) => row.textContent), ["z", "a", "项目不可用"]);
+    assert.deepEqual(body.querySelectorAll(".session-group-title").map((title) => title.textContent), ["z", "a", "项目不可用"]);
     assert.deepEqual(body.children.filter((row) => row.dataset[identity]).map((row) => row.dataset[identity]),
       [`${kind}-0`, `${kind}-2`, `${kind}-1`, `${kind}-3`]);
     gate.resolve({ items: items.map((item, index) => ({ chatId: item.chatId, chatLabel: `resolved-${index}`, chatLabelResolved: true })) });

@@ -66,6 +66,37 @@
       </nav>
     </section>
 
+    <dialog id="project-delete-dialog" class="project-delete-dialog" aria-labelledby="project-delete-title" aria-describedby="project-delete-warning">
+      <div class="project-delete-shell">
+        <div class="project-delete-head">
+          <div><p class="eyebrow">删除 PROJECT</p><h3 id="project-delete-title"></h3></div>
+          <button id="project-delete-close" class="drawer-close" type="button" aria-label="关闭删除确认">×</button>
+        </div>
+        <div class="project-delete-body">
+          <p id="project-delete-warning" class="project-delete-warning">原生会话、派生子会话、Codex App/CLI 历史和本地会话登记将永久删除，无法恢复。</p>
+          <div id="project-delete-scope" hidden>
+            <h4>本次删除范围</h4>
+            <dl class="project-delete-summary">
+              <div><dt>关联会话</dt><dd id="project-delete-sessions"></dd></div>
+              <div><dt>临时会话（Side）</dt><dd id="project-delete-sides"></dd></div>
+              <div><dt>定时计划</dt><dd id="project-delete-plans"></dd></div>
+              <div><dt>交接或未决的定时执行</dt><dd id="project-delete-runs"></dd></div>
+            </dl>
+            <p class="hint">包含所有归档会话，不受 Sessions 页面筛选影响。临时会话将结束并移除；定时计划删除后，后续会话清理失败也不会恢复计划。</p>
+            <div class="project-delete-preserved"><strong>原项目代码目录保留</strong><code id="project-delete-cwd"></code></div>
+          </div>
+          <section id="project-delete-worktree-option" class="project-delete-worktree-option" hidden>
+            <label class="project-delete-choice"><input id="project-delete-worktrees" type="checkbox" aria-describedby="project-delete-worktree-help"><span id="project-delete-worktree-label">同时删除关联受管 worktree</span></label>
+            <p id="project-delete-worktree-help" class="hint"></p>
+            <ul id="project-delete-paths" hidden></ul>
+          </section>
+          <p class="hint project-delete-outcome">全部删除确认成功后才移除 Project 登记；部分失败时保留 Project 和剩余项，已删除的内容不会恢复。</p>
+          <p id="project-delete-note" class="status" role="status" aria-live="polite"></p>
+        </div>
+        <div class="project-delete-footer"><button id="project-delete-cancel" class="drawer-cancel" type="button" autofocus>取消</button><button id="project-delete-confirm" class="action danger" type="button" disabled>删除 Project 及关联会话</button></div>
+      </div>
+    </dialog>
+
     <dialog id="project-drawer" class="editor-drawer" aria-labelledby="project-editor-title">
       <form id="project-editor" class="card-form drawer-form workspace-form" hidden>
         <div class="drawer-head"><div><p class="eyebrow">PROJECT</p><h3 id="project-editor-title">添加 Project</h3></div><button id="project-close" class="drawer-close" type="button" aria-label="关闭添加 Project 表单">×</button></div>
@@ -222,7 +253,11 @@
         <button type="button" id="session-filter-reset" class="refresh">重置</button>
       </form>
       <p id="session-search-help" class="hint">搜索名称、标题和预览中的连续文本，英文区分大小写；与当前时间、归档等筛选共同生效。Lazy 不支持搜索。</p>
-      <div class="session-layout"><label>布局 <select id="session-layout" data-session-layout="session" aria-label="普通会话布局"><option value="compact">紧凑</option><option value="project">本页按项目分组</option></select></label><span id="session-group-note" class="hint" data-session-group-note="session" hidden>仅组织当前页，组内保持当前排序；同一项目可能出现在其他页。</span></div>
+      <div class="session-layout">
+        <label>布局 <select id="session-layout" data-session-layout="session" aria-label="普通会话布局"><option value="compact">紧凑</option><option value="project">本页按项目分组</option><option value="chat">本页按聊天分组</option></select></label>
+        <div id="session-group-actions" class="session-group-actions" role="group" aria-label="普通会话分组操作" hidden><button id="session-groups-expand" type="button" disabled>全部展开</button><button id="session-groups-collapse" type="button" disabled>全部折叠</button></div>
+        <span id="session-group-note" class="hint" data-session-group-note="session" hidden>仅组织当前页，组内保持当前排序；同一分组可能出现在其他页。</span>
+      </div>
       <p id="sessions-empty" class="hint" hidden>当前筛选范围内没有会话，可调整关键词、时间或归档等条件。</p>
       <p id="sessions-lazy-notice" class="hint" hidden>Lazy 会话尚未在 Codex 创建，按 Netizen 登记时间排序；创建时间和更新时间筛选不适用。</p>
       <p id="sessions-identity-notice" class="hint" hidden>按指定会话 ID 筛选；未找到时可切换会话状态。</p>
@@ -255,7 +290,11 @@
           <button type="submit">筛选</button>
           <button type="button" id="side-filter-reset" class="refresh">重置</button>
         </form>
-        <div class="session-layout"><label>布局 <select id="side-layout" data-session-layout="side" aria-label="临时会话布局"><option value="compact">紧凑</option><option value="project">本页按项目分组</option></select></label><span id="side-group-note" class="hint" data-session-group-note="side" hidden>仅组织当前页，组内保持当前排序；同一项目可能出现在其他页。</span></div>
+        <div class="session-layout">
+          <label>布局 <select id="side-layout" data-session-layout="side" aria-label="临时会话布局"><option value="compact">紧凑</option><option value="project">本页按项目分组</option><option value="chat">本页按聊天分组</option></select></label>
+          <div id="side-group-actions" class="session-group-actions" role="group" aria-label="临时会话分组操作" hidden><button id="side-groups-expand" type="button" disabled>全部展开</button><button id="side-groups-collapse" type="button" disabled>全部折叠</button></div>
+          <span id="side-group-note" class="hint" data-session-group-note="side" hidden>仅组织当前页，组内保持当前排序；同一分组可能出现在其他页。</span>
+        </div>
         <div class="table-wrap"><table><thead><tr>
           <th>飞书位置</th><th>来源会话</th><th>会话状态</th><th>运行态</th><th>Project</th>
           <th aria-sort="none"><button type="button" class="session-sort" data-session-sort="side" data-sort-by="createdAt" aria-label="按创建时间由近及远排序" title="临时会话创建时间；按浏览器本地时区显示">创建时间<span class="sort-indicator" aria-hidden="true">↕</span></button></th>
@@ -661,11 +700,20 @@
       </div>
       <div id="system-notifications" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-notifications" hidden>
         <h3>提问通知</h3>
-        <p class="defaults-help">默认关闭。开启后，每张新问题卡都会 @ 本轮任务发起人；不影响问题卡显示和回答，与过程卡及结束提醒开关独立。</p>
-        <form id="question-notifications-form" class="card-form">
+        <p class="defaults-help">设置 Agent 提问时的 @ 提醒，与过程卡及结束提醒开关独立，不影响问题卡显示和回答。</p>
+        <form id="question-notifications-form" class="card-form question-notifications-form">
           <fieldset id="question-notifications-fields" disabled>
-            <label><input id="question-notifications-enabled" type="checkbox">提问时 @ 发起人</label>
-            <p class="defaults-field-help">无明确发起人时不提醒。提醒不表示任务一定暂停等待回答。</p>
+            <label class="question-notifications-option">
+              <span class="question-notifications-copy">
+                <span id="question-notifications-label" class="question-notifications-title">提问时 @ 发起人</span>
+                <span id="question-notifications-description">开启后，每张新问题卡都会 @ 本轮任务发起人。</span>
+              </span>
+              <span class="question-notifications-switch">
+                <input id="question-notifications-enabled" type="checkbox" role="switch" aria-labelledby="question-notifications-label" aria-describedby="question-notifications-description question-notifications-help">
+                <span class="question-notifications-track" aria-hidden="true"></span>
+              </span>
+            </label>
+            <p id="question-notifications-help" class="question-notifications-help">默认关闭。无明确发起人时不提醒；提醒不代表任务会暂停等待回答。</p>
           </fieldset>
           <div class="session-access-footer">
             <p id="question-notifications-note" class="defaults-field-help" role="status"></p>

@@ -166,6 +166,36 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay["code"], "stale_or_consumed")
         self.assertEqual([call for call in self.runtime.calls if call[0] == "delete"], delete_calls)
 
+    async def test_repreview_refreshes_inventory_and_choice_with_one_use_grants(self) -> None:
+        session = await self.login()
+        action = await self.preview_action(session)
+        with patch.object(self.management, "preview_project_delete", wraps=self.management.preview_project_delete) as query:
+            for count, choice in enumerate((False, True, False), start=1):
+                self.new_binding()
+                before = self.store.preview_project_delete("test")
+                payload = web_fixture._action_payload(action, deleteWorktrees=choice)
+                status, _, preview = await self.json_post("/api/v1/projects/delete-preview", session, payload)
+                self.assertEqual(status, 200, preview)
+                self.assertEqual(preview["sessionCount"], count)
+                self.assertEqual(preview["deleteWorktrees"], choice)
+                self.assertEqual(query.call_args.kwargs["delete_worktrees"], choice)
+                self.assertEqual(query.call_args.kwargs["expected_revision"], 1)
+                self.assertEqual(self.store.preview_project_delete("test"), before)
+                refreshed = preview["actions"]["previewDelete"]
+                self.assertNotEqual(refreshed["actionToken"], action["actionToken"])
+                status, _, replay = await self.json_post("/api/v1/projects/delete-preview", session, payload)
+                self.assertEqual(status, 409, replay)
+                self.assertEqual(replay["code"], "stale_or_consumed")
+                self.assertEqual(query.await_count, count)
+                action = refreshed
+        status, _, result = await self.json_post(
+            "/api/v1/projects/delete", session, web_fixture._action_payload(preview["actions"]["delete"]),
+        )
+        self.assertEqual(status, 200, result)
+        self.assertTrue(result["deleted"])
+        self.assertFalse(result["deleteWorktrees"])
+        self.assertEqual(result["deletedSessionCount"], 3)
+
     async def test_stale_same_count_inventory_rejected_before_project_disable(self) -> None:
         session = await self.login()
         native = self.new_binding("native-original")
@@ -208,17 +238,23 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 409, result)
         self.assertNotIn("actions", result)
         self.assertEqual(self.runtime.calls, [("project-side-snapshots", "test")])
-        delete_action = await self.delete_action(session)
-        self.registry.set_enabled(alias="test", enabled=True, expected_revision=2)
-        self.runtime.calls.clear()
-        status, _, result = await self.json_post(
-            "/api/v1/projects/delete", session,
-            web_fixture._action_payload(delete_action),
+        status, _, preview = await self.json_post(
+            "/api/v1/projects/delete-preview", session,
+            web_fixture._action_payload(await self.preview_action(session)),
         )
-        self.assertEqual(status, 409, result)
-        self.assertTrue(self.store.get_project("test").enabled)
-        self.assertEqual(self.store.get_project("test").revision, 3)
-        self.assertEqual(self.runtime.calls, [("project-side-snapshots", "test")])
+        self.assertEqual(status, 200, preview)
+        self.registry.set_enabled(alias="test", enabled=True, expected_revision=2)
+        for route, key in (("delete-preview", "previewDelete"), ("delete", "delete")):
+            self.runtime.calls.clear()
+            status, _, result = await self.json_post(
+                f"/api/v1/projects/{route}", session,
+                web_fixture._action_payload(preview["actions"][key]),
+            )
+            self.assertEqual(status, 409, result)
+            self.assertNotIn("actions", result)
+            self.assertTrue(self.store.get_project("test").enabled)
+            self.assertEqual(self.store.get_project("test").revision, 3)
+            self.assertEqual(self.runtime.calls, [("project-side-snapshots", "test")])
 
     async def assert_incomplete(self, error: Exception, expected_code: str) -> None:
         first = self.new_binding("native-first")
