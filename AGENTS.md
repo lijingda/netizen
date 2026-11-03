@@ -43,6 +43,10 @@ their cited ADRs before changing that boundary.
   [ADR 0067](docs/adr/0067-name-threads-with-private-ephemeral-forks.md).
 - Message provenance, mention catch-up, quotes, and images:
   [input preparation](docs/design.md#消息输入准备).
+  Input originals and Admin attachment deletion follow
+  [ADR 0090](docs/adr/0090-retain-input-attachments-independently-of-native-execution.md):
+  complete publication, exact local ownership, and manual deletion independent
+  of native acceptance; never add receipt locks or infer attachment history.
   Shared native question cards use target-specific Binding/Side input admission
   ([ADR 0071](docs/adr/0071-answer-native-questions-through-binding-input.md),
   [ADR 0072](docs/adr/0072-share-question-interaction-across-binding-and-side.md)).

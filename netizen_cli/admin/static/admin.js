@@ -72,8 +72,10 @@ function expireAdminSession() {
   window.NetizenIdentity?.expire();
   window.NetizenSessionAccess?.expire();
   window.NetizenProgressCard?.expire();
+  window.NetizenQuestionNotifications?.expire();
   window.NetizenWorktrees?.expire();
   window.NetizenProjectFiles?.expire();
+  closeLatestAnswer();
   setStatus("登录已过期，请重新登录。", true);
 }
 
@@ -719,6 +721,7 @@ async function loadProjects(cursor = undefined) {
     cell(row, `${project.bindingCount}（Lazy ${project.lazyBindingCount}）`);
     cell(row, project.lastActivatedAt);
     const actions = actionsCell(row);
+    if (!project.deleting) actions.append(actionButton("查看会话", () => openProjectSessions(project.alias)));
     if (!project.deleting) actions.append(actionButton("查看文件", () => window.NetizenProjectFiles?.open(project)));
     if (project.actions.setEnabled) {
       actions.append(actionButton(
@@ -1230,6 +1233,8 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
     if (name === "state" && values.length === 0) query.set(name, "all");
   }
   if (form.id === "session-filter") {
+    const search = query.get("searchTerm")?.trim();
+    if (search) query.set("searchTerm", search); else query.delete("searchTerm");
     // Exact links remain targeted while the user changes state or date filters.
     const identity = new URLSearchParams(state.sessionPage?.query || "").get("identity");
     if (identity) query.set("identity", identity);
@@ -1999,6 +2004,7 @@ function renderSessionSort(kind) {
 
 function updateSessionDateFilters() {
   const lazy = document.querySelector("#session-inventory-state").value === "lazy";
+  document.querySelector("#session-search").disabled = lazy;
   for (const root of document.querySelector("#session-filter").querySelectorAll("[data-time-range]")) {
     if (lazy) timeRangeControllers.get(root)?.cancel({ restoreFocus: false });
     root.disabled = lazy;
@@ -2046,9 +2052,11 @@ function resetSessionFilters(kind = "session") {
   for (const root of form.querySelectorAll("[data-time-range]")) {
     timeRangeControllers.get(root)?.reset();
   }
-  const page = sessionFilterPage(kind, { resetSort: true });
+  const page = kind === "session" ? firstSessionPage(defaultSessionQuery().toString())
+    : sessionFilterPage(kind, { resetSort: true });
   const query = new URLSearchParams(page.query);
   query.delete("identity");
+  if (kind === "session") restoreSessionFilterControls(kind, query);
   page.query = query.toString();
   return refresh("sessions", page);
 }
@@ -2070,8 +2078,12 @@ async function loadSessionChatLabels(kind, data, page, request) {
     && state[name] === data && state[`${kind}Page`] === page;
   if (!isCurrent()) return;
   const body = document.querySelector(`#${name}-body`);
-  const targets = data.items.flatMap((item, index) => item.chatLabelResolved || !item.chatId
-    ? [] : [{ item, cell: body.children[index].querySelector(".session-location") }]);
+  const identity = kind === "side" ? "sideId" : "bindingId";
+  const rows = new Map([...body.children].filter((row) => row.dataset[identity])
+    .map((row) => [row.dataset[identity], row]));
+  const targets = data.items.flatMap((item) => item.chatLabelResolved || !item.chatId
+    ? [] : [{ item, cell: rows.get(item[identity])?.querySelector(".session-location") }])
+    .filter(({ cell }) => cell);
   if (!targets.length) return;
   const showIdentity = kind !== "side";
   const finish = () => {
@@ -2148,10 +2160,44 @@ async function loadSessions(page = state.sessionPage) {
   return loadSessionPage("session", page, renderSessions);
 }
 
+function applySessionLayout(kind) {
+  const name = kind === "side" ? "sides" : "sessions";
+  const identity = kind === "side" ? "sideId" : "bindingId";
+  const body = document.querySelector(`#${name}-body`);
+  const grouped = document.querySelector(`#${kind}-layout`).value === "project";
+  document.querySelector(`#${kind}-group-note`).hidden = !grouped;
+  const rows = new Map([...body.children].filter((row) => row.dataset[identity])
+    .map((row) => [row.dataset[identity], row]));
+  const items = state[name]?.items || [];
+  const groups = new Map();
+  for (const item of items) {
+    const key = grouped ? item.projectAlias || "项目不可用" : "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  body.replaceChildren();
+  for (const [project, group] of groups) {
+    if (grouped) {
+      const heading = document.createElement("tr");
+      heading.className = "session-project-group";
+      const label = document.createElement("th");
+      label.setAttribute("colspan", kind === "side" ? "8" : "10");
+      label.textContent = project;
+      heading.append(label);
+      body.append(heading);
+    }
+    for (const item of group) {
+      const row = rows.get(item[identity]);
+      if (row) body.append(row);
+    }
+  }
+}
+
 function renderSessions(data) {
   const query = new URLSearchParams(state.sessionPage.query || "");
   document.querySelector("#sessions-lazy-notice").hidden = query.get("inventoryState") !== "lazy";
   document.querySelector("#sessions-identity-notice").hidden = !query.has("identity");
+  document.querySelector("#sessions-empty").hidden = data.items.length > 0;
   const body = document.querySelector("#sessions-body");
   body.replaceChildren();
   for (const session of data.items) {
@@ -2188,6 +2234,62 @@ function renderSessions(data) {
     wireSessionActions(actions, session);
     body.append(row);
   }
+  applySessionLayout("session");
+}
+
+let latestAnswerView = null;
+let latestAnswerRequest = 0;
+const answerNode = (name) => document.querySelector(`#session-answer-${name}`);
+
+function closeLatestAnswer() {
+  latestAnswerRequest += 1;
+  const previous = latestAnswerView;
+  latestAnswerView = null;
+  if (answerNode("drawer").open) answerNode("drawer").close();
+  if (!state.authExpired && previous?.returnFocus?.isConnected !== false) previous?.returnFocus?.focus();
+}
+
+async function openLatestAnswer(session) {
+  if (state.authExpired || !session.canReadLatestAnswer) return;
+  latestAnswerView = { session, returnFocus: document.activeElement };
+  answerNode("title").textContent = "最近一轮回答";
+  answerNode("identity").textContent = `${session.nativeTitle || "未命名会话"} · ${session.shortId}`;
+  answerNode("content").textContent = "";
+  answerNode("content").hidden = true;
+  answerNode("metadata").textContent = "";
+  answerNode("drawer").showModal();
+  await refreshLatestAnswer();
+}
+
+async function refreshLatestAnswer() {
+  const view = latestAnswerView;
+  if (!view || state.authExpired) return;
+  const request = ++latestAnswerRequest;
+  const isCurrent = () => latestAnswerView === view && request === latestAnswerRequest && !state.authExpired;
+  answerNode("refresh").disabled = true;
+  answerNode("note").textContent = "正在读取最近一轮…";
+  answerNode("note").classList.toggle("error", false);
+  try {
+    const query = new URLSearchParams({ bindingId: view.session.bindingId, threadId: view.session.nativeThreadId });
+    const result = await api(`/api/v1/sessions/latest-answer?${query}`);
+    if (!isCurrent()) return;
+    const status = { completed: "已完成", interrupted: "已停止", failed: "失败", inProgress: "运行中" }[result.status] || "状态未知";
+    answerNode("note").textContent = result.turnId
+      ? `本轮${status}${result.answer ? "" : "，暂无最终回答。"}` : "会话尚无执行轮次。";
+    answerNode("content").textContent = result.answer || "";
+    answerNode("content").hidden = !result.answer;
+    const metadata = [`读取于 ${sessionDateLabel(result.readAt)}`];
+    if (result.turnId) metadata.unshift(`轮次 ${result.turnId.slice(0, 12)}`);
+    if (result.startedAt != null) metadata.push(`开始 ${nativeSessionDateLabel(result.startedAt)}`);
+    if (result.completedAt != null) metadata.push(`完成 ${nativeSessionDateLabel(result.completedAt)}`);
+    answerNode("metadata").textContent = metadata.join(" · ");
+  } catch (error) {
+    if (!isCurrent()) return;
+    answerNode("note").textContent = `${error.message}${answerNode("metadata").textContent ? " 当前仍显示上次读取的快照。" : ""}`;
+    answerNode("note").classList.toggle("error", true);
+  } finally {
+    if (isCurrent()) answerNode("refresh").disabled = false;
+  }
 }
 
 function wireSessionActions(actions, session) {
@@ -2208,6 +2310,7 @@ function wireSessionActions(actions, session) {
   });
   const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
   secondary.append(schedule);
+  if (session.canReadLatestAnswer) secondary.append(actionButton("查看最近回答", () => openLatestAnswer(session)));
   if (a.configure) {
     const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
     actions.append(button);
@@ -2278,6 +2381,7 @@ function renderSides(data) {
     if (side.actions.close) actions.append(actionButton("结束临时会话", () => window.confirm("结束此临时会话？结束后无法恢复。") && mutate("/api/v1/side-topics/close", side.actions.close), true));
     body.append(row);
   }
+  applySessionLayout("side");
 }
 
 function resetSideFilters() {
@@ -3221,7 +3325,7 @@ function confirmDiscardChanges(changed) {
 function hasUnsavedEditors() {
   return projectEditorHasChanges() || sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
     || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty())
-    || Boolean(window.NetizenProgressCard?.dirty())
+    || Boolean(window.NetizenProgressCard?.dirty() || window.NetizenQuestionNotifications?.dirty())
     || Boolean(window.NetizenWorktrees?.dirty());
 }
 
@@ -3229,7 +3333,7 @@ function hasUnsavedEditors() {
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
 function confirmDiscardEditors() {
   if (projectEditor?.saving || sessionSettingsEditor?.saving || sessionRenameEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
-      || window.NetizenSessionAccess?.busy() || window.NetizenProgressCard?.busy()
+      || window.NetizenSessionAccess?.busy() || window.NetizenProgressCard?.busy() || window.NetizenQuestionNotifications?.busy()
       || window.NetizenWorktrees?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
   closeProjectEditor({ confirmed: true });
@@ -3240,6 +3344,7 @@ function confirmDiscardEditors() {
   cancelScheduleSelection({ confirmed: true });
   window.NetizenSessionAccess?.discard();
   window.NetizenProgressCard?.discard();
+  window.NetizenQuestionNotifications?.discard();
   window.NetizenWorktrees?.discard();
   return true;
 }
@@ -4554,7 +4659,7 @@ async function moveScheduleRunsPage(direction) {
 // keyset cursors stay in this document and are never restored as server facts.
 const adminPagePaths = { projects: "/projects", worktrees: "/worktrees", schedules: "/schedules", defaults: "/defaults",
   updates: "/maintenance", system: "/system" };
-const sessionUrlKeys = ["project", "scopeKind", "inventoryState", "current", "chatId", "topicId", "identity",
+const sessionUrlKeys = ["project", "scopeKind", "inventoryState", "searchTerm", "current", "chatId", "topicId", "identity",
   "createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange", "pageSize", "sortBy", "sortDirection"];
 const sideUrlKeys = ["project", "state", "chatId", "createdFrom", "createdBefore", "createdRange", "pageSize", "sortBy", "sortDirection"];
 let navigationReady = false;
@@ -4577,6 +4682,7 @@ function pageQuery(tab, sessionTab, raw = "") {
       if (!["active", "archived", "lazy"].includes(query.get(field))) query.set(field, "active");
       else query.set(field, query.get(field));
       if (query.get(field) === "lazy") {
+        query.delete("searchTerm");
         for (const key of ["createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange"]) query.delete(key);
         query.set("sortBy", "createdAt");
       } else if (!query.has("updatedFrom") && !query.has("updatedBefore") && query.get("updatedRange") !== "all") {
@@ -4598,6 +4704,18 @@ function pageQuery(tab, sessionTab, raw = "") {
   }
   if (tab === "schedules" && !query.has("ended")) query.set("ended", "false");
   return query;
+}
+
+function defaultSessionQuery() {
+  return pageQuery("sessions", "ordinary");
+}
+
+function openProjectSessions(alias) {
+  if (state.authExpired || !confirmDiscardEditors()) return;
+  const query = defaultSessionQuery();
+  query.set("project", alias);
+  restorePageFilters({ tab: "sessions", sessionTab: "ordinary", query });
+  return selectTab("sessions", "ordinary", { preserveEditors: true });
 }
 
 function pageUrl(tab, sessionTab = state.sessionTab, raw = "") {
@@ -4659,29 +4777,35 @@ function readPageLocation() {
   return { tab, sessionTab, query: pageQuery(tab, sessionTab, query) };
 }
 
+function restoreSessionFilterControls(kind, query) {
+  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+  for (const [name, filter] of filters) filter.setValues(query.getAll(name).filter((value) => value !== "all"));
+  if (kind === "side") ensureSideChatFilter(); else ensureSessionChatFilter();
+  const picker = kind === "side" ? sideChatPicker : sessionChatPicker;
+  const chatId = query.get("chatId");
+  picker.setSelection(chatId ? { chatId, name: chatId } : null);
+  document.querySelector(`#${kind}-chat-filter`).value = chatId || "";
+  document.querySelector(`#${kind}-page-size`).value = query.get("pageSize");
+  for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
+    const field = root.dataset.timeRangeField || "created";
+    timeRangeControllers.get(root).setBounds(query.get(`${field}From`) || "", query.get(`${field}Before`) || "", query.get(`${field}Range`) || "custom");
+  }
+  if (kind === "session") {
+    document.querySelector("#session-inventory-state").value = query.get("inventoryState");
+    document.querySelector("#session-search").value = query.get("searchTerm") || "";
+    updateSessionDateFilters();
+  }
+}
+
 function restorePageFilters(route) {
   const { tab, sessionTab, query } = route;
   if (tab === "sessions") {
     const kind = sessionTab === "temporary" ? "side" : "session";
-    const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
-    for (const [name, filter] of filters) filter.setValues(query.getAll(name).filter((value) => value !== "all"));
-    if (kind === "side") ensureSideChatFilter(); else ensureSessionChatFilter();
-    const picker = kind === "side" ? sideChatPicker : sessionChatPicker;
-    const chatId = query.get("chatId");
-    picker.setSelection(chatId ? { chatId, name: chatId } : null);
-    document.querySelector(`#${kind}-chat-filter`).value = chatId || "";
-    document.querySelector(`#${kind}-page-size`).value = query.get("pageSize");
-    for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
-      const field = root.dataset.timeRangeField || "created";
-      timeRangeControllers.get(root).setBounds(query.get(`${field}From`) || "", query.get(`${field}Before`) || "", query.get(`${field}Range`) || "custom");
-    }
-    if (kind === "session") {
-      document.querySelector("#session-inventory-state").value = query.get("inventoryState");
-      updateSessionDateFilters();
-    }
+    restoreSessionFilterControls(kind, query);
     state[`${kind}Page`] = firstSessionPage(query.toString());
     const name = kind === "side" ? "sides" : "sessions";
     state[name] = null;
+    if (kind === "session") document.querySelector("#sessions-empty").hidden = true;
     state[`${kind}RefreshedAt`] = null;
     document.querySelector(`#${name}-body`).replaceChildren();
     renderSessionPagination(kind);
@@ -4757,7 +4881,7 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "defaults") await loadDefaults();
     if (tab === "system") {
       const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load(),
-        window.NetizenProgressCard?.load()]);
+        window.NetizenProgressCard?.load(), window.NetizenQuestionNotifications?.load()]);
       if (results.includes(false)) return false;
     }
     if (state.authExpired) return false;
@@ -4812,6 +4936,7 @@ function selectTab(name, sessionTab = state.sessionTab || "ordinary", { preserve
   window.NetizenSelect?.close();
   window.NetizenIdentity?.closePanel?.();
   closeScheduleDetail();
+  closeLatestAnswer();
   state.tab = name;
   state.sessionTab = sessionTab;
   invalidateSessionListRequest();
@@ -4893,6 +5018,13 @@ for (const button of document.querySelectorAll("[data-project-mode]")) {
   button.addEventListener("click", () => selectProjectMode(button.dataset.projectMode));
 }
 
+answerNode("close").addEventListener("click", closeLatestAnswer);
+answerNode("drawer").addEventListener("cancel", (event) => { event.preventDefault(); closeLatestAnswer(); });
+answerNode("refresh").addEventListener("click", refreshLatestAnswer);
+for (const control of document.querySelectorAll("[data-session-layout]")) {
+  control.addEventListener("change", () => applySessionLayout(control.dataset.sessionLayout));
+}
+
 document.querySelector("#session-inventory-state").addEventListener("change", updateSessionDateFilters);
 document.querySelector("#session-filter").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -4912,7 +5044,10 @@ document.querySelector("#side-page-size").addEventListener("change", () => {
 document.querySelector("#projects-previous").addEventListener("click", () => moveListPage("projects", "previous"));
 document.querySelector("#projects-next").addEventListener("click", () => moveListPage("projects", "next"));
 window.NetizenWorktrees?.init({ api, actionPayload, setStatus, queryProjectOptions, isExpired: () => state.authExpired });
-window.NetizenProjectFiles?.init({ api, isExpired: () => state.authExpired });
+const fileBrowser = window.NetizenFileBrowser?.create({ container: document.querySelector("#file-browser-drawer"), api, isExpired: () => state.authExpired });
+window.NetizenProjectFiles?.init({ browser: fileBrowser });
+window.NetizenAttachmentFiles?.init({ browser: fileBrowser, api, isExpired: () => state.authExpired });
+document.querySelector("#attachment-files-open")?.addEventListener("click", () => window.NetizenAttachmentFiles?.open());
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-previous").addEventListener("click", () => moveSidePage("previous"));

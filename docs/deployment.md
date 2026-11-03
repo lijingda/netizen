@@ -64,6 +64,9 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
   lark-app/config.json                       # 固定 netizen profile
   credentials/admin-user-tokens.json         # 当前管理员用户凭证；私有，跨重启保留
   worktrees/                                 # 默认受管 checkout 根；可在 Admin 改以后新建位置
+  attachments/                              # 按需创建的私有输入原件目录；无全局初始化标记
+    .staging/                               # 每次输入独立准备；旧残留不在启动时扫描
+    retained/                               # 已发布原件；Admin 单文件人工删除
   state/
     admin-users.json                         # 当前应用的管理员名单与展示快照
     channel.sqlite3[-wal|-shm|-journal]
@@ -92,6 +95,7 @@ remove 默认仅解除系统服务及自启，保留数据；--purge 先展示�
 清单，永不递归删除 root／home，不删除未知文件、Project、Worktree 内容或共享 Codex 状态。
 purge 删除 Channel 数据库后受管工作区登记也消失；磁盘目录保留不等于可自动恢复登记，
 重新初始化不会收编这些目录，清理前应自行保存必要的路径与成果。
+输入附件原件也保留，不纳入递归 purge；需要清理时可先使用 Admin“文件附件”。
 名单、用户凭证及遗留 `credentials/admin-web-secret` 均属于精确 purge 清单；普通
 setup/start/update 不自动删除遗留 secret，也不再生成或读取它。
 移除实例不卸载 Python 环境中的共享包。
@@ -1305,6 +1309,62 @@ override key。失败停止并保留已知自建 Thread ID，不重试未知清�
 同时验证双 Admin 登录与 root 标识、端口首次实际分配及固化、端口冲突不漂移、显式
 端口、缺管理员的后台启动拒绝、服务 profile 导出别的 root 后仍重申绑定。Project、用户 Codex
 状态与外来文件不得因其他实例生命周期而被修改。
+
+### 2026-11-03 输入附件、Admin 会话与通知验收
+
+本次没有升级 SDK、部署服务或发布程序。固定 Codex SDK 0.163.0 / Channel SDK 1.4.0。
+原生只读历史用途扩展见 [ADR 0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)，
+附件资源边界见 [ADR 0090](adr/0090-retain-input-attachments-independently-of-native-execution.md)。
+
+可重跑的隔离原生探针使用临时 HOME/CODEX_HOME、真实 bundled App Server 和 loopback
+mock provider，不读取真实用户历史、不使用真实模型账号、不发飞书消息：
+
+```bash
+.venv/bin/python scripts/probe_admin_sessions.py --output /tmp/netizen-admin-sessions.json
+.venv/bin/python scripts/probe_input_attachments.py --output /tmp/netizen-input-attachments.json
+```
+
+Admin 原生探针验证 paginated/legacy 最新完整轮、最新空回答不回溯、已归档和冷进程
+归档读取、零输入精确拒绝与缺失 Thread 区分、搜索大小写；105 个原生临时会话中仅一个
+属于本实例时，确实跨两个原生页才命中，生产管理查询约 0.038 秒。这是本机合成目录
+结果，不是生产长历史、任意规模或最坏延迟承诺。
+附件读取验证 read-only/workspace-write 两种预设下新线程、冷恢复及持久分支，六种
+场景均从真实 exec_command 结果确认项目外合成原件可读，没有权限覆盖；用户自定义
+拒读策略仍按原生权限处理。固定 SDK 归一化样本验证独立 file、普通群/话题中的
+`post.files + @`、准确引用及无 @ 拒绝，不能据此声称所有人工客户端均可构造这些事件。
+
+固定 SDK 下载在完整缓冲后才返回 bytes，没有流式/下载前可信大小/字节硬上限。
+loopback 16 MiB 合成响应的 Python 分配峰值约 32.3 MiB，两并发约 48.2 MiB；这不代表
+RSS 或保证倍数。附件以本条数量、后验大小和有限批次/真实下载额度控制资源，
+超时/取消不提前释放仍工作的下载额度。按后续确认的简化方案，不设置累计容量配额，
+不在新输入时扫描旧附件；实际写盘失败按整条输入失败处理。输入限制、取消收尾、
+历史残留不阻塞新输入和写盘失败时只清理本次文件均有行为测试。
+
+隔离 Chromium 使用实际 Admin 认证、HTTP 和静态资源、合成项目/附件/会话，验证：
+
+- 1440/390/320 像素下共用文件浏览，Project/worktree 仍只读，附件按层展开、文本预览，
+  PDF 不支持预览仍可删除，最后原件删除后批次消失，认证失效清空内容；删除结果未知可刷新恢复。
+- 1440/320 像素下 Enter 单次搜索、失败保持成功查询/行、共享 Project 默认导航、普通/Side
+  本页分组不增加目录请求、异步补名不串位；普通/归档最近回答、无回答、失败和关闭后的迟到响应。
+- 上述浏览器路径未发现 JS/CSP 错误或外部请求。保存开关、提及序列化、既有结束提醒资格、
+  新问题逐卡提醒与重绘去重由 SDK/运行时/UI 行为测试覆盖。
+
+真实飞书桌面/手机客户端的附件 + @ 发送入口、问题卡实际提醒效果、飞书 WebView 和
+macOS 平台效果尚未验收；不得用 API 成功、浏览器窄屏或 mock provider 代替。
+按操作隔离简化附件目录后的工作区 `make check` 通过：3,963 项测试，15 项按平台或显式开关跳过；编译、依赖、
+SDK 兼容性检查均通过。隔离 wheel/sdist 构建及新 Admin 静态资源验证通过。后续候选版本
+仍按改动运行相应门禁；发布和部署由维护者单独安排。
+
+独立 review 发现 Admin 探针曾移除临时 HOME 覆盖，SDK 合并环境后会继承真实 HOME。
+已保留临时 HOME/CODEX_HOME 并完整重跑该探针，原生搜索和最近回答断言全部通过；
+上面的查询耗时取修正后的结果。未使用真实模型或读取生产会话目录。
+review 另补齐无正文自身 @ + 文件、仅顶层 `post.files` 的完整提交回归，以及最后原件
+删除后批次清理失败/中断的恢复覆盖；修复未新增原生接收确认或执行期删除锁。
+用户随后要求按操作隔离失败，独立设计 review 通过：取消全局附件标记、初始化回滚、
+进程级根身份缓存和启动恢复；按每次操作创建所需目录，本批记录保留准确文件证据。
+删除只确认目标文件，直接尽力收掉内部记录与空目录，不再搬回 staging 或以清理失败
+覆盖删除成功。专项覆盖目录创建半成品、写入与清理同时失败、损坏旧批次、空目录
+清理失败后浏览响应，以及附件路径不可用时普通服务正常启动。旧残留不会成为新操作前提。
 
 ### 已验证的兼容性结论
 

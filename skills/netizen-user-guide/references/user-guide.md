@@ -12,13 +12,13 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 | 查找命令和操作入口 | [完整命令索引](commands.md) |
 | 管理会话、Project、受管 worktree、默认配置和会话设置 | [会话与 Project](sessions.md) |
 | 让 agent 新建话题、查找或联系其他会话 | [会话协作](session-collaboration.md) |
-| 发送文本、引用、图片，回答提问或补充群聊上下文 | [消息输入](messages.md) |
+| 发送文本、引用、图片和文件，回答提问或补充群聊上下文 | [消息输入](messages.md) |
 | 查看执行进展、阶段性答案和本轮文件 | [运行反馈与文件](feedback-and-files.md) |
 | 让 Agent 做完后省略结果回复 | [静默结束本轮](feedback-and-files.md#静默结束本轮) |
 | 查看状态、账号额度，压缩或停止任务 | [状态与控制](status-and-control.md) |
 | 创建、修改、暂停或立即运行定时计划 | [定时任务](scheduled-tasks.md) |
 | 创建持久分支、临时讨论或持续推进目标 | [持久分支、Side 与 Goal](fork-side-goal.md) |
-| 跨聊天管理会话、管理员登录和实例维护 | [Admin Web](admin.md) |
+| 搜索和分组会话、查看最近回答、管理输入附件、管理员登录和实例维护 | [Admin Web](admin.md) |
 | 使用 Skills、登录 MCP 或比较 Codex App/CLI | [原生能力与宿主差异](native-capabilities.md) |
 | 排查使用问题 | [常见问题](faq.md) |
 

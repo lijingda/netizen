@@ -35,6 +35,9 @@ REQUIRED_WHEEL_FILES = frozenset({
     "netizen_cli/admin/static/index.html",
     "netizen_cli/admin/static/netizen.svg",
     "netizen_cli/admin/static/project-files.js",
+    "netizen_cli/admin/static/file-browser.js",
+    "netizen_cli/admin/static/attachment-files.js",
+    "netizen_cli/admin/static/question-notifications.js",
     "netizen_cli/admin/static/project-files.css",
     "netizen_cli/admin/static/vendor/ace/ace.js",
     "netizen_cli/admin/static/vendor/ace/mode-python.js",
@@ -135,6 +138,8 @@ def verify_sdist(path: Path, version: str, *, extract_to: Path | None = None) ->
             "netizen_cli/cli.py", "skills/netizen-lark/SKILL.md", "skills/netizen-user-guide/SKILL.md",
             "skills/netizen-runtime-guidance/SKILL.md",
         )}
+        required.update(f"{root}/{name}" for name in REQUIRED_WHEEL_FILES
+                        if name.startswith("netizen_cli/admin/static/"))
         if not required.issubset(names):
             raise DistributionError("sdist is missing package or build resources")
         metadata = archive.extractfile(f"{root}/PKG-INFO")

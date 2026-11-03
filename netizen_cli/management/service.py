@@ -13,6 +13,8 @@ from typing import Any, Literal, NoReturn
 
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .project_files import ProjectFileService
+from .attachment_files import AttachmentFileService
+from ..attachments import AttachmentStore
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .chat_directory import AvailableChat, AvailableChatPage, ChatDirectory, ChatDirectoryError
 from ..chat_targets import ValidatedChatTarget
@@ -51,6 +53,8 @@ from ..session_settings import SessionSettingsError
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
+    NativeLatestAnswer,
+    RuntimeClosed,
     NativeThreadCatalog,
     NativeThreadCatalogPage,
     NativeThreadCatalogState,
@@ -99,6 +103,7 @@ from ..worktrees.service import WorktreeService
 from ..worktrees.settings import WorktreeSettingsService
 from ..progress_card_config import ProgressCardConfigService
 from ..progress_card_settings import ProgressCardSettings
+from ..question_notifications import QuestionNotificationConfigService, QuestionNotificationSettings
 from ..sessions.policy import SessionAccessPolicy, SessionPolicyService
 
 
@@ -298,6 +303,7 @@ class SessionInventoryState(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class SessionQuery:
+    search_term: str | None = None
     local: BindingQuery = BindingQuery()
     inventory_state: SessionInventoryState = SessionInventoryState.ACTIVE
     sort_by: Literal["created_at", "updated_at"] = "updated_at"
@@ -750,6 +756,9 @@ class ManagementRuntimePort:
             use_state_db_only=use_state_db_only,
         )
 
+    async def latest_thread_answer_exact(self, thread_id: str) -> NativeLatestAnswer:
+        return await self.__runtime.latest_thread_answer(thread_id)
+
     async def thread_summary_exact(
         self, thread_id: str,
     ) -> NativeThreadMetadata:
@@ -785,10 +794,12 @@ class ManagementRuntimePort:
         sort_key: Literal["created_at", "updated_at"] = "updated_at",
         sort_direction: Literal["asc", "desc"] = "desc",
         deadline: float,
+        search_term: str | None = None,
     ) -> NativeThreadCatalogPage:
         return await self.__runtime.thread_catalog_page(
             archived=archived, cursor=cursor, limit=limit,
             sort_key=sort_key, sort_direction=sort_direction, deadline=deadline,
+            **({"search_term": search_term} if search_term is not None else {}),
         )
 
 
@@ -808,6 +819,8 @@ class InstanceManagementService:
         updates: UpdateService | None = None,
         root: Path | None = None,
         progress_card_config: ProgressCardConfigService | None = None,
+        attachment_store: AttachmentStore | None = None,
+        question_notification_config: QuestionNotificationConfigService | None = None,
     ) -> None:
         self._bindings = bindings
         self._projects = projects
@@ -815,6 +828,9 @@ class InstanceManagementService:
         self._scope_coordinator = scope_coordinator
         self._updates = updates or UpdateService(root=root)
         self._progress_card_config = progress_card_config or ProgressCardConfigService()
+        self._question_notification_config = (
+            question_notification_config or QuestionNotificationConfigService()
+        )
         self._chat_labels = (
             ChatLabelResolver(chat_labels) if chat_labels is not None else None
         )
@@ -829,12 +845,16 @@ class InstanceManagementService:
         self._summary_read_limiter = asyncio.Semaphore(
             _SESSION_SUMMARY_READ_CONCURRENCY
         )
-        self._summary_reads: set[asyncio.Task[NativeThreadMetadata]] = set()
+        self._summary_reads: set[asyncio.Task[NativeThreadMetadata | NativeLatestAnswer]] = set()
         self._summary_reads_closed = False
         self.schedules: ScheduleService | None = None
         self.defaults: SessionDefaultsService | None = None
         self.worktrees: WorktreeService | None = None
-        self.files = ProjectFileService(self)
+        file_io = BoundedBlockingIOExecutor(
+            max_workers=2, capacity=4, thread_name_prefix="netizen-file-preview",
+        )
+        self.files = ProjectFileService(self, io=file_io)
+        self.attachments = AttachmentFileService(attachment_store, file_io)
         self._default_creations: dict[str, asyncio.Future[CreatedBinding]] = {}
         self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
 
@@ -854,6 +874,32 @@ class InstanceManagementService:
             deadline=asyncio.get_running_loop().time() + 10,
         )
         return self.progress_card_settings()
+
+    def question_notification_settings(self) -> dict[str, Any]:
+        return self._question_notification_config.view()
+
+    @property
+    def question_mention_enabled(self) -> bool:
+        return self._question_notification_config.current.mention_initiator
+
+    async def update_question_notification_settings(
+        self, settings: QuestionNotificationSettings, *, expected_revision: str,
+    ) -> dict[str, Any]:
+        await self._blocking_io.submit(
+            self._question_notification_config.update, settings, expected_revision=expected_revision,
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
+        return self.question_notification_settings()
+
+    async def completion_thread_name(self, thread_id: str) -> str | None:
+        """One bounded exact read; a timed-out SDK worker still occupies its slot."""
+        try:
+            metadata = await self._read_thread_summary(
+                thread_id, deadline=asyncio.get_running_loop().time() + 1,
+            )
+            return metadata.name if metadata is not None else None
+        except Exception:
+            return None
 
     async def update_session_tool_access(
         self, service: SessionPolicyService, policy: SessionAccessPolicy, *, expected_revision: str,
@@ -1276,6 +1322,12 @@ class InstanceManagementService:
             if lower is not None and upper is not None and lower >= upper:
                 raise ValueError("Session time range is invalid")
 
+        if query.search_term is not None:
+            if not isinstance(query.search_term, str) or not query.search_term.strip():
+                raise ValueError("Session search term is invalid")
+            if query.inventory_state is SessionInventoryState.LAZY:
+                raise ValueError("Lazy sessions do not support native search")
+
         # Native timestamps belong to Codex, not the local Binding index. Lazy
         # has no native times and uses its separate registration-time order.
         local = replace(
@@ -1303,6 +1355,7 @@ class InstanceManagementService:
             sort_key=query.sort_by, sort_direction=query.sort_direction,
             created_from=query.created_from, created_before=query.created_before,
             updated_from=query.updated_from, updated_before=query.updated_before,
+            search_term=query.search_term,
         )
         native_state = NativeThreadCatalogState(query.inventory_state.value)
         return self._session_page(
@@ -1373,6 +1426,29 @@ class InstanceManagementService:
             active_binding_id=current_binding.id if current_binding is not None else None,
             has_lazy=has_lazy,
         )
+
+    async def latest_binding_answer(
+        self, binding_id: str, *, thread_id: str, deadline: float,
+    ) -> NativeLatestAnswer:
+        binding = self._bindings.get(binding_id)
+        if binding.native_thread_id is None or binding.native_thread_id != thread_id:
+            raise NativeThreadMissing("Exact native Thread identity is no longer available")
+        # The SDK request uses a synchronous worker. Count it after the caller
+        # times out, sharing the existing bounded exact-read budget.
+        async with asyncio.timeout_at(deadline):
+            await self._summary_read_limiter.acquire()
+            if self._summary_reads_closed or asyncio.get_running_loop().time() >= deadline:
+                self._summary_read_limiter.release()
+                raise RuntimeClosed("Native history reads are closed or expired")
+            task = asyncio.create_task(self._runtime.latest_thread_answer_exact(thread_id))
+            self._summary_reads.add(task)
+            task.add_done_callback(self._summary_read_finished)
+            answer = await asyncio.shield(task)
+        # A lifecycle operation may remove/change the exact target during a read.
+        current = self._bindings.get(binding_id)
+        if current.native_thread_id != thread_id or answer.thread_id != thread_id:
+            raise NativeThreadMissing("Exact native Thread identity changed during read")
+        return answer
 
     async def binding_metadata_exact(
         self, binding_id: str, *, deadline: float,
@@ -2229,16 +2305,9 @@ class InstanceManagementService:
 
         async def hydrate(thread_id: str) -> None:
             try:
-                async with asyncio.timeout_at(deadline):
-                    await self._summary_read_limiter.acquire()
-                    if self._summary_reads_closed or asyncio.get_running_loop().time() >= deadline:
-                        self._summary_read_limiter.release()
-                        return
-                    task = asyncio.create_task(self._runtime.thread_summary_exact(thread_id))
-                    self._summary_reads.add(task)
-                    task.add_done_callback(self._summary_read_finished)
-                    metadata = await asyncio.shield(task)
-                views[thread_id] = NativeThreadView(None, metadata)
+                metadata = await self._read_thread_summary(thread_id, deadline=deadline)
+                if metadata is not None:
+                    views[thread_id] = NativeThreadView(None, metadata)
             except Exception:
                 pass  # The exact row remains visible with unknown state and its ID.
 
@@ -2262,7 +2331,20 @@ class InstanceManagementService:
         ))
         return views
 
-    def _summary_read_finished(self, task: asyncio.Task[NativeThreadMetadata]) -> None:
+    async def _read_thread_summary(
+        self, thread_id: str, *, deadline: float,
+    ) -> NativeThreadMetadata | None:
+        async with asyncio.timeout_at(deadline):
+            await self._summary_read_limiter.acquire()
+            if self._summary_reads_closed or asyncio.get_running_loop().time() >= deadline:
+                self._summary_read_limiter.release()
+                return None
+            task = asyncio.create_task(self._runtime.thread_summary_exact(thread_id))
+            self._summary_reads.add(task)
+            task.add_done_callback(self._summary_read_finished)
+            return await asyncio.shield(task)
+
+    def _summary_read_finished(self, task: asyncio.Task[NativeThreadMetadata | NativeLatestAnswer]) -> None:
         self._summary_reads.discard(task)
         self._summary_read_limiter.release()
         if not task.cancelled():

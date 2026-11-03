@@ -34,6 +34,29 @@ class QuestionCardsTest(unittest.TestCase):
     def card(self):
         return render_question_card(self.target, self.request, 1)
 
+    def test_mentions_only_new_cards_and_never_enter_callback_context(self):
+        for index in range(len(self.request.questions)):
+            card = render_question_card(self.target, self.request, index, mention_user_id="ou_owner")
+            self.assertEqual(
+                [item["content"] for item in elements(card.card, "markdown")],
+                ["<at id=ou_owner></at>"],
+            )
+            context = decode_question_context(callback(card, "提交回答"))
+            redraw = render_question_context_card(context, notice="请重试")
+            self.assertNotIn("<at ", json.dumps(redraw.card))
+            answer = decode_question_answer(callback(card, "提交回答"), {
+                **form_values(card), "netizen_question_text": "Answer",
+            })
+            for followup in (
+                render_question_receipt_card(answer, sender_name="Answerer"),
+                render_question_submission_card(answer, sender_name="Answerer", accepted=True),
+                render_question_submission_card(answer, sender_name="Answerer", accepted=False),
+            ):
+                self.assertNotIn("<at ", json.dumps(followup.card))
+        for invalid in (None, "all", "ou_user></at><at id=all", "scheduled:plan"):
+            card = render_question_card(self.target, self.request, 0, mention_user_id=invalid)
+            self.assertNotIn("<at ", json.dumps(card.card))
+
     def test_free_answer_is_the_last_numbered_option_with_a_single_line_input(self):
         card = self.card()
         form = elements(card.card, "form")[0]

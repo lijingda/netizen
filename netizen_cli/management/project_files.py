@@ -29,10 +29,11 @@ class _Root:
 class ProjectFileService:
     """No index or content cache; cancelled reads keep their executor slot."""
 
-    def __init__(self, management: InstanceManagementService) -> None:
+    def __init__(self, management: InstanceManagementService, *,
+                 io: BoundedBlockingIOExecutor | None = None) -> None:
         self._management = management
         self._store = management._bindings
-        self._io = BoundedBlockingIOExecutor(
+        self._io = io or BoundedBlockingIOExecutor(
             max_workers=2, capacity=4, thread_name_prefix="netizen-file-preview",
         )
 

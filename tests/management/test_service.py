@@ -1010,6 +1010,93 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renamed.binding.id, first.id)
         self.assertEqual(self.store.active_binding(self.scope.key).id, replacement.id)
 
+    async def test_search_is_forwarded_for_every_sparse_native_page_and_lazy_rejects(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-match")
+        matching = NativeThreadMetadata("native-match", "SDK upgrade", "", updated_at=20)
+        unowned = NativeThreadMetadata("other-instance", "SDK discussion", "", updated_at=30)
+        with patch.object(self.runtime, "thread_catalog_page_exact", side_effect=[
+            NativeThreadCatalogPage((unowned,), "next"),
+            NativeThreadCatalogPage((matching,), None),
+        ]) as read:
+            result = await self.service.query_sessions(
+                query=SessionQuery(search_term="SDK", inventory_state=SessionInventoryState.ARCHIVED),
+                limit=1, deadline=asyncio.get_running_loop().time() + 2,
+            )
+        self.assertEqual([item.record.binding.id for item in result.items], [binding.id])
+        self.assertEqual([call.kwargs["search_term"] for call in read.call_args_list], ["SDK", "SDK"])
+        self.assertTrue(all(call.kwargs["archived"] for call in read.call_args_list))
+        self.assertIsNone(result.next_cursor)
+        with self.assertRaises(ValueError):
+            await self.service.query_sessions(
+                query=SessionQuery(search_term="SDK", inventory_state=SessionInventoryState.LAZY),
+                deadline=asyncio.get_running_loop().time() + 2,
+            )
+
+    async def test_latest_answer_validates_exact_binding_before_and_after_read(self) -> None:
+        from netizen_cli.runtime.contracts import NativeLatestAnswer
+        from netizen_cli.management.service import NativeThreadMissing
+
+        binding = await self._create()
+        result = NativeLatestAnswer("native", "turn", "completed", "answer")
+        read = AsyncMock(return_value=result)
+        self.runtime.latest_thread_answer_exact = read
+        deadline = asyncio.get_running_loop().time() + 2
+        with self.assertRaises(NativeThreadMissing):
+            await self.service.latest_binding_answer(binding.id, thread_id="native", deadline=deadline)
+        read.assert_not_awaited()
+        self.store.assign_native_thread_id(binding.id, "native")
+        with self.assertRaises(NativeThreadMissing):
+            await self.service.latest_binding_answer(binding.id, thread_id="wrong", deadline=deadline)
+        read.assert_not_awaited()
+        self.assertEqual(await self.service.latest_binding_answer(binding.id, thread_id="native", deadline=deadline), result)
+        read.assert_awaited_once_with("native")
+        read.return_value = replace(result, thread_id="wrong")
+        with self.assertRaises(NativeThreadMissing):
+            await self.service.latest_binding_answer(binding.id, thread_id="native", deadline=deadline)
+        read.return_value = result
+        read.side_effect = TimeoutError()
+        with self.assertRaises(TimeoutError):
+            await self.service.latest_binding_answer(binding.id, thread_id="native", deadline=deadline)
+
+    async def test_latest_answer_timeout_retains_native_worker_budget_until_it_finishes(self) -> None:
+        from netizen_cli.runtime.contracts import NativeLatestAnswer
+
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native")
+        entered, release = asyncio.Event(), asyncio.Event()
+        cancelled = []
+
+        async def read(_thread_id):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+            return NativeLatestAnswer("native", None, None, None)
+
+        self.runtime.latest_thread_answer_exact = AsyncMock(side_effect=read)
+        self.service._summary_read_limiter = asyncio.Semaphore(1)
+        first = asyncio.create_task(self.service.latest_binding_answer(
+            binding.id, thread_id="native", deadline=asyncio.get_running_loop().time() + 0.05,
+        ))
+        await asyncio.wait_for(entered.wait(), 1)
+        try:
+            with self.assertRaises(TimeoutError):
+                await first
+            with self.assertRaises(TimeoutError):
+                await self.service.latest_binding_answer(
+                    binding.id, thread_id="native", deadline=asyncio.get_running_loop().time() + 0.01,
+                )
+            self.assertEqual(cancelled, [])
+            self.assertEqual(self.runtime.latest_thread_answer_exact.await_count, 1)
+            self.assertEqual(len(self.service._summary_reads), 1)
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*self.service._summary_reads), 1)
+        self.assertEqual(len(self.service._summary_reads), 0)
+
     async def test_session_native_page_hydrates_only_selected_catalog_rows(self) -> None:
         materialized = await self._create()
         self.store.assign_native_thread_id(materialized.id, "native-active")
@@ -1604,6 +1691,35 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 results = await asyncio.gather(*queries)
         self.assertTrue(all(item.name == "Summary" for item in results))
         self.assertLessEqual(maximum, 4)
+
+    async def test_completion_name_timeout_keeps_exact_read_accounted_until_completion(self) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = False
+
+        async def read(thread_id):
+            nonlocal cancelled
+            self.assertEqual(thread_id, "completed-exact-thread")
+            entered.set()
+            try:
+                await release.wait()
+                return NativeThreadMetadata(thread_id, "Late name", "")
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+
+        with patch.object(self.runtime, "thread_summary_exact", side_effect=read) as reader:
+            query = asyncio.create_task(self.service.completion_thread_name("completed-exact-thread"))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                self.assertIsNone(await asyncio.wait_for(query, 2))
+                reader.assert_awaited_once_with("completed-exact-thread")
+                self.assertFalse(cancelled)
+                self.assertEqual(len(self.service._summary_reads), 1)
+            finally:
+                release.set()
+                await asyncio.gather(query, *self.service._summary_reads, return_exceptions=True)
+            self.assertFalse(self.service._summary_reads)
 
     async def test_binding_metadata_exact_reads_original_binding_without_switching(self) -> None:
         parent = await self._create()

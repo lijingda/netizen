@@ -52,6 +52,7 @@ from openai_codex import AsyncCodex, CodexConfig
 from .admin.web import AdminWebRunner
 from .admin.port_config import ConfigFileEditor
 from .progress_card_config import ProgressCardConfigService
+from .question_notifications import QuestionNotificationConfigService
 from .worktrees.settings import WorktreeSettingsService
 from .admin.users import AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
@@ -65,6 +66,7 @@ from .cli_data import (
     prepare_instance,
 )
 from .channel_app import ChannelApplication
+from .attachments import AttachmentStore
 from .chat_avatars import CHAT_AVATAR_HOSTS
 from .codex_runtime import CodexRuntime
 from .instance import resolve_instance_root
@@ -225,6 +227,9 @@ class ServiceCore:
             progress_card_config = ProgressCardConfigService(
                 self._settings.progress_card, config_editor=config_editor,
             )
+            question_notification_config = QuestionNotificationConfigService(
+                self._settings.question_notifications, config_editor=config_editor,
+            )
             stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
 
             # Bind the native MCP transport before App Server initializes its
@@ -318,6 +323,7 @@ class ServiceCore:
                 .log_level(lark.LogLevel.WARNING)
                 .build()
             )
+            attachment_store = AttachmentStore(self._instance_root / "attachments")
             self._management = InstanceManagementService(
                 bindings=self._store,
                 projects=self._projects,
@@ -326,7 +332,9 @@ class ServiceCore:
                 chat_labels=self._channel,
                 chat_directory=FeishuChatDirectory(self._feishu_read_client),
                 root=self._instance_root,
+                attachment_store=attachment_store,
                 progress_card_config=progress_card_config,
+                question_notification_config=question_notification_config,
             )
             worktrees = self._management.enable_worktrees(settings=WorktreeSettingsService(
                 self._settings.worktrees, default_root=self._instance_root / "worktrees",
@@ -360,6 +368,7 @@ class ServiceCore:
                 admin_urls=self._admin.urls if self._admin is not None else (),
                 admin_loopback_only=self._admin.loopback_only if self._admin is not None else None,
                 instance_root=self._instance_root,
+                attachment_store=attachment_store,
             )
             self._session_service = SessionService(
                 bindings=self._store,

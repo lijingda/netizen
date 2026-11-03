@@ -151,6 +151,7 @@ from ..management import (
     RuntimePrecondition,
     RuntimeStateChanged,
     SessionInventoryItem,
+    SessionInventoryState,
     SessionQuery,
     SideIdentityMismatch,
 )
@@ -171,6 +172,9 @@ from ..sessions.policy import (
 from ..worktrees.errors import WorktreeError
 from ..progress_card_config import ProgressCardConfigConflict, ProgressCardConfigError
 from ..progress_card_settings import ProgressCardSettings
+from ..question_notifications import (
+    QuestionNotificationConfigConflict, QuestionNotificationConfigError, QuestionNotificationSettings,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -188,7 +192,7 @@ _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 _AUTO_PORTS = range(8787, 8887)
 _FILE_VIEWER_ASSETS = (
-    "project-files.js", "project-files.css",
+    "project-files.js", "project-files.css", "file-browser.js", "attachment-files.js",
     "vendor/ace/ace.js",
     "vendor/ace/mode-python.js", "vendor/ace/mode-javascript.js",
     "vendor/ace/mode-json.js", "vendor/ace/mode-markdown.js",
@@ -266,6 +270,9 @@ class AdminActionPreconditions:
     cascade_delete: ExpectedValue[bool] = ExpectedValue.dont_check()
     worktree_settings_revision: ExpectedValue[str] = ExpectedValue.dont_check()
     progress_card_settings_revision: ExpectedValue[str] = ExpectedValue.dont_check()
+    attachment_root_identity: ExpectedValue[str] = ExpectedValue.dont_check()
+    attachment_file_version: ExpectedValue[str] = ExpectedValue.dont_check()
+    question_notification_revision: ExpectedValue[str] = ExpectedValue.dont_check()
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,6 +584,14 @@ class AdminWebApplication:
             mime = b"text/css; charset=utf-8" if name.endswith(".css") else b"text/javascript; charset=utf-8"
             return Response(200, ((b"Content-Type", mime),), self._assets[name])
         if context.method == "GET" and context.path in {
+            "/api/v1/attachment-files/root", "/api/v1/attachment-files/directory",
+            "/api/v1/attachment-files/content", "/api/v1/attachment-files/image",
+            "/api/v1/attachment-files/delete-options",
+        }:
+            return await self._attachment_files(context)
+        if route == ("POST", "/api/v1/attachment-files/delete"):
+            return await self._attachment_delete(context)
+        if context.method == "GET" and context.path in {
             "/api/v1/project-files/root", "/api/v1/project-files/directory",
             "/api/v1/project-files/content", "/api/v1/project-files/image",
         }:
@@ -601,6 +616,8 @@ class AdminWebApplication:
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["worktrees.js"])
         if route == ("GET", "/static/progress-card.js"):
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["progress-card.js"])
+        if route == ("GET", "/static/question-notifications.js"):
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["question-notifications.js"])
         if route == ("GET", "/api/v1/identity"):
             _require_query_keys(context.query, set())
             session = self._authenticate(context)
@@ -634,6 +651,8 @@ class AdminWebApplication:
             return self._worktree_settings(context)
         if route == ("GET", "/api/v1/progress-card/settings"):
             return self._progress_card_settings(context)
+        if route == ("GET", "/api/v1/question-notifications/settings"):
+            return self._question_notification_settings(context)
         if route == ("GET", "/api/v1/chats"):
             return await self._chats(context)
         if route == ("GET", "/api/v1/chat-labels"):
@@ -651,6 +670,8 @@ class AdminWebApplication:
             return await self._defaults(context)
         if route == ("GET", "/api/v1/sessions"):
             return await self._sessions(context)
+        if route == ("GET", "/api/v1/sessions/latest-answer"):
+            return await self._session_latest_answer(context)
         if route == ("GET", "/api/v1/sessions/options"):
             _require_query_keys(context.query, set())
             if self._management.defaults is None:
@@ -683,6 +704,7 @@ class AdminWebApplication:
             "/api/v1/worktrees/create": self._worktree_create,
             "/api/v1/worktrees/settings": self._worktree_save_settings,
             "/api/v1/progress-card/settings": self._progress_card_save_settings,
+            "/api/v1/question-notifications/settings": self._question_notification_save_settings,
             "/api/v1/worktrees/delete-preview": self._worktree_delete_preview,
             "/api/v1/worktrees/delete": self._worktree_delete,
             "/api/v1/session-tool-access/save": self._save_session_tool_access,
@@ -765,24 +787,7 @@ class AdminWebApplication:
                         return "/api/v1/project-files/image?" + urlencode({**query, "path": relative})
 
                     def content_data(preview):
-                        data = {"path": path, "kind": preview.kind, "size": preview.size,
-                                "modifiedAt": preview.modified_at, "version": preview.version}
-                        if preview.kind == "image":
-                            data["imageUrl"] = image_url(path) + "&" + urlencode({"version": preview.version})
-                        else:
-                            suffix = Path(path).suffix.lower()
-                            language = {".py": "python", ".pyw": "python", ".js": "javascript",
-                                ".mjs": "javascript", ".cjs": "javascript", ".json": "json",
-                                ".md": "markdown", ".markdown": "markdown"}.get(suffix, "text")
-                            data.update(text=preview.text, language=language)
-                            if language == "markdown":
-                                try:
-                                    data["markdownHtml"] = render_markdown(
-                                        preview.text, path=path, image_url=image_url,
-                                    )
-                                except PreviewUnavailable as error:
-                                    data["previewMessage"] = str(error)
-                        return data
+                        return _file_content_data(preview, path=path, image_url=image_url)
 
                     data = await self._management.files.content(**read_args, transform=content_data)
         except (TimeoutError, BlockingIOResultUnknown) as error:
@@ -791,6 +796,71 @@ class AdminWebApplication:
             raise AdminWebError(503, "read_unavailable", "文件查看暂不可用。") from error
         self._authenticate(context)
         return _json_response(200, {**data, "requestId": context.request.request_id})
+
+    async def _attachment_files(self, context: _RequestContext) -> Response:
+        operation = context.path.rsplit("/", 1)[1]
+        allowed = set() if operation == "root" else {"identity", "path"}
+        if operation in {"image", "delete-options"}:
+            allowed.add("version")
+        _require_query_keys(context.query, allowed)
+        deadline = asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS
+        service = self._management.attachments
+        try:
+            if operation == "root":
+                data = await service.root(deadline=deadline)
+            else:
+                identity = _optional_text_query(context.query, "identity", maximum=128)
+                paths = context.query.get("path", [""])
+                if not identity or len(paths) != 1 or len(paths[0].encode("utf-8")) > 4096:
+                    raise AdminWebError(400, "invalid_query", "附件目录身份或路径无效，请重新打开。")
+                path = paths[0]
+                args = {"identity": identity, "path": path, "deadline": deadline}
+                if operation == "directory":
+                    data = await service.directory(**args)
+                elif operation == "delete-options":
+                    version = _optional_text_query(context.query, "version", maximum=128)
+                    if not version:
+                        raise AdminWebError(400, "invalid_query", "请刷新后选择要删除的附件。")
+                    data = await service.metadata(**args, version=version)
+                    self._authenticate(context)
+                    data["confirmation"] = "删除后，正在执行或后续任务可能无法读取此附件。需要时请重新发送文件。"
+                    data["action"] = self._grant(context, "attachments.delete",
+                        AdminActionTarget("attachment-file", path), _empty_preconditions(
+                            attachment_root_identity=ExpectedValue.expect(identity),
+                            attachment_file_version=ExpectedValue.expect(version)))
+                elif operation == "image":
+                    version = _optional_text_query(context.query, "version", maximum=128)
+                    preview = await service.content(**args)
+                    if preview.kind != "image":
+                        raise FileBrowseError("unsupported_file", "该附件不支持图片预览。")
+                    if version is not None and version != preview.version:
+                        raise FileBrowseError("file_changed", "附件已变化，请刷新后重试。")
+                    self._authenticate(context)
+                    return Response(200, ((b"Content-Type", preview.mime.encode("ascii")),), preview.data)
+                else:
+                    def image_url(relative: str) -> str:
+                        return "/api/v1/attachment-files/image?" + urlencode({"identity": identity, "path": relative})
+
+                    data = await service.content(**args, transform=lambda preview:
+                        _file_content_data(preview, path=path, image_url=image_url))
+        except (TimeoutError, BlockingIOResultUnknown) as error:
+            raise AdminWebError(504, "read_timeout", "附件读取超时，请稍后重试。") from error
+        except BlockingIOExecutorClosed as error:
+            raise AdminWebError(503, "read_unavailable", "文件附件管理暂不可用。") from error
+        self._authenticate(context)
+        return _json_response(200, {**data, "requestId": context.request.request_id})
+
+    async def _attachment_delete(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        _, grant = self._redeem(context, "attachments.delete", expected_resource="attachment-file")
+        conditions = _grant_preconditions(grant)
+        result = await self._mutation(context, "attachments.delete", grant.target.target_id,
+            self._management.attachments.delete(
+                identity=_expected_value(conditions.attachment_root_identity, "attachment root"),
+                path=grant.target.target_id,
+                version=_expected_value(conditions.attachment_file_version, "attachment file"),
+                deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS))
+        return _json_response(200, {**result, "requestId": context.request.request_id})
 
     def _updates_response(
         self, context: _RequestContext, status: dict[str, Any]
@@ -1243,6 +1313,46 @@ class AdminWebApplication:
         await self._mutation(context, "progress-card.settings", "instance", apply())
         return self._progress_card_settings(context)
 
+    def _question_notification_settings(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        view = self._management.question_notification_settings()
+        actions = {}
+        if view["editable"]:
+            actions["save"] = self._grant(
+                context, "question-notifications.settings", AdminActionTarget("question-notifications-settings", "instance"),
+                _empty_preconditions(question_notification_revision=ExpectedValue.expect(view["revision"])),
+            )
+        return _json_response(200, {**view, "actions": actions, "requestId": context.request.request_id})
+
+    async def _question_notification_save_settings(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload, grant = self._redeem(
+            context, "question-notifications.settings", expected_resource="question-notifications-settings",
+            allowed_extra={"settings"},
+        )
+        if grant.target.target_id != "instance":
+            raise StaleActionGrant()
+        try:
+            settings = QuestionNotificationSettings.from_dict(payload["settings"])
+        except ValueError as error:
+            raise AdminWebError(400, "invalid_question_notification_settings", str(error)) from None
+        revision = _expected_value(
+            _grant_preconditions(grant).question_notification_revision, "question notification revision",
+        )
+
+        async def apply() -> dict[str, Any]:
+            try:
+                return await self._management.update_question_notification_settings(settings, expected_revision=revision)
+            except QuestionNotificationConfigConflict:
+                raise AdminWebError(409, "stale_question_notification_settings", "提问通知配置已被修改，请刷新后再保存。") from None
+            except AdminPortConfigurationError:
+                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
+            except (QuestionNotificationConfigError, OSError):
+                raise AdminWebError(503, "configuration_unavailable", "无法保存提问通知配置，当前配置未更新。") from None
+
+        await self._mutation(context, "question-notifications.settings", "instance", apply())
+        return self._question_notification_settings(context)
+
     async def _worktree_delete_preview(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
         payload, grant = self._redeem(
@@ -1402,6 +1512,32 @@ class AdminWebApplication:
             "items": [_chat_label_json(label) for label in labels.values()],
         })
 
+    async def _session_latest_answer(self, context: _RequestContext) -> Response:
+        from openai_codex import CodexError
+        from ..thread_history import ThreadHistoryUnavailable
+
+        _require_query_keys(context.query, {"bindingId", "threadId"})
+        binding_id = _optional_text_query(context.query, "bindingId")
+        thread_id = _optional_text_query(context.query, "threadId")
+        if not binding_id or not thread_id:
+            raise AdminWebError(400, "invalid_query", "需要准确的会话标识。")
+        try:
+            answer = await self._management.latest_binding_answer(
+                binding_id, thread_id=thread_id,
+                deadline=asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS,
+            )
+        except TimeoutError as error:
+            raise AdminWebError(504, "answer_timeout", "最近一轮读取超时，请手动重试。") from error
+        except (CodexError, ThreadHistoryUnavailable, OSError) as error:
+            raise AdminWebError(503, "answer_unavailable", "会话历史暂时不可读取，可能已删除或不可用。") from error
+        return _json_response(200, {
+            "requestId": context.request.request_id,
+            "threadId": answer.thread_id, "turnId": answer.turn_id,
+            "status": answer.status, "answer": answer.answer,
+            "startedAt": answer.started_at, "completedAt": answer.completed_at,
+            "readAt": datetime.now().astimezone().isoformat(),
+        })
+
     async def _sessions(self, context: _RequestContext) -> Response:
         allowed = {
             "cursor",
@@ -1412,6 +1548,7 @@ class AdminWebApplication:
             "topicId",
             "identity",
             "inventoryState",
+            "searchTerm",
             "current",
             "createdFrom",
             "createdBefore",
@@ -1434,7 +1571,11 @@ class AdminWebApplication:
             current=_current_query(context.query),
         )
         inventory_state = _session_inventory_state(context.query)
+        search_term = _optional_text_query(context.query, "searchTerm")
+        if search_term and inventory_state is SessionInventoryState.LAZY:
+            raise AdminWebError(400, "invalid_query", "Lazy 会话不支持搜索。")
         filter_values = {
+            "searchTerm": search_term,
             "pageSize": page_size,
             "sortBy": sort_by,
             "sortDirection": sort_direction,
@@ -1455,6 +1596,7 @@ class AdminWebApplication:
         )
         page = await self._management.query_sessions(
             query=SessionQuery(
+                search_term=search_term,
                 local=local,
                 inventory_state=inventory_state,
                 sort_by=sort_by,
@@ -1614,6 +1756,9 @@ class AdminWebApplication:
             "pointerState": status.pointer_state,
             "catalogState": item.inventory_state.value,
             "projectAlias": binding.project_alias,
+            "canReadLatestAnswer": binding.native_thread_id is not None and native_state in {
+                NativeThreadCatalogState.ACTIVE, NativeThreadCatalogState.ARCHIVED,
+            },
             "nativeThreadId": binding.native_thread_id,
             "nativeTitle": metadata.name if metadata is not None else None,
             "nativePreview": metadata.preview if metadata is not None else None,
@@ -2869,7 +3014,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js", "netizen.svg", *_FILE_VIEWER_ASSETS):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js", "question-notifications.js", "netizen.svg", *_FILE_VIEWER_ASSETS):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 
@@ -3172,6 +3317,9 @@ def _empty_preconditions(
     cascade_delete: ExpectedValue[bool] | None = None,
     worktree_settings_revision: ExpectedValue[str] | None = None,
     progress_card_settings_revision: ExpectedValue[str] | None = None,
+    attachment_root_identity: ExpectedValue[str] | None = None,
+    attachment_file_version: ExpectedValue[str] | None = None,
+    question_notification_revision: ExpectedValue[str] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -3195,6 +3343,9 @@ def _empty_preconditions(
         cascade_delete or ExpectedValue.dont_check(),
         worktree_settings_revision or ExpectedValue.dont_check(),
         progress_card_settings_revision or ExpectedValue.dont_check(),
+        attachment_root_identity or ExpectedValue.dont_check(),
+        attachment_file_version or ExpectedValue.dont_check(),
+        question_notification_revision or ExpectedValue.dont_check(),
     )
 
 
@@ -3405,3 +3556,23 @@ def _map_error(error: BaseException) -> AdminWebError | None:
     ):
         return AdminWebError(409, "operation_rejected", str(error)[:500])
     return None
+
+
+def _file_content_data(preview, *, path: str, image_url) -> dict:
+    """One inert preview projection for both authorized file providers."""
+    data = {"path": path, "kind": preview.kind, "size": preview.size,
+            "modifiedAt": preview.modified_at, "version": preview.version}
+    if preview.kind == "image":
+        data["imageUrl"] = image_url(path) + "&" + urlencode({"version": preview.version})
+    else:
+        suffix = Path(path).suffix.lower()
+        language = {".py": "python", ".pyw": "python", ".js": "javascript",
+            ".mjs": "javascript", ".cjs": "javascript", ".json": "json",
+            ".md": "markdown", ".markdown": "markdown"}.get(suffix, "text")
+        data.update(text=preview.text, language=language)
+        if language == "markdown":
+            try:
+                data["markdownHtml"] = render_markdown(preview.text, path=path, image_url=image_url)
+            except PreviewUnavailable as error:
+                data["previewMessage"] = str(error)
+    return data

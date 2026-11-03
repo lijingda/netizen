@@ -60,9 +60,9 @@ class FilePreviewsTest(unittest.TestCase):
     def test_local_links_resolve_unicode_spaces_and_file_fragments(self) -> None:
         parsed = self.render('[一](../src/main.py#L5) [二](<参考 说明.md>) [三](./%E4%B8%AD%E6%96%87.md)')
         self.assertEqual(parsed.attributes("a"), [
-            {"href": "#", "data-project-file": "src/main.py"},
-            {"href": "#", "data-project-file": "docs/参考 说明.md"},
-            {"href": "#", "data-project-file": "docs/中文.md"},
+            {"href": "#", "data-file-browser-path": "src/main.py"},
+            {"href": "#", "data-file-browser-path": "docs/参考 说明.md"},
+            {"href": "#", "data-file-browser-path": "docs/中文.md"},
         ])
 
     def test_only_explicit_safe_external_schemes_are_clickable(self) -> None:
@@ -74,14 +74,14 @@ class FilePreviewsTest(unittest.TestCase):
         for link in links:
             self.assertEqual(link["target"], "_blank")
             self.assertEqual(link["rel"], "noopener noreferrer")
-            self.assertNotIn("data-project-file", link)
+            self.assertNotIn("data-file-browser-path", link)
 
     def test_encoded_filename_separators_are_preserved_for_links_and_images(self) -> None:
         parsed = self.render('[hash](a%23b.md#heading) [query](a%3Fb.md) '
             '![hash](../a%23b.png) ![query](../a%3Fb.png)')
         self.assertEqual(parsed.attributes("a"), [
-            {"href": "#", "data-project-file": "docs/a#b.md"},
-            {"href": "#", "data-project-file": "docs/a?b.md"},
+            {"href": "#", "data-file-browser-path": "docs/a#b.md"},
+            {"href": "#", "data-file-browser-path": "docs/a?b.md"},
         ])
         self.assertEqual(self.images, ["a#b.png", "a?b.png"])
         self.assertEqual([image["src"] for image in parsed.attributes("img")], [
@@ -92,15 +92,15 @@ class FilePreviewsTest(unittest.TestCase):
     def test_directory_links_preserve_navigation_hints_and_root_targets(self) -> None:
         root = self.render('[文档](docs/) [当前](.)', path="README.md")
         self.assertEqual(root.attributes("a"), [
-            {"href": "#", "data-project-file": "docs", "data-project-directory": "true"},
-            {"href": "#", "data-project-file": "", "data-project-directory": "true"},
+            {"href": "#", "data-file-browser-path": "docs", "data-file-browser-directory": "true"},
+            {"href": "#", "data-file-browser-path": "", "data-file-browser-directory": "true"},
         ])
         nested = self.render('[上级](../) [上级无斜线](..) [当前](./) [文档](../docs/.)')
         self.assertEqual(nested.attributes("a"), [
-            {"href": "#", "data-project-file": "", "data-project-directory": "true"},
-            {"href": "#", "data-project-file": "", "data-project-directory": "true"},
-            {"href": "#", "data-project-file": "docs", "data-project-directory": "true"},
-            {"href": "#", "data-project-file": "docs", "data-project-directory": "true"},
+            {"href": "#", "data-file-browser-path": "", "data-file-browser-directory": "true"},
+            {"href": "#", "data-file-browser-path": "", "data-file-browser-directory": "true"},
+            {"href": "#", "data-file-browser-path": "docs", "data-file-browser-directory": "true"},
+            {"href": "#", "data-file-browser-path": "docs", "data-file-browser-directory": "true"},
         ])
 
     def test_directory_targets_cannot_cross_root_or_request_images(self) -> None:
@@ -127,7 +127,7 @@ class FilePreviewsTest(unittest.TestCase):
                 parsed = self.render(f"[点击]({destination})")
                 for link in parsed.attributes("a"):
                     self.assertNotIn("href", link)
-                    self.assertNotIn("data-project-file", link)
+                    self.assertNotIn("data-file-browser-path", link)
 
     def test_plain_urls_are_not_automatically_linkified(self) -> None:
         self.assertEqual(self.render("https://example.org").attributes("a"), [])

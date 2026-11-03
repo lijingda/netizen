@@ -95,6 +95,8 @@ from .channel.messages import _nonempty_field, _object_field, _send_result_error
 from .channel.completion_mentions import send_completion_mention
 from .channel.session_pages import SessionCardPage
 from .channel.input_preparation import MessageInputPreparer
+from .attachments import AttachmentStore
+from .file_inputs import FileInputError, file_references, file_free_message
 from .channel.question_inputs import CardAnswerConversation, CardAnswerOrigin, card_answer_sender
 from .channel.ports import ReplyChannel
 from .channel.topics import TopicMessage, TopicPublishError, complete_fresh_topic, send_topic_message
@@ -196,6 +198,7 @@ from .runtime.contracts import (
     ThreadSubscriptionState,
     ThreadStopping,
     ThreadOccupied,
+    ThreadResumeNotFound,
     TurnProgressSnapshot,
     TurnActivitySnapshot,
     TurnInterruptFailed,
@@ -627,6 +630,7 @@ class ChannelApplication:
         admin_urls: tuple[str, ...] = (),
         admin_loopback_only: bool | None = None,
         instance_root: Path | None = None,
+        attachment_store: AttachmentStore | None = None,
     ) -> None:
         self._app_id = app_id
         self._channel = channel
@@ -638,7 +642,7 @@ class ChannelApplication:
         self._admin_urls = admin_urls
         self._admin_loopback_only = admin_loopback_only
         self._instance_root = instance_root
-        self._input_preparer = MessageInputPreparer(channel=channel)
+        self._input_preparer = MessageInputPreparer(channel=channel, attachment_store=attachment_store)
         self._management = management
         self._management.enable_schedules(app_id=app_id, chat_info=channel)
         self._management.enable_defaults(app_id=app_id, chat_info=channel)
@@ -675,6 +679,7 @@ class ChannelApplication:
                     await self._reactions.close()
                 finally:
                     self._reply_suppression.clear()
+                    await self._input_preparer.close()
 
     async def suppress_reply(self, *, source_thread_id: str, source_turn_id: str) -> dict[str, Any]:
         """Record a caller's exact physical Turn choice without changing execution."""
@@ -1736,7 +1741,7 @@ class ChannelApplication:
             if pending is not None:
                 await self._reply(message, "定时任务正在启动，请稍后重发。")
                 return
-            current_images = current_message_image_references(message)
+            current_images = self._current_image_references(message)
             interaction = self._parse_current_interaction(message, scope)
             if isinstance(interaction, PromptInput):
                 await self._prompt(
@@ -1745,8 +1750,8 @@ class ChannelApplication:
                     current_images=current_images,
                 )
             else:
-                if current_images:
-                    raise InvalidInteraction("控制命令不能携带图片，请拆分后重试。")
+                if current_images or self._has_current_files(message):
+                    raise InvalidInteraction("控制命令不能携带图片或文件附件，请拆分后重试。")
                 await self._control(message, interaction)
         except Exception as error:
             await self._report_input_error(message, error)
@@ -1779,7 +1784,7 @@ class ChannelApplication:
             ContextBoundaryCommitFailed,
         )):
             await self._reply(message, describe_error(error))
-        elif isinstance(error, ImageInputError):
+        elif isinstance(error, (ImageInputError, FileInputError)):
             await self._reply(message, str(error))
         elif isinstance(error, PromptProjectionError):
             await self._reply(message, str(error))
@@ -1847,6 +1852,7 @@ class ChannelApplication:
 
     async def handle_questions(
         self, target: QuestionTarget, origin: object, request: QuestionRequest,
+        owner_id: str = "",
     ) -> None:
         """Project questions for either target without changing the producing Turn."""
         scope, _ = self._question_recipient(target)
@@ -1860,7 +1866,13 @@ class ChannelApplication:
             async with asyncio.timeout(15):
                 sent = await send_topic_message(
                     self._channel, scope.chat_id,
-                    render_question_card(target, request, index),
+                    render_question_card(
+                        target, request, index,
+                        mention_user_id=(
+                            valid_completion_mention_user_id(owner_id)
+                            if self._management.question_mention_enabled else None
+                        ),
+                    ),
                     SendOpts(
                         receive_id_type="chat_id", reply_to=reply_to,
                         reply_in_thread=scope.kind is ScopeKind.TOPIC,
@@ -3220,7 +3232,6 @@ class ChannelApplication:
                     expected_context_revision=admission.context_revision,
                     anchor=prepared.context_anchor,
                 )
-                await self._send_context_receipt(message, prepared.context_stats)
         else:
             prepared = await self._input_preparer.prepare(
                 source_message=message,
@@ -3241,10 +3252,20 @@ class ChannelApplication:
         submit_kwargs["admission"] = admission
         if scheduled_run_id is not None:
             self._bindings.schedules.begin_binding_submission(scheduled_run_id, binding.id)
+        attempted = False
+        accepted = False
         try:
+            if prepared.context_stats is not None:
+                await self._send_context_receipt(message, prepared.context_stats)
+            attempted = True
             submission = await self._runtime.submit(**submit_kwargs)
+            accepted = True
             if on_accepted is not None:
                 on_accepted()
+        except BaseException as error:
+            if not accepted:
+                await self._discard_unsubmitted_attachments(prepared, error, attempted=attempted)
+            raise
         finally:
             # The native RPC has consumed the input (or owns its in-flight
             # serialization). Do not retain a second large data-URL reference
@@ -3268,6 +3289,23 @@ class ChannelApplication:
             return
 
         await self._present_ordinary_receipt(submission, message)
+
+    async def _discard_unsubmitted_attachments(self, prepared, error: BaseException,
+                                               *, attempted: bool = True) -> None:
+        # Only exact pre-admission/verified-rejection errors prove no delivery.
+        # Generic RPC failures, cancellation during submit and post-acceptance
+        # cursor errors retain originals; manual deletion remains available.
+        if attempted and not isinstance(error, (
+            SteerRace, RuntimeClosed, ThreadStopping, ThreadCompacting,
+            ThreadArchived, ThreadResumeNotFound, ThreadOccupied,
+            SkillReferenceError, ModelCatalogError, SkillCatalogError,
+            SideSessionNotFound, SideSessionClosing, SideSessionConflict,
+        )):
+            return
+        try:
+            await self._input_preparer.discard_attachments(prepared)
+        except Exception:
+            logger.warning("unsubmitted attachment cleanup failed", exc_info=True)
 
     async def _present_ordinary_receipt(self, submission: Submission, origin: Any) -> None:
         """Ordinary input and scheduled initial Turns share feedback and receipt ordering."""
@@ -3321,6 +3359,15 @@ class ChannelApplication:
     def _parse_current_interaction(
         self, message: Any, scope: FeishuScope,
     ) -> PromptInput | ControlIntent:
+        if self._has_current_files(message):
+            # Filenames and SDK-generated file labels are material, never
+            # command heads or user-authored Skill invocations.
+            bot_open_id = _channel_bot_open_id(self._channel)
+            message = file_free_message(message, bot_open_id=bot_open_id)
+            if (normalized_message_type(message) == "file"
+                    or not _body_text(message, bot_open_id=bot_open_id).strip()):
+                return PromptInput(scope=scope, source_id=_message_id(message),
+                                   sender_id=_sender_id(message), text="")
         if normalized_message_type(message) in MATERIAL_MESSAGE_TYPES:
             # Sharing a card/forward supplies material, not commands authored
             # by its original senders. Do not run either slash or Skill parsing.
@@ -3342,6 +3389,10 @@ class ChannelApplication:
         self, message: Any, request_text: str, *, command: str | None = None,
     ) -> str:
         bot_open_id = _channel_bot_open_id(self._channel)
+        if self._has_current_files(message):
+            if normalized_message_type(message) == "file":
+                return ""
+            message = file_free_message(message, bot_open_id=bot_open_id)
         return project_task_text(
             message, request_text,
             bot_open_id=bot_open_id,
@@ -3352,6 +3403,16 @@ class ChannelApplication:
                 and _body_text(message, bot_open_id=bot_open_id).strip().startswith("//")
             ),
         )
+
+    def _has_current_files(self, message: Any) -> bool:
+        return (self._input_preparer.supports_files
+                and bool(file_references(message, source="current_message")))
+
+    def _current_image_references(self, message: Any) -> tuple[ImageReference, ...]:
+        # Validate the ordinary-file AST before allowing it through the shared
+        # image/media gate. Hidden locale descriptors are never selected.
+        self._has_current_files(message)
+        return current_message_image_references(message, allow_files=self._input_preparer.supports_files)
 
     async def _side_message(
         self,
@@ -3366,9 +3427,9 @@ class ChannelApplication:
                 and interaction.arguments
                 and interaction.arguments[0].strip().lower() == "close"
             ):
-                if current_message_image_references(message):
+                if self._current_image_references(message) or self._has_current_files(message):
                     raise InvalidInteraction(
-                        "控制命令不能携带图片，请拆分后重试。"
+                        "控制命令不能携带图片或文件附件，请拆分后重试。"
                     )
                 await self._close_creating_side_from_message(message, record)
                 return
@@ -3381,7 +3442,7 @@ class ChannelApplication:
         if not await self._side_session_available(message, record):
             return
 
-        current_images = current_message_image_references(message)
+        current_images = self._current_image_references(message)
         interaction = self._parse_current_interaction(message, self._side_scope(record))
         if isinstance(interaction, PromptInput):
             target_id = quoted_message_id(message)
@@ -3394,8 +3455,8 @@ class ChannelApplication:
                 current_images=current_images,
             )
             return
-        if current_images:
-            raise InvalidInteraction("控制命令不能携带图片，请拆分后重试。")
+        if current_images or self._has_current_files(message):
+            raise InvalidInteraction("控制命令不能携带图片或文件附件，请拆分后重试。")
         await self._side_control(message, interaction, record)
 
     async def _side_session_available(self, message: Any, record: SideTopicRecord) -> bool:
@@ -3474,10 +3535,16 @@ class ChannelApplication:
             admission=admission,
             skill_names=skill_names,
         )
+        accepted = False
         try:
             submission = await self._runtime.submit_side(**submit_kwargs)
+            accepted = True
             if on_accepted is not None:
                 on_accepted()
+        except BaseException as error:
+            if not accepted:
+                await self._discard_unsubmitted_attachments(prepared, error)
+            raise
         finally:
             submit_kwargs.pop("input", None)
             prepared = None
@@ -6471,11 +6538,20 @@ class ChannelApplication:
         user_id = _outcome_completion_mention_user_id(outcome)
         if user_id is None:
             return
+        if isinstance(outcome, SideTurnOutcome):
+            session_label = f"临时会话 {outcome.side_id[:8]}"
+        else:
+            name = await self._management.completion_thread_name(outcome.thread_id)
+            session_label = (
+                _normalized_thread_text(name, max_chars=80)
+                or f"会话 {outcome.binding_id[:8]}"
+            )
         await send_completion_mention(
             self._channel, scope=scope or self._scope(outcome.origin),
             card_message_id=card_message_id, user_id=user_id,
             operation_id=outcome.turn_id,
             source_message_id=source_message_id,
+            session_label=session_label,
         )
 
     async def _reply_task_answers(

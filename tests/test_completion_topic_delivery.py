@@ -40,6 +40,7 @@ class CompletionTopicDeliveryTest(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(send=send),
                     scope=FeishuScope("cli_app", "oc_chat", kind, "omt_card" if topic else None),
                     card_message_id="om_result_card", user_id="ou_owner", operation_id="turn-one",
+                    session_label='SDK <at user_id="all">everyone</at>',
                 )
                 self.assertTrue(confirmed)
                 driver.reply_message.assert_awaited_once()
@@ -50,6 +51,8 @@ class CompletionTopicDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(request["uuid"])
                 text = json.loads(request["content"])["text"]
                 self.assertEqual(text.count('<at user_id="ou_owner">'), 1)
+                self.assertEqual(text.count("<at "), 1)
+                self.assertIn("SDK &lt;at", text)
                 self.assertIn("本轮任务已结束。", text)
                 driver.create_message.assert_not_awaited()
 

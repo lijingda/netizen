@@ -86,17 +86,23 @@ class ImageDownloadChannel(Protocol):
     ) -> bytes | None: ...
 
 
-def current_message_image_references(message: Any) -> tuple[ImageReference, ...]:
+def current_message_image_references(
+    message: Any, *, allow_files: bool = False,
+) -> tuple[ImageReference, ...]:
     """Validate current prompt media and return its ordinary image refs.
 
     Current messages stay strict: text cannot carry resources, and image/post
     prompts cannot silently drop non-image resources.  Quoted messages retain
     their existing per-type projection and call :func:`image_references` only
-    to add supported pixels.
+    to add supported pixels. ``allow_files`` is used only after the separate
+    file-input boundary validates the exact ordinary-file AST.
     """
 
     message_type = normalized_message_type(message)
     resources = tuple(getattr(message, "resources", None) or ())
+    if message_type == "file" and allow_files:
+        # The file preparation boundary separately validates exact resources.
+        return ()
     if message_type in MATERIAL_MESSAGE_TYPES:
         # Material containers are projected by the shared content layer. Their
         # resource descriptors are not proof of readable child image pixels.
@@ -117,19 +123,23 @@ def current_message_image_references(message: Any) -> tuple[ImageReference, ...]
         visible_types = _post_visible_resource_types(elements or ())
         has_top_level_attachments = _post_has_top_level_attachments(message)
         has_unsupported_visible_resource = any(
-            resource_type != "image" for resource_type in visible_types
+            resource_type not in ({"image", "file"} if allow_files else {"image"})
+            for resource_type in visible_types
         )
         # A missing typed post AST is a contract gap, so retain descriptors as
         # a conservative fallback for rejecting unsupported attachments.  If
         # the AST exists, it is authoritative for the same document/version
         # that the SDK rendered; descriptors can belong to a hidden locale or
-        # the unselected content-v1 variant in SDK 1.4.0. Top-level post.files
-        # is outside that locale AST and is rejected independently above.
+        # the unselected content-v1 variant in SDK 1.4.0. A validated top-level
+        # post.files zone is also sufficient file evidence without a body AST;
+        # descriptors alone still cannot introduce files.
         has_unsupported_fallback_resource = elements is None and any(
-            _resource_type(resource) != "image" for resource in resources
+            _resource_type(resource) != "image" and not (
+                allow_files and has_top_level_attachments and _resource_type(resource) == "file"
+            ) for resource in resources
         )
         if (
-            has_top_level_attachments
+            (has_top_level_attachments and not allow_files)
             or has_unsupported_visible_resource
             or has_unsupported_fallback_resource
         ):

@@ -14,7 +14,7 @@ from .user_questions import QuestionTarget, question_target_payload
 
 _PROMPT_KIND = "feishu_current_message"
 _PROMPT_VERSION = 1
-_SUPPORTED_MESSAGE_TYPES = frozenset({"text", "image", "post"}) | MATERIAL_MESSAGE_TYPES
+_SUPPORTED_MESSAGE_TYPES = frozenset({"text", "image", "post", "file"}) | MATERIAL_MESSAGE_TYPES
 _SUPPORTED_CONTENT_FIDELITY = frozenset(
     {"full_text", "full_multimodal", "visible_text", "bounded_aggregate"}
 )

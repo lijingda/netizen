@@ -144,9 +144,9 @@ def render_markdown(
 ) -> str:
     """Render safe HTML; image_url maps a root-relative file to its Admin endpoint.
 
-    Local links carry ``data-project-file`` for the file browser to intercept;
+    Local links carry ``data-file-browser-path`` for the file browser to intercept;
     the empty path identifies its root. Explicit directory targets additionally
-    carry ``data-project-directory="true"``.
+    carry ``data-file-browser-directory="true"``.
     Remote images and fragment-only links remain inert. No filesystem or network
     access occurs here; the file endpoint separately validates image contents.
     """
@@ -179,13 +179,13 @@ def render_markdown(
                 token.attrSet("target", "_blank")
             else:
                 token.attrSet("href", "#")
-                token.attrSet("data-project-file", value)
+                token.attrSet("data-file-browser-path", value)
                 if kind == "directory":
-                    token.attrSet("data-project-directory", "true")
+                    token.attrSet("data-file-browser-directory", "true")
         elif token.type == "image":
             target = _target(token.attrGet("src") or "", directory)
             if target is None or target[0] != "local":
-                _replace_image(token, "仅预览项目内的相对路径图片")
+                _replace_image(token, "仅预览当前根目录内的相对路径图片")
             elif images >= MAX_MARKDOWN_IMAGES:
                 _replace_image(token, "本页最多预览 8 张图片")
             else:
