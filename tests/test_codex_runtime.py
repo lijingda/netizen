@@ -11731,7 +11731,13 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_recovery_interruption_confirmation_keeps_read_and_time_budgets(self) -> None:
         real_sleep = asyncio.sleep
-        for budget in ("last-read", "timeout"):
+        # The last-read budget is bounded by the native IO count alone, so its
+        # recovery window keeps the production default and scheduling jitter
+        # cannot truncate the bounded reads. The timeout budget must end
+        # through the real confirmation sleep instead, so only that subTest
+        # shrinks the window below the patched confirmation delay.
+        budgets = (("last-read", 5.0), ("timeout", 0.5))
+        for budget, recovery_window in budgets:
             with self.subTest(budget=budget):
                 binding = self.binding()
                 before = len(self.codex.read_calls)
@@ -11741,7 +11747,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
                 with (
                     patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 2),
-                    patch("netizen_cli.codex_runtime._TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS", 0.05),
+                    patch("netizen_cli.codex_runtime._TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS", recovery_window),
                     patch("netizen_cli.codex_runtime.asyncio.sleep", wraps=real_sleep) as sleep_mock,
                     patch.object(self.store, "release_scheduled_initial_turn", wraps=self.store.release_scheduled_initial_turn) as release_initial,
                 ):
