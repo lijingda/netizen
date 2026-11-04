@@ -11,9 +11,11 @@ import tempfile
 import unittest
 from http.cookies import SimpleCookie
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlencode
 
+import psutil
 import yaml
 
 from netizen_cli.admin.auth import AdminAuth
@@ -375,24 +377,79 @@ class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
             admin_access_urls("::", (("::", 8787, 0, 0),), ("127.0.0.1:8787",)), (),
         )
 
-    def test_discovered_hostnames_do_not_hide_bound_family_loopback_fallback(self) -> None:
+    def test_interface_addresses_do_not_hide_bound_family_loopback_fallback(self) -> None:
         for host, bound, discovered, expected in (
             ("::", ("::", 8890, 0, 0),
-             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.4", 0)),
+             SimpleNamespace(family=socket.AF_INET, address="192.0.2.4"),
              "http://[::1]:8890/"),
             ("0.0.0.0", ("0.0.0.0", 8890),
-             (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", 0, 0, 0)),
+             SimpleNamespace(family=socket.AF_INET6, address="2001:db8::1"),
              "http://127.0.0.1:8890/"),
         ):
             with (
                 self.subTest(host=host),
                 patch("netizen_cli.admin.web.socket.gethostname", return_value="server"),
                 patch("netizen_cli.admin.web.socket.getfqdn", return_value="server.example.test"),
-                patch("netizen_cli.admin.web.socket.getaddrinfo", return_value=[discovered]),
+                patch("netizen_cli.admin.web.psutil.net_if_addrs", return_value={"net0": [discovered]}),
             ):
                 authorities = accepted_authorities(host, 8890, (bound,))
                 self.assertIn("server.example.test:8890", authorities)
                 self.assertEqual(admin_access_urls(host, (bound,), authorities), (expected,))
+
+    def test_interface_discovery_survives_dns_failure_and_preserves_unlisted_hosts(self) -> None:
+        interfaces = {
+            "net0": [
+                SimpleNamespace(family=socket.AF_INET, address=host)
+                for host in ("192.0.2.7", "192.0.2.4", "192.0.2.6", "192.0.2.5")
+            ] + [
+                SimpleNamespace(family=socket.AF_INET6, address="2001:db8::1"),
+                SimpleNamespace(family=socket.AF_INET6, address="fe80::1%net0"),
+                SimpleNamespace(family=psutil.AF_LINK, address="00:11:22:33:44:55"),
+            ],
+            "vpn0": [
+                SimpleNamespace(family=socket.AF_INET, address="100.64.0.8"),
+                SimpleNamespace(family=socket.AF_INET, address="192.0.2.4"),
+            ],
+            "lo0": [SimpleNamespace(family=socket.AF_INET, address="127.0.0.1")],
+        }
+        for host, bound, expected in (
+            ("0.0.0.0", (("0.0.0.0", 8890),), (
+                "http://100.64.0.8:8890/", "http://192.0.2.4:8890/",
+                "http://192.0.2.5:8890/", "http://192.0.2.6:8890/",
+            )),
+            ("::", (("::", 8890, 0, 0),), ("http://[2001:db8::1]:8890/",)),
+        ):
+            with (
+                self.subTest(host=host),
+                patch("netizen_cli.admin.web.socket.gethostname", return_value="unresolvable"),
+                patch("netizen_cli.admin.web.socket.getfqdn", return_value="unresolvable"),
+                patch("netizen_cli.admin.web.socket.getaddrinfo", side_effect=socket.gaierror("not known")),
+                patch("netizen_cli.admin.web.psutil.net_if_addrs", return_value=interfaces),
+            ):
+                authorities = accepted_authorities(host, 8787, bound)
+                self.assertEqual(admin_access_urls(host, bound, authorities), expected)
+                self.assertIn("192.0.2.7:8890", authorities)
+                self.assertIn("[2001:db8::1]:8890", authorities)
+                self.assertIn("[fe80::1]:8890", authorities)
+                self.assertIn("127.0.0.1:8890", authorities)
+                self.assertFalse(any("00:11:22:33:44:55" in value for value in authorities))
+
+    def test_interface_discovery_failure_preserves_explicit_and_loopback_urls(self) -> None:
+        for host, bound, expected in (
+            ("0.0.0.0", ("0.0.0.0", 8890), "http://127.0.0.1:8890/"),
+            ("::", ("::", 8890, 0, 0), "http://[::1]:8890/"),
+            ("192.0.2.4", ("192.0.2.4", 8890), "http://192.0.2.4:8890/"),
+        ):
+            with (
+                self.subTest(host=host),
+                patch("netizen_cli.admin.web.socket.gethostname", return_value="server"),
+                patch("netizen_cli.admin.web.socket.getfqdn", return_value="server.example.test"),
+                patch("netizen_cli.admin.web.psutil.net_if_addrs", side_effect=OSError("unavailable")),
+                self.assertLogs("netizen_cli.admin.web", level="WARNING"),
+            ):
+                authorities = accepted_authorities(host, 8787, (bound,))
+            self.assertIn("server.example.test:8890", authorities)
+            self.assertEqual(admin_access_urls(host, (bound,), authorities), (expected,))
 
     def test_explicit_access_hostname_is_preserved_for_single_family_listener(self) -> None:
         authorities = ("[::1]:8890", "192.0.2.4:8890", "admin.example.test:8890")

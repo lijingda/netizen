@@ -2832,7 +2832,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch("netizen_cli.admin.web.socket.gethostname", return_value="host.test"),
             patch("netizen_cli.admin.web.socket.getfqdn", return_value="host.example"),
-            patch("netizen_cli.admin.web.socket.getaddrinfo", return_value=[]),
+            patch("netizen_cli.admin.web.psutil.net_if_addrs", return_value={}),
         ):
             authorities = accepted_authorities("::", 8787, (("::1", 8787, 0, 0),))
         self.assertIn("[::1]:8787", authorities)

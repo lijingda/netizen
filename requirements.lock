@@ -29,6 +29,7 @@ openai-codex==0.163.0
 openai-codex-cli-bin==0.163.0
 opentelemetry-api==1.44.0
 packaging==26.2
+psutil==7.2.2
 pycparser==3.0
 pycryptodome==3.23.0
 pydantic==2.13.4
