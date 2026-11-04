@@ -2,6 +2,47 @@ let latestAnswer = () => ({ threadId: "native", turnId: "turn-current", status: 
   answer: "<script>inert</script>\nfinal", markdownHtml: "<p>&lt;script&gt;inert&lt;/script&gt;\nfinal</p>",
   startedAt: null, completedAt: null, readAt: "2026-11-03T08:00:00+00:00" });
 let labelsAnswer = async () => ({ items: [] });
+const answerImageBlobs = [];
+const activeAnswerImageUrls = new Set();
+const revokedAnswerImageUrls = [];
+URL.createObjectURL = (blob) => {
+  answerImageBlobs.push(blob);
+  const url = `blob:answer-${answerImageBlobs.length}`;
+  activeAnswerImageUrls.add(url);
+  return url;
+};
+URL.revokeObjectURL = (url) => {
+  assert(activeAnswerImageUrls.delete(url), "each allocated image URL is released once");
+  revokedAnswerImageUrls.push(url);
+};
+// The small DOM port only needs to recognize the trusted renderer's image slots here.
+const answerContent = document.querySelector("#session-answer-content");
+Object.defineProperty(answerContent, "innerHTML", {
+  get() { return this.html || ""; },
+  set(value) {
+    this.html = value;
+    this.replaceChildren();
+    for (const match of value.matchAll(/<img\b([^>]*)>/g)) {
+      const attrs = Object.fromEntries([...match[1].matchAll(/([\w-]+)="([^"]*)"/g)]
+        .map((attribute) => [attribute[1], attribute[2]]));
+      const node = new Element("img", attrs);
+      node.replaceWith = (replacement) => {
+        const parent = node.parentElement;
+        const index = parent?.children.indexOf(node) ?? -1;
+        if (index < 0) return;
+        replacement.parentElement = parent;
+        parent.children.splice(index, 1, replacement);
+        node.parentElement = null;
+      };
+      this.append(node);
+    }
+  },
+});
+const imageAnswer = (id = "image-0") => ({
+  turnId: "image-turn", status: "completed", answer: "![小猫](/tmp/cat.png)", readAt: "now",
+  markdownHtml: `<p><img data-answer-image="${id}" alt="小猫" loading="lazy" decoding="async"></p>`,
+  images: [{ id, mime: "image/png", data: "aW1hZ2U=" }],
+});
 const priorFetch = fetch;
 fetch = async (path, options = {}) => {
   const url = new URL(path, "https://admin");
@@ -109,12 +150,29 @@ fetch = async (path, options = {}) => {
   answerNode("toggle").click();
   assert.equal(answerNode("content").hidden, false);
   assert.equal(requests.length, afterAnswer, "switching preview/source reuses the same snapshot");
+
+  const repeatedImage = imageAnswer();
+  repeatedImage.markdownHtml += repeatedImage.markdownHtml;
+  repeatedImage.images.push({ id: "unused", mime: "image/png", data: "aW1hZ2U=" });
+  latestAnswer = () => repeatedImage;
+  await refreshLatestAnswer();
+  const imageNodes = answerNode("content").querySelectorAll("img");
+  assert.equal(imageNodes.length, 2);
+  assert.equal(answerImageBlobs.length, 1, "repeated image references share one Blob; unreferenced images are not decoded");
+  assert.equal(imageNodes[0].src, imageNodes[1].src);
+  assert.equal(answerImageBlobs[0].type, "image/png");
+  assert.equal(await answerImageBlobs[0].text(), "image");
+  assert.equal(latestAnswerView.result.images, undefined, "snapshot does not retain base64 image data");
+  answerNode("toggle").click(); answerNode("toggle").click();
+  assert.equal(answerImageBlobs.length, 1, "source/preview toggles retain the image resources");
   latestAnswer = async () => { throw new Error("refresh failed"); };
   await refreshLatestAnswer();
   assert.equal(answerNode("content").hidden, false, "refresh failure retains the rendered snapshot");
   assert.match(answerNode("note").textContent, /读取的快照/);
+  assert(activeAnswerImageUrls.has(imageNodes[0].src), "failed refresh preserves the displayed images");
   latestAnswer = () => ({ turnId: "newest", status: "completed", answer: "large source", previewMessage: "已显示原文", readAt: "now" });
   await refreshLatestAnswer();
+  assert.equal(activeAnswerImageUrls.size, 0, "successful replacement releases the previous images");
   assert.equal(answerNode("source").textContent, "large source");
   assert.equal(answerNode("source").hidden, false);
   assert.equal(answerNode("toggle").hidden, true);
@@ -130,23 +188,69 @@ fetch = async (path, options = {}) => {
   latestAnswer = async () => { throw new Error("history unavailable"); };
   await refreshLatestAnswer();
   assert.match(answerNode("note").textContent, /读取的快照/);
+
+  for (const images of [[], [{ id: "image-0", mime: "image/png", data: "!invalid!" }],
+    [{ id: "image-0", mime: "image/svg+xml", data: "aW1hZ2U=" }]]) {
+    latestAnswer = () => ({ ...imageAnswer(), images });
+    await refreshLatestAnswer();
+    assert.equal(answerNode("content").querySelectorAll("img").length, 0);
+    assert.match(answerNode("content").textContent, /小猫.*图片预览不可用/);
+    assert.equal(activeAnswerImageUrls.size, 0);
+  }
+  latestAnswer = () => ({ ...imageAnswer(),
+    markdownHtml: imageAnswer().markdownHtml + imageAnswer("image-1").markdownHtml,
+    images: [{ id: "image-0", mime: "image/png", data: "!invalid!" }, ...imageAnswer("image-1").images],
+  });
+  await refreshLatestAnswer();
+  assert.match(answerNode("content").textContent, /小猫.*图片预览不可用/);
+  assert.equal(answerNode("content").querySelectorAll("img").length, 1, "one malformed image does not hide the remaining images");
+  assert.equal(activeAnswerImageUrls.size, 1);
+  latestAnswer = () => imageAnswer();
+  await refreshLatestAnswer();
+  const failedImage = answerNode("content").querySelector("img");
+  failedImage.dispatch("error");
+  assert.match(answerNode("content").textContent, /小猫.*图片预览不可用/);
+  assert.equal(answerNode("source").textContent, imageAnswer().answer);
+  assert.equal(answerNode("toggle").hidden, false, "image decode failure does not disrupt answer text/toggle");
+
   const slow = deferred(); latestAnswer = () => slow.promise;
+  const beforeLateAnswer = answerImageBlobs.length;
   const pending = refreshLatestAnswer(); closeLatestAnswer();
-  slow.resolve({ turnId: "stale", status: "completed", answer: "must not appear" }); await pending;
+  assert.equal(activeAnswerImageUrls.size, 0, "closing the drawer releases image resources");
+  slow.resolve({ ...imageAnswer(), answer: "must not appear" }); await pending;
+  assert.equal(answerImageBlobs.length, beforeLateAnswer, "closed drawer ignores late image responses before allocating URLs");
   assert.equal(answerNode("drawer").open, false);
   assert.equal(answerNode("source").textContent, "");
   assert(!answerNode("content").textContent.includes("must not appear"));
   state.sessions = { items: [{ ...ordinary, canReadLatestAnswer: false }] }; renderSessions(state.sessions);
   assert(!document.querySelector("#sessions-body").querySelectorAll("button").some((button) => button.textContent === "查看最近回答"));
+  latestAnswer = () => imageAnswer();
+  await openLatestAnswer(archived);
   const otherPending = deferred(); latestAnswer = () => otherPending.promise;
   const opening = openLatestAnswer(archived);
+  assert.equal(activeAnswerImageUrls.size, 0, "opening a session clears the preceding session's image resources immediately");
   latestAnswer = () => ({ turnId: "other", status: "completed", answer: "new session", markdownHtml: "<p>new session</p>" });
   await openLatestAnswer({ ...archived, bindingId: "other", nativeThreadId: "other" });
-  otherPending.resolve({ turnId: "stale", status: "completed", answer: "stale", markdownHtml: "<p>stale</p>" });
+  const beforeOldSession = answerImageBlobs.length;
+  otherPending.resolve(imageAnswer());
   await opening;
+  assert.equal(answerImageBlobs.length, beforeOldSession, "late response from another session cannot allocate or display images");
   assert.equal(answerNode("source").textContent, "new session");
   assert.equal(answerNode("content").innerHTML, "<p>new session</p>");
+  latestAnswer = () => imageAnswer();
+  await refreshLatestAnswer();
+  assert.equal(activeAnswerImageUrls.size, 1);
+  const staleRefresh = deferred(); latestAnswer = () => staleRefresh.promise;
+  const refreshing = refreshLatestAnswer();
+  latestAnswer = () => ({ ...imageAnswer(), answer: "fresh snapshot" });
+  await refreshLatestAnswer();
+  const beforeStaleRefresh = answerImageBlobs.length;
+  staleRefresh.resolve(imageAnswer()); await refreshing;
+  assert.equal(answerImageBlobs.length, beforeStaleRefresh, "older refresh cannot allocate images after a newer successful refresh");
+  assert.equal(answerNode("source").textContent, "fresh snapshot");
   expireAdminSession();
+  assert.equal(activeAnswerImageUrls.size, 0, "authentication expiry releases image resources");
+  assert.equal(revokedAnswerImageUrls.length, answerImageBlobs.length);
   assert.equal(answerNode("drawer").open, false);
   assert.equal(answerNode("source").textContent, "");
   assert.equal(answerNode("content").textContent, "");

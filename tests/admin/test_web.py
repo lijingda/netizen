@@ -1966,6 +1966,86 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(read.await_count, 3)
         self.assertEqual(self.management.calls, [])
 
+    async def test_latest_answer_images_require_authentication_and_use_bounded_worker(self) -> None:
+        import threading
+        from netizen_cli.admin.answer_previews import render_answer_preview
+        from netizen_cli.runtime.contracts import NativeAnswerImage, NativeLatestAnswer
+        from netizen_cli.management.blocking_io import BoundedBlockingIOExecutor
+
+        self.runner.open_admission()
+        self.management.file_reads = BoundedBlockingIOExecutor(max_workers=2, capacity=4)
+        self.addAsyncCleanup(self.management.file_reads.aclose)
+        session = await self.login()
+        data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOesAAAAASUVORK5CYII="
+        answer = NativeLatestAnswer("native", "turn", "completed", "before 🌙 ![猫](/native/image.png) after",
+                                    images=(NativeAnswerImage("/native/image.png", data),
+                                            NativeAnswerImage("/unused.png", data)))
+        main_thread = threading.get_ident()
+        workers = []
+
+        def render(value):
+            workers.append(threading.get_ident())
+            return render_answer_preview(value)
+
+        target = "/api/v1/sessions/latest-answer?bindingId=binding&threadId=native"
+        with patch.object(self.management, "latest_binding_answer", AsyncMock(return_value=answer), create=True) as read, \
+                patch("netizen_cli.admin.web.render_answer_preview", side_effect=render):
+            status, _, _ = await self.request("GET", target)
+            self.assertEqual(status, 401)
+            read.assert_not_awaited()
+            status, headers, result = await self.json_get(target, session)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["answer"], answer.answer)
+        self.assertEqual(result["images"], [{"id": "image-0", "mime": "image/png", "data": data}])
+        self.assertIn('data-answer-image="image-0"', result["markdownHtml"])
+        self.assertNotIn("/native/image.png", result["markdownHtml"])
+        self.assertNotIn("/unused.png", json.dumps(result))
+        self.assertIn("blob:", dict(headers)["content-security-policy"])
+        self.assertEqual(len(workers), 1)
+        self.assertNotEqual(workers[0], main_thread)
+        self.assertEqual(self.management.calls, [])
+
+    async def test_latest_answer_revoked_during_encoding_never_returns_image_payload(self) -> None:
+        import threading
+        from netizen_cli.admin.web import _json_response
+        from netizen_cli.runtime.contracts import NativeAnswerImage, NativeLatestAnswer
+        from netizen_cli.management.blocking_io import BoundedBlockingIOExecutor
+
+        self.runner.open_admission()
+        self.management.file_reads = BoundedBlockingIOExecutor(max_workers=2, capacity=4)
+        self.addAsyncCleanup(self.management.file_reads.aclose)
+        session = await self.login()
+        data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOesAAAAASUVORK5CYII="
+        answer = NativeLatestAnswer("native", "turn", "completed", "![猫](/native/image.png)",
+                                    images=(NativeAnswerImage("/native/image.png", data),))
+        encoded = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def encode(status, payload, **kwargs):
+            result = _json_response(status, payload, **kwargs)
+            if isinstance(payload, dict) and payload.get("images"):
+                loop.call_soon_threadsafe(encoded.set)
+                if not release.wait(5):
+                    raise AssertionError("image encoder was not released")
+            return result
+
+        with patch.object(self.management, "latest_binding_answer", AsyncMock(return_value=answer), create=True), \
+                patch("netizen_cli.admin.web._json_response", side_effect=encode):
+            request = asyncio.create_task(self.json_get(
+                "/api/v1/sessions/latest-answer?bindingId=binding&threadId=native", session,
+            ))
+            try:
+                await asyncio.wait_for(encoded.wait(), timeout=5)
+                self.assertTrue(self.auth.logout(session))
+            finally:
+                release.set()
+                status, _, result = await request
+        self.assertEqual(status, 401, result)
+        self.assertNotIn("images", result)
+        self.assertNotIn("answer", result)
+        self.assertNotIn(data, json.dumps(result))
+
     async def test_latest_answer_preview_failure_retains_source_and_empty_answer_skips_rendering(self) -> None:
         from netizen_cli.runtime.contracts import NativeLatestAnswer
         from netizen_cli.admin.file_previews import PreviewUnavailable

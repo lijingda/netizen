@@ -56,7 +56,7 @@ from .partial_answers import PartialAnswer, partial_answers_from_items
 from .progress_card_settings import ProgressCardSettings
 from .error_messages import describe_error, native_turn_failure
 from .thread_history import AppServerThreadHistory
-from .runtime.contracts import NativeLatestAnswer
+from .runtime.contracts import NativeAnswerImage, NativeLatestAnswer
 from .runtime.name_writes import ThreadNameWrites
 from .runtime.thread_naming import NamingJob, ThreadNameGenerationError, ThreadNamer
 # Preserve existing public imports as aliases of the shared contract types.
@@ -2162,9 +2162,23 @@ class CodexRuntime:
         turn = page.data[0]
         status = _enum_value(turn.status)
         items = list(turn.items) if status in {"completed", "failed", "interrupted"} else []
+        answer = _final_agent_response(items)
+        images = []
+        if status == "completed" and answer:
+            for item in items:
+                root = getattr(item, "root", item)
+                if (getattr(root, "type", None) != "imageGeneration"
+                        or _enum_value(getattr(root, "status", None)) != "completed"):
+                    continue
+                path = getattr(root, "saved_path", None)
+                path = getattr(path, "root", path)
+                data = getattr(root, "result", None)
+                if isinstance(path, str) and isinstance(data, str):
+                    images.append(NativeAnswerImage(path, data))
         return NativeLatestAnswer(
-            thread_id, turn.id, status, _final_agent_response(items),
+            thread_id, turn.id, status, answer,
             getattr(turn, "started_at", None), getattr(turn, "completed_at", None),
+            tuple(images),
         )
 
     async def thread_summary(

@@ -39,6 +39,7 @@ from .auth import (
 )
 from .errors import AdminWebError
 from .file_previews import PreviewUnavailable, render_markdown
+from .answer_previews import render_answer_preview
 from .credentials import AdminCredentials
 from .feishu import AuthExpired, FeishuClient, FeishuError
 from .login import AdminLogin
@@ -210,7 +211,7 @@ _SECURITY_HEADERS = (
         b"Content-Security-Policy",
         (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            f"img-src 'self' {CHAT_AVATAR_IMAGE_SOURCES}; "
+            f"img-src 'self' {CHAT_AVATAR_IMAGE_SOURCES} blob:; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
             "form-action 'self'"
         ).encode("ascii"),
@@ -1533,25 +1534,28 @@ class AdminWebApplication:
             raise AdminWebError(504, "answer_timeout", "最近一轮读取超时，请手动重试。") from error
         except (CodexError, ThreadHistoryUnavailable, OSError) as error:
             raise AdminWebError(503, "answer_unavailable", "会话历史暂时不可读取，可能已删除或不可用。") from error
-        preview = {}
-        if answer.answer:
-            try:
-                preview["markdownHtml"] = await self._management.file_reads.submit(
-                    lambda: render_markdown(answer.answer), deadline=deadline,
-                )
-            except PreviewUnavailable:
-                preview["previewMessage"] = "回答超出排版预览限制，已显示原文。"
-            except (TimeoutError, BlockingIOResultUnknown, BlockingIOExecutorClosed, BlockingIOExecutorSaturated):
-                preview["previewMessage"] = "排版预览暂不可用，已显示原文。"
-        self._authenticate(context)
-        return _json_response(200, {
+        payload = {
             "requestId": context.request.request_id,
             "threadId": answer.thread_id, "turnId": answer.turn_id,
             "status": answer.status, "answer": answer.answer,
             "startedAt": answer.started_at, "completedAt": answer.completed_at,
             "readAt": datetime.now().astimezone().isoformat(),
-            **preview,
-        })
+        }
+        response = None
+        if answer.answer:
+            try:
+                # Decode, render and encode the larger image-bearing response
+                # in the existing bounded executor, off the service event loop.
+                response = await self._management.file_reads.submit(
+                    lambda: _json_response(200, {**payload, **render_answer_preview(answer)}, ensure_ascii=True),
+                    deadline=deadline,
+                )
+            except PreviewUnavailable:
+                payload["previewMessage"] = "回答超出排版预览限制，已显示原文。"
+            except (TimeoutError, BlockingIOResultUnknown, BlockingIOExecutorClosed, BlockingIOExecutorSaturated):
+                payload["previewMessage"] = "排版预览暂不可用，已显示原文。"
+        self._authenticate(context)
+        return response if response is not None else _json_response(200, payload)
 
     async def _sessions(self, context: _RequestContext) -> Response:
         allowed = {
@@ -3109,13 +3113,19 @@ def _secure(response: Response) -> Response:
     return Response(response.status, tuple(headers), response.body)
 
 
-def _json_response(status: int, payload: object) -> Response:
-    body = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
+def _json_response(status: int, payload: object, *, ensure_ascii: bool = False) -> Response:
+    if ensure_ascii:
+        # Keep image-bearing chunks ASCII even when the answer contains emoji.
+        # Iteration also avoids one C encoder call holding the GIL across all
+        # images; encode each chunk before joining the final response bytes.
+        chunks = json.JSONEncoder(
+            ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+        ).iterencode(payload)
+        body = b"".join(chunk.encode("ascii") for chunk in chunks)
+    else:
+        body = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        ).encode("utf-8")
     return Response(
         status,
         ((b"Content-Type", b"application/json; charset=utf-8"),),
