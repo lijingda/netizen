@@ -1993,14 +1993,24 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             status, _, _ = await self.request("GET", target)
             self.assertEqual(status, 401)
             read.assert_not_awaited()
-            status, headers, result = await self.json_get(target, session)
+            status, _, result = await self.json_get(target, session)
         self.assertEqual(status, 200, result)
         self.assertEqual(result["answer"], answer.answer)
         self.assertEqual(result["images"], [{"id": "image-0", "mime": "image/png", "data": data}])
         self.assertIn('data-answer-image="image-0"', result["markdownHtml"])
         self.assertNotIn("/native/image.png", result["markdownHtml"])
         self.assertNotIn("/unused.png", json.dumps(result))
-        self.assertIn("blob:", dict(headers)["content-security-policy"])
+        # Image loading follows the document's CSP, not the JSON response's.
+        for page in ("/projects", "/sessions/ordinary"):
+            status, headers, _ = await self.request(
+                "GET", page, headers=[("Cookie", f"netizen_admin_session={session}")],
+            )
+            self.assertEqual(status, 200)
+            policies = [value for name, value in headers if name == "content-security-policy"]
+            self.assertEqual(len(policies), 1)
+            image_sources = next(part.split()[1:] for part in policies[0].split(";")
+                                 if part.strip().startswith("img-src "))
+            self.assertIn("blob:", image_sources)
         self.assertEqual(len(workers), 1)
         self.assertNotEqual(workers[0], main_thread)
         self.assertEqual(self.management.calls, [])

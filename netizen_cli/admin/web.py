@@ -231,7 +231,7 @@ _SELECTOR_CSP = (
     "https://lf3-cdn-tos.bytegoofy.com/obj/goofy/locl/lark/external_js_sdk/h5-js-sdk-1.2.21.js "
     "https://sf1-scmcdn-cn.feishucdn.com/obj/feishu-static/locl/lark/external_js_sdk/; "
     "style-src 'self' 'unsafe-inline' https://sf1-scmcdn-cn.feishucdn.com; "
-    f"img-src 'self' data: {CHAT_AVATAR_IMAGE_SOURCES} https://*.feishucdn.com https://*.feishu.cn; "
+    f"img-src 'self' data: blob: {CHAT_AVATAR_IMAGE_SOURCES} https://*.feishucdn.com https://*.feishu.cn; "
     "connect-src 'self' https://open.feishu.cn https://internal-api-lark-api.feishu.cn "
     "https://internal-api-space.feishu.cn https://accounts.feishu.cn/suite/passport/users/get_info; "
     "frame-src https://open.feishu.cn https://www.feishu.cn https://accounts.feishu.cn; "
