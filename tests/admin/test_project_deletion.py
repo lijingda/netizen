@@ -19,6 +19,17 @@ from tests.admin import test_web as web_fixture
 from tests.management import test_service as management_fixture
 
 
+def _relaxed_query_seconds(deadline: float, *, maximum: float = 30.0) -> float:
+    # These cases exercise the deletion flow itself, not the half-second
+    # per-query responsiveness bound. A loaded macOS CI runner can spend more
+    # than that on one queued store query and turn the whole case into a
+    # spurious 504 query_timeout, so keep the request deadline as the bound.
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise TimeoutError("management query deadline elapsed")
+    return min(maximum, remaining)
+
+
 class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
     # Reuse only HTTP fixture helpers, without inheriting the unrelated test cases.
     request = web_fixture.AdminWebTest.request
@@ -49,6 +60,13 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
             scope_coordinator=ScopeCoordinator(),
         )
         self.runner.application._management = self.management
+        query_cap_patch = patch.object(
+            InstanceManagementService,
+            "_query_seconds",
+            staticmethod(_relaxed_query_seconds),
+        )
+        query_cap_patch.start()
+        self.addCleanup(query_cap_patch.stop)
         self.scope = FeishuScope("cli_test", "oc_project", ScopeKind.DIRECT)
         self.runner.open_admission()
 
