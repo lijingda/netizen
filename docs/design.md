@@ -2365,7 +2365,9 @@ cookie，无 Expires/Max-Age。服务重启要求重新确认身份，磁盘有�
 session 并撤销 grants、失败登录不得驱逐等边界。preauth 保留来源与 cookie/nonce 配对，
 每来源 16、全局 1024 容量；action/CSRF 为十分钟单次 grant。过期页面停止管理请求和
 轮询，显示主动重新登录入口，不自动重放 mutation。
-Host 只接受启动时发现的本机地址/名称、可选 `adminWeb.accessHost` 与 exact 实际端口，
+Host 只接受启动时发现的本机地址/名称、可选 `adminWeb.accessHost` 与 exact 实际端口。
+本机 IP 在启动时通过系统网卡枚举获取，不依赖主机名解析；枚举失败保留已有名称、
+回环与显式入口。发现结果沿用启动快照，不随网络变化自动刷新。
 accessHost 只接受 hostname/IP，不是协议、端口、路径或反向代理配置。登录 start/cancel 及所有 mutation 还要求
 同源 `Origin`，不信任 forwarded header。页面和 API 直接使用受信内网 HTTP，不实现 TLS、
 OIDC、角色或 RBAC。

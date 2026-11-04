@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
+import psutil
+
 from .auth import (
     ActionCsrfRejected,
     AdmissionClosed,
@@ -2933,16 +2935,14 @@ def accepted_authorities(
         if name:
             hosts.add(name.rstrip(".").lower())
     try:
-        infos = socket.getaddrinfo(
-            socket.gethostname(),
-            None,
-            type=socket.SOCK_STREAM,
-        )
-    except OSError:
-        infos = []
-    for _family, _kind, _protocol, _canonical, sockaddr in infos:
-        if isinstance(sockaddr, tuple) and sockaddr and isinstance(sockaddr[0], str):
-            hosts.add(sockaddr[0].split("%", 1)[0])
+        interfaces = psutil.net_if_addrs()
+    except OSError as error:
+        logger.warning("Admin network interface discovery failed: %s", type(error).__name__)
+        interfaces = {}
+    for addresses_on_interface in interfaces.values():
+        for address in addresses_on_interface:
+            if address.family in {socket.AF_INET, socket.AF_INET6}:
+                hosts.add(address.address.split("%", 1)[0])
     authorities = {
         _format_authority(host, port)
         for host in hosts
