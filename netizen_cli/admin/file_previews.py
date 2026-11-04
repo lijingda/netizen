@@ -158,6 +158,8 @@ def render_markdown(
     *,
     path: str | None = None,
     image_url: Callable[[str], str] | None = None,
+    answer_image: Callable[[str], str | None] | None = None,
+    max_images: int = MAX_MARKDOWN_IMAGES,
 ) -> str:
     """Render safe HTML; image_url maps a root-relative file to its Admin endpoint.
 
@@ -166,7 +168,9 @@ def render_markdown(
     carry ``data-file-browser-directory="true"``.
     Remote images and fragment-only links remain inert. No filesystem or network
     access occurs here; the file endpoint separately validates image contents.
-    Without a file context, local links and all images remain inert.
+    Without a file context, local links remain inert. An answer_image resolver
+    may select already validated native image data by opaque slot id; it never
+    grants file access or creates a resource URL.
     """
     try:
         length = len(text.encode("utf-8"))
@@ -208,12 +212,23 @@ def render_markdown(
                     token.attrSet("data-file-browser-directory", "true")
         elif token.type == "image":
             target = _target(token.attrGet("src") or "", directory)
-            if path is None or image_url is None:
+            if path is None and answer_image is not None:
+                slot = answer_image(token.attrGet("src") or "") if images < max_images else None
+                if slot is None:
+                    _replace_image(token, "图片预览暂不可用")
+                else:
+                    token.children = [Token("text", "", 0, content=_image_alt(token.children or []))]
+                    token.attrs.pop("src", None)
+                    token.attrSet("data-answer-image", slot)
+                    token.attrSet("loading", "lazy")
+                    token.attrSet("decoding", "async")
+                    images += 1
+            elif path is None or image_url is None:
                 _replace_image(token, "此处不加载图片")
             elif target is None or target[0] != "local":
                 _replace_image(token, "仅预览当前根目录内的相对路径图片")
-            elif images >= MAX_MARKDOWN_IMAGES:
-                _replace_image(token, "本页最多预览 8 张图片")
+            elif images >= max_images:
+                _replace_image(token, f"本页最多预览 {max_images} 张图片")
             else:
                 token.children = [Token(
                     "text", "", 0, content=_image_alt(token.children or []),

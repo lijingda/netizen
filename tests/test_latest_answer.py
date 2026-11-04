@@ -5,9 +5,10 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from openai_codex import InvalidRequestError
+from openai_codex.generated.v2_all import ThreadItem
 
 from netizen_cli.codex_runtime import CodexRuntime
-from netizen_cli.runtime.contracts import NativeLatestAnswer
+from netizen_cli.runtime.contracts import NativeAnswerImage, NativeLatestAnswer
 
 
 def message(text, phase=None, kind="agentMessage"):
@@ -15,6 +16,33 @@ def message(text, phase=None, kind="agentMessage"):
 
 
 class LatestAnswerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_images_come_only_from_completed_generation_in_the_same_completed_turn(self):
+        runtime = object.__new__(CodexRuntime)
+        runtime._codex = object()
+        image = ThreadItem.model_validate({
+            "type": "imageGeneration", "id": "image", "status": "completed",
+            "result": "native-png-base64", "savedPath": "/original-thread/image.png",
+        })
+        ignored = [SimpleNamespace(root=SimpleNamespace(type="imageView", path="/view.png")),
+                   SimpleNamespace(root=SimpleNamespace(type="imageGeneration", status="inProgress",
+                                                       saved_path="/pending.png", result="pending")),
+                   SimpleNamespace(root=SimpleNamespace(type="imageGeneration", status="completed",
+                                                       saved_path=None, result="no-path"))]
+        for status in ("completed", "failed", "interrupted", "inProgress"):
+            with self.subTest(status=status):
+                turn = SimpleNamespace(id="latest", status=status,
+                                       items=[image, *ignored, message("![image](/original-thread/image.png)", "final_answer")])
+                history = SimpleNamespace(list_turns=AsyncMock(return_value=SimpleNamespace(data=[turn])))
+                with patch("netizen_cli.codex_runtime.AppServerThreadHistory", return_value=history):
+                    result = await runtime.latest_thread_answer("fork")
+                expected = (NativeAnswerImage("/original-thread/image.png", "native-png-base64"),) if status == "completed" else ()
+                self.assertEqual(result.images, expected)
+                history.list_turns.assert_awaited_once_with("fork", limit=1, items_view="full")
+        turn.status = "completed"
+        turn.items = [image]
+        with patch("netizen_cli.codex_runtime.AppServerThreadHistory", return_value=history):
+            self.assertEqual((await runtime.latest_thread_answer("fork")).images, ())
+
     async def test_reads_latest_full_turn_once_and_never_uses_a_tail(self):
         runtime = object.__new__(CodexRuntime)
         runtime._codex = object()

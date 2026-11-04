@@ -2399,10 +2399,49 @@ let latestAnswerView = null;
 let latestAnswerRequest = 0;
 const answerNode = (name) => document.querySelector(`#session-answer-${name}`);
 
+function releaseLatestAnswerImages(view) {
+  if (!view) return;
+  for (const url of view.imageUrls.values()) URL.revokeObjectURL(url);
+  view.imageUrls.clear();
+}
+
+function installLatestAnswerImages(view, images) {
+  const slots = new Map();
+  for (const node of answerNode("content").querySelectorAll("[data-answer-image]")) {
+    const id = node.dataset.answerImage;
+    if (!slots.has(id)) slots.set(id, []);
+    slots.get(id).push(node);
+  }
+  const unavailable = (node) => node.replaceWith(document.createTextNode(
+    `〔图片：${node.getAttribute("alt") || "图片"}；图片预览不可用〕`,
+  ));
+  for (const [id, nodes] of slots) {
+    const image = Array.isArray(images) ? images.find((item) => item?.id === id) : null;
+    try {
+      // Only bounded, validated PNG bytes from this answer response are accepted.
+      if (image?.mime !== "image/png" || typeof image.data !== "string") throw new Error("Invalid answer image");
+      const decoded = atob(image.data);
+      const bytes = new Uint8Array(decoded.length);
+      for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index);
+      const url = URL.createObjectURL(new Blob([bytes], { type: image.mime }));
+      view.imageUrls.set(id, url);
+      for (const node of nodes) {
+        node.addEventListener("error", () => {
+          if (latestAnswerView === view && view.imageUrls.get(id) === url) unavailable(node);
+        }, { once: true });
+        node.src = url;
+      }
+    } catch (_error) {
+      for (const node of nodes) unavailable(node);
+    }
+  }
+}
+
 function closeLatestAnswer() {
   latestAnswerRequest += 1;
   const previous = latestAnswerView;
   latestAnswerView = null;
+  releaseLatestAnswerImages(previous);
   document.body.classList.toggle("session-answer-open", false);
   answerNode("content").replaceChildren();
   answerNode("source").textContent = "";
@@ -2413,7 +2452,8 @@ function closeLatestAnswer() {
 
 async function openLatestAnswer(session) {
   if (state.authExpired || !session.canReadLatestAnswer) return;
-  latestAnswerView = { session, returnFocus: document.activeElement, preview: true, result: null };
+  releaseLatestAnswerImages(latestAnswerView);
+  latestAnswerView = { session, returnFocus: document.activeElement, preview: true, result: null, imageUrls: new Map() };
   answerNode("title").textContent = "最近一轮回答";
   answerNode("identity").textContent = `${session.nativeTitle || "未命名会话"} · ${session.shortId}`;
   answerNode("content").textContent = "";
@@ -2456,8 +2496,11 @@ async function refreshLatestAnswer() {
     const status = { completed: "已完成", interrupted: "已停止", failed: "失败", inProgress: "运行中" }[result.status] || "状态未知";
     answerNode("note").textContent = result.turnId
       ? `本轮${status}${result.answer ? "" : "，暂无最终回答。"}` : "会话尚无执行轮次。";
-    view.result = result;
+    const { images, ...snapshot } = result;
+    releaseLatestAnswerImages(view);
+    view.result = snapshot;
     window.NetizenContentPreview.renderMarkdown(answerNode("content"), result.answer ? result.markdownHtml : null);
+    installLatestAnswerImages(view, images);
     answerNode("source").textContent = result.answer || "";
     answerNode("preview-note").textContent = result.previewMessage || "";
     renderLatestAnswer(view);

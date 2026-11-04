@@ -277,14 +277,25 @@ def _image_dimensions(data: bytes, mime: str) -> tuple[int, int]:
     raise FileBrowseError("invalid_image", "无法读取图片尺寸，暂不支持预览。")
 
 
+def validate_image(
+    data: bytes, mime: str, *, max_bytes: int = MAX_IMAGE_BYTES,
+    max_pixels: int = MAX_IMAGE_PIXELS, max_dimension: int = MAX_IMAGE_DIMENSION,
+) -> tuple[int, int]:
+    """Validate bytes and dimensions under the caller's preview budgets."""
+    if len(data) > max_bytes:
+        raise FileBrowseError("preview_too_large", "图片过大，暂不支持预览。")
+    width, height = _image_dimensions(data, mime)
+    if width <= 0 or height <= 0:
+        raise FileBrowseError("invalid_image", "图片尺寸无效，暂不支持预览。")
+    if max(width, height) > max_dimension or width * height > max_pixels:
+        raise FileBrowseError("preview_too_large", "图片尺寸过大，暂不支持预览。")
+    return width, height
+
+
 def _preview(data: bytes, path: str, info: os.stat_result) -> FilePreview:
     mime = _image_mime(data, path)
     if mime:
-        width, height = _image_dimensions(data, mime)
-        if width <= 0 or height <= 0:
-            raise FileBrowseError("invalid_image", "图片尺寸无效，暂不支持预览。")
-        if max(width, height) > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
-            raise FileBrowseError("preview_too_large", "图片尺寸过大，暂不支持预览。")
+        validate_image(data, mime)
         return FilePreview(path, "image", None, data, mime, len(data), _modified_at(info), _file_version(info))
     if len(data) > MAX_TEXT_BYTES:
         raise FileBrowseError("preview_too_large", "文本超过 1 MiB，暂不支持预览。")

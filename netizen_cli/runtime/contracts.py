@@ -7,7 +7,7 @@ locks, subscriptions or persistence.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
@@ -498,6 +498,12 @@ class NativeThreadMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeAnswerImage:
+    saved_path: str
+    data: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class NativeLatestAnswer:
     thread_id: str
     turn_id: str | None
@@ -505,6 +511,7 @@ class NativeLatestAnswer:
     answer: str | None
     started_at: int | None = None
     completed_at: int | None = None
+    images: tuple[NativeAnswerImage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
