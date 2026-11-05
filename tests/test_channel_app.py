@@ -35,6 +35,7 @@ from openai_codex.errors import InternalRpcError
 from openai_codex.types import ThreadItem, TurnError
 
 from netizen_cli import channel_app
+from netizen_cli.channel import constants as channel_constants
 from netizen_cli.channel.session_pages import SessionCardPage
 from netizen_cli.channel import input_preparation
 from netizen_cli.channel.input_preparation import MessageInputPreparer
@@ -1160,9 +1161,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
-            patch.object(
-                channel_app,
-                "turn_patch_summary",
+            patch(
+                "netizen_cli.channel.presentation.turn_patch_summary",
                 wraps=channel_app.turn_patch_summary,
             ) as parse_diff,
         ):
@@ -2028,9 +2028,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         report = self.project / "research.md"
         report.write_text("research", encoding="utf-8")
 
-        with patch.object(
-            channel_app,
-            "turn_patch_summary",
+        with patch(
+            "netizen_cli.channel.presentation.turn_patch_summary",
             wraps=channel_app.turn_patch_summary,
         ) as parse_diff:
             await self.app.handle_completion(
@@ -2305,9 +2304,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         report.write_text("report", encoding="utf-8")
 
         with (
-            patch.object(
-                channel_app,
-                "turn_files_card",
+            patch(
+                "netizen_cli.channel.presentation.turn_files_card",
                 side_effect=channel_app.TurnFileCardLimitError(
                     "本轮文件共 501 个，超过上限；未截断文件清单。"
                 ),
@@ -3034,7 +3032,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
 
         with patch(
-            "netizen_cli.channel_app.git_branch_status",
+            "netizen_cli.channel.base.git_branch_status",
             return_value="main...origin/main [ahead 2]",
         ) as read_branch:
             await self.app.handle_message(
@@ -3351,7 +3349,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(self.runtime, "goal_snapshot", stalled_goal),
-            patch("netizen_cli.channel_app._SESSION_QUERY_TIMEOUT_SECONDS", 0.05),
+            patch("netizen_cli.channel.constants.SESSION_QUERY_TIMEOUT_SECONDS", 0.05),
         ):
             card = await asyncio.wait_for(self.app._sessions_card(scope=scope), 0.5)
         self.assertTrue(entered.is_set())
@@ -4136,7 +4134,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         replies_before = len(self.channel.replies)
         with (
-            patch.object(channel_app.asyncio, "sleep", record_delay),
+            patch.object(asyncio, "sleep", record_delay),
             self.assertLogs("netizen_cli.channel_app", level="WARNING"),
         ):
             await self.app.handle_card_action(
@@ -4174,7 +4172,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             delays.append(delay)
 
         with (
-            patch.object(channel_app.asyncio, "sleep", record_delay),
+            patch.object(asyncio, "sleep", record_delay),
             self.assertLogs("netizen_cli.channel_app", level="ERROR"),
         ):
             await self.app.handle_card_action(
@@ -4247,7 +4245,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             delays.append(delay)
 
         with (
-            patch.object(channel_app.asyncio, "sleep", record_delay),
+            patch.object(asyncio, "sleep", record_delay),
             self.assertLogs("netizen_cli.channel_app", level="WARNING"),
         ):
             await self.app.handle_card_action(
@@ -8732,7 +8730,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         try:
             with (
                 patch.object(self.runtime, "thread_summary", new=delayed_summary),
-                patch("netizen_cli.channel_app._SIDE_CARD_METADATA_TIMEOUT_SECONDS", 0.01),
+                patch("netizen_cli.channel.constants.SIDE_CARD_METADATA_TIMEOUT_SECONDS", 0.01),
             ):
                 await asyncio.wait_for(self.app.handle_message(source), timeout=1)
                 record = self.store.side_topic_for_source(app_id="cli_test", source_message_id=source.id)
@@ -9476,7 +9474,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(calls), 2)
                 self.assertEqual(
                     calls[1][1],
-                    channel_app._SIDE_EMPTY_TOPIC_PROMPT,
+                    channel_constants.SIDE_EMPTY_TOPIC_PROMPT,
                 )
                 opts = calls[1][2]
                 self.assertEqual(opts.receive_id_type, "chat_id")
@@ -9508,7 +9506,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 root_uuid,
                 channel_app._side_send_uuid(
-                    channel_app._SIDE_ROOT_UUID_PREFIX,
+                    channel_constants.SIDE_ROOT_UUID_PREFIX,
                     record.id,
                 ),
             )
@@ -9518,7 +9516,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     seed_uuid,
                     channel_app._side_send_uuid(
-                        channel_app._SIDE_SEED_UUID_PREFIX,
+                        channel_constants.SIDE_SEED_UUID_PREFIX,
                         record.id,
                     ),
                 )
@@ -9749,7 +9747,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             opts.uuid,
             channel_app._side_send_uuid(
-                channel_app._SIDE_SEED_UUID_PREFIX,
+                channel_constants.SIDE_SEED_UUID_PREFIX,
                 record.id,
             ),
         )
@@ -9764,7 +9762,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_initial_question_echo_is_bounded_and_marks_excerpt(self) -> None:
-        text = "x" * (channel_app._SIDE_INITIAL_QUESTION_MAX_CHARS + 100)
+        text = "x" * (channel_constants.SIDE_INITIAL_QUESTION_MAX_CHARS + 100)
 
         echo = channel_app._side_initial_question_echo(text)
 
@@ -10302,7 +10300,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         assert record is not None
 
         with patch(
-            "netizen_cli.channel_app.git_branch_status",
+            "netizen_cli.channel.base.git_branch_status",
             return_value="HEAD (no branch)",
         ) as read_branch:
             await self.app.handle_message(

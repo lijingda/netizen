@@ -42,7 +42,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         # Behavioral fixtures replace the public handle constructor, rather
         # than inventing a Thread-read method on the high-level Codex facade.
         reader = patch(
-            "netizen_cli.codex_runtime.AsyncThread",
+            "netizen_cli.runtime.state.AsyncThread",
             side_effect=lambda codex, thread_id: FakeThread(thread_id, codex),
         )
         reader.start()

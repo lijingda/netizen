@@ -33,10 +33,8 @@ from openai_codex import (
 import openai_codex
 from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
-from netizen_cli.codex_runtime import (
-    _INTERRUPTION_CONFIRMATION_SECONDS,
-    _is_paginated_turn_read_unavailable,
-)
+from netizen_cli.codex_runtime import _is_paginated_turn_read_unavailable
+from netizen_cli.runtime.limits import INTERRUPTION_CONFIRMATION_SECONDS
 from netizen_cli.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID
 from netizen_cli.prompt_projection import CurrentMessageProjection, render_plain_prompt
 from netizen_cli.sdk_gap_adapter import (
@@ -1217,7 +1215,7 @@ async def _confirm_interrupted_turn(
     """Reread the same exact Turn once after an interrupted candidate."""
 
     async with asyncio.timeout_at(deadline):
-        await asyncio.sleep(_INTERRUPTION_CONFIRMATION_SECONDS)
+        await asyncio.sleep(INTERRUPTION_CONFIRMATION_SECONDS)
         snapshot = await thread.read(include_turns=True)
     if snapshot.thread.id != thread.id:
         raise AssertionError("interruption confirmation changed the native Thread ID")

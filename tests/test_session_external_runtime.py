@@ -66,7 +66,7 @@ class ExternalCodex(fixtures.FakeCodex):
 
 class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.enterContext(patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 0.001))
+        self.enterContext(patch("netizen_cli.runtime.limits.INTERRUPTION_CONFIRMATION_SECONDS", 0.001))
         self.cwd = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.store = BindingStore()
         self.addCleanup(self.store.close)

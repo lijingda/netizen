@@ -211,7 +211,7 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 | 位置 | 职责 |
 | --- | --- |
 | `netizen_cli/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
-| `netizen_cli/channel_app.py`、`netizen_cli/channel/` | ChannelApplication 负责准入、Runtime 提交和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
+| `netizen_cli/channel_app.py`、`netizen_cli/channel/` | ChannelApplication 负责准入、Runtime 提交和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。它由 `channel/` 中的单向分层组成（共享状态 → 回复 → 完成展示 → 普通输入 → Side → 持久分支 → 会话工具 → 定时 → 提问 → 会话卡片 → 本轮文件 → 卡片动作 → 命令 → 入口），下层不得调用上层，由类型检查保证；斜杠命令与卡片动作各按名称分发到独立处理函数。 |
 | `netizen_cli/channel/input_preparation.py` | MessageInputPreparer 负责当前、引用和 catch-up 材料的读取、校验与图片准备，返回 typed PreparedInput；ChannelApplication 继续捕获 admission、组装 Context Boundary 提交参数并发送可见回执，Runtime 确认接受后才推进边界。 |
 | `netizen_cli/message_content.py`、`netizen_cli/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读，由消息准备组件复用。控制意图仍由 Channel 入口判定。 |
 | `netizen_cli/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
@@ -219,7 +219,7 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 | `netizen_cli/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的安装信息与本实例重启编排。 |
 | `netizen_cli/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
 | `netizen_cli/deployment/` | 有界 Admin 重启记录、维护锁与独立重启 job。 |
-| `netizen_cli/runtime/contracts.py`、`netizen_cli/codex_runtime.py` | 前者唯一定义公共协议、异常、输入输出和快照；后者继续独占任务、Goal、Side、订阅和锁，并保留原公共类型导入路径。 |
+| `netizen_cli/runtime/contracts.py`、`netizen_cli/codex_runtime.py`、`netizen_cli/runtime/` | `contracts.py` 唯一定义公共协议、异常、输入输出和快照；CodexRuntime 继续独占任务、Goal、Side、订阅和锁，并在 `codex_runtime.py` 保留原公共类型导入路径。它由 `runtime/` 中的单向生命周期分层组成（共享状态与守卫 → 订阅 → Goal 占用 → 持久分支 → 只读查询 → Activity → 归档/删除/恢复 → 命名 → 普通 Turn 观测 → Goal → 停止 → 压缩 → 输入提交 → Side → 停服），下层不得调用上层，由类型检查保证；共享可变状态只在 `runtime/state.py` 声明一次，超时与预算集中在 `runtime/limits.py`。 |
 
 程序分发与实例数据由 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md)
 分开：`netizen_cli/cli.py` 提供命令，`cli_services.py` 控制精确系统服务，

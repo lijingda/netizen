@@ -57,7 +57,7 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         )
         self.codex = FakeCodex()
         self.enterContext(patch(
-            "netizen_cli.codex_runtime.AsyncThread",
+            "netizen_cli.runtime.state.AsyncThread",
             side_effect=lambda codex, thread_id: FakeThread(thread_id, codex),
         ))
         self.runtime = CodexRuntime(

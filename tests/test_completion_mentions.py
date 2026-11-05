@@ -377,7 +377,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         outcome = await self.start_progress(outcome)
                         self.channel.replies.clear()
                         with (
-                            patch("netizen_cli.channel_app.turn_progress_card", side_effect=ValueError("cannot render")),
+                            patch("netizen_cli.channel.presentation.turn_progress_card", side_effect=ValueError("cannot render")),
                             self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
                         ):
                             await self.app.handle_completion(outcome)
@@ -473,7 +473,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def test_file_card_construction_failure_keeps_mention_for_text_fallback(self):
         (self.fixture.project / "result.txt").write_text("result", encoding="utf-8")
         with (
-            patch("netizen_cli.channel_app.turn_files_card", side_effect=ValueError("cannot render")),
+            patch("netizen_cli.channel.presentation.turn_files_card", side_effect=ValueError("cannot render")),
             self.assertLogs("netizen_cli.channel_app", level="ERROR"),
         ):
             await self.app.handle_completion(self.outcome(

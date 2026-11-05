@@ -330,7 +330,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             sent_result("om_partial", chat_id="oc_group", thread_id="omt_fresh"),
             sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"),
         ])
-        with patch("netizen_cli.channel_app.turn_progress_card", side_effect=ValueError("cannot render")):
+        with patch("netizen_cli.channel.presentation.turn_progress_card", side_effect=ValueError("cannot render")):
             await self.app.handle_completion(TurnOutcome(
                 binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
                 turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
@@ -636,7 +636,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_file_card_preparation_failure_can_fall_back_once(self):
         claim, request = await self.completion_fixture()
         self.channel.reply_results.append(sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"))
-        with patch("netizen_cli.channel_app.turn_files_card", side_effect=ValueError("cannot render")):
+        with patch("netizen_cli.channel.presentation.turn_files_card", side_effect=ValueError("cannot render")):
             await self.finish_files_fixture(claim, request)
         self.assertEqual([content for _, content in self.channel.replies], ["report complete"])
         self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")

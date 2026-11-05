@@ -66,7 +66,7 @@ class StatusCommandsTest(unittest.IsolatedAsyncioTestCase):
         await self.assert_ordinary_aliases_match_slash()
 
     async def test_git_directory_aliases_have_the_same_replies_as_slash(self):
-        with patch("netizen_cli.channel_app.git_branch_status", return_value="main...origin/main [ahead 2]"):
+        with patch("netizen_cli.channel.base.git_branch_status", return_value="main...origin/main [ahead 2]"):
             await self.assert_ordinary_aliases_match_slash()
 
     async def test_missing_directory_aliases_have_the_same_replies_as_slash(self):

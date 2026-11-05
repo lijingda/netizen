@@ -395,7 +395,7 @@ class WorktreeRuntimeCwdTest(unittest.IsolatedAsyncioTestCase):
     async def test_resume_cwd_timeout_retains_subscription_without_starting_turn(self):
         self.materialize()
         self.codex.read_gate = asyncio.Event()
-        with patch("netizen_cli.codex_runtime._PREPARED_CWD_READ_TIMEOUT_SECONDS", 0):
+        with patch("netizen_cli.runtime.limits.PREPARED_CWD_READ_TIMEOUT_SECONDS", 0):
             with self.assertRaises(SteerRace):
                 await self.runtime.submit(
                     binding=self.binding, cwd=self.selected, input="prepared", owner_id="user", origin=object(),

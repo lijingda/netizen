@@ -359,7 +359,7 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                             update_mock = AsyncMock(return_value=False)
                         c.fx.app._safe_update_card = update_mock
                         c.queue_anchor()
-                        with patch("netizen_cli.channel_app._QUESTION_SUBMISSION_CARD_TIMEOUT_SECONDS", 0.01):
+                        with patch("netizen_cli.channel.constants.QUESTION_SUBMISSION_CARD_TIMEOUT_SECONDS", 0.01):
                             if failure == "rejected":
                                 await c.fx.app.handle_card_action(c.event())
                             else:

@@ -388,7 +388,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
                 submission.release_receipt_attempt()
 
         self.app._present_ordinary_receipt.side_effect = blocked_display
-        with patch("netizen_cli.channel_app._SESSION_RECEIPT_TIMEOUT_SECONDS", 0.01):
+        with patch("netizen_cli.channel.constants.SESSION_RECEIPT_TIMEOUT_SECONDS", 0.01):
             async with asyncio.timeout(2):
                 result = await self.service.call(
                     "send_message_to_thread", {"threadId": "native-target", "prompt": "任务"}, "native-source",
