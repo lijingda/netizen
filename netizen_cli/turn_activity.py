@@ -32,7 +32,6 @@ from openai_codex.generated.v2_all import (
     ThreadItem,
     TurnCompletedNotification,
     TurnPlanStep,
-    TurnPlanStepStatus,
     TurnPlanUpdatedNotification,
     TurnStartedNotification,
     WebSearchThreadItem,

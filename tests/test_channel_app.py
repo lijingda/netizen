@@ -3962,7 +3962,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             first.id, "native-one", "turn-one", "ou_user", ActiveState.RUNNING,
         )
         await self.fixture.new(message_id="om_new_two")
-        second = self.store.active_binding(scope.key)
 
         await self.app.handle_message(
             FakeMessage("/sessions", message_id="om_sessions")

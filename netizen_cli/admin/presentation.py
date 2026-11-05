@@ -8,7 +8,8 @@ from enum import Enum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..feishu_links import chat_open_url, topic_open_url as _topic_open_url
+from ..feishu_links import chat_open_url
+from ..feishu_links import topic_open_url as _topic_open_url  # noqa: F401 - re-exported for admin.web
 from ..runtime.contracts import (
     ReleaseDisposition,
     StopDisposition,

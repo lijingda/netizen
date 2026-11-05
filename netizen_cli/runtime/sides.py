@@ -390,7 +390,7 @@ class SideRuntime(SubmissionRuntime):
             or not 1 <= limit <= PROJECT_DELETE_LIMIT
         ):
             raise ValueError("Project Side snapshot limit is invalid")
-        snapshots = []
+        snapshots: list[SideSessionSnapshot] = []
         for session in self._sides.values():
             if session.project_alias == alias:
                 if len(snapshots) >= limit:
@@ -404,7 +404,7 @@ class SideRuntime(SubmissionRuntime):
         """Use each live Side's frozen cwd, independent of its Parent's state."""
         if not root.is_absolute() or type(limit) is not int or not 1 <= limit <= PROJECT_DELETE_LIMIT:
             raise ValueError("Worktree Side snapshot range is invalid")
-        snapshots = []
+        snapshots: list[SideSessionSnapshot] = []
         for session in self._sides.values():
             if session.cwd.is_relative_to(root):
                 if len(snapshots) >= limit:

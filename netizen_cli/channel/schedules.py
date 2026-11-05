@@ -511,6 +511,7 @@ class ScheduleChannel(SessionToolChannel):
                 # The draft is display state, not a create/update request.
                 # Search and failed saves share its renderer, not retry logic.
                 draft = payload["draft"]
+                workspace_options: dict[str, Any] | None
                 (catalog, catalog_error), (workspace_options, workspace_error) = await asyncio.gather(
                     service.model_catalog_options(),
                     service.workspace_catalog_options(

@@ -3048,8 +3048,8 @@ def _message_context_anchor(
         return None
     try:
         return MessageContextAnchor(
-            message_id=message_id,  # type: ignore[arg-type]
-            create_time_ms=create_time_ms,  # type: ignore[arg-type]
+            message_id=message_id,
+            create_time_ms=create_time_ms,
         )
     except (TypeError, ValueError) as error:
         raise RuntimeError("Binding contains an invalid context anchor") from error

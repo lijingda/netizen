@@ -166,7 +166,7 @@ class TurnControlRuntime(GoalRuntime):
                 raise SteerRace("当前会话已切换，本条消息未执行，请重新发送。")
             active = self._active.get(binding_id)
             if active is None or active.state is not ActiveState.OBSERVATION_UNAVAILABLE:
-                return
+                return None
             if active.task is None or active.task.done():
                 # The current request reports failure itself. Do not also send
                 # another unavailable notice to the original prompt.
@@ -272,6 +272,8 @@ class TurnControlRuntime(GoalRuntime):
                             )
                         if status != "interrupted" or attempt == 1:
                             return status
+                # The second attempt always returns or raises above.
+                raise AssertionError("scheduled Turn read loop must return")
         except TimeoutError as error:
             raise ScheduledTurnReadError(
                 "read_timeout", "读取本次定时执行状态超时，请稍后刷新。",

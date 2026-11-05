@@ -144,7 +144,7 @@ class Scheduler:
     def _dispatch_claim(self, claim: Claim) -> None:
         task = asyncio.create_task(self._dispatch_once(claim), name="schedule-dispatch:" + claim.run.id)
         self._dispatches[claim.run.id] = (claim.run.project_alias, task)
-        task.add_done_callback(lambda done, run_id=claim.run.id: self._dispatch_done(run_id, done))
+        task.add_done_callback(lambda done, run_id=claim.run.id: self._dispatch_done(run_id, done))  # type: ignore[misc]  # default binds the Run ID
 
     async def close(self) -> None:
         """Stop the timer; shutdown dispatch draining remains a separate step."""

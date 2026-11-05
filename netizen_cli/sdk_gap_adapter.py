@@ -699,7 +699,7 @@ class AppServerGoalControl:
             # Runtime until transport teardown. Attach the opaque handle
             # so Runtime can retain that ownership without converting
             # cancellation into an ordinary exception.
-            error.goal_handle = handle
+            error.goal_handle = handle  # type: ignore[attr-defined]  # opaque ownership handoff
             raise
         except Exception as error:
             raise GoalMutationStateUnknown(
@@ -1079,7 +1079,7 @@ class _AppServerGoalHandle:
         return physical_turn_id
 
     async def aclose(self) -> None:
-        await self._stream.aclose()
+        await self._stream.aclose()  # type: ignore[attr-defined]  # the pinned SDK stream type provides aclose()
 
 
 def facade_migration_requirements() -> tuple[str, ...]:

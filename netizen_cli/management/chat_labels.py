@@ -176,7 +176,7 @@ class ChatLabelResolver:
                 self._inflight[chat_id] = _Lookup(task, shared_budget)
                 self._workers.add(task)
                 task.add_done_callback(
-                    lambda completed, resolved_id=chat_id: self._finish(
+                    lambda completed, resolved_id=chat_id: self._finish(  # type: ignore[misc]  # default binds the loop value
                         resolved_id,
                         completed,
                     )

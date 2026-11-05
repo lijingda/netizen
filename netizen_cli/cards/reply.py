@@ -71,7 +71,6 @@ from .callbacks import (
     _md_code,
     _notice,
     _plain,
-    _plain_text,
     _repeatable_callback_button,
     _required_string,
     _scope_from_envelope,

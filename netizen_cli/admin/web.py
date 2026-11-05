@@ -107,7 +107,6 @@ from ..bindings import (
     SideTopicNotFound,
     SideTopicQuery,
     SideTopicState,
-    ThreadBinding,
 )
 from ..management.blocking_io import (
     BlockingIODrainTimeout,
@@ -2703,7 +2702,7 @@ class AdminWebApplication:
             execute(),
             name=f"netizen-admin:{action_kind}",
         )
-        self._mutation_tasks.add(task)  # type: ignore[arg-type]
+        self._mutation_tasks.add(task)
         task.add_done_callback(self._mutation_finished)
         try:
             return await asyncio.shield(task)

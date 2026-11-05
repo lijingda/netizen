@@ -26,7 +26,8 @@ from mcp.types import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
-from ..mcp_transport import EmbeddedMcpRunner, MAX_BODY_BYTES, native_thread_id as _native_thread_id
+from ..mcp_transport import EmbeddedMcpRunner, native_thread_id as _native_thread_id
+from ..mcp_transport import MAX_BODY_BYTES  # noqa: F401 - re-exported with the schedule MCP limits
 from ..worktrees.policy import WorkspacePolicy, WorkspacePolicyError
 
 

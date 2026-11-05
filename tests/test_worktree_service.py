@@ -7,16 +7,16 @@ from types import SimpleNamespace
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from netizen_cli.admin.port_config import ConfigFileSnapshot
-from netizen_cli.bindings import BindingNotFound, BindingStore, ProjectNotFound
+from netizen_cli.bindings import BindingNotFound, BindingStore
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import InstanceManagementService, ScopeCoordinator
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.worktrees.errors import WorktreeError
 from netizen_cli.worktrees.git import GitError, WorktreeState
-from netizen_cli.worktrees.models import WorktreeConflict, WorktreeNotFound
+from netizen_cli.worktrees.models import WorktreeConflict
 from netizen_cli.worktrees.settings import WorktreeSettings, WorktreeSettingsService
 
 

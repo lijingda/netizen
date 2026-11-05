@@ -18,16 +18,21 @@ Python 包，不存在 Node.js/TypeScript 运行时、前端构建或 fallback�
 python3 -m venv .venv
 .venv/bin/python -m pip install 'setuptools==80.9.0'
 .venv/bin/python -m pip install -c requirements.lock -e .
+.venv/bin/python -m pip install -c requirements.lock -r requirements-dev.lock
 node --version
 make check
 ```
+
+`requirements-dev.lock` 精确固定门禁使用的 ruff 与 mypy；它们只用于开发和 CI，不是运行
+依赖，也不进入发行包。
 
 Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确认版本。Node.js 仅用于
 开发与 CI 测试，不是 Python 包生产运行的前置依赖。本地缺少 Node.js 时该项
 测试会明确跳过；此时 `make check` 通过不代表 JavaScript 测试已完成。CI 安装 Node.js
 并强制执行该项测试。
 
-`make check` 执行 unittest（含 wheel／sdist 构建与隔离资源加载）、Python 编译检查、
+`make check` 先执行 `make lint`（ruff：语法、pyflakes 与未持有引用的 asyncio 任务）和
+`make typecheck`（mypy），再执行 unittest（含 wheel／sdist 构建与隔离资源加载）、Python 编译检查、
 依赖一致性检查与 SDK synthetic probes。打包测试要求开发环境安装上述固定构建后端；也可
 用 `NETIZEN_TEST_BUILD_PYTHON=/absolute/path/to/builder/python make check` 指定已准备好的
 独立构建 Python。测试不自动下载构建依赖，不静默跳过打包门禁。它
@@ -35,6 +40,18 @@ Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确�
 内置 Skill discovery 另启动真实 bundled App Server 做只读发现；这不能证明普通
 start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收见
 [多实例与内置 Skills](deployment.md#多实例与内置-skills-验收)。
+
+### 静态检查与类型债务
+
+ruff 只检查正确性，不约束格式与风格。mypy 检查整个 `netizen_cli` 包，新模块默认全量检查。
+`pyproject.toml` 末尾的类型债务清单按模块列出仍被豁免的具体错误码；修复后从清单删除该
+错误码或模块，不为新代码向清单添加模块或错误码。行内 `type: ignore` 必须写明错误码和原因。
+
+`CodexRuntime`（`netizen_cli/runtime/`）与 `ChannelApplication`（`netizen_cli/channel/`）由单向
+分层的类链组成，各层顺序记录在 `codex_runtime.py` 与 `channel_app.py` 的模块说明中。层内
+方法只能调用本层和下层；调用上层方法会成为 mypy 的 `attr-defined` 错误。新增方法时放入
+它实际依赖的最低一层；跨生命周期共享的守卫与状态放在最底层，共享可变状态只在最底层
+声明一次，由门面类的 `__init__` 初始化。因此分层模块不得进入 `attr-defined` 债务清单。
 
 ### 局部回归与共享测试支持
 

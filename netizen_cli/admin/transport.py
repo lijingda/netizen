@@ -139,8 +139,8 @@ class AdminHttpTransport:
         self._port = port
         self._handler = handler
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._server: asyncio.AbstractServer | None = None
-        self._closed_servers: list[asyncio.AbstractServer] = []
+        self._server: asyncio.Server | None = None
+        self._closed_servers: list[asyncio.Server] = []
         self._state = AdminHttpState.NEW
         self._admission_open = False
         self._closing = False
@@ -429,7 +429,7 @@ class AdminHttpTransport:
                     )
                     return
                 force_close = _must_close_request(request)
-                handler_task = self._owned_loop().create_task(self._handler(request))
+                handler_task: asyncio.Task[None] = self._owned_loop().create_task(self._handler(request))
                 connection.handler_task = handler_task
                 self._track_task(handler_task, self._handler_tasks)
                 watcher = self._owned_loop().create_task(reader.read(1))

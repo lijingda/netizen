@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import re
 import stat
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -184,7 +184,10 @@ def turn_patch_summary(
         deletions if complete and saw_counts else None,
         tuple(
             TurnDiffFileStats(
-                path, *(value or (None, None)), deleted=path in deleted_paths,
+                path,
+                additions=value[0] if value else None,
+                deletions=value[1] if value else None,
+                deleted=path in deleted_paths,
             )
             for path, value in counts.items()
         ),
@@ -206,8 +209,8 @@ def _file_change_counts(
     if kind in {"add", "delete"}:
         # SDK add/delete contain whole text, not a unified diff. Count LF only;
         # a final newline terminates the last line rather than adding a line.
-        lines = diff.count("\n") + int(bool(diff) and not diff.endswith("\n"))
-        return (lines, 0) if kind == "add" else (0, lines)
+        line_count = diff.count("\n") + int(bool(diff) and not diff.endswith("\n"))
+        return (line_count, 0) if kind == "add" else (0, line_count)
     if kind != "update":
         return None
     if move_path:
@@ -522,7 +525,7 @@ def _reported_paths(
     *,
     turn_diff: str | None = None,
     diff_summary: TurnDiffSummary | None = None,
-) -> Iterable[_ReportedTurnPath]:
+) -> Iterator[_ReportedTurnPath]:
     summary = diff_summary if diff_summary is not None else TurnDiffSummary(
         files=tuple(TurnDiffFileStats(path) for path in turn_diff_paths(turn_diff))
     )

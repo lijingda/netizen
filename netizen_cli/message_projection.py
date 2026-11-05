@@ -18,7 +18,7 @@ from .image_inputs import ImagePromptReferences, localize_image_markers
 from .message_content import (
     SUPPORTED_MESSAGE_TYPES,
     HistoricalMessageContractError,
-    HistoricalMessageError,
+    HistoricalMessageError,  # noqa: F401 - re-exported for input preparation and quotes
     HistoricalMessageUnavailable,
     UnsupportedHistoricalMessage,
     normalized_content_type,
@@ -782,13 +782,13 @@ def _historical_prompt_attachments(
                     "历史图片缺少对应的本地输入引用，"
                     "本条消息未执行。"
             )
-            attachment = {"type": "image", "ref": prompt_ref}
+            attachment: dict[str, Any] = {"type": "image", "ref": prompt_ref}
             if prompt_ref not in seen_image_refs:
                 seen_image_refs.add(prompt_ref)
                 attachments.append(attachment)
             continue
 
-        attachment: dict[str, Any] = {"type": resource_type}
+        attachment = {"type": resource_type}
         file_name = _nonempty_string(resource.get("file_name"))
         if file_name is not None:
             attachment["name"] = file_name

@@ -287,7 +287,7 @@ class ServiceManager:
                 raw = json.loads(first[len(_SERVICE_MARKER):])
                 if set(raw) != {"root", "python", "prefix", "codex_home"}:
                     raise ValueError("unrecognized binding metadata")
-                binding = ServiceBinding(*(Path(raw[key]) for key in ("root", "python", "prefix")),
+                binding = ServiceBinding(Path(raw["root"]), Path(raw["python"]), Path(raw["prefix"]),
                                          Path(raw["codex_home"]) if raw["codex_home"] is not None else None)
                 expected = _service_definition(self.home, self.platform, binding)
                 valid = content == expected

@@ -60,7 +60,7 @@ class MigrationPlan(TypedDict):
 
 def _registered() -> tuple[dict[int, Migration], dict[int, Validator]]:
     steps: dict[int, Migration] = {}
-    validators = {MIN_SUPPORTED_SCHEMA_VERSION: validate_v14}
+    validators: dict[int, Validator] = {MIN_SUPPORTED_SCHEMA_VERSION: validate_v14}
     for step in MIGRATIONS:
         if (
             type(step.from_version) is not int or type(step.to_version) is not int

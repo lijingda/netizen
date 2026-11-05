@@ -26,7 +26,6 @@ from netizen_cli.codex_runtime import (
     ActiveGoalSnapshot,
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
-    CodexRuntime,
     NativeThreadCatalogState,
     NativeThreadCatalog,
     NativeThreadCatalogPage,
@@ -39,7 +38,6 @@ from netizen_cli.codex_runtime import (
     StopDisposition,
     ThreadLifecycleSnapshot,
     ThreadLifecycleState,
-    ThreadLifecycleError,
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
     ThreadArchived,
@@ -971,7 +969,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_name_generation_rejects_stale_and_cross_scope_targets(self) -> None:
         first = await self._create()
-        second = await self._create()
+        await self._create()
         with self.assertRaises(CurrentBindingChanged):
             await self.service.generate_current_binding_name(
                 target=CurrentBindingTarget(self.scope.key, first.id),

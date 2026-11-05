@@ -263,7 +263,10 @@ their cited ADRs before changing that boundary.
   [SDK upgrade review](docs/deployment.md#codex-sdk-升级审查): compare the full API and
   behavior changes, reassess adapters and workarounds, classify new capabilities,
   and report migration decisions and evidence beyond automated test results.
-- Use `make check` for the repository gate. Run affected live phases only under
+- Use `make check` for the repository gate; it includes ruff and mypy. `CodexRuntime`
+  and `ChannelApplication` are one-way layer chains enforced by mypy; follow the
+  [static checks](docs/CONTRIBUTING.md#静态检查与类型债务) rules and never grow the typing
+  debt list. Run affected live phases only under
   the [documented triggers](docs/deployment.md#代码门禁与按需实时兼容性验证).
   Formal Releases reuse successful CI for the exact main commit; package changes
   require isolated wheel/sdist validation. Synthetic tests do not replace platform/live

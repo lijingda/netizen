@@ -174,7 +174,7 @@ class SessionToolChannel(ForkChannel):
         )
 
     def _session_receipt(self, binding: ThreadBinding, scope: FeishuScope, submission: Submission) -> dict[str, Any]:
-        result = {"threadId": submission.thread_id, "turnId": submission.turn_id, "netizen": {
+        result: dict[str, Any] = {"threadId": submission.thread_id, "turnId": submission.turn_id, "netizen": {
             "bindingId": binding.id, "chatId": scope.chat_id, "topicId": scope.topic_id,
             "topicUrl": topic_open_url(scope.chat_id, scope.topic_id) if scope.topic_id else None,
             "isCurrent": binding.active, "accepted": True,

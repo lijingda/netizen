@@ -38,7 +38,6 @@ from tests.support.channel_results import (
 )
 from tests.support.channel_cards import (
     callback,
-    elements,
     form_values,
     manager_form,
 )

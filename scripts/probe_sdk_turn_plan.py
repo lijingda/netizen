@@ -48,7 +48,6 @@ def _thread_payload(*, active: bool, include_turns: bool) -> dict[str, object]:
 
 
 def _fake_server() -> None:
-    active = False
     for line in sys.stdin:
         message = json.loads(line)
         method = message.get("method")
@@ -82,7 +81,6 @@ def _fake_server() -> None:
                 }
             )
         elif method == "turn/start":
-            active = True
             _send(
                 {
                     "method": "item/started",
@@ -153,7 +151,6 @@ def _fake_server() -> None:
             )
         elif method == "thread/read":
             include_turns = bool(message.get("params", {}).get("includeTurns"))
-            active = False
             _send(
                 {
                     "id": request_id,

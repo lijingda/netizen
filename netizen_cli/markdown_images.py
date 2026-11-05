@@ -31,7 +31,7 @@ def _validate_local_file_link(target: str) -> bool:
     return _DEFAULT_VALIDATE_LINK(target)
 
 
-_MARKDOWN.validateLink = _validate_local_file_link
+_MARKDOWN.validateLink = _validate_local_file_link  # type: ignore[method-assign, assignment]  # markdown-it hook
 
 
 def parse_markdown(content: str) -> tuple[list[Token], dict[str, Any]]:

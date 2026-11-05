@@ -36,3 +36,189 @@ build_py = "_build.BuildPy"
 
 [tool.setuptools.package-data]
 "netizen_cli.admin" = ["static/*.html", "static/*.css", "static/*.js", "static/*.svg", "static/vendor/ace/*.js", "static/vendor/ace/LICENSE", "static/vendor/ace/README.md"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["netizen_cli/admin/static"]
+
+[tool.ruff.lint]
+# Correctness only: syntax errors, pyflakes and dangling asyncio tasks.
+# Formatting and style are not enforced.
+select = ["E9", "F", "RUF006"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["netizen_cli"]
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# Third-party packages without inline types or stubs.
+module = ["lark_channel", "lark_channel.*", "lark_oapi", "lark_oapi.*", "psutil", "qrcode", "qrcode.*", "yaml"]
+ignore_missing_imports = true
+
+# ---- Typing debt baseline -------------------------------------------------------
+# Each entry suppresses only the error codes that module still reports. New modules
+# are checked in full. Remove a code (or the module) once its errors are fixed;
+# never add modules or codes here to land new code.
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.admin.auth",
+    "netizen_cli.admin.file_previews",
+    "netizen_cli.admin.presentation",
+    "netizen_cli.bindings",
+    "netizen_cli.builtin_skills",
+    "netizen_cli.channel.reply_presenter",
+    "netizen_cli.channel.session_tools",
+    "netizen_cli.cli_update_worker",
+    "netizen_cli.defaults.service",
+    "netizen_cli.management.blocking_io",
+    "netizen_cli.management.chat_directory",
+    "netizen_cli.message_content",
+    "netizen_cli.runtime.forks",
+    "netizen_cli.runtime.lifecycle",
+    "netizen_cli.runtime.naming",
+    "netizen_cli.runtime.queries",
+    "netizen_cli.runtime.state",
+    "netizen_cli.sessions.mcp",
+    "netizen_cli.sessions.presentation",
+    "netizen_cli.sessions.schema",
+]
+disable_error_code = ["arg-type"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.account_rate_limits",
+    "netizen_cli.channel.questions",
+    "netizen_cli.cli_setup",
+    "netizen_cli.defaults.store",
+    "netizen_cli.file_inputs",
+    "netizen_cli.image_inputs",
+    "netizen_cli.message_projection",
+    "netizen_cli.runtime.shutdown",
+]
+disable_error_code = ["assignment"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.cli",
+]
+disable_error_code = ["call-overload"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.turn_files",
+]
+disable_error_code = ["operator"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.channel.input_preparation",
+    "netizen_cli.mcp_transport",
+    "netizen_cli.runtime.submission",
+    "netizen_cli.schedules.scheduler",
+]
+disable_error_code = ["union-attr"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.cards.chat_target",
+]
+disable_error_code = ["var-annotated"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.admin.transport",
+    "netizen_cli.channel.commands",
+    "netizen_cli.channel.forks",
+    "netizen_cli.channel.prompts",
+    "netizen_cli.channel.sides",
+    "netizen_cli.cli_services",
+    "netizen_cli.result_images",
+    "netizen_cli.runtime.goals",
+    "netizen_cli.schedules.store",
+]
+disable_error_code = ["arg-type", "assignment"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.project_files",
+]
+disable_error_code = ["arg-type", "attr-defined"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.channel.presentation",
+    "netizen_cli.channel.schedules",
+    "netizen_cli.channel.session_cards",
+    "netizen_cli.main",
+    "netizen_cli.markdown_images",
+    "netizen_cli.runtime.activity",
+    "netizen_cli.runtime.thread_naming",
+]
+disable_error_code = ["arg-type", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.turn_patch_children",
+    "netizen_cli.worktrees.service",
+]
+disable_error_code = ["arg-type", "var-annotated"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.management.service",
+]
+disable_error_code = ["arg-type", "assignment", "attr-defined"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.cli_packages",
+    "netizen_cli.schedules.models",
+]
+disable_error_code = ["arg-type", "assignment", "operator"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.channel.replies",
+]
+disable_error_code = ["arg-type", "assignment", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.turn_activity",
+]
+disable_error_code = ["arg-type", "attr-defined", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.cards.scheduled",
+    "netizen_cli.sessions.service",
+]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "index"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.schedules.mcp",
+]
+disable_error_code = ["arg-type", "assignment", "dict-item", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.schedules.service",
+]
+disable_error_code = ["arg-type", "call-overload", "index", "misc"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.cards.reply",
+]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "call-overload", "no-redef"]
+
+[[tool.mypy.overrides]]
+module = [
+    "netizen_cli.admin.web",
+]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "return-value", "union-attr", "var-annotated"]
