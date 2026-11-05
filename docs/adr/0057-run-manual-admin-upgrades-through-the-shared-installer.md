@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-09-06
 amends: 0031, 0034, 0041
-amended-by: 0059
+amended_by: 0059
 related: 0022, 0032, 0035, 0042, 0044, 0050, 0062
 ---
 
