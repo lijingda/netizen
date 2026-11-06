@@ -244,7 +244,8 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 ### 代码门禁与按需实时兼容性验证
 
 所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在 Linux x64
-标准 CPython 3.11-3.14，以及 macOS arm64 标准 CPython 3.13/3.14 执行这一个统一本地门禁。
+标准 CPython 3.11-3.14，以及 macOS arm64 标准 CPython 3.14 执行这一个统一本地门禁；
+这 5 个 job 都是 `Protect main` ruleset 的 required status checks。
 发布可复用 exact main commit 的成功 CI 结论，但不能用旧 archive 门禁替代新包验收。
 固定 SDK synthetic probes 的命令、参数和执行顺序统一由 `scripts/check_sdk.py` 维护；
 `make check` 调用该入口，失败即停止后续探针；新 CLI 包安装不重复运行完整测试。

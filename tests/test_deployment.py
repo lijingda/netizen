@@ -95,7 +95,7 @@ class DeploymentAssetsTest(unittest.TestCase):
 
         for job_name, runner, versions in (
             ("check", "ubuntu-latest", ["3.11", "3.12", "3.13", "3.14"]),
-            ("macos-arm64-check", "macos-15", ["3.13", "3.14"]),
+            ("macos-arm64-check", "macos-15", ["3.14"]),
         ):
             with self.subTest(job=job_name):
                 job = workflow["jobs"][job_name]
