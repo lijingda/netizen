@@ -75,7 +75,7 @@ class ThreadNamer:
         terminal_cleanup: TerminalCleanup,
         subscription_control: ThreadSubscriptionControl,
         commit: Callable[[NamingJob, str], Awaitable[None]],
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float = 600.0,
         cleanup_timeout_seconds: float = 5.0,
     ) -> None:
         if timeout_seconds <= 0 or cleanup_timeout_seconds <= 0:
