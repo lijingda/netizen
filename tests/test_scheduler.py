@@ -185,6 +185,77 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         await self.scheduler.recover()
         self.scheduler.start()
 
+    async def test_tick_yields_after_attachment_and_keeps_reentrant_tick_out(self):
+        plans = {self.plan(), self.plan()}
+        self.scheduler._admission = True
+        self.now = 160
+        self.dispatch_gate = asyncio.Event()
+
+        async def observe_between_claims():
+            pending = self.store.pending_runs()
+            self.assertEqual(len(pending), 1)
+            self.assertIn(pending[0].id, self.scheduler._dispatches)
+            self.assertFalse(self.bindings._connection.in_transaction)
+            self.assertTrue(self.scheduler._ticking)
+            self.assertEqual(await self.scheduler.tick(), 0)
+
+        observer = asyncio.create_task(observe_between_claims())
+        try:
+            self.assertEqual(await self.scheduler.tick(), 2)
+            await observer
+            self.assertEqual({run.plan_id for run in self.store.pending_runs()}, plans)
+            self.assertFalse(self.scheduler._ticking)
+        finally:
+            self.dispatch_gate.set()
+            await asyncio.gather(observer, return_exceptions=True)
+        self.assertTrue(await self.scheduler.drain(asyncio.get_running_loop().time() + 1))
+        self.assertEqual(len(self.dispatched), 2)
+
+    async def test_tick_rechecks_closed_admission_between_claims(self):
+        self.plan()
+        self.plan()
+        self.scheduler._admission = True
+        self.now = 160
+
+        async def stop_between_claims():
+            self.assertEqual(len(self.scheduler._dispatches), 1)
+            self.scheduler.close_admission()
+
+        stopper = asyncio.create_task(stop_between_claims())
+        self.assertEqual(await self.scheduler.tick(), 1)
+        await stopper
+        self.assertEqual(len(self.store.pending_runs()), 1)
+        self.assertFalse(self.scheduler._ticking)
+
+    async def test_tick_cancellation_between_claims_retains_attached_dispatch(self):
+        self.plan()
+        self.plan()
+        self.scheduler._admission = True
+        self.now = 160
+        self.dispatch_gate = asyncio.Event()
+        ticking = asyncio.create_task(self.scheduler.tick())
+
+        async def cancel_between_claims():
+            self.assertEqual(len(self.scheduler._dispatches), 1)
+            ticking.cancel()
+
+        canceller = asyncio.create_task(cancel_between_claims())
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await ticking
+            await canceller
+            self.assertFalse(self.scheduler._ticking)
+            self.assertEqual(len(self.store.pending_runs()), 1)
+            attached = next(iter(self.scheduler._dispatches.values()))[1]
+            self.assertFalse(attached.cancelled())
+            self.assertFalse(attached.done())
+            self.assertEqual(await self.scheduler.tick(), 1)
+        finally:
+            self.dispatch_gate.set()
+            await asyncio.gather(ticking, canceller, return_exceptions=True)
+        self.assertTrue(await self.scheduler.drain(asyncio.get_running_loop().time() + 1))
+        self.assertEqual(len(self.dispatched), 2)
+
     async def test_due_tasks_dispatch_concurrently_and_claim_only_once(self):
         self.plan()
         self.plan()

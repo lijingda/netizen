@@ -676,6 +676,30 @@ class BindingStoreTest(unittest.TestCase):
         self.now = 111
         self.assertFalse(self.store.seen("msg:one"))
 
+    def test_dedup_sweeps_once_per_monotonic_minute_without_delaying_expiry(self) -> None:
+        statements = []
+        self.store._connection.set_trace_callback(statements.append)
+        with patch("netizen_cli.bindings.time.monotonic", return_value=1000.0) as clock:
+            self.store.mark("expired", 10)
+            self.store.mark("renewed", 10)
+            self.store.mark("backlog", 10)
+            self.now = 111
+            self.store.mark("renewed", 100)
+            self.assertFalse(self.store.seen("expired"))
+            self.assertTrue(self.store.seen("renewed"))
+            self.assertIsNotNone(self.store._connection.execute(
+                "SELECT 1 FROM dedup_keys WHERE dedup_key='backlog'",
+            ).fetchone())
+            # Wall-clock movement must not trigger another whole-table sweep.
+            self.now = 10000
+            clock.return_value = 1059.9
+            self.store.mark("live", 100)
+            self.assertEqual(sum(sql.startswith("DELETE FROM dedup_keys WHERE expires_at") for sql in statements), 1)
+            clock.return_value = 1060.0
+            self.store.mark("live", 100)
+            self.assertEqual(sum(sql.startswith("DELETE FROM dedup_keys WHERE expires_at") for sql in statements), 2)
+            self.assertEqual([row[0] for row in self.store._connection.execute("SELECT dedup_key FROM dedup_keys")], ["live"])
+
     def test_memory_store_admin_reads_share_the_test_connection(self) -> None:
         binding = self.create("test")
 

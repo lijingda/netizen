@@ -45,6 +45,9 @@ SCHEMA_VERSION = 20
 # Includes the running query and all submitted queries waiting for the reader.
 _ADMIN_QUERY_CAPACITY = 32
 PROJECT_DELETE_LIMIT = 1000
+# Logical expiry is checked by seen(); sweep at most once a minute so each
+# message does not scan the TTL table (the SDK marks two keys per message).
+_DEDUP_EXPIRY_INTERVAL_SECONDS = 60.0
 
 
 _CONTEXT_INTEGRITY_TRIGGERS = (
@@ -588,6 +591,7 @@ class BindingStore:
         self._connection_uri = not create
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._wall_clock = wall_clock
+        self._next_dedup_expiry = 0.0
         self._lock = threading.RLock()
         self._project_delete_intents: dict[str, ProjectDeleteSnapshot] = {}
         self._query_state_lock = threading.Lock()
@@ -2679,10 +2683,13 @@ class BindingStore:
             raise ValueError("ttl_seconds must be positive")
         now = self._wall_clock()
         with self._lock:
-            self._connection.execute(
-                "DELETE FROM dedup_keys WHERE expires_at <= ?",
-                (now,),
-            )
+            monotonic_now = time.monotonic()
+            if monotonic_now >= self._next_dedup_expiry:
+                self._connection.execute(
+                    "DELETE FROM dedup_keys WHERE expires_at <= ?",
+                    (now,),
+                )
+                self._next_dedup_expiry = monotonic_now + _DEDUP_EXPIRY_INTERVAL_SECONDS
             self._connection.execute(
                 """
                 INSERT INTO dedup_keys(dedup_key, expires_at) VALUES (?, ?)

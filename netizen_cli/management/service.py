@@ -1182,7 +1182,7 @@ class InstanceManagementService:
                 *bindings_by_id,
                 *(side.parent_binding_id for side in snapshot.sides),
             ]))
-            for parent_id in parent_ids:
+            for index, parent_id in enumerate(parent_ids):
                 binding = bindings_by_id.get(parent_id)
                 failed_binding_id = binding.id if binding is not None else None
                 failed_side_id = None
@@ -1237,6 +1237,10 @@ class InstanceManagementService:
                         pass
                     else:
                         raise
+                # Exact deletion has released Store/Binding/Scope locks. Keep
+                # the Project intent and frozen inventory across this yield.
+                if index + 1 < len(parent_ids):
+                    await asyncio.sleep(0)
             failed_binding_id = None
             if self._runtime.project_side_snapshots(alias):
                 raise SideCloseFailed("Project 仍有未完成关闭的 Side。")

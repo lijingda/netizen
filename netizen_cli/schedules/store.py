@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
 
 
 MAX_INSTRUCTIONS_JSON_BYTES = 48 * 1024
+# Exact-key expiry remains synchronous; physical cleanup may wait one minute.
+_REQUEST_EXPIRY_INTERVAL_SECONDS = 60.0
 
 
 _RUN_TABLE = """CREATE TABLE schedule_runs (
@@ -255,6 +258,7 @@ class ScheduleStore:
 
     def __init__(self, owner: BindingStore) -> None:
         self.owner = owner
+        self._next_request_expiry = 0.0
         self._db.create_function("netizen_schedule_has_trigger", 5, _has_trigger, deterministic=True)
 
     @property
@@ -324,9 +328,16 @@ class ScheduleStore:
     def _request(self, request_id: str, operation: str, payload: object, now: float) -> MutationResult | None:
         if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
             raise ScheduleError("写操作需要稳定的 request_id（最多 200 字符）。")
-        self._db.execute("DELETE FROM schedule_requests WHERE expires_at <= ?", (now,))
+        monotonic_now = time.monotonic()
+        if monotonic_now >= self._next_request_expiry:
+            self._db.execute("DELETE FROM schedule_requests WHERE expires_at <= ?", (now,))
+            self._next_request_expiry = monotonic_now + _REQUEST_EXPIRY_INTERVAL_SECONDS
         digest = hashlib.sha256(_json(payload).encode()).hexdigest()
         row = self._db.execute("SELECT * FROM schedule_requests WHERE request_id = ?", (request_id,)).fetchone()
+        if row is not None and row["expires_at"] <= now:
+            # Also permits reusing this key in _remember before the next sweep.
+            self._db.execute("DELETE FROM schedule_requests WHERE request_id = ?", (request_id,))
+            return None
         if row is not None:
             if row["operation"] != operation or row["payload_digest"] != digest:
                 raise ScheduleRequestConflict("request_id 已用于不同的操作，请核查原操作。")
@@ -789,7 +800,17 @@ class ScheduleStore:
             return run
 
     def _release_binding(self, binding_id: str, *, binding_removed: bool) -> None:
-        rows = self._db.execute("SELECT run_id,plan_id FROM schedule_runs WHERE binding_id=? AND (target_kind='new_topic' OR ?)", (binding_id, binding_removed)).fetchall()
+        rows = self._db.execute(
+            "SELECT run_id,plan_id FROM schedule_runs WHERE binding_id=? AND target_kind='new_topic'",
+            (binding_id,),
+        ).fetchall()
+        if binding_removed:
+            # The existing partial Binding index only covers new-topic Runs.
+            # Binding-target history still needs a scan until a schema change.
+            rows.extend(self._db.execute(
+                "SELECT run_id,plan_id FROM schedule_runs WHERE binding_id=? AND target_kind='binding'",
+                (binding_id,),
+            ).fetchall())
         for row in rows:
             self._set_run(row["run_id"], barrier="released", binding_removed=binding_removed)
             self._prune(row["plan_id"])

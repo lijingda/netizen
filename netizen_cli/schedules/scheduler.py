@@ -189,7 +189,7 @@ class Scheduler:
         try:
             deadline = loop.time() + RECOVERY_TIMEOUT_SECONDS
             plans = self._store.due_plans(app_id=self._app_id, now=self._wall_clock(), limit=DUE_BATCH_SIZE)
-            for plan in plans:
+            for index, plan in enumerate(plans):
                 if not self._admission:
                     break
                 pending = self._store.pending_for_plan(plan.id)
@@ -207,6 +207,10 @@ class Scheduler:
                 if claim is not None:
                     self._dispatch_claim(claim)
                     claimed += 1
+                # The claim is attached and its Store transaction has ended.
+                # Keep _ticking reserved while other tasks get a turn.
+                if index + 1 < len(plans):
+                    await asyncio.sleep(0)
             # Drain full batches without another minute's delay, including
             # skipped occurrences. Do not spin on frozen Project deletions.
             if len(plans) == DUE_BATCH_SIZE and processed:
