@@ -18,16 +18,21 @@ Python 包，不存在 Node.js/TypeScript 运行时、前端构建或 fallback�
 python3 -m venv .venv
 .venv/bin/python -m pip install 'setuptools==80.9.0'
 .venv/bin/python -m pip install -c requirements.lock -e .
+.venv/bin/python -m pip install -c requirements.lock -r requirements-dev.lock
 node --version
 make check
 ```
+
+`requirements-dev.lock` 精确固定门禁使用的 ruff 与 mypy；它们只用于开发和 CI，不是运行
+依赖，也不进入发行包。
 
 Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确认版本。Node.js 仅用于
 开发与 CI 测试，不是 Python 包生产运行的前置依赖。本地缺少 Node.js 时该项
 测试会明确跳过；此时 `make check` 通过不代表 JavaScript 测试已完成。CI 安装 Node.js
 并强制执行该项测试。
 
-`make check` 执行 unittest（含 wheel／sdist 构建与隔离资源加载）、Python 编译检查、
+`make check` 先执行 `make lint`（ruff：语法、pyflakes 与未持有引用的 asyncio 任务）和
+`make typecheck`（mypy），再执行 unittest（含 wheel／sdist 构建与隔离资源加载）、Python 编译检查、
 依赖一致性检查与 SDK synthetic probes。打包测试要求开发环境安装上述固定构建后端；也可
 用 `NETIZEN_TEST_BUILD_PYTHON=/absolute/path/to/builder/python make check` 指定已准备好的
 独立构建 Python。测试不自动下载构建依赖，不静默跳过打包门禁。它
@@ -35,6 +40,43 @@ Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确�
 内置 Skill discovery 另启动真实 bundled App Server 做只读发现；这不能证明普通
 start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收见
 [多实例与内置 Skills](deployment.md#多实例与内置-skills-验收)。
+
+### 实现导航
+
+代码按职责归属组织，目录拆分不新增运行实例或状态所有者：
+
+| 位置 | 职责 |
+| --- | --- |
+| `netizen_cli/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
+| `netizen_cli/channel_app.py`、`netizen_cli/channel/` | ChannelApplication 负责准入、Runtime 提交和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。它由 `channel/` 中的单向分层组成（顺序见 `channel_app.py` 模块说明），下层不得调用上层，由类型检查保证；斜杠命令与卡片动作各按名称分发到独立处理函数。 |
+| `netizen_cli/channel/input_preparation.py` | MessageInputPreparer 负责当前、引用和 catch-up 材料的读取、校验与图片准备，返回 typed PreparedInput；ChannelApplication 继续捕获 admission、组装 Context Boundary 提交参数并发送可见回执，Runtime 确认接受后才推进边界。 |
+| `netizen_cli/message_content.py`、`netizen_cli/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读，由消息准备组件复用。控制意图仍由 Channel 入口判定。 |
+| `netizen_cli/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
+| `netizen_cli/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
+| `netizen_cli/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的安装信息与本实例重启编排。 |
+| `netizen_cli/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
+| `netizen_cli/deployment/` | 有界 Admin 重启记录、维护锁与独立重启 job。 |
+| `netizen_cli/runtime/contracts.py`、`netizen_cli/codex_runtime.py`、`netizen_cli/runtime/` | `contracts.py` 唯一定义公共协议、异常、输入输出和快照；CodexRuntime 继续独占任务、Goal、Side、订阅和锁，并在 `codex_runtime.py` 保留原公共类型导入路径。它由 `runtime/` 中的单向生命周期分层组成（顺序见 `codex_runtime.py` 模块说明），下层不得调用上层，由类型检查保证；共享可变状态只在 `runtime/state.py` 声明一次，超时与预算集中在 `runtime/limits.py`。 |
+
+程序分发与实例数据由 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md)
+分开：`netizen_cli/cli.py` 提供命令，`cli_services.py` 控制精确系统服务，
+`cli_data.py` 负责显式初始化、启动校验和迁移，`cli_packages.py` 限定包维护方式，
+`cli_update.py` 与包替换范围外的临时协调器负责环境级更新。程序及依赖由用户 Python
+包管理器维护；不会为每实例生成 release 或 venv，也不增加常驻总控服务。
+
+### 静态检查与类型债务
+
+ruff 只检查正确性，不约束格式与风格。mypy 检查整个 `netizen_cli` 包，新模块默认全量检查。
+`pyproject.toml` 末尾的类型债务清单按模块列出仍被豁免的具体错误码；修复后从清单删除该
+错误码或模块，不为新代码向清单添加模块或错误码。行内 `type: ignore` 必须写明错误码和原因。
+
+`CodexRuntime`（`netizen_cli/runtime/`）与 `ChannelApplication`（`netizen_cli/channel/`）由单向
+分层的类链组成，各层顺序记录在 `codex_runtime.py` 与 `channel_app.py` 的模块说明中。层内
+方法只能调用本层和下层；调用上层方法会成为 mypy 的 `attr-defined` 错误。新增方法时放入
+它实际依赖的最低一层；跨生命周期共享的守卫与状态放在最底层，声明一次并由门面类的
+`__init__` 初始化。仅本生命周期及上层使用的状态，在实际使用它的最低所属层声明和
+初始化；门面类按层次顺序调用各层的小型显式初始化方法。因此分层模块不得进入
+`attr-defined` 债务清单。
 
 ### 局部回归与共享测试支持
 
@@ -168,6 +210,9 @@ chmod 600 LOCAL_ENVIRONMENT.md
 提交 Issue 或 PR 时说明具体场景、当前行为与预期结果；修复问题时附可复现步骤。让改动
 保持可审查的范围，按行为补足相关测试，检查最终 diff 是否包含无关改动或遗漏的约束。
 产品行为变化时同步更新用户手册与相应工程契约，README 保留准确的产品摘要和入口。
+新建 ADR 须同时满足难以撤销、缺少上下文会令人意外、确实经过取舍三条，规则与全部 ADR 的
+状态、修订链见[ADR 索引](adr/README.md#何时写-adr)；单个功能的行为直接更新[工程设计](design.md)与用户手册。
+用户手册面向使用者：优先使用界面上出现的词和日常说法，不写内部实现细节与重试预算。
 
 升级 Codex SDK 或随附 App Server 时，先完成[SDK 升级审查](deployment.md#codex-sdk-升级审查)，
 逐项检查公开 API 替代、既有兼容债务和新增能力的用户价值、接入边界与成本。将讨论取舍

@@ -95,6 +95,11 @@ COMMAND_SPECS = (
         group=CommandGroup.START,
     ),
     CommandSpec(
+        "enable", ControlName.ENABLE, CommandOwner.CHANNEL, "/enable",
+        "启用本群（仅实例管理员）",
+        group=CommandGroup.START,
+    ),
+    CommandSpec(
         "help",
         ControlName.HELP,
         CommandOwner.CHANNEL,
@@ -219,7 +224,7 @@ COMMAND_SPECS = (
         ControlName.DELETE,
         CommandOwner.HYBRID,
         "/delete",
-        "永久删除当前会话及其原生历史",
+        "永久删除当前会话及其 Codex 历史",
         group=CommandGroup.SESSION,
     ),
     CommandSpec(
@@ -227,7 +232,7 @@ COMMAND_SPECS = (
         None,
         CommandOwner.NATIVE_THREAD,
         "/plan [prompt]",
-        "切换原生 Codex Plan 模式",
+        "切换 Codex Plan 模式",
         unavailable_reason=(
             "当前锁定的 openai-codex 高层 SDK 缺少 collaboration mode / plan 控制"
         ),
@@ -237,7 +242,7 @@ COMMAND_SPECS = (
         None,
         CommandOwner.NATIVE_THREAD,
         "/apps",
-        "发现并选择原生 Codex App",
+        "发现并选择 Codex App",
         unavailable_reason=(
             "当前锁定的 openai-codex 高层 SDK 缺少 Apps discovery 的公开能力"
         ),
@@ -320,7 +325,7 @@ def parse_message(
             raise InvalidInteraction(str(error)) from error
         if skill_names and NativeCapability.SKILLS not in capabilities:
             raise InvalidInteraction(
-                "当前原生 Skills discovery 不可用，$skill 引用未执行。"
+                "当前 Codex Skills 发现功能不可用，$skill 引用未执行。"
             )
         return PromptInput(scope, message_id, sender_id, body, skill_names)
     if body == "/":
@@ -422,6 +427,7 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
         ControlName.USAGE: 0,
         ControlName.FORK: 0,
         ControlName.ADMIN: 0,
+        ControlName.ENABLE: 0,
         ControlName.GOAL: None,
         ControlName.HELP: 0,
     }[name]

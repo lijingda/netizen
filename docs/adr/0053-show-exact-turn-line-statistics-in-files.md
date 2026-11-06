@@ -3,7 +3,7 @@ status: accepted
 date: 2026-09-02
 amends: 0024, 0027, 0047
 related: 0014, 0048, 0052
-amended-by: 0056
+amended_by: 0056
 ---
 
 # 在 Files 模块展示 exact Turn 行数统计

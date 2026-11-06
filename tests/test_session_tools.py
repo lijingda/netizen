@@ -9,7 +9,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from jsonschema import Draft202012Validator
 from mcp.types import CallToolRequestParams
@@ -154,6 +154,24 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.catalog.sides[thread_id] = snapshot
         return snapshot
+
+    async def test_channel_group_rejection_does_not_affect_read_wait_discovery(self):
+        rejection = SessionToolError("group_not_enabled", "Group is not enabled", {"netizen": {"accepted": False}})
+        self.service._create = AsyncMock(side_effect=rejection)
+        self.service._send = AsyncMock(side_effect=rejection)
+        for name, args in (("create_thread", {"prompt": "create"}),
+                           ("send_message_to_thread", {"threadId": "target", "prompt": "send"})):
+            result = await self.call(name, args)
+            self.assertEqual(result["error"]["code"], "group_not_enabled")
+            self.assertFalse(result["netizen"]["accepted"])
+        self.service._create.reset_mock()
+        self.service._send.reset_mock()
+        for name, args in (("list_threads", {}), ("read_thread", {"threadId": "target"}),
+                           ("wait_threads", {"targets": [{"threadId": "target"}], "timeoutMs": 0})):
+            result = await self.call(name, args)
+            self.assertNotIn("error", result)
+        self.service._create.assert_not_called()
+        self.service._send.assert_not_called()
 
     async def test_discovery_uses_native_cwd_and_reports_unknown_without_project_fallback(self):
         self.catalog.items["target"]["cwd"] = "/managed/worktree"

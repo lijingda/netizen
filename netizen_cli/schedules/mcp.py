@@ -26,7 +26,8 @@ from mcp.types import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
-from ..mcp_transport import EmbeddedMcpRunner, MAX_BODY_BYTES, native_thread_id as _native_thread_id
+from ..mcp_transport import EmbeddedMcpRunner, native_thread_id as _native_thread_id
+from ..mcp_transport import MAX_BODY_BYTES  # noqa: F401 - re-exported with the schedule MCP limits
 from ..worktrees.policy import WorkspacePolicy, WorkspacePolicyError
 
 
@@ -368,9 +369,19 @@ class ScheduleMcpRunner(EmbeddedMcpRunner):
             return _result(value)
         except TimeoutError:
             return _error("timeout", "Management timed out. Retry the same mutation with the same request_id.")
-        except Exception:
+        except Exception as diagnostic_error:
             # Exception text and tracebacks may contain task instructions or credentials.
-            logger.error("Scheduled task management callback failed")
+            logger.warning(
+                "scheduled task management callback failed",
+                extra={
+                    "thread_id": native_thread_id,
+                    "operation": request.get("mode"),
+                    "request_id": request.get("request_id"),
+                    "plan_id": request.get("plan_id"),
+                    "run_id": request.get("run_id"),
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             return _error("internal_error", "Scheduled task management failed. Check the current plan before retrying.")
         finally:
             self._calls.discard(task)

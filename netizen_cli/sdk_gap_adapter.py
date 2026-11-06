@@ -9,6 +9,7 @@ disabled or replaced without coupling it to another.
 
 from __future__ import annotations
 
+import logging
 import asyncio
 import inspect
 from collections.abc import Callable
@@ -32,6 +33,9 @@ from .turn_activity import (
     TurnActivityProjectionUnavailable,
     project_turn_activity_notification,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 _SKILLS_LIST_METHOD = "skills/list"
@@ -650,7 +654,7 @@ class AppServerGoalControl:
         snapshot = _goal_snapshot(goal)
         if snapshot.thread_id != thread_id:
             raise GoalControlError(
-                "Codex Goal 响应与请求的原生 Thread 不一致。"
+                "Codex Goal 响应与请求的 Codex 会话不一致。"
             )
         return snapshot
 
@@ -699,7 +703,7 @@ class AppServerGoalControl:
             # Runtime until transport teardown. Attach the opaque handle
             # so Runtime can retain that ownership without converting
             # cancellation into an ordinary exception.
-            error.goal_handle = handle
+            error.goal_handle = handle  # type: ignore[attr-defined]  # opaque ownership handoff
             raise
         except Exception as error:
             raise GoalMutationStateUnknown(
@@ -732,7 +736,7 @@ class AppServerGoalControl:
                 and error.code == -32600
                 and error.message == f"cannot update goal for thread {thread_id}: no goal exists"
             ):
-                raise GoalMutationRejected("原生 Goal 已不存在，本次状态修改未执行。") from error
+                raise GoalMutationRejected("Codex Goal 已不存在，本次状态修改未执行。") from error
             raise GoalMutationStateUnknown(
                 "Codex Goal 状态修改结果未确认；不能自动重试。"
             ) from error
@@ -842,8 +846,15 @@ class _GoalActivityTap:
             self._sink = None
             try:
                 sink(None)
-            except Exception:
-                pass
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "Goal activity unavailable notification failed",
+                    extra={
+                        "thread_id": self._thread_id,
+                        "turn_id": self._turn_id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
             return notification
         if projection.turn_started:
             self._turn_id = projection.turn_id
@@ -858,7 +869,15 @@ class _GoalActivityTap:
             return notification
         try:
             sink(projection)
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "Goal activity sink disabled after failure",
+                extra={
+                    "thread_id": self._thread_id,
+                    "turn_id": self._turn_id,
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             # Activity is display-only. A projection consumer can disable
             # itself but must never interrupt the one Goal notification stream.
             self._sink = None
@@ -1079,7 +1098,7 @@ class _AppServerGoalHandle:
         return physical_turn_id
 
     async def aclose(self) -> None:
-        await self._stream.aclose()
+        await self._stream.aclose()  # type: ignore[attr-defined]  # the pinned SDK stream type provides aclose()
 
 
 def facade_migration_requirements() -> tuple[str, ...]:

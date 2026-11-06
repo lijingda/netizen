@@ -36,7 +36,7 @@ from .turn_activity import (
     TurnActivityEvent,
     TurnActivityProjectionUnavailable,
     TurnPlanStepSnapshot,
-    TurnPlanStepState,
+    TurnPlanStepState,  # noqa: F401 - re-exported with the observer contract
     project_turn_activity_notification,
 )
 

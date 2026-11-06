@@ -9,9 +9,10 @@ import threading
 import time
 import unittest
 from contextlib import asynccontextmanager
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tests.support.legacy_bindings import legacy_admin_lazy_binding
 
@@ -75,6 +76,38 @@ class BindingStoreTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.store.close()
+
+    def test_close_preserves_query_control_signals_after_cleanup(self) -> None:
+        for signal in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(signal=type(signal).__name__):
+                store = BindingStore()
+                self.addCleanup(store.close)
+                query_connection = Mock()
+                store._query_connection = query_connection
+                future = Future()
+                future.set_exception(signal)
+                store._query_futures.add(future)
+
+                with self.assertRaises(type(signal)) as raised:
+                    store.close()
+
+                self.assertIs(raised.exception, signal)
+                query_connection.close.assert_called_once_with()
+                self.assertTrue(store._closed)
+                self.assertIsNone(store._query_connection)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    store._connection.execute("SELECT 1")
+                with self.assertRaises(RuntimeError):
+                    store._query_executor.submit(lambda: None)
+
+    def test_close_suppresses_previously_reported_query_exception(self) -> None:
+        future = Future()
+        future.set_exception(RuntimeError("already reported"))
+        self.store._query_futures.add(future)
+
+        self.store.close()
+
+        self.assertTrue(self.store._closed)
 
     def create(self, project: str = "none"):
         return self.store.create_channel_binding(
@@ -642,6 +675,30 @@ class BindingStoreTest(unittest.TestCase):
 
         self.now = 111
         self.assertFalse(self.store.seen("msg:one"))
+
+    def test_dedup_sweeps_once_per_monotonic_minute_without_delaying_expiry(self) -> None:
+        statements = []
+        self.store._connection.set_trace_callback(statements.append)
+        with patch("netizen_cli.bindings.time.monotonic", return_value=1000.0) as clock:
+            self.store.mark("expired", 10)
+            self.store.mark("renewed", 10)
+            self.store.mark("backlog", 10)
+            self.now = 111
+            self.store.mark("renewed", 100)
+            self.assertFalse(self.store.seen("expired"))
+            self.assertTrue(self.store.seen("renewed"))
+            self.assertIsNotNone(self.store._connection.execute(
+                "SELECT 1 FROM dedup_keys WHERE dedup_key='backlog'",
+            ).fetchone())
+            # Wall-clock movement must not trigger another whole-table sweep.
+            self.now = 10000
+            clock.return_value = 1059.9
+            self.store.mark("live", 100)
+            self.assertEqual(sum(sql.startswith("DELETE FROM dedup_keys WHERE expires_at") for sql in statements), 1)
+            clock.return_value = 1060.0
+            self.store.mark("live", 100)
+            self.assertEqual(sum(sql.startswith("DELETE FROM dedup_keys WHERE expires_at") for sql in statements), 2)
+            self.assertEqual([row[0] for row in self.store._connection.execute("SELECT dedup_key FROM dedup_keys")], ["live"])
 
     def test_memory_store_admin_reads_share_the_test_connection(self) -> None:
         binding = self.create("test")

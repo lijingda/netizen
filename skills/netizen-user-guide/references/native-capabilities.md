@@ -12,7 +12,7 @@
 
 - 可以直接用自然语言询问 Netizen 的使用方式；本 `netizen-user-guide` Skill 设计为在相关问题上自动匹配。
 - 要显式调用其他 Skill，可在普通消息开头写 `$skill-name ...`；同一消息开头可以连续引用多个 Skill。
-- Skill 会在 start/steer 前重新发现和校验。名称不存在、已禁用或路径失效时，本条消息不会执行。
+- 每次提交任务或补充消息前，都会重新查找并校验 Skill。名称不存在、已禁用或路径失效时，本条消息不会执行。
 - 飞书不提供 `/skills` 浏览命令。想知道当前有哪些 Skill，可以直接用自然语言询问 Codex。
 - `$skill` 是普通 prompt 的一部分，不能和飞书 slash control 串成一个消息，也不能放进 Goal objective。
 - 本手册随该实例使用的 Python 安装包保存，Netizen 启动时只为自己的 Codex 进程加载内置
@@ -50,19 +50,19 @@ Netizen 复用原生 Codex Thread、历史、配置和工具，但飞书不是 C
   App/CLI 私有托管索引，不承诺 worktree 管理、删除或自动回收互认；本版不做环境初始化、
   文件自动复制、快照恢复、自动回收或 Handoff。
 - `/copy`、`/vim`、`/theme`、`/exit` 和 `/quit` 属于宿主界面或生命周期命令，在飞书中不可用。
-- `/plan` 和 `/apps` 当前没有安全、公开的高层 SDK 控制面，在飞书中不可用。
+- `/plan` 和 `/apps` 目前没有安全、公开的 Codex 接口可供飞书控制，在飞书中不可用。
 - `$app` 当前不会被包装成原生结构化 attachment。
 - `/model`、`/effort`、`/fast` 被统一为 `/new` 和 `/config` 卡片。
 - 普通会话、Goal 和 Side 的结构化提问使用飞书选择/填写卡片，回答按各自普通消息消费；它不是原生
   审批界面，也不要求原提问任务一直保持运行。详见[回答 Codex 的问题](messages.md#回答-codex-的问题)。
-- 已物化 Thread 必须已持久化且 Delete compatibility gate 可用；删除直接委托 App Server
-  处理当前原生活动。不想丢失历史时使用 `/archive`。
-- `/release` 只释放飞书服务当前连接的订阅，不删除 Thread；CLI/App 或其他 App Server
-  的订阅彼此独立。之后飞书仍可按原 native ID 继续。
-- Codex 认证、MCP、Skills、AGENTS、`config.toml`、sandbox 和其他原生配置来自服务用户的标准 Codex 状态，不由每个飞书 Scope 另建一套配置系统。
+- 删除已有 Codex 历史的会话，需要该会话已保存到 Codex 且当前版本支持删除；正在进行的
+  活动直接交给 Codex 处理。不想丢失历史时使用 `/archive`。
+- `/release` 只断开飞书服务当前与该会话的连接，不删除会话；Codex CLI/App 或其他服务的
+  连接彼此独立。之后飞书仍可按原 Codex 会话 ID 继续。
+- Codex 认证、MCP、Skills、AGENTS、`config.toml`、sandbox 和其他原生配置来自服务用户的标准 Codex 状态，不会为每个飞书聊天位置另建一套配置。
 - Netizen 定时计划独立于 Codex App 的自动化列表；自然语言管理只在 Netizen 的原生执行
   连接中临时提供一个工具，不写用户 MCP 配置，也不改已有会话的指令继承。
 - Netizen 服务每次启动都会重新读取服务账号的 interactive login shell 导出环境；写入持久 profile 的 NVM PATH、代理和工具路径在重启服务后生效，不维护飞书专用环境文件。
 - 后台服务没有真实 TTY，也不会继承某个已打开终端中的临时 `export`、alias 或未导出的 shell function；这部分无法与宿主终端逐项镜像。
-- 全新会话的 approval mode 使用当前 Python SDK 的公开默认 `auto_review`；飞书不提供
+- 全新会话的审批模式（approval mode）使用当前 Codex SDK 的公开默认值 `auto_review`；飞书不提供
   Codex App 的 Ask/Custom 宿主选择器。`/fork` 沿用原生分支继承的权限，不额外覆盖。

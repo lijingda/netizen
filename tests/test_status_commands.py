@@ -66,7 +66,7 @@ class StatusCommandsTest(unittest.IsolatedAsyncioTestCase):
         await self.assert_ordinary_aliases_match_slash()
 
     async def test_git_directory_aliases_have_the_same_replies_as_slash(self):
-        with patch("netizen_cli.channel_app.git_branch_status", return_value="main...origin/main [ahead 2]"):
+        with patch("netizen_cli.channel.base.git_branch_status", return_value="main...origin/main [ahead 2]"):
             await self.assert_ordinary_aliases_match_slash()
 
     async def test_missing_directory_aliases_have_the_same_replies_as_slash(self):
@@ -138,7 +138,7 @@ class StatusCommandsTest(unittest.IsolatedAsyncioTestCase):
         scope, card = await self.panel()
         binding = self.store.active_binding(scope.key)
         await self.app.handle_card_action(self.event(card, "归档"))
-        self.assertIn("Lazy 会话没有原生历史可归档", self.channel.replies[-1][1])
+        self.assertIn("Lazy 会话没有 Codex 历史可归档", self.channel.replies[-1][1])
         self.assertEqual(self.runtime.archive_binding_calls, [])
         self.runtime.materialize(binding.id, "native-one", cwd=self.fixture.project)
         self.runtime.active[binding.id] = ActiveTurnSnapshot(

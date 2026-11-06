@@ -41,6 +41,7 @@ from netizen_cli.runtime.contracts import (
     SubmitDisposition,
     TurnOutcome,
 )
+from netizen_cli.group_access import GroupAccessRule, GroupAccessService
 from netizen_cli.schedules.models import ScheduleRule
 from netizen_cli.session_settings import SessionSettings
 from netizen_cli.partial_answers import PartialAnswer
@@ -95,6 +96,46 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             ])
         else:
             self.channel.send_results.append(sent_result("om_root", chat_id="oc_group", thread_id="omt_fresh", root_id="om_root"))
+
+    async def test_group_access_rejects_new_topic_run_without_modifying_plan(self):
+        claim = self.claim()
+        self.app._group_access = GroupAccessService(GroupAccessRule("only"))
+        await self.app.dispatch_scheduled_run(claim)
+        run = self.store.schedules.get_run(claim.run.id)
+        self.assertEqual(run.error_code, "group_not_enabled")
+        self.assertEqual(run.barrier, "released")
+        self.assertEqual(self.channel.send_calls, [])
+        self.assertEqual(self.submissions, [])
+        self.assertEqual(self.store.schedules.get(claim.plan.id).enabled, claim.plan.enabled)
+        self.assertEqual(self.store.schedules.get(claim.plan.id).revision, claim.plan.revision)
+
+    async def test_group_access_captures_new_topic_rule_before_awaits(self):
+        claim = self.claim()
+        self.app._group_access = GroupAccessService(GroupAccessRule("only", ("oc_group",)))
+        async def lookup(chat_id):
+            self.app._group_access = GroupAccessService(GroupAccessRule("only"))
+            return SimpleNamespace(chat_mode="topic")
+        self.queue_topic()
+        with patch.object(self.channel, "get_chat_info", side_effect=lookup):
+            await self.app.dispatch_scheduled_run(claim)
+        self.assertEqual(len(self.submissions), 1)
+
+    async def test_group_access_unknown_chat_and_lookup_failure_are_dispatch_rejected(self):
+        claim = self.claim()
+        self.app._group_access = GroupAccessService(GroupAccessRule("only"))
+        for index, failure in enumerate((SimpleNamespace(chat_mode="unknown"), OSError("lookup failed"))):
+            if index:
+                claim = self.store.schedules.claim_due(claim.plan.id, app_id="app", now=220)
+                self.assertIsNotNone(claim)
+            lookup = AsyncMock(side_effect=failure) if isinstance(failure, Exception) else AsyncMock(return_value=failure)
+            with patch.object(self.channel, "get_chat_info", lookup):
+                await self.app.dispatch_scheduled_run(claim)
+                lookup.assert_awaited_once_with("oc_group")
+            run = self.store.schedules.get_run(claim.run.id)
+            self.assertEqual(run.error_code, "dispatch_rejected")
+            self.assertEqual(run.barrier, "released")
+        self.assertEqual(self.channel.send_calls, [])
+        self.assertEqual(self.submissions, [])
 
     async def test_fresh_topic_has_ordinary_defaults_real_origin_and_keeps_group_selection(self):
         claim = self.claim("$reports 检查资源")
@@ -330,7 +371,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             sent_result("om_partial", chat_id="oc_group", thread_id="omt_fresh"),
             sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"),
         ])
-        with patch("netizen_cli.channel_app.turn_progress_card", side_effect=ValueError("cannot render")):
+        with patch("netizen_cli.channel.presentation.turn_progress_card", side_effect=ValueError("cannot render")):
             await self.app.handle_completion(TurnOutcome(
                 binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
                 turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
@@ -636,7 +677,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_file_card_preparation_failure_can_fall_back_once(self):
         claim, request = await self.completion_fixture()
         self.channel.reply_results.append(sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"))
-        with patch("netizen_cli.channel_app.turn_files_card", side_effect=ValueError("cannot render")):
+        with patch("netizen_cli.channel.presentation.turn_files_card", side_effect=ValueError("cannot render")):
             await self.finish_files_fixture(claim, request)
         self.assertEqual([content for _, content in self.channel.replies], ["report complete"])
         self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")

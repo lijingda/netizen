@@ -289,7 +289,7 @@ async function fetch(path) {
   await loadSessions(sessionFilterPage());
   const rows = document.querySelector("#sessions-body");
   assert.match(rows.textContent, /Read summary.*状态未确认.*running/);
-  assert.doesNotMatch(rows.textContent, /Lazy Session|原生会话缺失/);
+  assert.doesNotMatch(rows.textContent, /Lazy Session|Codex 会话缺失/);
   const actions = rows.querySelector(".actions");
   assert.deepEqual(actions.children.filter((child) => child.tagName === "button").map((button) => button.textContent), ["停止", "归档"]);
   const more = actions.querySelector("details");

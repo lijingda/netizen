@@ -18,7 +18,7 @@ from .image_inputs import ImagePromptReferences, localize_image_markers
 from .message_content import (
     SUPPORTED_MESSAGE_TYPES,
     HistoricalMessageContractError,
-    HistoricalMessageError,
+    HistoricalMessageError,  # noqa: F401 - re-exported for input preparation and quotes
     HistoricalMessageUnavailable,
     UnsupportedHistoricalMessage,
     normalized_content_type,
@@ -679,7 +679,7 @@ def _historical_prompt_objects(
             continue
         if message.message_id in message_refs:
             raise HistoricalMessageContractError(
-                "历史上下文包含重复的 exact 消息，"
+                "历史上下文包含重复的消息，"
                 "本条消息未执行。"
             )
         message_refs[message.message_id] = prompt_ref
@@ -771,7 +771,7 @@ def _historical_prompt_attachments(
             file_key = _nonempty_string(resource.get("file_key"))
             if message.message_id is None or file_key is None:
                 raise HistoricalMessageContractError(
-                    "已读取的历史图片缺少 exact 资源身份，"
+                    "已读取的历史图片缺少资源标识，"
                     "本条消息未执行。"
                 )
             prompt_ref = image_prompt_refs.get(
@@ -782,13 +782,13 @@ def _historical_prompt_attachments(
                     "历史图片缺少对应的本地输入引用，"
                     "本条消息未执行。"
             )
-            attachment = {"type": "image", "ref": prompt_ref}
+            attachment: dict[str, Any] = {"type": "image", "ref": prompt_ref}
             if prompt_ref not in seen_image_refs:
                 seen_image_refs.add(prompt_ref)
                 attachments.append(attachment)
             continue
 
-        attachment: dict[str, Any] = {"type": resource_type}
+        attachment = {"type": resource_type}
         file_name = _nonempty_string(resource.get("file_name"))
         if file_name is not None:
             attachment["name"] = file_name
@@ -835,7 +835,7 @@ def _validate_supplemental_order(
     for message in messages:
         if message.message_id is None or message.created_at is None:
             raise HistoricalMessageContractError(
-                "补充上下文消息缺少 exact ID 或创建时间，"
+                "补充上下文消息缺少消息 ID 或创建时间，"
                 "本条消息未执行。"
             )
         if previous is not None and message.created_at < previous:

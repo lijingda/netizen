@@ -80,6 +80,7 @@ _STATES = {
     "starting": "正在启动", "starting_turn": "正在启动", "handed_off": "已启动", "released": "本次已处理",
     "missed": "已错过", "skipped_busy": "上次仍在运行，本次跳过",
     "scope_conflict": "话题已有 Agent 会话，本次未启动", "publishing_unknown": "话题发布结果待确认",
+    "group_not_enabled": "目标群尚未启用，请实例管理员在该群发送 /enable，或在 Admin 中启用",
     "publishing_failed": "话题发布失败", "dispatch_rejected": "本次未启动",
     "initial_start_rejected": "首次启动条件已改变", "initial_start_unknown": "启动结果待确认",
     "observation_unavailable": "执行状态暂不可读", "sent": "已投递", "unknown": "待确认",
@@ -465,7 +466,7 @@ def _binding_workspace_summary(workspace: Mapping[str, Any] | None) -> str:
         if workspace.get("working_cwd"):
             lines.append("登记工作目录：" + str(workspace["working_cwd"]))
         if workspace.get("native_cwd_unresolved"):
-            lines.append("实际工作目录以原生会话为准；此处未重新读取。")
+            lines.append("实际工作目录以 Codex 会话为准；此处未重新读取。")
     return "\n".join(lines)
 
 

@@ -63,7 +63,7 @@ fetch = async (path, options = {}) => {
   }
   if (!["/api/v1/projects", "/api/v1/schedules", "/api/v1/defaults", "/logout", "/api/v1/identity",
     "/api/v1/admin-users", "/api/v1/admin-users/selector-config", "/api/v1/worktrees", "/api/v1/worktrees/settings",
-    "/api/v1/session-tool-access", "/api/v1/session-tool-access/save", "/api/v1/progress-card/settings"].includes(url.pathname)) return baseFetch(path, options);
+    "/api/v1/group-access", "/api/v1/session-tool-access", "/api/v1/session-tool-access/save", "/api/v1/progress-card/settings"].includes(url.pathname)) return baseFetch(path, options);
   requests.push({ path: url.pathname, query: url.searchParams, options });
   if (expireResponse) return { ok: false, status: 401, json: async () => ({}) };
   if (failPage) throw new Error("本页读取失败");
@@ -92,6 +92,7 @@ fetch = async (path, options = {}) => {
     if (selectorConfigGate) await selectorConfigGate.promise;
     data = { openId: "fixture-admin", appId: "fixture-app", signature: "fixture-signature" };
   }
+  else if (url.pathname === "/api/v1/group-access") data = {mode: "all", chatIds: [], chats: [], revision: "groups-first", saveAction: adminGrant};
   else if (url.pathname.startsWith("/api/v1/session-tool-access")) {
     if (options.method === "POST") {
       if (accessSaveGate) await accessSaveGate.promise;
@@ -145,6 +146,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   if (initialUrl === "/system") {
     const admins = document.querySelector("#system-tab-admins");
     const access = document.querySelector("#system-tab-access");
+    const groups = document.querySelector("#system-tab-groups");
     const progress = document.querySelector("#system-tab-progress");
     const badge = document.querySelector("#session-access-unsaved");
     const mode = document.querySelector("#session-access-discovery-mode");
@@ -185,6 +187,8 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     assert.equal(document.querySelector("#system-access").hidden, true);
     assert.equal(badge.hidden, false, "hidden permission edits remain discoverable");
     admins.dispatch("keydown", { key: "ArrowRight" });
+    assert.equal(document.activeElement, groups);
+    groups.dispatch("keydown", { key: "ArrowRight" });
     assert.equal(document.activeElement, access);
     access.dispatch("keydown", { key: "ArrowLeft" });
     access.click();
@@ -230,6 +234,21 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     const saved = requests.find((request) => request.path.endsWith("/session-tool-access/save"));
     assert.deepEqual(JSON.parse(saved.options.body).discovery, { mode: "disabled", chatIds: [] });
     assert.equal(JSON.parse(saved.options.body).actionToken, adminGrant.actionToken);
+
+    groups.click();
+    const groupMode = document.querySelector("#group-access-mode");
+    groupMode.value = "only"; groupMode.dispatch("change");
+    assert.equal(document.querySelector("#group-access-unsaved").hidden, false);
+    const groupRequests = requests.length;
+    admins.click(); groups.click();
+    assert.equal(groupMode.value, "only", "sub-tabs retain the group admission draft");
+    assert.equal(requests.length, groupRequests);
+    assert.equal(unload(), true);
+    window.confirm = () => false;
+    await selectTab("projects");
+    assert.equal(state.tab, "system", "group admission draft guards navigation");
+    document.querySelector("#group-access-cancel").click();
+    assert.equal(unload(), false);
 
     admins.click();
     document.querySelector("#admin-user-add").click(); await flush();

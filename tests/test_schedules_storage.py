@@ -8,6 +8,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import (
@@ -342,6 +343,71 @@ class ScheduleStorageTest(unittest.TestCase):
             plan_id, app_id=app_id, expected_revision=expected_revision,
             request_id=request_id or self.request(), now=now,
         )
+
+    def test_request_sweeps_are_throttled_but_expired_keys_can_be_reused(self):
+        statements = []
+        self.store._connection.set_trace_callback(statements.append)
+        with patch("netizen_cli.schedules.store.time.monotonic", return_value=1000.0) as clock:
+            original = self.create(request_id="reuse", request_payload={"v": 1})
+            self.create(request_id="backlog", request_payload={})
+            replay = self.schedules.lookup_request("reuse", "create", {"v": 1})
+            self.assertEqual(replay.plan_id, original.plan_id)
+            self.assertTrue(replay.replayed)
+            with self.assertRaises(ScheduleRequestConflict):
+                self.schedules.lookup_request("reuse", "update", {"v": 1})
+            self.now += 7 * 86400
+            clock.return_value = 1059.9
+            self.assertIsNone(self.schedules.lookup_request("absent", "create", {}))
+            self.assertIsNotNone(self.store._connection.execute(
+                "SELECT 1 FROM schedule_requests WHERE request_id='reuse'",
+            ).fetchone())
+            renewed = self.create(request_id="reuse", request_payload={"v": 2})
+            self.assertFalse(renewed.replayed)
+            self.assertNotEqual(renewed.plan_id, original.plan_id)
+            self.assertEqual(sum(sql.startswith("DELETE FROM schedule_requests WHERE expires_at") for sql in statements), 1)
+            clock.return_value = 1060.0
+            self.assertIsNone(self.schedules.lookup_request("absent", "create", {}))
+            self.assertEqual(sum(sql.startswith("DELETE FROM schedule_requests WHERE expires_at") for sql in statements), 2)
+            self.assertEqual([row[0] for row in self.store._connection.execute("SELECT request_id FROM schedule_requests")], ["reuse"])
+
+    def test_expired_request_cleanup_rollback_does_not_revive_replay(self):
+        with patch("netizen_cli.schedules.store.time.monotonic", return_value=1000.0) as clock:
+            original = self.create(request_id="reuse", request_payload={"v": 1})
+            self.now += 7 * 86400
+            clock.return_value = 1060.0
+            with self.assertRaises(ScheduleError):
+                self.create(request_id="reuse", request_payload={"v": 2}, instructions="")
+            self.assertIsNotNone(self.store._connection.execute(
+                "SELECT 1 FROM schedule_requests WHERE request_id='reuse'",
+            ).fetchone())
+            renewed = self.create(request_id="reuse", request_payload={"v": 2})
+            self.assertFalse(renewed.replayed)
+            self.assertNotEqual(renewed.plan_id, original.plan_id)
+
+    def test_archive_uses_partial_run_index_and_delete_releases_both_target_kinds(self):
+        new_topic_plan = self.create().plan_id
+        new_topic_run = self.claim(new_topic_plan)
+        binding = self.binding(new_topic_run)
+        binding_plan = self.create(target_kind="binding", target_binding_id=binding.id,
+                                   session_settings=None, workspace=None).plan_id
+        binding_run = self.claim(binding_plan, self.now + 60)
+        statements = []
+        self.store._connection.set_trace_callback(statements.append)
+        self.store.archive_binding(binding.id)
+        self.store._connection.set_trace_callback(None)
+        queries = [sql for sql in statements if sql.startswith("SELECT run_id,plan_id FROM schedule_runs WHERE binding_id=")]
+        self.assertEqual(len(queries), 1)
+        plan = self.store._connection.execute("EXPLAIN QUERY PLAN " + queries[0]).fetchall()
+        self.assertTrue(any("SEARCH schedule_runs USING INDEX schedule_runs_binding" in row[3] for row in plan), plan)
+        self.assertEqual(self.schedules.get_run(new_topic_run.run.id).barrier, "released")
+        self.assertEqual(self.schedules.get_run(binding_run.run.id).barrier, "held")
+        self.assertFalse(self.schedules.get(binding_plan).deleted)
+        self.store.delete_binding(binding.id)
+        for run_id in (new_topic_run.run.id, binding_run.run.id):
+            run = self.schedules.get_run(run_id)
+            self.assertEqual(run.barrier, "released")
+            self.assertTrue(run.binding_removed)
+        self.assertTrue(self.schedules.get(binding_plan, include_deleted=True).deleted)
 
     def test_auto_archive_defaults_updates_and_claim_snapshots(self):
         self.assertFalse(self.schedules.get(self.create().plan_id).auto_archive)

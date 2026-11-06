@@ -20,7 +20,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
-from typing import Generic, TypeVar, cast
+from typing import Generic, TypeVar
 
 from .users import AdminIdentity, AdminUsers, AdminUsersUnavailable
 
@@ -616,7 +616,7 @@ class AdminAuth:
                 session_log_handle=session.log_handle,
                 generation=self._generation,
                 action_kind=record.action_kind,
-                target=cast(TargetT, record.target),
+                target=record.target,
                 preconditions=record.preconditions,
                 identity=session.identity,
                 add_revision=session.add_revision,

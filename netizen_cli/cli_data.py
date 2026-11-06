@@ -489,7 +489,10 @@ def purge_inventory(root: Path, *, protected_codex_home: Path | None = None) -> 
                 if (value is None or type(value.get("version")) is not int
                         or value["version"] != 1):
                     raise ValueError("unsupported user credential format")
-                identity = AdminIdentity(value.get("appId"), value.get("openId"))
+                app_id, open_id = value.get("appId"), value.get("openId")
+                if not isinstance(app_id, str) or not isinstance(open_id, str):
+                    raise ValueError("unsupported user credential format")
+                identity = AdminIdentity(app_id, open_id)
                 if credential_path(root, identity) != candidate:
                     raise ValueError("user credential identity does not match its path")
             except (PrivateJSONError, ValueError) as error:

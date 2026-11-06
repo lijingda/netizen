@@ -3453,7 +3453,7 @@ class CardRendererTest(unittest.TestCase):
                 visible_text = json.dumps(card.card, ensure_ascii=False)
                 self.assertNotIn("已接收调整", visible_text)
                 self.assertEqual(
-                    "最近一次原生上报，可能尚未反映追加消息" in visible_text,
+                    "最近一次 Codex 上报，可能尚未反映追加消息" in visible_text,
                     projection.goal is not None and projection.activity is not None,
                 )
 
@@ -3971,10 +3971,10 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("确认归档当前会话", str(archive.card))
         self.assertIn("binding.delete", str(delete.card))
         self.assertIn("永久删除且无法恢复", str(delete.card))
-        self.assertIn("只删除本地 Binding", str(delete.card))
-        self.assertNotIn("原生 Thread", str(delete.card))
-        self.assertIn("原生 Codex Thread", str(materialized_delete.card))
-        self.assertIn("spawned descendants", str(materialized_delete.card))
+        self.assertIn("只删除 Netizen 中的会话记录", str(delete.card))
+        self.assertNotIn("Codex 会话", str(delete.card))
+        self.assertIn("Codex 会话", str(materialized_delete.card))
+        self.assertIn("派生会话", str(materialized_delete.card))
         self.assertIn(
             "native-thread:v1:native-one",
             str(materialized_delete.card),
@@ -4282,7 +4282,7 @@ class CardRendererTest(unittest.TestCase):
         )
 
         self.assertEqual(materialized.card["header"]["template"], "red")
-        self.assertIn("spawned descendants", str(materialized.card))
+        self.assertIn("派生会话", str(materialized.card))
         self.assertIn("Codex App/CLI", str(materialized.card))
         final = next(
             button
@@ -4311,7 +4311,7 @@ class CardRendererTest(unittest.TestCase):
             if button["text"]["content"] == "返回会话列表"
         )
         self.assertEqual(back["behaviors"][0]["value"]["page"], 3)
-        self.assertIn("只永久删除本地 Binding", str(lazy.card))
+        self.assertIn("只永久删除 Netizen 中的会话记录", str(lazy.card))
         lazy_final = next(
             button
             for button in _elements(lazy.card, "button")

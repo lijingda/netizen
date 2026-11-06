@@ -511,7 +511,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.management.query_available_chats.side_effect = stalled_query
         initial = await self.open_form()
         self.management.query_available_chats.assert_not_awaited()
-        with patch("netizen_cli.channel_app._CARD_CHAT_QUERY_SECONDS", 0.01):
+        with patch("netizen_cli.channel.constants.CARD_CHAT_QUERY_SECONDS", 0.01):
             card = await self.search_form(initial)
         self.assertTrue(cancelled.is_set())
         self.assertNotIn("oc_partial_timeout", str(card.card))

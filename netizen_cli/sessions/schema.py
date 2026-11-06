@@ -53,7 +53,7 @@ class SendArguments(Arguments):
     threadId: str = Field(min_length=1, max_length=256)
     prompt: str = Field(min_length=1, max_length=1000, description="Maximum 1,000 UTF-8 bytes.")
     model: str | None = Field(default=None, min_length=1, max_length=256)
-    _validate_prompt = field_validator("prompt")(CreateArguments.validate_prompt.__func__)
+    _validate_prompt = field_validator("prompt")(CreateArguments.validate_prompt.__func__)  # type: ignore[attr-defined]  # reuse the classmethod body
 
 
 class WaitTarget(Arguments):

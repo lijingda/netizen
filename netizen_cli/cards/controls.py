@@ -1174,7 +1174,7 @@ def archive_binding_card(
     builder = _builder("归档当前会话", f"Netizen 会话编号：{short_id} · {project_alias}")
     builder.markdown(
         f"即将归档：`{_md_code(title)}`\n"
-        "Codex 会处理该 Thread 当前的原生活动后执行归档。"
+        "Codex 会处理该 Thread 当前的活动后执行归档。"
         "归档会同步影响 Codex App/CLI；历史不会删除，之后可以恢复。"
     )
     builder.raw(
@@ -1212,19 +1212,19 @@ def delete_binding_card(
     if native_thread_id is None:
         builder.markdown(
             f"即将删除：`{_md_code(title)}`\n"
-            "该 Lazy 会话尚无原生历史；确认后只删除本地 Binding。"
+            "该 Lazy 会话尚无 Codex 历史；确认后只删除 Netizen 中的会话记录。"
         )
         confirm_body = "请再次确认：该本地会话映射将被永久删除。"
         callback_extra: dict[str, object] = {}
     else:
         builder.markdown(
             f"即将删除：`{_md_code(title)}`\n"
-            "Codex 会处理该 Thread 当前的原生活动。确认后将永久删除原生 "
-            "Codex Thread、其 spawned descendants 与本地 "
-            "Binding；Codex App/CLI 中的对应历史也会消失。"
+            "Codex 会处理该 Thread 当前的活动。确认后将永久删除 "
+            "Codex 会话、其派生会话与 "
+            "Netizen 中的会话记录；Codex App/CLI 中的对应历史也会消失。"
         )
         confirm_body = (
-            "请再次确认：原生会话、派生会话与本地 Binding 都将永久删除，无法恢复。"
+            "请再次确认：Codex 会话、派生会话与 Netizen 中的会话记录都将永久删除，无法恢复。"
         )
         callback_extra = {
             "expected_native_thread_id": _native_thread_reference(
@@ -1268,17 +1268,17 @@ def sessions_delete_binding_card(
     if native_thread_id is None:
         builder.markdown(
             f"即将删除：`{_md_code(title)}`\n"
-            "该 Lazy 会话尚无原生历史；确认后只永久删除本地 Binding。"
+            "该 Lazy 会话尚无 Codex 历史；确认后只永久删除 Netizen 中的会话记录。"
         )
         confirm_body = "请再次确认：该本地会话映射将被永久删除。"
     else:
         builder.markdown(
             f"即将删除：`{_md_code(title)}`\n"
-            "确认后将永久删除原生 Codex Thread、其 spawned descendants 与本地 "
-            "Binding；Codex App/CLI 中的对应历史也会消失。"
+            "确认后将永久删除 Codex 会话、其派生会话与 "
+            "Netizen 中的会话记录；Codex App/CLI 中的对应历史也会消失。"
         )
         confirm_body = (
-            "请再次确认：原生会话、派生会话与本地 Binding 都将永久删除，无法恢复。"
+            "请再次确认：Codex 会话、派生会话与 Netizen 中的会话记录都将永久删除，无法恢复。"
         )
     expected_native_thread_id = (
         _native_thread_reference(native_thread_id)
@@ -1327,7 +1327,7 @@ def archived_sessions_card(
         builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
         "已归档会话不会出现在普通 `/sessions` 中。恢复不会修改历史或会话配置；"
-        "删除会永久移除原生 Thread、其 spawned descendants 与本地 Binding。\n"
+        "删除会永久移除 Codex 会话、其派生会话与 Netizen 中的会话记录。\n"
         "更多管理请使用 Admin 会话列表，发送 `/admin` 打开。"
     )
     if not sessions:
@@ -1368,8 +1368,8 @@ def archived_sessions_delete_binding_card(
     )
     builder.markdown(
         f"即将删除：`{_md_code(title)}`\n"
-        "确认后将永久删除原生 Codex Thread、其 spawned descendants 与本地 "
-        "Binding；Codex App/CLI 中的对应历史也会消失。"
+        "确认后将永久删除 Codex 会话、其派生会话与 "
+        "Netizen 中的会话记录；Codex App/CLI 中的对应历史也会消失。"
     )
     builder.raw(
         _button_row(
@@ -1387,7 +1387,7 @@ def archived_sessions_delete_binding_card(
                 style="danger",
                 confirm=(
                     "永久删除且无法恢复",
-                    "原生会话、派生会话与本地 Binding 都将永久删除。",
+                    "Codex 会话、派生会话与 Netizen 中的会话记录都将永久删除。",
                 ),
             ),
             _repeatable_callback_button(
@@ -1838,9 +1838,9 @@ def side_topic_card(
                 confirm=(
                     "取消 Side" if creating else "结束 Side",
                     (
-                        "将重试清理未完成的 Side，并取消原生订阅。"
+                        "将重试清理未完成的 Side，并取消 Codex 订阅。"
                         if creating
-                        else "将中断当前 Side Turn、清理后台终端并取消原生订阅。"
+                        else "将中断当前 Side Turn、清理后台终端并取消 Codex 订阅。"
                     ),
                 ),
             )
@@ -2232,7 +2232,7 @@ def decode_button_action(
         name is CardControlName.RECHECK_EXACT_TURN
         and expected_turn_id is None
     ):
-        raise CardActionError("Turn 重新检查动作缺少 exact Turn。")
+        raise CardActionError("Turn 重新检查动作缺少本轮任务标识。")
     return CardControlIntent(
         scope=scope,
         source_id=message_id,

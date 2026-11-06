@@ -518,7 +518,7 @@ class MessageInputPreparer:
 
         if _message_id(message) != message_id:
             raise MessageHistoryUnavailable(
-                "补充上下文 exact message ID 不一致，本条消息未执行。"
+                "补充上下文消息 ID 不一致，本条消息未执行。"
             )
         if validate is not None:
             validate(message)
@@ -579,7 +579,7 @@ class MessageInputPreparer:
     ) -> None:
         if _message_id(message) != reference.message_id:
             raise MessageHistoryUnavailable(
-                "补充上下文 exact message ID 不一致，本条消息未执行。"
+                "补充上下文消息 ID 不一致，本条消息未执行。"
             )
         conversation = getattr(message, "conversation", None)
         if str(getattr(conversation, "chat_id", "") or "") != scope.chat_id:

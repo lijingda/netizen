@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-10-11
 amends: 0031, 0062, 0066, 0074, 0076
-amended-by: 0091
+amended_by: 0091, 0092
 ---
 
 # 用飞书身份登录并维护实例管理员

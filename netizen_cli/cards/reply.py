@@ -71,7 +71,6 @@ from .callbacks import (
     _md_code,
     _notice,
     _plain,
-    _plain_text,
     _repeatable_callback_button,
     _required_string,
     _scope_from_envelope,
@@ -872,8 +871,8 @@ def _reply_goal_block(
                 {
                     "tag": "markdown",
                     "content": (
-                        "无法安全确认原生 Goal 是否存在；当前会话仍保持占用，"
-                        "请勿启动新的原生操作。"
+                        "无法安全确认 Codex Goal 是否存在；当前会话仍保持占用，"
+                        "请勿启动新的 Codex 操作。"
                     ),
                 }
             )
@@ -882,7 +881,7 @@ def _reply_goal_block(
                 {
                     "tag": "markdown",
                     "content": (
-                        "当前原生 Thread 没有 Goal。使用 `/goal <objective>` 启动；"
+                        "当前 Codex 会话没有 Goal。使用 `/goal <objective>` 启动；"
                         "Goal 可跨多个物理 Turn 自动继续。"
                     ),
                 }
@@ -956,7 +955,7 @@ def _reply_goal_block(
             elements.append(
                 _notice(
                     "这是重启前或外部客户端启动的 active Goal；"
-                    "当前 SDK 无法安全补收通知并重挂。请先在原生 Codex 中暂停。"
+                    "当前 SDK 无法安全补收通知并重挂。请先在 Codex 中暂停。"
                 )
             )
     if scope is not None:
@@ -1172,7 +1171,7 @@ def _turn_activity_elements(
 
     title = "**任务清单**"
     if goal:
-        title += "（最近一次原生上报，可能尚未反映追加消息）"
+        title += "（最近一次 Codex 上报，可能尚未反映追加消息）"
     elif snapshot.plan_may_be_stale:
         title += "（可能尚未反映最近一次调整）"
     elements.append({"tag": "markdown", "content": title})

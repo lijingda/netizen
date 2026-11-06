@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import sqlite3
 import uuid
@@ -268,7 +269,7 @@ class DefaultsStore:
                 self._write_order(app_id, [item.id for item in self.group_rules(app_id)])
                 self._bump_order(app_id)
 
-    def reorder(self, app_id: str, rule_ids: list[str], order_revision: int) -> int:
+    def reorder(self, app_id: str, rule_ids: builtins.list[str], order_revision: int) -> int:
         with self.owner._transaction():
             if self._order_revision(self._db, app_id) != order_revision:
                 raise DefaultConfigurationError("群名规则顺序已变化，请刷新后重试。", code="revision_conflict")
@@ -278,7 +279,7 @@ class DefaultsStore:
             self._write_order(app_id, rule_ids)
             return self._bump_order(app_id)
 
-    def _write_order(self, app_id: str, rule_ids: list[str]) -> None:
+    def _write_order(self, app_id: str, rule_ids: builtins.list[str]) -> None:
         # Move out of the dense final range before assigning the new positions;
         # the unique index remains valid throughout the transaction.
         self._db.execute(

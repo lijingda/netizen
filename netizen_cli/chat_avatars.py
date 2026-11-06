@@ -84,11 +84,11 @@ class ChatAvatarImages:
             try:
                 key = await self._channel.upload_media(MediaSource(kind="url", url=url), kind="image")
                 if not isinstance(key, str) or not _IMAGE_KEY.fullmatch(key):
-                    return
+                    return None
             except asyncio.CancelledError:
                 raise
             except Exception:
-                return
+                return None
             self._keys[url] = (monotonic() + _KEY_SECONDS, key)
             self._keys.move_to_end(url)
             while len(self._keys) > _MAX_KEYS:

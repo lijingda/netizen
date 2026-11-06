@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, closing, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from lark_channel import (
@@ -35,6 +35,7 @@ from openai_codex.errors import InternalRpcError
 from openai_codex.types import ThreadItem, TurnError
 
 from netizen_cli import channel_app
+from netizen_cli.channel import constants as channel_constants
 from netizen_cli.channel.session_pages import SessionCardPage
 from netizen_cli.channel import input_preparation
 from netizen_cli.channel.input_preparation import MessageInputPreparer
@@ -1160,9 +1161,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
-            patch.object(
-                channel_app,
-                "turn_patch_summary",
+            patch(
+                "netizen_cli.channel.presentation.turn_patch_summary",
                 wraps=channel_app.turn_patch_summary,
             ) as parse_diff,
         ):
@@ -2028,9 +2028,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         report = self.project / "research.md"
         report.write_text("research", encoding="utf-8")
 
-        with patch.object(
-            channel_app,
-            "turn_patch_summary",
+        with patch(
+            "netizen_cli.channel.presentation.turn_patch_summary",
             wraps=channel_app.turn_patch_summary,
         ) as parse_diff:
             await self.app.handle_completion(
@@ -2305,9 +2304,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         report.write_text("report", encoding="utf-8")
 
         with (
-            patch.object(
-                channel_app,
-                "turn_files_card",
+            patch(
+                "netizen_cli.channel.presentation.turn_files_card",
                 side_effect=channel_app.TurnFileCardLimitError(
                     "本轮文件共 501 个，超过上限；未截断文件清单。"
                 ),
@@ -3034,7 +3032,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
 
         with patch(
-            "netizen_cli.channel_app.git_branch_status",
+            "netizen_cli.channel.base.git_branch_status",
             return_value="main...origin/main [ahead 2]",
         ) as read_branch:
             await self.app.handle_message(
@@ -3097,7 +3095,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(
             FakeMessage("/release", message_id="om_release_lazy")
         )
-        self.assertIn("尚未物化", str(self.channel.replies[-1][1]))
+        self.assertIn("尚未开始", str(self.channel.replies[-1][1]))
 
         binding = self.store.active_binding(
             FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key
@@ -3351,7 +3349,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(self.runtime, "goal_snapshot", stalled_goal),
-            patch("netizen_cli.channel_app._SESSION_QUERY_TIMEOUT_SECONDS", 0.05),
+            patch("netizen_cli.channel.constants.SESSION_QUERY_TIMEOUT_SECONDS", 0.05),
         ):
             card = await asyncio.wait_for(self.app._sessions_card(scope=scope), 0.5)
         self.assertTrue(entered.is_set())
@@ -3536,7 +3534,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/delete", message_id="om_delete")
         )
         card = self.channel.replies[-1][1]
-        self.assertIn("只删除本地 Binding", str(card.card))
+        self.assertIn("只删除 Netizen 中的会话记录", str(card.card))
         button = next(
             item
             for item in _elements(card.card, "button")
@@ -3575,7 +3573,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         card = self.channel.replies[-1][1]
         serialized = str(card.card)
-        self.assertIn("原生 Codex Thread", serialized)
+        self.assertIn("Codex 会话", serialized)
         self.assertIn("native-thread:v1:native-one", serialized)
         self.assertIn("Materialized", serialized)
         self.assertEqual(self.runtime.thread_summary_calls, ["native-one"])
@@ -3597,7 +3595,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.delete_binding_calls, [binding.id])
         with self.assertRaises(BindingNotFound):
             self.store.get(binding.id)
-        self.assertIn("原生 Codex 会话", str(self.channel.updates[-1][1]))
+        self.assertIn("Codex 会话", str(self.channel.updates[-1][1]))
 
     async def test_delete_materialized_binding_is_unavailable_without_capability(
         self,
@@ -3773,7 +3771,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         confirmation = self.channel.updates[-1][1]
-        self.assertIn("spawned descendants", str(confirmation))
+        self.assertIn("派生会话", str(confirmation))
         delete = next(
             button
             for button in _elements(confirmation, "button")
@@ -3964,7 +3962,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             first.id, "native-one", "turn-one", "ou_user", ActiveState.RUNNING,
         )
         await self.fixture.new(message_id="om_new_two")
-        second = self.store.active_binding(scope.key)
 
         await self.app.handle_message(
             FakeMessage("/sessions", message_id="om_sessions")
@@ -4136,7 +4133,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         replies_before = len(self.channel.replies)
         with (
-            patch.object(channel_app.asyncio, "sleep", record_delay),
+            patch.object(asyncio, "sleep", record_delay),
             self.assertLogs("netizen_cli.channel_app", level="WARNING"),
         ):
             await self.app.handle_card_action(
@@ -4174,7 +4171,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             delays.append(delay)
 
         with (
-            patch.object(channel_app.asyncio, "sleep", record_delay),
+            patch.object(asyncio, "sleep", record_delay),
             self.assertLogs("netizen_cli.channel_app", level="ERROR"),
         ):
             await self.app.handle_card_action(
@@ -4221,7 +4218,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.delete_binding_calls, [])
         confirmation = self.channel.updates[-1][1]
         self.assertEqual(confirmation["header"]["template"], "red")
-        self.assertIn("只永久删除本地 Binding", str(confirmation))
+        self.assertIn("只永久删除 Netizen 中的会话记录", str(confirmation))
         final = next(
             button
             for button in _elements(confirmation, "button")
@@ -4247,7 +4244,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             delays.append(delay)
 
         with (
-            patch.object(channel_app.asyncio, "sleep", record_delay),
+            patch.object(asyncio, "sleep", record_delay),
             self.assertLogs("netizen_cli.channel_app", level="WARNING"),
         ):
             await self.app.handle_card_action(
@@ -4297,7 +4294,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         confirmation = self.channel.updates[-1][1]
-        self.assertIn("spawned descendants", str(confirmation))
+        self.assertIn("派生会话", str(confirmation))
         self.assertIn("Delete target", str(confirmation))
         final = next(
             button
@@ -4486,7 +4483,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.store.get(target.id).native_thread_id,
             "native-raced",
         )
-        self.assertIn("原生历史已变化", str(self.channel.updates[-1][1]))
+        self.assertIn("Codex 历史已变化", str(self.channel.updates[-1][1]))
 
     async def test_sessions_delete_surfaces_native_lifecycle_failure(
         self,
@@ -4586,7 +4583,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.active_binding(scope.key).id, current.id)
         reply = self.channel.replies[-1][1]
         self.assertIsInstance(reply, str)
-        self.assertIn("✅ 已永久删除原生 Codex 会话", reply)
+        self.assertIn("✅ 已永久删除 Codex 会话", reply)
 
     async def test_sessions_delete_refresh_keeps_position_and_offers_home(self) -> None:
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -8732,7 +8729,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         try:
             with (
                 patch.object(self.runtime, "thread_summary", new=delayed_summary),
-                patch("netizen_cli.channel_app._SIDE_CARD_METADATA_TIMEOUT_SECONDS", 0.01),
+                patch("netizen_cli.channel.constants.SIDE_CARD_METADATA_TIMEOUT_SECONDS", 0.01),
             ):
                 await asyncio.wait_for(self.app.handle_message(source), timeout=1)
                 record = self.store.side_topic_for_source(app_id="cli_test", source_message_id=source.id)
@@ -8773,6 +8770,59 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         root = self.channel.updates[-1][1]
         self.assertEqual(root["header"]["subtitle"]["content"], "已结束")
         self.assertNotIn("side.close", str(root))
+
+    async def test_initial_side_accepted_prompt_survives_presenter_failure(self) -> None:
+        source = FakeMessage(
+            "/side accepted work", message_id="om-side-presenter-failure",
+            chat_id="oc-direct", chat_type="p2p", mentioned_bot=False,
+        )
+        self.fixture.binding_for(source)
+        self.fixture.queue_promoted_topic(
+            chat_id="oc-direct", root_id="om-root", seed_id="om-seed", topic_id="omt-side",
+        )
+        release = Mock()
+        submit = self.runtime.submit_side
+
+        async def accepted(**kwargs):
+            return replace(await submit(**kwargs), release_receipt_attempt=release)
+
+        with (
+            patch.object(self.runtime, "submit_side", side_effect=accepted),
+            patch.object(self.app._progress_cards, "start_side", side_effect=AttributeError("private detail")),
+            self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs,
+        ):
+            await self.app.handle_message(source)
+
+        self.assertEqual(len(self.runtime.submit_side_calls), 1)
+        release.assert_called_once_with()
+        self.assertFalse(any("首轮问题未执行" in str(reply) for reply in self.channel.replies))
+        record = self.store.side_topic_for_source(app_id="cli_test", source_message_id=source.id)
+        self.assertEqual(record.state, SideTopicState.OPEN)
+        self.assertEqual(logs.records[-1].error_type, "AttributeError")
+        self.assertNotIn("private detail", "\n".join(logs.output))
+
+    async def test_ordinary_accepted_prompt_survives_presenter_failure(self) -> None:
+        source = FakeMessage(
+            "accepted work", message_id="om-ordinary-presenter-failure",
+            chat_id="oc-direct", chat_type="p2p", mentioned_bot=False,
+        )
+        binding = self.fixture.binding_for(source)
+        release = Mock()
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED, binding.id, binding.native_thread_id, "turn-presenter-failure", release,
+        )
+        with (
+            patch.object(self.app._progress_cards, "start", side_effect=AttributeError("private detail")),
+            self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs,
+        ):
+            await self.app.handle_message(source)
+
+        self.assertEqual(len(self.runtime.submit_calls), 1)
+        release.assert_called_once_with()
+        self.assertEqual(self.channel.replies, [])
+        self.assertEqual(logs.records[-1].binding_id, binding.id)
+        self.assertEqual(logs.records[-1].error_type, "AttributeError")
+        self.assertNotIn("private detail", "\n".join(logs.output))
 
     async def test_initial_and_subsequent_side_share_task_mentions_without_changing_seed(self) -> None:
         mentions = [
@@ -9476,7 +9526,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(calls), 2)
                 self.assertEqual(
                     calls[1][1],
-                    channel_app._SIDE_EMPTY_TOPIC_PROMPT,
+                    channel_constants.SIDE_EMPTY_TOPIC_PROMPT,
                 )
                 opts = calls[1][2]
                 self.assertEqual(opts.receive_id_type, "chat_id")
@@ -9508,7 +9558,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 root_uuid,
                 channel_app._side_send_uuid(
-                    channel_app._SIDE_ROOT_UUID_PREFIX,
+                    channel_constants.SIDE_ROOT_UUID_PREFIX,
                     record.id,
                 ),
             )
@@ -9518,7 +9568,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     seed_uuid,
                     channel_app._side_send_uuid(
-                        channel_app._SIDE_SEED_UUID_PREFIX,
+                        channel_constants.SIDE_SEED_UUID_PREFIX,
                         record.id,
                     ),
                 )
@@ -9749,7 +9799,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             opts.uuid,
             channel_app._side_send_uuid(
-                channel_app._SIDE_SEED_UUID_PREFIX,
+                channel_constants.SIDE_SEED_UUID_PREFIX,
                 record.id,
             ),
         )
@@ -9764,7 +9814,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_initial_question_echo_is_bounded_and_marks_excerpt(self) -> None:
-        text = "x" * (channel_app._SIDE_INITIAL_QUESTION_MAX_CHARS + 100)
+        text = "x" * (channel_constants.SIDE_INITIAL_QUESTION_MAX_CHARS + 100)
 
         echo = channel_app._side_initial_question_echo(text)
 
@@ -10302,7 +10352,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         assert record is not None
 
         with patch(
-            "netizen_cli.channel_app.git_branch_status",
+            "netizen_cli.channel.base.git_branch_status",
             return_value="HEAD (no branch)",
         ) as read_branch:
             await self.app.handle_message(

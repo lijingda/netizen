@@ -102,7 +102,7 @@ class ExperienceTest(unittest.TestCase):
             resolved_references.skill_names,
             ("code-review", "test-triage"),
         )
-        with self.assertRaisesRegex(InvalidInteraction, "discovery 不可用"):
+        with self.assertRaisesRegex(InvalidInteraction, "Codex Skills 发现功能不可用"):
             self.parse("$code-review inspect")
 
     def test_supported_commands_are_typed_controls(self) -> None:
@@ -298,6 +298,15 @@ class ExperienceTest(unittest.TestCase):
         self.assertIn("需要 @机器人", group_help)
         self.assertIn("无需 @机器人", direct_help)
 
+    def test_enable_is_an_argument_free_channel_control(self) -> None:
+        intent = self.parse("/enable")
+        self.assertIsInstance(intent, ControlIntent)
+        self.assertEqual(intent.name, ControlName.ENABLE)
+        self.assertEqual(intent.arguments, ())
+        self.assertIn("`/enable`", command_help())
+        with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
+            self.parse("/enable other")
+
     def test_skills_command_is_not_registered(self) -> None:
         with self.assertRaisesRegex(InvalidInteraction, "未知命令"):
             self.parse("/skills", NativeCapability.SKILLS)
@@ -323,7 +332,7 @@ class ExperienceTest(unittest.TestCase):
         self.assertIn("/rename [名称]", help_text)
         self.assertIn("/sessions [archived]", help_text)
         self.assertIn("/unarchive <会话短 ID>", help_text)
-        self.assertIn("永久删除当前会话及其原生历史", help_text)
+        self.assertIn("永久删除当前会话及其 Codex 历史", help_text)
         self.assertIn("不保证前台工具进程退出", help_text)
         self.assertNotIn("/model", help_text)
         self.assertNotIn("/goal", help_text)

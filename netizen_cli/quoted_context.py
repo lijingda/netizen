@@ -20,9 +20,9 @@ from .image_inputs import ImagePromptReferences
 from .message_content import usable_text as _usable_text, validate_interactive_version
 from .message_projection import (
     HistoricalMessageContractError as QuotedMessageContractError,
-    HistoricalMessageError as QuotedMessageError,
+    HistoricalMessageError as QuotedMessageError,  # noqa: F401 - public quote error name
     HistoricalMessageUnavailable as QuotedMessageUnavailable,
-    UnsupportedHistoricalMessage as UnsupportedQuotedMessage,
+    UnsupportedHistoricalMessage as UnsupportedQuotedMessage,  # noqa: F401 - public quote error name
     historical_message_deleted,
     historical_projection_json,
     normalized_historical_message_type,

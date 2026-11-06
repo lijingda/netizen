@@ -72,6 +72,7 @@ function expireAdminSession() {
   if (notice) notice.hidden = false;
   window.NetizenIdentity?.expire();
   window.NetizenSessionAccess?.expire();
+  window.NetizenGroupAccess?.expire();
   window.NetizenProgressCard?.expire();
   window.NetizenQuestionNotifications?.expire();
   window.NetizenWorktrees?.expire();
@@ -578,7 +579,7 @@ function confirmMaterializedDelete(session) {
   const name = session.nativeTitle || "未命名 Session";
   return window.confirm(
     `确认永久删除这个会话？\n\n会话：${name}\nScope：${session.scopeKey}\nNetizen 会话编号：${session.shortId}`
-    + "\n\n原生 Thread、spawned descendants、Codex App/CLI 历史和本地 Binding 都会永久消失，无法恢复。",
+    + "\n\nCodex 会话、派生会话、Codex App/CLI 历史和 Netizen 中的会话记录都会永久消失，无法恢复。",
   );
 }
 
@@ -739,8 +740,8 @@ async function deleteProject(project) {
         + `\n已删除 ${result.deletedSessionCount} 个 Session；剩余 ${result.remainingSessionCount} 个 Session、${result.remainingSideCount} 个 Side。`
         + (result.message ? `\n${result.message}` : "");
       details = (result.remainingSessions || []).map((session) =>
-        `Session ${session.shortId} · Scope ${session.scopeKey} · Binding ${session.bindingId}`);
-      if (result.failedBindingId) details.push(`未确认删除的 Binding：${result.failedBindingId}`);
+        `Session ${session.shortId} · Scope ${session.scopeKey} · Netizen 会话编号 ${session.bindingId}`);
+      if (result.failedBindingId) details.push(`未确认删除的会话：${result.failedBindingId}`);
       if (result.failedSideId) details.push(`未确认收尾的 Side：${result.failedSideId}`);
     }
     if (result.deletedPlanCount) {
@@ -1901,7 +1902,7 @@ function catalogStateLabel(value) {
     archived: "已归档",
     lazy: "Lazy",
     unknown: "状态未确认",
-    missing: "原生会话缺失",
+    missing: "Codex 会话缺失",
   }[value] || value;
 }
 
@@ -1965,7 +1966,7 @@ function sessionIdentityCell(row, session) {
   summary.textContent = "会话标识";
   details.append(summary);
   for (const [label, value] of [["飞书聊天 ID（位置）", session.chatId], ["飞书话题 ID（位置）", session.topicId],
-    ["Netizen 会话编号（Binding ID，管理与切换）", session.bindingId],
+    ["Netizen 会话编号（管理与切换）", session.bindingId],
     ["Codex 会话 ID（Thread ID，跨会话工具）", session.nativeThreadId]]) {
     if (!value) continue;
     const field = document.createElement("label");
@@ -2075,7 +2076,7 @@ function renderSessionSort(kind) {
     const labelNode = button.querySelector(".sort-label");
     if (labelNode) {
       labelNode.textContent = label;
-      button.title = lazy ? "Netizen 登记时间；此时尚无 Codex 创建时间" : "Codex 原生会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示";
+      button.title = lazy ? "Netizen 登记时间；此时尚无 Codex 创建时间" : "Codex 会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示";
     }
     button.parentElement.setAttribute("aria-sort", selected ? descending ? "descending" : "ascending" : "none");
     button.setAttribute("aria-label", `按${label}${descending ? "由远及近" : "由近及远"}排序`
@@ -2544,7 +2545,7 @@ function wireSessionActions(actions, session) {
     const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
     actions.append(button);
   }
-  if (a.stop) actions.append(actionButton("停止", () => window.confirm("停止这个 exact 会话的当前运行？") && mutate("/api/v1/sessions/stop", a.stop), true));
+  if (a.stop) actions.append(actionButton("停止", () => window.confirm("停止这个会话的当前运行？") && mutate("/api/v1/sessions/stop", a.stop), true));
   if (a.activate) actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
   if (a.rename) {
     const button = actionButton("重命名", () => openSessionRenameEditor(session, button));
@@ -2553,7 +2554,7 @@ function wireSessionActions(actions, session) {
   if (a.archive) actions.append(actionButton("归档", () => window.confirm("确认归档？") && mutate("/api/v1/sessions/archive", a.archive), true));
   if (a.unarchive) actions.append(actionButton("恢复", () => mutate("/api/v1/sessions/unarchive", a.unarchive, { actionKind: a.unarchive.actionKind })));
   if (a.unarchiveCurrent) actions.append(actionButton("恢复并设为当前", () => mutate("/api/v1/sessions/unarchive", a.unarchiveCurrent, { actionKind: a.unarchiveCurrent.actionKind })));
-  if (a.deleteLazy) secondary.append(actionButton("删除 Lazy", () => window.confirm("永久删除这个 Lazy Binding？") && mutate("/api/v1/sessions/delete-lazy", a.deleteLazy), true));
+  if (a.deleteLazy) secondary.append(actionButton("删除 Lazy", () => window.confirm("永久删除这个尚未开始的会话？") && mutate("/api/v1/sessions/delete-lazy", a.deleteLazy), true));
   if (a.deleteMaterialized) secondary.append(actionButton("删除", () => confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized", a.deleteMaterialized), true));
   if (a.release) secondary.append(actionButton("释放订阅", () => window.confirm("释放本进程订阅？历史不会删除。") && mutate("/api/v1/sessions/release", a.release)));
   actions.append(more);
@@ -2578,7 +2579,7 @@ function renderSides(data) {
     const summary = document.createElement("summary");
     summary.textContent = "标识详情";
     details.append(summary);
-    for (const [label, value] of [["Side", side.sideId], ["来源 Binding", side.parentBindingId],
+    for (const [label, value] of [["Side", side.sideId], ["来源会话", side.parentBindingId],
       ["Chat", side.chatId], ["Topic", side.topicId], ["Root Message", side.rootMessageId]]) {
       if (!value) continue;
       const line = document.createElement("div");
@@ -3553,7 +3554,7 @@ function confirmDiscardChanges(changed) {
 
 function hasUnsavedEditors() {
   return projectEditorHasChanges() || sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
-    || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty())
+    || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty()) || Boolean(window.NetizenGroupAccess?.dirty())
     || Boolean(window.NetizenProgressCard?.dirty() || window.NetizenQuestionNotifications?.dirty())
     || Boolean(window.NetizenWorktrees?.dirty());
 }
@@ -3562,7 +3563,7 @@ function hasUnsavedEditors() {
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
 function confirmDiscardEditors() {
   if (projectEditor?.saving || sessionSettingsEditor?.saving || sessionRenameEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
-      || window.NetizenSessionAccess?.busy() || window.NetizenProgressCard?.busy() || window.NetizenQuestionNotifications?.busy()
+      || window.NetizenSessionAccess?.busy() || window.NetizenGroupAccess?.busy() || window.NetizenProgressCard?.busy() || window.NetizenQuestionNotifications?.busy()
       || window.NetizenWorktrees?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
   closeProjectEditor({ confirmed: true });
@@ -3573,6 +3574,7 @@ function confirmDiscardEditors() {
   if (scheduleEditor) closeScheduleEditor({ confirmed: true });
   cancelScheduleSelection({ confirmed: true });
   window.NetizenSessionAccess?.discard();
+  window.NetizenGroupAccess?.discard();
   window.NetizenProgressCard?.discard();
   window.NetizenQuestionNotifications?.discard();
   window.NetizenWorktrees?.discard();
@@ -3623,6 +3625,7 @@ function scheduleRunStatus(status) {
     released: "调度已收尾", recovery_no_start: "服务恢复，本次未启动",
     publishing_unknown: "话题投递待确认", deleted: "执行会话已删除",
     initial_start_rejected: "启动被拒绝", publishing_failed: "话题发布失败",
+    group_not_enabled: "目标群尚未启用，请联系实例管理员在 Admin 中启用",
     scope_conflict: "话题已有会话，未启动", dispatch_rejected: "未启动",
     input_started: "已启动新一轮", input_steered: "已追加当前任务", input_unknown: "输入接收情况待确认",
     input_rejected: "输入被拒绝", anchor_failed: "触发消息发送失败", anchor_unknown: "触发消息发送结果待确认",
@@ -3678,7 +3681,7 @@ function scheduleInheritedWorkspace(plan) {
     : "工作目录尚未登记"];
   if (workspace.worktree_id) labels.push(`worktree：${workspace.worktree_id}`);
   labels.push(workspace.native_cwd_unresolved
-    ? "实际目录由原会话确定，本次未查询原生目录。" : "执行时沿用原会话的工作目录。");
+    ? "实际目录由原会话确定，本次未查询 Codex 中的工作目录。" : "执行时沿用原会话的工作目录。");
   return labels.join(" · ");
 }
 
@@ -5111,7 +5114,7 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "schedules" && await loadSchedules(cursor) === false) return false;
     if (tab === "defaults") await loadDefaults();
     if (tab === "system") {
-      const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load(),
+      const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load(), window.NetizenGroupAccess?.load(),
         window.NetizenProgressCard?.load(), window.NetizenQuestionNotifications?.load()]);
       if (results.includes(false)) return false;
     }
@@ -5151,6 +5154,7 @@ function selectSystemTab(name) {
   if (state.authExpired || state.systemTab === name) return;
   window.NetizenSelect?.close();
   if (state.systemTab === "admins") window.NetizenIdentity?.suspendSelector();
+  else if (state.systemTab === "groups") window.NetizenGroupAccess?.closePickers();
   else if (state.systemTab === "access") window.NetizenSessionAccess?.closePickers();
   state.systemTab = name;
   for (const button of document.querySelectorAll("[data-system-tab]")) {

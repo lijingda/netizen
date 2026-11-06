@@ -33,14 +33,14 @@ class LatestAnswerTest(unittest.IsolatedAsyncioTestCase):
                 turn = SimpleNamespace(id="latest", status=status,
                                        items=[image, *ignored, message("![image](/original-thread/image.png)", "final_answer")])
                 history = SimpleNamespace(list_turns=AsyncMock(return_value=SimpleNamespace(data=[turn])))
-                with patch("netizen_cli.codex_runtime.AppServerThreadHistory", return_value=history):
+                with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
                     result = await runtime.latest_thread_answer("fork")
                 expected = (NativeAnswerImage("/original-thread/image.png", "native-png-base64"),) if status == "completed" else ()
                 self.assertEqual(result.images, expected)
                 history.list_turns.assert_awaited_once_with("fork", limit=1, items_view="full")
         turn.status = "completed"
         turn.items = [image]
-        with patch("netizen_cli.codex_runtime.AppServerThreadHistory", return_value=history):
+        with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
             self.assertEqual((await runtime.latest_thread_answer("fork")).images, ())
 
     async def test_reads_latest_full_turn_once_and_never_uses_a_tail(self):
@@ -51,7 +51,7 @@ class LatestAnswerTest(unittest.IsolatedAsyncioTestCase):
                                items=[message("final", "final_answer")]
                                + [message("tool", kind="commandExecution") for _ in range(30)])
         history = SimpleNamespace(list_turns=AsyncMock(return_value=SimpleNamespace(data=[turn])))
-        with patch("netizen_cli.codex_runtime.AppServerThreadHistory", return_value=history):
+        with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
             result = await runtime.latest_thread_answer("archived-thread")
         self.assertEqual(result, NativeLatestAnswer("archived-thread", "latest", "completed", "final", 100, 120))
         history.list_turns.assert_awaited_once_with("archived-thread", limit=1, items_view="full")
@@ -73,7 +73,7 @@ class LatestAnswerTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status, expected=expected):
                 turn = SimpleNamespace(id="latest", status=status, items=items)
                 history = SimpleNamespace(list_turns=AsyncMock(return_value=SimpleNamespace(data=[turn])))
-                with patch("netizen_cli.codex_runtime.AppServerThreadHistory", return_value=history):
+                with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
                     result = await runtime.latest_thread_answer("thread")
                 self.assertEqual(result.answer, expected)
                 self.assertEqual(result.status, status)
@@ -86,7 +86,7 @@ class LatestAnswerTest(unittest.IsolatedAsyncioTestCase):
         runtime._codex = object()
         message = "thread thread is not materialized yet; thread/turns/list is unavailable before first user message"
         history = SimpleNamespace(list_turns=AsyncMock(side_effect=InvalidRequestError(-32600, message)))
-        with patch("netizen_cli.codex_runtime.AppServerThreadHistory", return_value=history):
+        with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
             self.assertEqual(await runtime.latest_thread_answer("thread"), NativeLatestAnswer("thread", None, None, None))
             for rejection in ("thread not found: thread", message.replace("thread thread", "thread other"), "history unavailable"):
                 history.list_turns.side_effect = InvalidRequestError(-32600, rejection)
@@ -97,7 +97,7 @@ class LatestAnswerTest(unittest.IsolatedAsyncioTestCase):
         runtime = object.__new__(CodexRuntime)
         runtime._codex = object()
         history = SimpleNamespace(list_turns=AsyncMock(return_value=SimpleNamespace(data=[])))
-        with patch("netizen_cli.codex_runtime.AppServerThreadHistory", return_value=history):
+        with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
             result = await runtime.latest_thread_answer("thread")
             self.assertEqual(result, NativeLatestAnswer("thread", None, None, None))
             history.list_turns.side_effect = TimeoutError("unavailable")

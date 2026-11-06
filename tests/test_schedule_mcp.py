@@ -405,10 +405,12 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
 
         self.runner._callback = fail
         self.runner.open_admission()
-        with self.assertLogs("netizen_cli.schedules.mcp", level="ERROR") as captured:
+        with self.assertLogs("netizen_cli.schedules.mcp", level="WARNING") as captured:
             result = await self.call({"mode": "list"})
         self.assertEqual(result["structuredContent"]["error"]["code"], "internal_error")
         self.assertNotIn("SECRET", json.dumps(result) + str(captured.output))
+        self.assertEqual(captured.records[-1].error_type, "ValueError")
+        self.assertEqual(captured.records[-1].operation, "list")
 
     async def test_process_config_is_one_owned_entry_without_credential_value(self):
         override, = self.runner.config_overrides

@@ -74,6 +74,10 @@ class EmbeddedMcpRunner:
     and also closes the listener with bounded ASGI lifespan shutdown.
     """
 
+    # Each concrete runner defines both handlers; the base only wires them.
+    _list_tools: Callable[..., Awaitable[Any]]
+    _call_tool: Callable[..., Awaitable[Any]]
+
     def __init__(self, *, name: str, namespace_prefix: str, env_prefix: str,
                  instructions: str, tool_names: tuple[str, ...]) -> None:
         nonce = secrets.token_hex(12)

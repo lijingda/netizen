@@ -276,7 +276,7 @@ def _native_thread_reference(thread_id: str) -> str:
 def _decode_native_thread_reference(value: str) -> str:
     match = _NATIVE_THREAD_REFERENCE.fullmatch(value)
     if match is None:
-        raise CardActionError("原生会话引用无效，请重新发送 /delete。")
+        raise CardActionError("Codex 会话引用无效，请重新发送 /delete。")
     return match.group(1)
 
 
@@ -304,7 +304,7 @@ def _turn_reference(turn_id: str) -> str:
 def _decode_turn_reference(value: str) -> str:
     match = _TURN_REFERENCE.fullmatch(value)
     if match is None:
-        raise CardActionError("原生 Turn 引用无效，请重新执行任务。")
+        raise CardActionError("Codex 任务引用无效，请重新执行任务。")
     return match.group(1)
 
 

@@ -26,7 +26,6 @@ from ..bindings import (
     BindingFeedbackRevisionConflict,
     BindingInventoryRecord,
     BindingNotFound,
-    BindingPage,
     BindingQuery,
     BindingSettingsRevisionConflict,
     BindingStore,
@@ -38,11 +37,9 @@ from ..bindings import (
     ProjectDisabled as StoredProjectDisabled,
     ProjectNotFound as StoredProjectNotFound,
     ProjectRevisionConflict as StoredProjectRevisionConflict,
-    ScopeRecord,
     SideTopicCursor,
     SideTopicConflict,
     SideTopicInventoryRecord,
-    SideTopicPage,
     SideTopicQuery,
     SideTopicRecord,
     SideTopicState,
@@ -59,7 +56,6 @@ from ..runtime.contracts import (
     NativeThreadCatalogPage,
     NativeThreadCatalogState,
     NativeThreadMetadata,
-    ThreadCatalogError,
     ReleaseDisposition,
     SideLifecycleOutcome,
     SideCloseFailed,
@@ -69,7 +65,6 @@ from ..runtime.contracts import (
     StopAcknowledger,
     StopDisposition,
     ThreadSubscriptionState,
-    ThreadArchived,
     ThreadResumeNotFound,
     ThreadDeleteTargetChanged,
     ThreadDeleteUnavailable,
@@ -103,6 +98,7 @@ from ..worktrees.service import WorktreeService
 from ..worktrees.settings import WorktreeSettingsService
 from ..progress_card_config import ProgressCardConfigService
 from ..progress_card_settings import ProgressCardSettings
+from ..group_access import GroupAccessRule, GroupAccessService
 from ..question_notifications import QuestionNotificationConfigService, QuestionNotificationSettings
 from ..sessions.policy import SessionAccessPolicy, SessionPolicyService
 
@@ -909,6 +905,31 @@ class InstanceManagementService:
             deadline=asyncio.get_running_loop().time() + 10,
         )
 
+    async def update_group_access(
+        self, service: GroupAccessService, rule: GroupAccessRule, *, expected_revision: str,
+    ) -> None:
+        await self._blocking_io.submit(
+            service.update, rule, expected_revision=expected_revision,
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
+
+    async def enable_group_access(
+        self, service: GroupAccessService, chat_id: str, *, expected_revision: str,
+    ) -> tuple[GroupAccessRule, bool]:
+        return await self._blocking_io.submit(
+            service.enable_chat, chat_id, expected_revision=expected_revision,
+        )
+
+    async def group_access_chats(self, chat_ids: Sequence[str]) -> dict[str, Any]:
+        labels = self.cached_chat_labels(chat_ids)
+        pending = [chat_id for chat_id in chat_ids if not labels[chat_id].resolved]
+        labels.update(await self.resolve_chat_labels(
+            pending[:20], deadline=asyncio.get_running_loop().time() + 3,
+        ))
+        return {
+            "chats": [{"chatId": chat_id, "name": labels[chat_id].display_name} for chat_id in chat_ids],
+        }
+
     def enable_schedules(self, *, app_id: str, chat_info: Any = None) -> ScheduleService:
         if self.schedules is None:
             self.schedules = ScheduleService(
@@ -1095,7 +1116,7 @@ class InstanceManagementService:
         if not self.native_delete_available and any(
             item.binding.native_thread_id is not None for item in snapshot.bindings
         ):
-            raise ThreadDeleteUnavailable("原生会话删除能力不可用，Project 未删除。")
+            raise ThreadDeleteUnavailable("Codex 会话删除能力不可用，Project 未删除。")
 
     def _project_side_ids(self, alias: str) -> tuple[str, ...]:
         return tuple(side.side_id for side in self._runtime.project_side_snapshots(alias))
@@ -1161,7 +1182,7 @@ class InstanceManagementService:
                 *bindings_by_id,
                 *(side.parent_binding_id for side in snapshot.sides),
             ]))
-            for parent_id in parent_ids:
+            for index, parent_id in enumerate(parent_ids):
                 binding = bindings_by_id.get(parent_id)
                 failed_binding_id = binding.id if binding is not None else None
                 failed_side_id = None
@@ -1216,6 +1237,10 @@ class InstanceManagementService:
                         pass
                     else:
                         raise
+                # Exact deletion has released Store/Binding/Scope locks. Keep
+                # the Project intent and frozen inventory across this yield.
+                if index + 1 < len(parent_ids):
+                    await asyncio.sleep(0)
             failed_binding_id = None
             if self._runtime.project_side_snapshots(alias):
                 raise SideCloseFailed("Project 仍有未完成关闭的 Side。")
@@ -2117,7 +2142,7 @@ class InstanceManagementService:
             binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
                 raise ThreadDeleteTargetChanged(
-                    "会话的原生 Thread 已变化，本删除确认未执行。"
+                    "会话对应的 Codex 会话已变化，本删除确认未执行。"
                 )
         deleted = await self._runtime.delete_exact(
             binding.id,
@@ -2139,7 +2164,7 @@ class InstanceManagementService:
             binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
                 raise ThreadDeleteTargetChanged(
-                    "归档会话的原生 Thread 已变化，本删除确认未执行。"
+                    "归档会话对应的 Codex 会话已变化，本删除确认未执行。"
                 )
         deleted = await self._runtime.delete_archived_exact(
             binding.id,
@@ -2308,8 +2333,11 @@ class InstanceManagementService:
                 metadata = await self._read_thread_summary(thread_id, deadline=deadline)
                 if metadata is not None:
                     views[thread_id] = NativeThreadView(None, metadata)
-            except Exception:
-                pass  # The exact row remains visible with unknown state and its ID.
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "archived thread metadata unavailable",
+                    extra={"thread_id": thread_id, "error_type": type(diagnostic_error).__name__},
+                )
 
         unresolved = tuple(
             thread_id for thread_id, view in views.items()

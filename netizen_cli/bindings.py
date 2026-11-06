@@ -45,6 +45,9 @@ SCHEMA_VERSION = 20
 # Includes the running query and all submitted queries waiting for the reader.
 _ADMIN_QUERY_CAPACITY = 32
 PROJECT_DELETE_LIMIT = 1000
+# Logical expiry is checked by seen(); sweep at most once a minute so each
+# message does not scan the TTL table (the SDK marks two keys per message).
+_DEDUP_EXPIRY_INTERVAL_SECONDS = 60.0
 
 
 _CONTEXT_INTEGRITY_TRIGGERS = (
@@ -588,6 +591,7 @@ class BindingStore:
         self._connection_uri = not create
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._wall_clock = wall_clock
+        self._next_dedup_expiry = 0.0
         self._lock = threading.RLock()
         self._project_delete_intents: dict[str, ProjectDeleteSnapshot] = {}
         self._query_state_lock = threading.Lock()
@@ -987,7 +991,7 @@ class BindingStore:
                 worktree_id=source.worktree_id,
             )
         except sqlite3.IntegrityError as error:
-            raise BindingConflict("原生分支已绑定到其他会话，本次未覆盖。") from error
+            raise BindingConflict("Codex 分支已绑定到其他会话，本次未覆盖。") from error
 
     def _create_binding(
         self,
@@ -1388,7 +1392,7 @@ class BindingStore:
                 ),
             )
             if cursor.rowcount != 1:
-                raise BindingConflict("Binding configuration changed concurrently")
+                raise BindingConflict("会话配置已被其他操作修改")
         return self.get(binding_id)
 
     def commit_context_anchor(
@@ -1575,7 +1579,7 @@ class BindingStore:
         with self._transaction():
             binding = self.get(binding_id)
             if binding.native_thread_id != expected_native_thread_id:
-                raise BindingConflict("原生会话身份已变化，本次未同步 worktree 关联。")
+                raise BindingConflict("Codex 会话身份已变化，本次未同步 worktree 关联。")
             self.worktrees.require_binding_not_deleting(binding_id)
             self.worktrees.require_cwd_not_deleting(working_cwd)
             project = self.get_project(binding.project_alias)
@@ -1622,6 +1626,14 @@ class BindingStore:
         if row is None:
             raise BindingNotFound(binding_id)
         return _binding(row)
+
+    def has_direct_scope(self, app_id: str, chat_id: str) -> bool:
+        """Only an exact App/chat DIRECT scope proves a direct conversation."""
+        with self._lock:
+            return self._connection.execute(
+                "SELECT 1 FROM scopes WHERE app_id = ? AND chat_id = ? AND kind = ? LIMIT 1",
+                (app_id, chat_id, ScopeKind.DIRECT.value),
+            ).fetchone() is not None
 
     def list_bindings(self, scope_key: str) -> list[ThreadBinding]:
         with self._lock:
@@ -2671,10 +2683,13 @@ class BindingStore:
             raise ValueError("ttl_seconds must be positive")
         now = self._wall_clock()
         with self._lock:
-            self._connection.execute(
-                "DELETE FROM dedup_keys WHERE expires_at <= ?",
-                (now,),
-            )
+            monotonic_now = time.monotonic()
+            if monotonic_now >= self._next_dedup_expiry:
+                self._connection.execute(
+                    "DELETE FROM dedup_keys WHERE expires_at <= ?",
+                    (now,),
+                )
+                self._next_dedup_expiry = monotonic_now + _DEDUP_EXPIRY_INTERVAL_SECONDS
             self._connection.execute(
                 """
                 INSERT INTO dedup_keys(dedup_key, expires_at) VALUES (?, ?)
@@ -2691,19 +2706,21 @@ class BindingStore:
                 return
             self._query_closing = True
             futures = tuple(self._query_futures)
-        for future in futures:
-            try:
-                future.result()
-            except BaseException:
-                pass
-        if self._query_connection is not None:
-            self._query_executor.submit(self._query_connection.close).result()
-            self._query_connection = None
-        self._query_executor.shutdown(wait=True, cancel_futures=False)
-        with self._lock:
-            self._connection.close()
-        with self._query_state_lock:
-            self._closed = True
+        try:
+            for future in futures:
+                try:
+                    future.result()
+                except Exception:
+                    pass
+        finally:
+            if self._query_connection is not None:
+                self._query_executor.submit(self._query_connection.close).result()
+                self._query_connection = None
+            self._query_executor.shutdown(wait=True, cancel_futures=False)
+            with self._lock:
+                self._connection.close()
+            with self._query_state_lock:
+                self._closed = True
 
     def _transaction(self):
         return _Transaction(self._connection, self._lock)
@@ -3048,8 +3065,8 @@ def _message_context_anchor(
         return None
     try:
         return MessageContextAnchor(
-            message_id=message_id,  # type: ignore[arg-type]
-            create_time_ms=create_time_ms,  # type: ignore[arg-type]
+            message_id=message_id,
+            create_time_ms=create_time_ms,
         )
     except (TypeError, ValueError) as error:
         raise RuntimeError("Binding contains an invalid context anchor") from error

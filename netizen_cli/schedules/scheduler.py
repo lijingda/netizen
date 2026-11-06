@@ -144,7 +144,7 @@ class Scheduler:
     def _dispatch_claim(self, claim: Claim) -> None:
         task = asyncio.create_task(self._dispatch_once(claim), name="schedule-dispatch:" + claim.run.id)
         self._dispatches[claim.run.id] = (claim.run.project_alias, task)
-        task.add_done_callback(lambda done, run_id=claim.run.id: self._dispatch_done(run_id, done))
+        task.add_done_callback(lambda done, run_id=claim.run.id: self._dispatch_done(run_id, done))  # type: ignore[misc]  # default binds the Run ID
 
     async def close(self) -> None:
         """Stop the timer; shutdown dispatch draining remains a separate step."""
@@ -189,7 +189,7 @@ class Scheduler:
         try:
             deadline = loop.time() + RECOVERY_TIMEOUT_SECONDS
             plans = self._store.due_plans(app_id=self._app_id, now=self._wall_clock(), limit=DUE_BATCH_SIZE)
-            for plan in plans:
+            for index, plan in enumerate(plans):
                 if not self._admission:
                     break
                 pending = self._store.pending_for_plan(plan.id)
@@ -207,6 +207,10 @@ class Scheduler:
                 if claim is not None:
                     self._dispatch_claim(claim)
                     claimed += 1
+                # The claim is attached and its Store transaction has ended.
+                # Keep _ticking reserved while other tasks get a turn.
+                if index + 1 < len(plans):
+                    await asyncio.sleep(0)
             # Drain full batches without another minute's delay, including
             # skipped occurrences. Do not spin on frozen Project deletions.
             if len(plans) == DUE_BATCH_SIZE and processed:
@@ -259,6 +263,16 @@ class Scheduler:
                 self._store.set_run(current.id, barrier="unknown", error_code="read_cancelled")
             raise
         except Exception as error:
+            logger.warning(
+                "scheduled Run observation unavailable",
+                extra={
+                    "run_id": current.id,
+                    "binding_id": current.binding_id,
+                    "turn_id": current.initial_turn_id,
+                    "chat_id": current.chat_id,
+                    "error_type": type(error).__name__,
+                },
+            )
             code = getattr(error, "code", None)
             if not isinstance(code, str):
                 code = "read_timeout" if isinstance(error, TimeoutError) else "read_unavailable"

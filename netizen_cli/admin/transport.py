@@ -139,8 +139,8 @@ class AdminHttpTransport:
         self._port = port
         self._handler = handler
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._server: asyncio.AbstractServer | None = None
-        self._closed_servers: list[asyncio.AbstractServer] = []
+        self._server: asyncio.Server | None = None
+        self._closed_servers: list[asyncio.Server] = []
         self._state = AdminHttpState.NEW
         self._admission_open = False
         self._closing = False
@@ -429,7 +429,7 @@ class AdminHttpTransport:
                     )
                     return
                 force_close = _must_close_request(request)
-                handler_task = self._owned_loop().create_task(self._handler(request))
+                handler_task: asyncio.Task[None] = self._owned_loop().create_task(self._handler(request))
                 connection.handler_task = handler_task
                 self._track_task(handler_task, self._handler_tasks)
                 watcher = self._owned_loop().create_task(reader.read(1))
@@ -454,8 +454,10 @@ class AdminHttpTransport:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
                 connection.handler_task = None
+                stage = "handler_result"
                 try:
                     response = handler_task.result()
+                    stage = "response_write"
                     await self._write_response(
                         parser,
                         writer,
@@ -464,12 +466,16 @@ class AdminHttpTransport:
                     )
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as diagnostic_error:
                     # Never render exception strings or tracebacks into either
                     # the response or logs; handler inputs can reach both.
-                    logger.error(
-                        "admin HTTP handler failed request_id=%s",
-                        request_id,
+                    logger.warning(
+                        "admin HTTP handler or response write failed",
+                        extra={
+                            "stage": stage,
+                            "request_id": request_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
                     )
                     await self._safe_error(
                         parser, writer, 500, b"internal server error", request_id

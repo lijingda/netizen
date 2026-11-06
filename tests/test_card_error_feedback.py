@@ -130,7 +130,7 @@ class CardErrorFeedbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_unexpected_form_decode_error_keeps_verified_location(self):
         event = self.form_event({"config_model": "old-card"})
         with (
-            patch("netizen_cli.channel_app.decode_card_form", side_effect=RuntimeError("decode unavailable")),
+            patch("netizen_cli.channel.base.decode_card_form", side_effect=RuntimeError("decode unavailable")),
             patch.object(self.app, "_safe_update_card", AsyncMock(return_value=False)),
             patch.object(self.app, "_card_control", AsyncMock()) as control,
             self.assertLogs("netizen_cli.channel_app", level="ERROR"),

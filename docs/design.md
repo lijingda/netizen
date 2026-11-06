@@ -77,26 +77,16 @@ Netizen 调用公开高层 API；现有能力缺口只走已批准的窄 Adapter
 
 | 所有者 | 负责的状态 |
 | --- | --- |
-| Codex 原生状态 | 登录、Thread/Turn 历史、Goal、工具、Skills、MCP 与原生配置；Netizen 复用 effective user 的标准 `$CODEX_HOME`。 |
-| Channel SQLite | Scope/Binding/Project 元数据、受管 Worktree 身份/创建回执及工作区选择、显式配置意图与 revision、聊天默认配置与有序群名规则、去重 TTL、上下文边界及不含 native ID 的 Side 路由墓碑；定时任务窄扩展保存当前计划指令与最小交接记录。 |
-| 当前进程内存 | 活动 Turn/Goal/Side、锁与准入、订阅计时、Activity/usage 展示、Admin session 与一次性控制凭据；重启不自动重建这些执行或展示状态。 |
-| 实例 state 目录 | 实例维护锁、初始化证据、ready/lifetime/runtime identity、迁移备份与有界 Admin 重启结果；不进入 Channel SQLite。 |
+| Codex 原生状态 | 登录、Thread/Turn 历史、Goal、工具、Skills、MCP 与原生配置；复用 effective user 的标准 `$CODEX_HOME`。 |
+| Channel SQLite | 仅[数据契约](#channel-数据库与结构校验)列出的元数据、显式意图及定时任务窄例外，不复制原生历史。 |
+| 当前进程内存 | 活动执行、锁与准入、订阅、Activity/usage 展示、Admin session 与一次性凭据；重启不重建执行/展示状态。 |
+| 实例文件 | [部署状态](#部署事务与操作状态)、维护锁、初始化/ready 证据与迁移备份；不进入 Channel SQLite。 |
 
-持久化清单和各项例外以[数据与配置](#数据与配置)、[定时任务](#定时任务)及
-[部署事务](deployment.md#候选验证与切换)为准。普通 Prompt、回复、Turn 历史、已生效
-Codex 配置与卡片 session 不复制到 Channel 数据库。内置 Skill 的清单和安装包加载边界统一见
-[候选验证与切换](deployment.md#候选验证与切换)，其他用户 Skill 保持原生管理。
+- 并发与共享实际 cwd 遵守[锁与输入准入](#锁与输入准入)，不以目录副本或私有 `CODEX_HOME` 隔离 Binding/Side。
+- [展示](#回复与活动展示)尽力完成，不改变原生执行；Files 只来自 exact Turn 证据，不扫描目录补齐。
+- 未知副作用按[操作级失败语义](#失败语义)隔离，观测失败不能当作终态。
 
-不同 Binding、Parent 与 Side 可以并发使用同一个实际 cwd，文件改动彼此可见；
-不能以全局 semaphore、Project lock、目录副本或独立 `CODEX_HOME` 隔离它们。飞书展示
-尽力完成，失败不改变原生执行；文件必须来自 exact Turn 证据，不能靠扫描目录补齐。
-未知副作用按各操作规定的范围 fail closed，不能把观测失败当成任务已结束。停止、
-归档、删除与 Goal 完成各有独立契约，修改前直接读[运行与锁](#运行与锁)和
-[失败语义](#失败语义)及其引用的 ADR。
-
-SDK 使用精确固定的官方版本与公开高层 API。已批准的能力缺口 Adapter 各自保留
-capability 或版本/指纹门禁及移除条件，不扩展成通用 RPC 层；兼容事实与按需 live
-验证入口在[部署文档](deployment.md#代码门禁与按需实时兼容性验证)。
+SDK 门禁见[适配边界](#sdk-适配边界)，内置与用户 Skill 的归属见[服务环境](#服务环境与受管-skill)。
 
 ## 目标与边界
 
@@ -107,8 +97,9 @@ capability 或版本/指纹门禁及移除条件，不扩展成通用 RPC 层；
 目标是让少量受信用户在一台受支持的 Linux 或 macOS 主机上，通过飞书单聊、群聊和话题使用原生 Codex。
 飞书只是新的 Channel；历史、工具、Skills、MCP、配置、sandbox 和认证仍由 Codex
 管理。Project Registry 可通过飞书项目管理卡片或 Admin Web 管理；当前仍不实现审批卡、Codex 原生配置
-值的 idle read/update、文件/音视频作为 prompt 输入、流式 token、HA 或
-durable queue。普通 Turn 的结构化本轮文件可在终态卡片中按需发送；普通图片
+值的 idle read/update、文件正文自动解析或音视频输入、流式 token、HA 或 durable queue。
+普通文件按[输入文件附件](#输入文件附件)保存原件并提供本地路径，由 Agent 按需读取；
+普通 Turn 的结构化本轮文件可在终态卡片中按需发送。普通图片
 和富文本图片按 [ADR 0015](adr/0015-support-native-image-inputs-for-message-and-quote.md)
 作为原生视觉输入支持。
 
@@ -144,6 +135,8 @@ Project 是归属与默认目录；lazy Binding 保存显式 `working_cwd`/`work
 提交入口的 cwd 仅表达新建 Thread 的目录意图；Runtime 在取得或复用 Thread 时确定
 执行目录：新建采用选定目录，恢复读取本次原生 cwd，复用活动 Thread 则同时复用其
 已确认目录。调用方不再为已有 Thread 提前读取或传递执行目录。
+恢复后目录未知、无效或读取超时只拒绝本条未发送输入，不推进 Context Boundary 或自动重试；
+已确认目录同步到 exact-native 关联及 Worktree 删除准入，已恢复但未提交的订阅按 idle 策略释放。
 ordinary/Goal、Skill、Side、持久 fork、模型创建、已有 Binding 定时输入及相对文件/图片
 解析均使用实际目录；新话题定时计划使用独立工作区策略。目录缺失时保留历史和原 cwd、
 提示缺失并按 Codex 实际返回处理后续请求，不统一禁聊、不静默回主目录或重建文件。
@@ -206,26 +199,10 @@ flowchart LR
 都运行在 Channel background loop，且只构造一个 Store、Project Registry、Runtime 与 `AsyncCodex`。App
 Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 
-代码按职责归属组织，目录拆分不新增运行实例或状态所有者：
-
-| 位置 | 职责 |
-| --- | --- |
-| `netizen_cli/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
-| `netizen_cli/channel_app.py`、`netizen_cli/channel/` | ChannelApplication 负责准入、Runtime 提交和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
-| `netizen_cli/channel/input_preparation.py` | MessageInputPreparer 负责当前、引用和 catch-up 材料的读取、校验与图片准备，返回 typed PreparedInput；ChannelApplication 继续捕获 admission、组装 Context Boundary 提交参数并发送可见回执，Runtime 确认接受后才推进边界。 |
-| `netizen_cli/message_content.py`、`netizen_cli/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读，由消息准备组件复用。控制意图仍由 Channel 入口判定。 |
-| `netizen_cli/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
-| `netizen_cli/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
-| `netizen_cli/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的安装信息与本实例重启编排。 |
-| `netizen_cli/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
-| `netizen_cli/deployment/` | 有界 Admin 重启记录、维护锁与独立重启 job。 |
-| `netizen_cli/runtime/contracts.py`、`netizen_cli/codex_runtime.py` | 前者唯一定义公共协议、异常、输入输出和快照；后者继续独占任务、Goal、Side、订阅和锁，并保留原公共类型导入路径。 |
-
-程序分发与实例数据由 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md)
-分开：`netizen_cli/cli.py` 提供命令，`cli_services.py` 控制精确系统服务，
-`cli_data.py` 负责显式初始化、启动校验和迁移，`cli_packages.py` 限定包维护方式，
-`cli_update.py` 与包替换范围外的临时协调器负责环境级更新。程序及依赖由用户 Python
-包管理器维护；不会为每实例生成 release 或 venv，也不增加常驻总控服务。
+单向分层不新增运行实例或状态所有者；公共 contracts 唯一定义协议与快照，Runtime
+独占执行、订阅和锁。程序由 Python 包管理器维护，与实例数据分离，不为每实例生成
+release/venv 或增加常驻总控。模块地图、公共导入兼容与分层维护规则见
+[开发指南的实现导航](CONTRIBUTING.md#实现导航)。
 
 ## 核心模型
 
@@ -244,6 +221,10 @@ exact `/new` 保留原有手动创建入口；任何 `/new ...` 参数都零 mut
 Mode 的 lazy Binding；选择新建工作区时先创建并登记目录，不要求任务、不创建 native Thread；完整表单及目录降级语义见
 [新建与配置表单](#新建与配置表单)。没有当前 Binding 的普通输入还可按
 [聊天默认配置](#聊天默认配置与自动创建)自动创建；`/new` 不读取这些默认值或改变预填行为。
+Lazy Binding 的移除须先证明公开创建流程在没有真实 Turn、额外归档恢复或私有 RPC 时，
+支持 exact ID 的同连接及冷恢复。idle/path metadata、失败 history read 的潜在副作用，或
+Goal 直接沿用刚创建 handle，均不能证明零 Turn 持久性；历史实验见
+[SDK 0.159.2 记录](compatibility-history.md#sdk-01592-20260930)。
 下一条需要启动新 Turn 的普通消息执行：
 
 1. 若有 Binding 配置，在进入 native mutation 前重新调用 live `codex.models()`，按所选
@@ -412,7 +393,8 @@ Settings。`/delete` 为 Lazy Binding 显示只删本地记录的确认卡；mat
 按 [ADR 0067](adr/0067-name-threads-with-private-ephemeral-forks.md)，新 Turn 成功启动后
 在后台为无名称且无在途命名任务的会话补名；steer 不触发。内部 ephemeral fork 使用
 原生上下文快照，不建立 Binding/Side route，不进入会话统计或任务反馈。生成失败不影响
-主线；失败已确认结束后，下一次新 Turn 可再尝试。所有名称写入共用每 Binding 一把名称锁：
+主线；失败已确认结束后，下一次新 Turn 可再尝试。后台 fork 前等待 exact Turn 输入在公开历史中可见，
+局部预算 10 秒、整体 120 秒；首轮 ACK 不等于可 fork 的上下文证据。所有名称写入共用每 Binding 一把名称锁：
 自动拿不到锁就退出，手动按顺序等待覆盖；等待不持 Scope/Binding 锁，不阻塞其他会话操作。
 管理入口固定 exact 目标后释放 Scope，后续切换不重定向已接受的请求。实际写入 worker
 拥有名称锁，外层取消不会提前释放；锁不持久化。归档/删除使旧生成结果失效，自动写入
@@ -598,6 +580,68 @@ root，再按需以 `reply_in_thread=True` promotion；promotion 固定 `fail`�
 时假成功地降级为主线新消息。未知发送结果只用相同 UUID 做一次有界对账；P2P 建话题、
 五类入口的真实返回 shape 以及重复 UUID 的 exact identity 都是部署 live gate。错误 230071
 显式失败，单元 Fake 不能替代该验收。
+
+## 群聊准入
+
+[ADR 0092](adr/0092-restrict-execution-to-enabled-group-chats-on-demand.md) 增加可选的实例级
+执行准入。实例 YAML 顶层 `groupAccess` 保存 `mode: all|only` 与 `chatIds`。缺省或
+`all` 允许全部群聊，保留名单但不使用；`only` 按名单中的 chat ID 准入，类型只用于豁免
+`p2p`。`topic`、`unknown` 或类型缺失均不阻止名单命中。名单去重后最多 1000 个精确、非空
+chat ID，每个最多 256 字符，排序保存；错误配置启动失败。一个 ID 覆盖群主线和全部话题。
+单聊及单聊话题不受限制；不能用 `ScopeKind.TOPIC` 推断群聊或单聊。
+
+每条消息、卡片回调、定时投递和会话工具调用在入口捕获不可变规则，处理中修改配置
+不撤销本次准入。消息复用 `chat_type`，不额外查询，在 Side 路由、定时占位路由、命令与输入
+准备前拒绝（下述 `/enable` 是唯一命令例外）；不读引用、补充历史、图片或附件，
+不创建 Binding，不提交 Runtime。
+卡片在所有具体处理器之前检查；没有类型时先按名单放行，再检查同 App、同 chat 的 DIRECT
+Scope，仅在仍需确认单聊豁免时读取公共 chat info。类型不明或读取失败则拒绝并记录日志；
+不新增缓存或持久状态，`all` 不新增 chat-info 查询或其他 I/O。拒绝同样覆盖提问回答、停止、
+归档、分支、默认配置、定时任务、Files 与状态按钮。被拒绝的卡片保留原样，不替换或更新；
+只尽力回复该卡片的准确 message ID。公共回调不含话题信息；chat info 确认话题群时在话题内回复，
+不为提示解码卡片或额外读取消息；目标消失时不改投聊天主线。
+
+未启用群中，除 `/enable` 外的触发消息回复“本群尚未启用 Netizen，消息不会执行。请实例管理员在本群发送
+/enable，或在 Admin 中启用本群。”，未 @ 的消息静默忽略，拒绝路径不查询 Side 路由；群 Side 本就要求 @。
+每次实际交付到应用的触发消息或被拒绝的卡片动作均尝试回复一次；应用不另做提示去重、
+持久化或重试，失败只记录日志，目标消失不改投聊天主线；SDK 原有传输重试不变。
+固定 Channel SDK 按原消息、操作者和动作内容在进程内去重 12 小时。被拒绝的卡片保持原样，
+同一人重复点击同一按钮不会再收到回复；重新启用群后，该按钮仍须等去重过期或服务重启。
+应重发命令取得新卡片；其他人点击不受该条去重影响。
+
+两类 Scheduled Run 都在发送锚点及输入准备前检查真实目标聊天，只有已确认非单聊且未在
+名单中的聊天才记录 `group_not_enabled`；聊天验证失败保留各投递路径原有错误。
+本次 Run 失败并释放原有屏障，不修改计划定义、不自动暂停，后续到期点仍按既有规则处理。
+原会话计划保持先捕获 exact Turn 准入、再查询聊天类型的顺序，复用原有查询完成群聊检查；
+即使准入捕获失败，未启用群仍不发布锚点、准备输入或提交执行。
+会话协作 create/send 在原有 readSend 和 validate_chat_target 后复用已确认类型检查目标群，
+拒绝为 `group_not_enabled`、accepted=false；验证失败保留原有错误及未接受回执。
+read、wait、发现继续仅受 sessionTools 约束。此规则不改变原生执行、工具或审批策略。
+
+“系统管理 → 群聊准入”醒目显示当前模式，all 时展示“群成员共享服务账号的工具与文件
+权限，可按需限制为已启用的群聊。”。名单复用群选择器，显示名称和 chat ID，名称缺失时只显示 ID。
+从已保存的 all 切换 only 只编辑模式，不改变名单。保存时确认只有名单中的 N 个群可以执行、
+其他群的新输入不会执行，并提示实例管理员可在群里发送 `/enable` 启用。
+名称仅供展示，复用缓存并对未取得名称的已保存 ID 做有界查询，刷新可继续补全。
+切回 all 保留编辑结果；放弃修改和重新加载恢复已保存快照。保存只使用可见名单，
+名单去重后最多 1000 个 ID，超出数量时在表单提示修改。
+
+实例管理员可在群里 @机器人并发送零参数的 Channel 命令 `/enable`，把整个群加入名单，
+包括其主线和全部话题。在未启用群中只从当前消息文本识别此命令；不准备输入、不查询 Side
+或定时路由、不创建 Binding、不提交 Runtime。其他命令仍回复未启用说明。
+Channel 通过注入的窄身份检查，按本实例 App ID 和发送者 open_id 精确查询已有 AdminUsers
+成员资格；非管理员拒绝，身份无效或管理员名单不可用时不启用。单聊直接说明无需启用。
+群已在名单中时只回复当前状态，不重复写入；all 模式也可添加，并说明限制模式下生效。
+写入通过共享 blocking I/O helper 在事件循环外执行，在 GroupAccessService 写锁内追加准确
+chat ID，复用 revision 检查和 ConfigFileEditor 原子更新，保留当前模式和其他群。
+配置冲突、外部文件修改、名单上限或写入失败均不重试，记录日志并提示稍后重试或在 Admin
+启用。`/enable` 是飞书中唯一使用实例管理员身份授权的命令；移除群和切换模式仍通过 Admin。
+
+Admin 编辑沿用同源认证、一次性 action grant、配置冲突检测与原子写入契约，成功后
+发布新快照。名单和未保存修改遵守现有系统页导航保护，不新增文件、表或角色。
+修改规则不删除会话、Side 或计划，不取消已接受输入和运行中 Turn，结果照常交付。
+未启用群内不能回答运行中任务提出的问题，应在 Admin 停止任务或重新启用群聊。
+不限制个人、单聊、Project 或创建者，不新增 bot_added 订阅，不形成文件或原生工具隔离。
 
 ## 消息输入准备
 
@@ -826,6 +870,8 @@ Admin 文件附件管理见[输入附件管理](#输入附件管理)，不写 Ch
 `SkillInput(name, path)`。多个 Skill 仍只对应一次 `turn()` 或一次 exact `steer()`；
 discovery 期间不持有 Binding 锁，返回后复核原 admission、准备时的原生 Thread 身份
 以及已恢复订阅的代次，防止任务状态或 Skill 所属目录被重解释。
+提交复用发现前已恢复的同一 handle，不二次恢复；lazy 仍先解析 Skill 再创建 Thread。
+文本、引用和图片准备不依赖 cwd，目录变化不要求重做这些材料。
 被引用历史中的 `$` 会在版本化 quote envelope 中编码为非激活文本，不能把历史内容
 变成当前 Skill 调用。
 
@@ -1075,6 +1121,10 @@ Activity 的 opaque item identity 仅用于进程内 lifecycle 合并，Channel 
 的唯一 `next_notification` 消费链内 tap 同一受限投影。rename/archive/
 unarchive 全部使用高层公开 API。原生名称、归档状态、plan 与终态仍以 Codex 为事实源，不
 增加本地 lifecycle 或 progress 状态列。
+
+开放式 `CodexErrorInfo` 字符串/对象仍只做受限错误投影，unknown、损坏 known 与 HTTP
+variant 不得泄露任意对象或改变 exact Turn 归属。SDK 可注册/解析 `thread/prediction/updated`，
+但 `sourceTurnId` 不是活动 `turnId`，不据此生成终态、Activity 或回复模块。
 
 `root_turn_id` / `parent_turn_id` 由 Codex 原生传递，当前 Netizen 调用无须补写或消费；
 不据此改 Files 归属、扩大旧子任务统计或新增过滤，随现有流程回归。
@@ -1652,6 +1702,8 @@ Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle R
 
 ## 定时任务
 
+两类计划投递都受[群聊准入](#群聊准入)约束；未启用的目标群使本次执行失败，计划继续保留。
+
 Scheduled Plan 保存明确的执行指令、时间规则与执行目标，支持 `new_topic` 和 `binding`。
 新话题模式另保存 Project、目标飞书会话、独立会话配置、工作区策略与完成后自动归档选项。每次触发在目标会话中新建真实话题和普通持久 Thread；单聊、普通群、话题群及
 已有话题来源使用相同语义。已有话题的计划在所属 chat 新建 sibling 话题，不切换来源
@@ -2071,6 +2123,8 @@ native 接受事实分别报告。接受回执不等待命名，首轮展示使�
 
 ### 实例范围配置与标识展示
 
+create/send 另受[群聊准入](#群聊准入)约束；read、wait 和发现不受该开关影响。
+
 现有实例 YAML 的 `sessionTools.discovery` 与 `sessionTools.readSend` 分别保存
 `mode: all|only|exclude|disabled` 和 `chatIds`。两组默认 all，按目标 chat 匹配普通
 Binding，所有来源共用。readSend 包括 read、send、wait 和 create 的目标检查；已知
@@ -2197,9 +2251,9 @@ ADR 0085 另允许明确选择删除关联受管 Worktree，不能据此删除�
 ADR 0061 将关联定时计划和仍在创建会话的定时执行纳入同一清单；提交即删除关联计划，
 后续部分失败或同名重新登记均不复活它们。
 它不做 workspace clone 或 Project ACL。
-用户和群的准入由飞书应用权限负责；Netizen 和 Channel SDK 不再配置
-user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Binding、Project 和
-停止 active Turn，群聊/话题的消息命令仍逐条要求 @机器人。
+准入由飞书应用可用范围和群成员关系负责，并受 [ADR 0092 群聊准入](#群聊准入)的实例级
+可选限制；不增加个人、角色或 Project ACL。通过准入的 Scope 参与者都能管理 Binding、
+Project 和停止 active Turn，群聊/话题的消息命令仍逐条要求 @机器人。
 
 ### 飞书应用凭据
 
@@ -2424,8 +2478,8 @@ Projects 页通过“添加 Project”抽屉切换登记已有目录和创建空
 独立，创建及配置草稿互不覆盖；核对结果只读查询，不重发写请求。Project 明确拒绝后
 可显式刷新授权、保留输入再提交；结果未知时仅核对，不恢复提交能力。
 
-系统管理使用同一套横向子 Tab 展示“管理员”“跨会话工具权限”“过程卡”“提问通知”和“文件附件”，整页加载默认进入管理员。
-子 Tab 切换仅改变可见内容，不发请求、不保存、不重置表单；权限、全局过程卡或提问通知有修改时
+系统管理使用同一套横向子 Tab 展示“管理员”“群聊准入”“跨会话工具权限”“过程卡”“提问通知”和“文件附件”，整页加载默认进入管理员。
+子 Tab 切换仅改变可见内容，不发请求、不保存、不重置表单；群聊准入、权限、全局过程卡或提问通知有修改时
 在对应 Tab 标记“未保存”，隐藏后仍参与页面离开与退出登录保护。刷新读取当前配置，附件目录仅在打开浏览器或显式刷新时读取，
 并在放弃未保存修改前确认。
 切离管理员时卸载 Selector 浮层、忽略晚到回调，保留已选人员及原操作授权；返回后可确认
@@ -3137,8 +3191,9 @@ enabled Project 引导 `/projects` 后 `/new`，有 enabled Project 引导 `/new
 另一普通会话的 rename 仍应先 `/resume`。`/sessions` 中按 ADR 0036/0049 对
 exact materialized 行归档，以及按 ADR 0038/0049 经独立红色确认卡删除 exact active-catalog
 或 archived-catalog 行，是跨当前会话的 lifecycle 例外；它们不新增 `/delete <id>`。rename 可直接带
-名称或打开 form；archive/delete 卡片沿用上文 `/sessions` 的 exact
-Scope/Binding/native identity 与二次确认，但不携带 Runtime activity 前置条件。本地活动仍在
+名称或打开 form；`/archive`、`/delete` 确认提交时仍复核目标是 Scope 当前 active Binding，
+切换 current 后旧卡拒绝执行；`/sessions` exact 行的确认不受 current 切换影响。两类入口
+均保留各自 Scope/Binding/native identity 与二次确认，不携带 Runtime activity 前置条件。本地活动仍在
 运行也直接委托 App Server removal，不先 stop/pause 或等待 terminal。materialized `/delete` 还要明确 spawned
 descendants 与 Codex App/CLI 历史会永久消失。归档列表只为同一 Scope 的原生 archived
 Thread 生成恢复和独立删除入口；提交恢复不复查 catalog，按 ADR 0082 使用 exact
@@ -3219,6 +3274,11 @@ ID intent。Project config 的重载能力由锁定 SDK 的 compatibility probe 
 不能泛化为所有用户级键；官方或探针要求重启的设置通过
 `netizen restart --root "<NETIZEN_ROOT>"` 或管理页“重启服务”重新加载；不保证所有配置
 作用于已有 Thread。
+
+MCP OAuth `loginId` 与 `/mcp login` 的关联由原生处理；Netizen 仅说明同环境登录与凭证
+复用，不添加 OAuth UI、凭证库或通知消费者。动态模型目录、API-key discovery、原生
+retry/fallback、权限和存储仍由 Codex 管理，不硬编码默认模型或增加 Netizen 重试。
+公开 `models()` 没有 cursor，完整目录分页仍是缺口；不能复制私有协议补齐。
 
 Runtime 的公开 resume/fork 显式使用 `include_turns=False`，省略仅供返回展示的历史，
 不修改模型上下文；需要终态、Files 或 Goal 证据时仍公开 read 完整历史。

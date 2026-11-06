@@ -6,6 +6,7 @@ retained. The shared official client uses only the instance's bot credentials.
 
 from __future__ import annotations
 
+import logging
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ from lark_oapi.api.im.v2.model.search_chat_request_body import SearchChatRequest
 from ..channel.messages import public_chat_kind
 from ..chat_avatars import avatar_url
 from ..chat_targets import ChatTargetError, ValidatedChatTarget
+
+
+logger = logging.getLogger(__name__)
 
 
 _PAGE_SIZE = 20
@@ -209,7 +213,15 @@ class FeishuChatDirectory:
                 response = await operation(request)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "chat directory SDK read failed",
+                extra={
+                    "request_type": type(request).__name__,
+                    "chat_id": getattr(request, "chat_id", None),
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             raise ChatDirectoryError("chat_query_failed", "无法读取飞书聊天，请稍后重试。") from None
         if getattr(response, "code", None) != 0:
             code = getattr(response, "code", None)

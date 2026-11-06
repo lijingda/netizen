@@ -372,7 +372,7 @@ class ScheduleService:
         if "auto_archive" in request:
             raise ScheduleError("执行成功后自动归档仅适用于新话题计划。")
         if {"project", "chat_id", "session_settings", "workspace", "expected_project_revision"}.intersection(request):
-            raise ScheduleError("Agent 会话计划沿用目标 Binding 的 Project、位置、配置和实际工作目录，不接受独立覆盖。")
+            raise ScheduleError("Agent 会话计划沿用目标会话的 Project、位置、配置和实际工作目录，不接受独立覆盖。")
 
     @staticmethod
     def _workspace_policy(value: Any) -> WorkspacePolicy:
@@ -431,7 +431,7 @@ class ScheduleService:
         if "target_kind" in request and _target_kind(request["target_kind"]) != plan.target_kind:
             raise ScheduleError("计划的执行目标类型不可修改；请新建计划。")
         if "target_binding_id" in request and request["target_binding_id"] != plan.target_binding_id:
-            raise ScheduleError("计划的目标 Binding 不可修改；请新建计划。")
+            raise ScheduleError("计划的目标会话不可修改；请新建计划。")
         if plan.target_kind == "binding":
             self._reject_binding_overrides(request)
 
@@ -894,7 +894,18 @@ class ScheduleService:
                         async with slots:
                             status = await self._runtime.read_scheduled_turn(binding.id, run.initial_turn_id, deadline=deadline)
                     value["status"] = status if status in _NATIVE_STATUSES else "unknown"
-                except Exception:
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "scheduled Run status read unavailable",
+                        extra={
+                            "run_id": run.id,
+                            "binding_id": binding.id,
+                            "thread_id": binding.native_thread_id,
+                            "turn_id": run.initial_turn_id,
+                            "chat_id": run.chat_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
                     value["status"] = "unavailable"
         return value
 

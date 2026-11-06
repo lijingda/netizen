@@ -5,6 +5,7 @@ available for explicit deletion, regardless of whether an input was accepted.
 """
 from __future__ import annotations
 
+import logging
 import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ from .project_files import (
     _directories, _file_version, _identity, _modified_at, _open_directory, _read_bounded,
     read_file,
 )
+
+
+logger = logging.getLogger(__name__)
 
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_ATTACHMENT_BATCH_BYTES = 50 * 1024 * 1024
@@ -257,8 +261,11 @@ class AttachmentStore:
             # The worker still owns its write. Do not abandon a late completion.
             try:
                 batch = await _finish_worker(task)
-            except Exception:
-                pass
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "attachment preparation worker failed during cancellation drain",
+                    extra={"error_type": type(diagnostic_error).__name__},
+                )
             else:
                 await _finish_worker(asyncio.create_task(asyncio.to_thread(self.discard, batch)))
             raise
@@ -295,8 +302,11 @@ class AttachmentStore:
         except asyncio.CancelledError:
             try:
                 await _finish_worker(task)
-            except Exception:
-                pass
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "attachment publication worker failed during cancellation drain",
+                    extra={"batch_id": prepared.batch_id, "error_type": type(diagnostic_error).__name__},
+                )
             await _finish_worker(asyncio.create_task(asyncio.to_thread(self.discard, prepared)))
             raise
 

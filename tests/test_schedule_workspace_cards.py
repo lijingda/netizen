@@ -133,7 +133,7 @@ class ScheduleWorkspaceCardsTest(unittest.TestCase):
         self.assertIn("实际工作目录", str(card.card))
         self.assertIn("/tmp/binding-cwd", str(card.card))
         self.assertIn("wt-binding", str(card.card))
-        self.assertIn("以原生会话为准", str(card.card))
+        self.assertIn("以 Codex 会话为准", str(card.card))
         self.assertNotIn("加载 worktree 选项", str(card.card))
         values["cron_workspace"] = workspace_reference("work", 4, {"mode": "project"})
         with self.assertRaises(CardActionError):

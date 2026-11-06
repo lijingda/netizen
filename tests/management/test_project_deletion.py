@@ -11,9 +11,11 @@ from netizen_cli.bindings import (
     BindingNotFound,
     BindingStore,
     ProjectConflict,
+    ProjectDeleting,
     SideTopicState,
 )
 from netizen_cli.codex_runtime import (
+    CodexRuntime,
     SideCloseFailed,
     SideLifecycleOutcome,
     SideSessionNotFound,
@@ -21,7 +23,7 @@ from netizen_cli.codex_runtime import (
     ThreadLifecycleStateUnknown,
 )
 from netizen_cli.domain import FeishuScope, ScopeKind
-from netizen_cli.management import InstanceManagementService, ScopeCoordinator
+from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from netizen_cli.projects import ProjectError, ProjectRegistry, UnknownProject
 from tests.management.test_service import FakeManagementRuntime
 
@@ -423,6 +425,77 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
         result = await self.delete()
         self.assertTrue(result.deleted)
         self.assertEqual(self.native_deletes(), [("delete", lazy.id, None)])
+
+    async def test_lazy_cascade_yields_with_locks_released_and_intent_retained(self) -> None:
+        first = self.binding("first")
+        second = self.binding("second")
+        runtime = CodexRuntime(codex=object(), bindings=self.store, terminal_cleanup=object(),
+                               automatic_thread_naming=False)
+        self.service._runtime = ManagementRuntimePort(runtime)
+        snapshot = await self.preview()
+
+        async def observe_between_deletions():
+            with self.assertRaises(BindingNotFound):
+                self.store.get(first.id)
+            self.assertEqual(self.store.get(second.id).id, second.id)
+            self.assertTrue(self.store.project_delete_in_progress("test"))
+            self.assertFalse(self.store._connection.in_transaction)
+            self.assertFalse(runtime._lock(first.id).locked())
+            self.assertFalse(any(lock.locked() for lock in self.service.scope_coordinator._locks.values()))
+            with self.assertRaises(ProjectDeleting):
+                self.binding("late")
+
+        observer = asyncio.create_task(observe_between_deletions())
+        self.tasks.append(observer)
+        try:
+            result = await self.delete(snapshot)
+            await observer
+            self.assertTrue(result.deleted)
+            self.assertEqual(result.deleted_session_count, 2)
+        finally:
+            await runtime.cancel_tasks()
+
+    async def test_cascade_revalidates_remaining_native_identity_after_yield(self) -> None:
+        first = self.binding("first")
+        second = self.binding("second")
+        snapshot = await self.preview()
+
+        async def materialize_remaining():
+            with self.assertRaises(BindingNotFound):
+                self.store.get(first.id)
+            self.store.assign_native_thread_id(second.id, "native-inflight")
+
+        materializer = asyncio.create_task(materialize_remaining())
+        self.tasks.append(materializer)
+        result = await self.delete(snapshot)
+        await materializer
+        self.assertEqual(result.code, "inventory_changed")
+        self.assertEqual(result.deleted_session_count, 1)
+        self.assertEqual(result.failed_binding_id, second.id)
+        self.assertEqual([binding.id for binding in result.remaining_sessions], [second.id])
+        self.assertEqual(self.native_deletes(), [("delete", first.id, None)])
+        self.assert_retained(second)
+
+    async def test_cancellation_between_lazy_deletions_retains_partial_work(self) -> None:
+        first = self.binding("first")
+        second = self.binding("second")
+        snapshot = await self.preview()
+        deleting = asyncio.create_task(self.delete(snapshot))
+        self.tasks.append(deleting)
+
+        async def cancel_between_deletions():
+            with self.assertRaises(BindingNotFound):
+                self.store.get(first.id)
+            self.assertTrue(self.store.project_delete_in_progress("test"))
+            deleting.cancel()
+
+        canceller = asyncio.create_task(cancel_between_deletions())
+        self.tasks.append(canceller)
+        with self.assertRaises(asyncio.CancelledError):
+            await deleting
+        await canceller
+        self.assertEqual(self.native_deletes(), [("delete", first.id, None)])
+        self.assert_retained(second)
 
     async def test_deadline_keeps_project_and_releases_only_project_fence(self) -> None:
         await self._assert_interrupted_delete_preserves_project(cancel=False)

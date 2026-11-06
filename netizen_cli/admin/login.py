@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import asyncio
 from collections import deque
 import hashlib
@@ -14,6 +15,9 @@ from .auth import AdminAuth, AdminAuthError, LoginRejected, normalize_source_ip
 from .credentials import AdminCredentials
 from .feishu import AuthExpired, DeviceChallenge, FeishuClient, FeishuError, SlowDownError
 from .users import AdminIdentity, AdminUsers
+
+
+logger = logging.getLogger(__name__)
 
 
 _START_WINDOW = 300
@@ -162,6 +166,10 @@ class AdminLogin:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
+                    logger.warning(
+                        "administrator login polling failed",
+                        extra={"error_type": type(error).__name__},
+                    )
                     if self._current(key, attempt):
                         code = error.code if isinstance(error, FeishuError) else "login_failed"
                         attempt.state = "denied" if code in {"access_denied", "not_administrator"} else (
@@ -181,7 +189,11 @@ class AdminLogin:
                 # Deletion/re-addition cannot reissue a stale browser session.
                 try:
                     self.auth.authenticate(attempt.session_token)
-                except Exception:
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "administrator login session validation failed",
+                        extra={"error_type": type(diagnostic_error).__name__},
+                    )
                     attempt.session_token = None
                     attempt.state = "expired"
             return self._state(attempt), attempt.session_token

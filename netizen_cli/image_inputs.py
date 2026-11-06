@@ -332,7 +332,7 @@ def image_prompt_references(
         key = _image_prompt_reference_key(image.reference)
         if key in references:
             raise ImageInputContractError(
-                "图片输入包含重复的 exact 资源，本条消息未执行。"
+                "图片输入包含重复的资源，本条消息未执行。"
             )
         references[key] = f"img{index}"
     return MappingProxyType(references)

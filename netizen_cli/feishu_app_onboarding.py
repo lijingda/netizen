@@ -8,11 +8,15 @@ all user-facing progress goes to stderr.
 
 from __future__ import annotations
 
+import logging
 import argparse
 import json
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, IO
+
+
+logger = logging.getLogger(__name__)
 
 
 REQUIRED_TENANT_SCOPES = (
@@ -167,15 +171,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    stage = "sdk_import"
     try:
         import lark_oapi as lark
 
+        stage = "registration"
         run_registration(args.app_id, register_app=lark.register_app)
         return 0
     except KeyboardInterrupt:
         print("netizen: Feishu/Lark app setup interrupted", file=sys.stderr)
         return 130
-    except Exception:
+    except Exception as diagnostic_error:
+        logger.warning(
+            "app registration setup failed",
+            extra={"stage": stage, "error_type": type(diagnostic_error).__name__},
+        )
         # Credential material is only emitted after complete validation.  Keep
         # failures generic so an unexpected SDK exception can never echo a
         # sensitive response into the terminal or installer logs.

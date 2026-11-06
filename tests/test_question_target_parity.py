@@ -359,7 +359,7 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                             update_mock = AsyncMock(return_value=False)
                         c.fx.app._safe_update_card = update_mock
                         c.queue_anchor()
-                        with patch("netizen_cli.channel_app._QUESTION_SUBMISSION_CARD_TIMEOUT_SECONDS", 0.01):
+                        with patch("netizen_cli.channel.constants.QUESTION_SUBMISSION_CARD_TIMEOUT_SECONDS", 0.01):
                             if failure == "rejected":
                                 await c.fx.app.handle_card_action(c.event())
                             else:
@@ -373,16 +373,20 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(update_mock.await_args.args[0], "om_question")
                         self.assertEqual(update_mock.await_args.args[1].card["header"]["title"]["content"], "回答已提交")
 
-    async def test_side_feedback_error_after_acceptance_keeps_original_card_submitted(self):
-        async with self.case("side") as c:
-            c.queue_anchor()
-            c.fx.app._reactions.start = AsyncMock(side_effect=OSError("feedback failed"))
-            with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
-                await c.fx.app.handle_card_action(c.event())
-            self.assertEqual(len(c.submits), 1)
-            self.assertEqual(c.released, [True])
-            self.assertIn("feedback failed", c.fx.channel.replies[-1][1])
-            self.assert_submission_summary(c, accepted=True)
+    async def test_feedback_error_after_acceptance_keeps_original_card_submitted(self):
+        for kind in ("binding", "side"):
+            with self.subTest(kind=kind):
+                async with self.case(kind) as c:
+                    c.queue_anchor()
+                    c.fx.app._reactions.start = AsyncMock(side_effect=OSError("feedback failed"))
+                    with self.assertLogs("netizen_cli.channel_app", level="WARNING") as captured:
+                        await c.fx.app.handle_card_action(c.event())
+                    self.assertEqual(len(c.submits), 1)
+                    self.assertEqual(c.released, [True])
+                    self.assertEqual(c.fx.channel.replies, [])
+                    self.assertEqual(captured.records[-1].error_type, "OSError")
+                    self.assertNotIn("feedback failed", "\n".join(captured.output))
+                    self.assert_submission_summary(c, accepted=True)
 
     async def test_side_answer_ignores_later_parent_metadata_changes(self):
         # Mutate persisted parent metadata only: the Channel must not consult it

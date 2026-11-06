@@ -104,6 +104,8 @@ sys.exit(17 if index == int(os.environ["NETIZEN_TEST_PROBE_FAIL_AT"]) else 0)
         self.assertEqual(
             [shlex.split(line) for line in result.stdout.splitlines()],
             [
+                ["/chosen/python", "-m", "ruff", "check", "netizen_cli", "scripts", "tests", "_build.py"],
+                ["/chosen/python", "-m", "mypy"],
                 ["/chosen/python", "-m", "unittest", "discover", "-s", "tests", "-v"],
                 ["/chosen/python", "-m", "compileall", "-q", "netizen_cli", "scripts", "tests"],
                 ["/chosen/python", "-m", "pip", "check"],

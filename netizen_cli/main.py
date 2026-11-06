@@ -52,9 +52,10 @@ from openai_codex import AsyncCodex, CodexConfig
 from .admin.web import AdminWebRunner
 from .admin.port_config import ConfigFileEditor
 from .progress_card_config import ProgressCardConfigService
+from .group_access import GroupAccessService
 from .question_notifications import QuestionNotificationConfigService
 from .worktrees.settings import WorktreeSettingsService
-from .admin.users import AdminUsers, AdminUsersError
+from .admin.users import AdminIdentity, AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
 from .cli_setup import require_admin_binding, SetupError
 from .bindings import BindingStore
@@ -112,6 +113,10 @@ _SHUTDOWN_BUDGET_SECONDS = 60.0
 _READY_MARKER_CONTENT = b"netizen service ready\n"
 _LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOG_BACKUP_COUNT = 2
+_LOG_EXTRA_VALUE_MAX_LENGTH = 160
+_STANDARD_LOG_RECORD_FIELDS = frozenset(
+    vars(logging.LogRecord("", 0, "", 0, "", (), None))
+) | {"message", "asctime"}
 
 
 def _log_startup_timing(stage: str, started_at: float) -> float:
@@ -223,6 +228,9 @@ class ServiceCore:
             self._session_policy = SessionPolicyService(
                 self._settings.session_tools,
                 config_editor=config_editor,
+            )
+            group_access = GroupAccessService(
+                self._settings.group_access, config_editor=config_editor,
             )
             progress_card_config = ProgressCardConfigService(
                 self._settings.progress_card, config_editor=config_editor,
@@ -353,7 +361,7 @@ class ServiceCore:
             self._schedule_mcp.attach(manage_schedule)
             if self._admin is not None:
                 self._admin.attach_management(
-                    self._management, session_policy=self._session_policy,
+                    self._management, session_policy=self._session_policy, group_access=group_access,
                 )
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
@@ -369,6 +377,10 @@ class ServiceCore:
                 admin_loopback_only=self._admin.loopback_only if self._admin is not None else None,
                 instance_root=self._instance_root,
                 attachment_store=attachment_store,
+                group_access=group_access,
+                is_instance_admin=lambda app_id, open_id: users.get_membership(
+                    AdminIdentity(app_id, open_id),
+                ) is not None,
             )
             self._session_service = SessionService(
                 bindings=self._store,
@@ -878,28 +890,46 @@ def _clear_ready_marker(path: Path) -> None:
         logger.exception("failed to clear service ready marker")
 
 
+class _NetizenLogFormatter(logging.Formatter):
+    """Render audited Netizen diagnostics without expanding third-party logs."""
+
+    def formatMessage(self, record: logging.LogRecord) -> str:
+        message = super().formatMessage(record)
+        if record.name != "netizen_cli" and not record.name.startswith("netizen_cli."):
+            return message
+        fields = []
+        for key in sorted(record.__dict__.keys() - _STANDARD_LOG_RECORD_FIELDS):
+            value = "".join(
+                char if char.isprintable() else ascii(char)[1:-1]
+                for char in repr(record.__dict__[key])
+            )
+            if len(value) > _LOG_EXTRA_VALUE_MAX_LENGTH:
+                value = value[:_LOG_EXTRA_VALUE_MAX_LENGTH - 3] + "..."
+            fields.append(f"{key}={value}")
+        return message + (" " + " ".join(fields) if fields else "")
+
+
 def _configure_logging() -> None:
     raw_log_file = os.environ.get("NETIZEN_LOG_FILE", "")
+    handler: logging.Handler
     if not raw_log_file.strip():
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(name)s %(message)s",
-            force=True,
+        handler = logging.StreamHandler()
+    else:
+        log_file = _managed_absolute_path(raw_log_file, label="NETIZEN_LOG_FILE")
+        if log_file.is_symlink() or (log_file.exists() and not log_file.is_file()):
+            raise RuntimeError(f"managed service log is not a regular file: {log_file}")
+        handler = RotatingFileHandler(
+            log_file,
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding="utf-8",
         )
-        return
-    log_file = _managed_absolute_path(raw_log_file, label="NETIZEN_LOG_FILE")
-    if log_file.is_symlink() or (log_file.exists() and not log_file.is_file()):
-        raise RuntimeError(f"managed service log is not a regular file: {log_file}")
-    handler = RotatingFileHandler(
-        log_file,
-        maxBytes=_LOG_MAX_BYTES,
-        backupCount=_LOG_BACKUP_COUNT,
-        encoding="utf-8",
-    )
-    os.chmod(log_file, 0o600)
+        os.chmod(log_file, 0o600)
+    handler.setFormatter(_NetizenLogFormatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+    ))
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=[handler],
         force=True,
     )

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import argparse
 import json
 import sys
@@ -17,6 +18,9 @@ from .feishu_app_onboarding import (
     TENANT_SCOPE_ALTERNATIVES,
 )
 from .lark_app import load_lark_app
+
+
+logger = logging.getLogger(__name__)
 
 
 class PermissionCheckError(RuntimeError):
@@ -89,8 +93,10 @@ def main(
     client_factory: Callable[[str, str], Any] | None = None,
 ) -> int:
     args = parse_args(argv)
+    stage = "credentials"
     try:
         credentials = load_lark_app(args.lark_app_config)
+        stage = "client_setup"
         if client_factory is None:
             import lark_oapi as lark
             from lark_oapi.api.application.v6 import ListScopeRequest
@@ -107,16 +113,24 @@ def main(
             client = client_factory(credentials.app_id, credentials.app_secret)
 
         def list_scopes() -> Any:
+            nonlocal stage
+            stage = "request"
             if client_factory is None:
                 request = ListScopeRequest.builder().build()
             else:
                 request = None
-            return client.application.v6.scope.list(request)
+            response = client.application.v6.scope.list(request)
+            stage = "validation"
+            return response
 
         run_permission_check(list_scopes=list_scopes)
     except KeyboardInterrupt:
         return 130
-    except Exception:
+    except Exception as diagnostic_error:
+        logger.warning(
+            "app permission verification failed",
+            extra={"stage": stage, "error_type": type(diagnostic_error).__name__},
+        )
         print("Feishu/Lark permission verification did not complete.", file=sys.stderr)
         return 1
     return 0

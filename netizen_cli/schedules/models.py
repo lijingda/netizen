@@ -61,7 +61,7 @@ def resolve_once_local(
             raise ValueError("invalid local datetime")
         zone = ZoneInfo(timezone)
         local = datetime.fromisoformat(local_at)
-        moments = []
+        moments: list[datetime] = []
         for fold in (0, 1):
             moment = local.replace(tzinfo=zone, fold=fold)
             if datetime.fromtimestamp(moment.timestamp(), zone).replace(tzinfo=None) != local:
