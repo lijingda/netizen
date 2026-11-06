@@ -6,111 +6,47 @@ their cited ADRs before changing that boundary.
 
 ## Task navigation
 
-- Product introduction and first use: [README.md](README.md). Complete commands
-  and user-visible behavior: [user guide](skills/netizen-user-guide/references/user-guide.md).
-  Local development and contribution: [CONTRIBUTING.md](docs/CONTRIBUTING.md).
-  For a system overview, see [engineering overview](docs/design.md#工程概览);
-  domain vocabulary is in [CONTEXT.md](CONTEXT.md). The task-specific contracts
-  and ADRs below remain the direct entry points for related changes.
-- Runtime, Scope/Binding identity and concurrency:
-  [identity](docs/design.md#scopebinding-与会话配置),
-  [locks and admission](docs/design.md#锁与输入准入),
-  [Turn observation](docs/design.md#普通-turn-终态与观测恢复), and
-  [failure semantics](docs/design.md#失败语义).
-  Lifecycle-specific rules are in [Goal](docs/design.md#goal-物理-turn-与逻辑终态),
-  [Side](docs/design.md#side-运行与关闭),
-  [subscriptions](docs/design.md#普通会话订阅), and
-  [archive/delete](docs/design.md#原生归档与删除).
-  Persistent forks and shared resume/delete result handling follow
-  [ADR 0078](docs/adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md).
-  Archive restoration uses exact native results and Binding-local uncertainty
-  ([ADR 0082](docs/adr/0082-restore-archived-sessions-from-exact-native-results.md)).
-  Missing-current session creation uses chat defaults and the original message Scope
-  ([ADR 0073](docs/adr/0073-create-sessions-from-chat-defaults.md)); keep `/new`, input
-  admission, and Project deletion semantics independent of those rules.
-  SDK compatibility boundaries are in [adapters](docs/design.md#sdk-适配边界).
-  Goal input retains exact physical-Turn admission across rollover
-  ([ADR 0069](docs/adr/0069-steer-the-current-physical-goal-turn.md)).
-  Ordinary/Side/Goal steer failures and verified ordinary-input resume rejections
-  follow [ADR 0088](docs/adr/0088-align-steer-failures-and-input-resume-rejections.md);
-  preserve cancellation and Goal receipt-identity protections separately.
-  Ordinary session collaboration follows
-  [ADR 0081](docs/adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md):
-  native Thread IDs, instance tool ranges, and the narrow ExternalMessage start/join
-  entry. Preserve existing human/card/scheduled exact-Turn admission. Directory and
-  model read/wait pagination follow [ADR 0083](docs/adr/0083-page-native-session-history-through-a-narrow-read-adapter.md).
-  Background Thread naming has its own failure and cleanup boundary in
-  [ADR 0067](docs/adr/0067-name-threads-with-private-ephemeral-forks.md).
-- Message provenance, mention catch-up, quotes, and images:
-  [input preparation](docs/design.md#消息输入准备).
-  Input originals and Admin attachment deletion follow
-  [ADR 0090](docs/adr/0090-retain-input-attachments-independently-of-native-execution.md):
-  complete publication, exact local ownership, and manual deletion independent
-  of native acceptance; never add receipt locks or infer attachment history.
-  Shared native question cards use target-specific Binding/Side input admission
-  ([ADR 0071](docs/adr/0071-answer-native-questions-through-binding-input.md),
-  [ADR 0072](docs/adr/0072-share-question-interaction-across-binding-and-side.md)).
-  Reply Cards, Activity, Partial Answers, completion mentions, and Files:
-  [presentation](docs/design.md#回复与活动展示), including
-  [ADR 0079](docs/adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)
-  for stable answers during execution and Goal rollover retention.
-  Progress Card settings and time organization follow
-  [ADR 0086](docs/adr/0086-configure-progress-card-presentation-with-bounded-activity-segments.md):
-  independent bounded windows, preserved segment boundaries and self-contained pagination.
-  Missing session presentation intent uses the instance fallback only when captured for execution
-  ([ADR 0087](docs/adr/0087-use-instance-progress-card-settings-for-missing-session-intent.md));
-  preserve explicit historical values and never persist the resolved fallback as session intent.
-  Controls and form callbacks: [commands and cards](docs/design.md#飞书命令与控制卡片).
-  Preserve the referenced
-  ADRs' exact identity, context, display, and file-evidence contracts.
-- SQLite and schema migration policy: [data](docs/design.md#channel-数据库与结构校验),
-  [ADR 0075](docs/adr/0075-migrate-channel-databases-during-installation.md), as amended by
-  [ADR 0076](docs/adr/0076-separate-cli-installations-from-instance-data.md).
-  App credentials: [credential source](docs/design.md#飞书应用凭据).
-  Service environment and native settings: [configuration](docs/design.md#原生环境与能力配置).
-  Admin Web: [queries and actions](docs/design.md#管理查询与操作), including
-  [Feishu administrator identities](docs/adr/0080-authenticate-admins-with-feishu-identities.md) and
-  [runtime polling](docs/design.md#运行态投影与轮询).
-  Read-only Project file browsing follows
-  [ADR 0089](docs/adr/0089-browse-current-project-files-through-admin.md):
-  current-directory identity, bounded descriptor-relative reads, inert previews,
-  and no download endpoint; keep it separate from exact-Turn Files evidence.
-  Project deletion uses the exact inventory, tombstone and lifecycle boundaries
-  in [the current contract](docs/design.md#project-删除与交接) and
-  [ADR 0060](docs/adr/0060-delete-projects-with-exact-session-inventory.md).
-  Managed Worktree ownership and lifecycle follow
-  ([ADR 0085](docs/adr/0085-manage-worktrees-independently-of-sessions.md)); read its
-  independent ownership, actual-cwd and optional-cascade boundaries before changing
-  workspace behavior. Git owns live filesystem facts; Netizen manages only resources
-  created through its shared Worktree service, not external App/CLI worktrees.
-- Scheduled Plans, dispatch, ordinary topic Threads, and the dedicated MCP
-  management entry: [scheduled tasks](docs/design.md#定时任务) and
-  [ADR 0061](docs/adr/0061-schedule-ordinary-threads-in-feishu-topics.md).
-  Manual runs of saved plans follow [ADR 0068](docs/adr/0068-run-saved-scheduled-plans-manually.md).
-  Existing-Binding inputs follow [ADR 0070](docs/adr/0070-schedule-inputs-in-existing-bindings.md):
-  ordinary start/steer admission and feedback, input-receipt Run semantics,
-  and lifecycle-derived suspension independent of manual enablement.
-- Installation, release, permissions, and platform service management:
-  [CLI deployment](docs/cli.md) and [platform/live evidence](docs/deployment.md).
-  [ADR 0076](docs/adr/0076-separate-cli-installations-from-instance-data.md) replaces
-  the per-instance release installer with an environment-scoped Python package.
-  Routine Agent installation starts with the README command and follows setup output; consult the relay procedure for
-  alternate setup or troubleshooting. Read the relevant acceptance gates
-  before changing deployment behavior.
-  Multi-instance root ownership and the scoped Skills adapter are recorded in
-  [ADR 0074](docs/adr/0074-deploy-independent-instances-by-root.md). Read the
-  deployment manual's [multi-instance acceptance gates](docs/deployment.md#多实例与内置-skills-验收)
-  and separate platform/live acceptance status before rollout.
-- End-user usage consultation:
-  [netizen-user-guide](skills/netizen-user-guide/SKILL.md). Its reference manual
-  explains the product; it is not an engineering implementation guide.
-  Runtime-specific Agent guidance stays separate; follow its
-  [description/body boundary and size budgets](docs/design.md#运行环境提示与使用指南的边界)
-  before adding execution hints.
-- Decisions: [ADR index](docs/adr/README.md), with status, amendment chains and the
-  [admission rule](docs/adr/README.md#何时写-adr) for new ADRs; feature-level behavior goes
-  to design.md instead. Add a root navigation reference only when a new
-  decision creates a durable guardrail contributors need before related work.
+- Start with [README](README.md), [CONTRIBUTING](docs/CONTRIBUTING.md), [overview](docs/design.md#工程概览),
+  and [vocabulary](CONTEXT.md). For usage consult [the skill](skills/netizen-user-guide/SKILL.md) and
+  [user guide](skills/netizen-user-guide/references/user-guide.md); they are not implementation guides.
+- Runtime: [identity](docs/design.md#scopebinding-与会话配置), [admission](docs/design.md#锁与输入准入),
+  [observation](docs/design.md#普通-turn-终态与观测恢复), [failures](docs/design.md#失败语义), [SDK adapters](docs/design.md#sdk-适配边界).
+  [Goal](docs/design.md#goal-物理-turn-与逻辑终态) retains exact physical-Turn admission across rollover;
+  Ordinary/Side/Goal steer and verified ordinary-resume rejections preserve separate cancellation and Goal receipt-identity protections.
+  [Side](docs/design.md#side-运行与关闭), [subscriptions](docs/design.md#普通会话订阅), and
+  [lifecycle/forks](docs/design.md#普通会话生命周期) preserve exact native results and Binding-local restore uncertainty;
+  [removal](docs/design.md#原生归档与删除) and background naming retain their separate failure/cleanup boundaries.
+- [Missing-current creation](docs/design.md#聊天默认配置与自动创建) uses chat defaults and the original message Scope;
+  keep `/new`, input admission and Project deletion independent of those rules.
+- [Collaboration](docs/design.md#普通会话协作): native Thread IDs, instance tool ranges and narrow ExternalMessage start/join;
+  preserve human/card/scheduled exact-Turn admission and [directory/read/wait pagination](docs/design.md#工具与可访问目录).
+- [Input preparation](docs/design.md#消息输入准备) owns provenance, mention catch-up, quotes and images.
+  [Attachments](docs/design.md#输入文件附件): complete publication, exact local ownership and manual deletion independent
+  of native acceptance; no receipt locks or inferred attachment history. [Questions](docs/design.md#原生问题卡片与回答)
+  use target-specific Binding/Side admission; preserve exact identity, context, display and file-evidence contracts.
+- [Presentation](docs/design.md#回复与活动展示): stable partial answers retain Goal rollover fragments.
+  [Progress settings](docs/design.md#过程卡展示设置): independent bounded windows, preserved segments, self-contained pagination;
+  resolve missing intent from instance fallback only at execution capture, preserve explicit historical values, never persist the fallback.
+  [Commands/cards](docs/design.md#飞书命令与控制卡片) own controls, forms and callbacks.
+- [SQLite](docs/design.md#channel-数据库与结构校验), [credentials](docs/design.md#飞书应用凭据), and
+  [native environment](docs/design.md#原生环境与能力配置) own data, schema, App source and configuration boundaries.
+- [Admin](docs/design.md#管理查询与操作): Feishu administrator identities and [runtime polling](docs/design.md#运行态投影与轮询).
+  [Project browsing](docs/design.md#project-文件查看): current-directory identity, bounded descriptor-relative reads, inert previews,
+  no download endpoint; keep it separate from exact-Turn Files. [Project deletion](docs/design.md#project-删除与交接)
+  preserves exact inventory, tombstones and lifecycle boundaries.
+- [Worktrees](docs/design.md#受管-worktree-与实际目录): independent ownership, actual cwd and optional cascade;
+  Git owns live filesystem facts; manage only resources created by the shared service, never external App/CLI worktrees.
+- [Schedules](docs/design.md#定时任务) own plans, dispatch, ordinary topics, MCP management and saved-plan manual runs.
+  [Existing-Binding inputs](docs/design.md#原会话目标) retain ordinary start/steer admission/feedback, input-receipt Runs,
+  and lifecycle suspension independent of manual enablement.
+- [CLI](docs/cli.md) and [deployment](docs/deployment.md): environment-scoped packages replace per-instance releases.
+  Routine Agent installation starts with README and setup output; use [relay guidance](docs/deployment.md#agent-驱动首次安装)
+  for alternatives/troubleshooting. Read relevant acceptance gates before deployment changes and
+  [multi-instance/Skills gates](docs/deployment.md#多实例与内置-skills-验收) with separate platform/live status before rollout.
+- [Runtime Agent guidance](docs/design.md#运行环境提示与使用指南的边界) stays separate from user guidance;
+  follow its description/body boundary and size budgets before adding execution hints.
+- [ADR index](docs/adr/README.md) owns status/amendment chains and [admission](docs/adr/README.md#何时写-adr).
+  Feature behavior belongs in design.md; add root navigation only for new durable contributor guardrails.
 
 ## Architecture
 
