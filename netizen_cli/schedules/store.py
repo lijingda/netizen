@@ -361,7 +361,7 @@ class ScheduleStore:
         elif plan.target_kind == "binding":
             if (not isinstance(plan.target_binding_id, str) or not plan.target_binding_id
                     or plan.session_settings is not None or plan.workspace is not None or plan.auto_archive):
-                raise ScheduleError("原会话计划需要准确 Binding，并沿用该会话设置与工作目录。")
+                raise ScheduleError("原会话计划需要明确目标会话，并沿用该会话设置与工作目录。")
         else:
             raise ScheduleError("执行目标仅支持新话题或原会话。")
         if not isinstance(plan.source, str) or len(plan.source) > 1000:

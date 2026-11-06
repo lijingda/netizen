@@ -434,7 +434,7 @@ class SideChannel(PromptChannel):
         if closed.missing_runtime_session:
             await self._update_side_card(
                 closed.record,
-                notice="Side 创建未完成，且没有可重试的原生 Session。",
+                notice="Side 创建未完成，且没有可重试的 Codex 会话。",
                 notice_is_error=True,
             )
             await self._reply(
@@ -499,7 +499,7 @@ class SideChannel(PromptChannel):
                 not in self._runtime.available_capabilities
             ):
                 raise InvalidInteraction(
-                    "当前原生 Skills discovery 不可用，$skill 引用未执行。"
+                    "当前 Codex Skills 发现功能不可用，$skill 引用未执行。"
                 )
         source_message_id = _message_id(message)
         requires_mention = _message_chat_type(message) != "p2p"

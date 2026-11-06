@@ -69,7 +69,7 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
             binding = self._bindings.get(binding_id)
             if binding.native_thread_id is None:
                 raise ThreadNotMaterialized(
-                    "Lazy 会话没有原生历史可归档；如不再需要，请使用 /delete。"
+                    "Lazy 会话没有 Codex 历史可归档；如不再需要，请使用 /delete。"
                 )
             operation = self._begin_lifecycle_locked(
                 binding,
@@ -98,19 +98,19 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
             except Exception as reconcile_error:
                 await self._mark_lifecycle_unknown(operation)
                 raise ThreadLifecycleStateUnknown(
-                    "Codex 会话归档结果与原生目录均未确认；Binding 保留，"
+                    "Codex 会话归档结果与 Codex 目录均未确认；会话保留，"
                     "请稍后重新检查。"
                 ) from reconcile_error
             if state is NativeThreadCatalogState.ACTIVE:
                 await self._release_lifecycle_reservation(operation)
                 raise ThreadLifecycleError(
-                    "Codex 会话仍在 active 目录，Binding 已保留；"
+                    "Codex 会话仍在 active 目录，会话已保留；"
                     "本次归档未完成，请重新确认后重试。"
                 ) from mutation_error
             if state is not NativeThreadCatalogState.ARCHIVED:
                 await self._mark_lifecycle_unknown(operation)
                 raise ThreadLifecycleStateUnknown(
-                    "Codex 会话归档结果无法由原生目录确认；Binding 保留，"
+                    "Codex 会话归档结果无法由 Codex 目录确认；会话保留，"
                     "请稍后重新检查。"
                 ) from mutation_error
 
@@ -135,7 +135,7 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
                     self._finish_lifecycle_locked(operation)
         if local_commit_error is not None:
             raise ThreadLifecycleStateUnknown(
-                "原生 Codex 会话已归档，但本地 Binding 更新结果未确认。"
+                "Codex 会话已归档，但 Netizen 中的会话记录更新结果未确认。"
             ) from local_commit_error
         return archived
 
@@ -192,10 +192,10 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
             if binding.native_thread_id != expected_native_thread_id:
                 if not allow_materialized and binding.native_thread_id is not None:
                     raise ThreadDeleteUnavailable(
-                        "已有原生历史的会话不支持 Lazy 删除；本次未调用 Codex。"
+                        "已有 Codex 历史的会话不支持 Lazy 删除；本次未调用 Codex。"
                     )
                 raise ThreadDeleteTargetChanged(
-                    "会话的原生 Thread 已变化，本删除确认未执行；"
+                    "会话对应的 Codex 会话已变化，本删除确认未执行；"
                     "请重新发送 /delete。"
                 )
 
@@ -216,14 +216,14 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
 
             if not allow_materialized:
                 raise ThreadDeleteUnavailable(
-                    "已有原生历史的会话不支持删除；本次未调用 Codex。"
+                    "已有 Codex 历史的会话不支持删除；本次未调用 Codex。"
                 )
 
             control = self._thread_delete_control
             if control is None:
                 raise ThreadDeleteUnavailable(
                     "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
-                    "本次未调用 Codex，Binding 与原生历史均未改变。"
+                    "本次未调用 Codex，会话与 Codex 历史均未改变。"
                 )
             operation = self._begin_lifecycle_locked(
                 binding,
@@ -243,7 +243,7 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
             await self._release_lifecycle_reservation(operation)
             raise ThreadDeleteUnavailable(
                 "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
-                "本次未调用 Codex，Binding 与原生历史均未改变。"
+                "本次未调用 Codex，会话与 Codex 历史均未改变。"
             )
 
         try:
@@ -266,14 +266,14 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
             finally:
                 await self._release_lifecycle_reservation(operation)
             raise ThreadLifecycleError(
-                "Codex 未完成本次删除，Binding 已保留；"
+                "Codex 未完成本次删除，会话已保留；"
                 "原有运行活动可能已停止，请重新确认后再操作。"
             ) from error
         except Exception as error:
             await self._mark_lifecycle_unknown(operation)
             raise ThreadLifecycleStateUnknown(
-                "Codex 会话删除结果未确认；Binding 已保留，"
-                "当前 Binding 生命周期状态未知，不能自动重试。"
+                "Codex 会话删除结果未确认；会话已保留，"
+                "当前会话生命周期状态未知，不能自动重试。"
             ) from error
 
         local_commit_error: Exception | None = None
@@ -297,7 +297,7 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
                     self._finish_lifecycle_locked(operation)
         if local_commit_error is not None:
             raise ThreadLifecycleStateUnknown(
-                "原生 Codex 会话已删除，但 Binding 删除结果未确认。"
+                "Codex 会话已删除，但 Netizen 中的会话记录删除结果未确认。"
             ) from local_commit_error
         return deleted
 
@@ -404,9 +404,9 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
                     if rejection is None:
                         raise
                     reasons = {
-                        "archived": "原生会话目前已归档，请重新发起恢复。",
-                        "not_found": "未找到该原生会话的可恢复记录。",
-                        "closing": "原生会话正在关闭，请等待完成后重新操作。",
+                        "archived": "Codex 会话目前已归档，请重新发起恢复。",
+                        "not_found": "未找到该 Codex 会话的可恢复记录。",
+                        "closing": "Codex 会话正在关闭，请等待完成后重新操作。",
                         "occupied": (
                             "无法取得该会话，可能由其他 Codex 实例占用。"
                             "请释放占用后重新操作。"
@@ -450,16 +450,16 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
                 self._retain_unknown_lifecycle(operation)
                 if resumed:
                     message = (
-                        "原生 Codex 会话已恢复，但本地切换结果未确认；"
+                        "Codex 会话已恢复，但本地切换结果未确认；"
                         if activate else
-                        "原生 Codex 会话已恢复，但本地订阅状态未确认；"
+                        "Codex 会话已恢复，但本地订阅状态未确认；"
                     )
                 elif unarchived:
                     message = "本次已解除归档，但后续会话恢复结果未确认；"
                 else:
                     message = "Codex 会话恢复结果未确认；"
                 raise ThreadLifecycleStateUnknown(
-                    message + "当前 Binding "
+                    message + "当前会话"
                     "的生命周期状态待对账。"
                 ) from error
             self._finish_lifecycle_locked(operation)
@@ -645,7 +645,7 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
     ) -> NativeThread:
         thread_id = binding.native_thread_id
         if thread_id is None:
-            raise ThreadNotMaterialized("当前会话尚未创建原生 Codex Thread。")
+            raise ThreadNotMaterialized("当前会话尚未在 Codex 中创建。")
         active_turn = self._active.get(binding.id)
         if active_turn is not None:
             thread = active_turn.thread

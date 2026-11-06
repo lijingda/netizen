@@ -142,7 +142,7 @@ def _stop_disposition_message(disposition: StopDisposition) -> str:
     return {
         StopDisposition.NOT_RUNNING: "该会话当前没有运行任务。",
         StopDisposition.REQUESTED: (
-            "已请求中断 exact Codex Turn；确认终态前仍会显示为停止中。"
+            "已请求中断这一轮 Codex 任务；确认终态前仍会显示为停止中。"
         ),
         StopDisposition.STOPPING: (
             "该会话正在停止；已再次尝试完成中断与终端清理。"
@@ -163,13 +163,13 @@ def _stop_disposition_message(disposition: StopDisposition) -> str:
 def _release_disposition_message(disposition: ReleaseDisposition) -> str:
     return {
         ReleaseDisposition.NOT_MATERIALIZED: (
-            "该会话尚未物化，没有原生 Thread 订阅可释放。"
+            "该会话尚未开始，没有 Codex 会话订阅可释放。"
         ),
         ReleaseDisposition.NOT_SUBSCRIBED: (
-            "本进程当前没有该 Thread 的订阅；Binding 与原生历史均保留。"
+            "本进程当前没有该 Thread 的订阅；会话与 Codex 历史均保留。"
         ),
         ReleaseDisposition.RELEASED: (
-            "已取消本进程对该 Thread 的订阅；Binding 与原生历史均保留，"
+            "已取消本进程对该 Thread 的订阅；会话与 Codex 历史均保留，"
             "下次消息仍会 resume 同一 Thread。"
         ),
     }[disposition]

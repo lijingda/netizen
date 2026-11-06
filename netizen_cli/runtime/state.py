@@ -517,15 +517,15 @@ class RuntimeState:
             rejection = _resume_rejection(error, thread_id)
             if rejection == "archived":
                 raise ThreadArchived(
-                    "原生会话已归档；请先使用“恢复归档并切换”。"
+                    "Codex 会话已归档；请先使用“恢复归档并切换”。"
                 ) from error
             if rejection == "not_found":
                 raise ThreadResumeNotFound(
-                    "未找到该原生会话的可恢复记录；Binding 已保留。"
+                    "未找到该 Codex 会话的可恢复记录；会话已保留。"
                 ) from error
             if rejection == "closing":
                 raise ThreadLifecycleError(
-                    "原生会话正在关闭；请等待关闭完成后再恢复。"
+                    "Codex 会话正在关闭；请等待关闭完成后再恢复。"
                 ) from error
             if rejection == "occupied":
                 raise ThreadOccupied(
@@ -575,7 +575,7 @@ class RuntimeState:
 
     def _require_goal_control(self) -> GoalControl:
         if self._goal_control is None:
-            raise GoalControlError("当前原生 Goal 兼容能力不可用。")
+            raise GoalControlError("当前 Codex Goal 兼容能力不可用。")
         return self._goal_control
 
     @staticmethod
@@ -644,7 +644,7 @@ class RuntimeState:
         actual_turn_id = active.handle.id if active is not None else None
         if actual_turn_id != expected_turn_id:
             raise ThreadActivityChanged(
-                "会话的 exact Turn 已经变化，本次操作未执行；"
+                "会话当前的任务已经变化，本次操作未执行；"
                 "请刷新 /sessions。"
             )
 

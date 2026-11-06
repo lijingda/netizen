@@ -84,7 +84,7 @@ class NativeQueryRuntime(ForkRuntime):
             raise SteerRace("读取来源模型期间会话身份已变化，本次未创建。")
         model = getattr(native, "model", None)
         if not isinstance(model, str) or not model:
-            raise ModelCatalogError("来源原生会话未返回模型，无法确认继承配置。")
+            raise ModelCatalogError("来源 Codex 会话未返回模型，无法确认继承配置。")
         return model
 
     async def resolve_binding_cwd(
@@ -103,13 +103,13 @@ class NativeQueryRuntime(ForkRuntime):
     async def native_thread_cwd(self, binding_id: str) -> Path:
         binding = self._bindings.get(binding_id)
         if binding.native_thread_id is None:
-            raise ThreadNotMaterialized("会话尚未生成 Codex Thread，无法读取原生工作目录。")
+            raise ThreadNotMaterialized("会话尚未生成 Codex Thread，无法读取 Codex 工作目录。")
         response = await self._thread_handle(binding.native_thread_id).read(
             include_turns=False,
         )
         current = self._bindings.get(binding_id)
         if current.native_thread_id != binding.native_thread_id:
-            raise SteerRace("读取原生工作目录期间会话身份已变化。")
+            raise SteerRace("读取 Codex 工作目录期间会话身份已变化。")
         cwd = _native_cwd(getattr(response, "thread", None), binding.native_thread_id)
         self._bindings.sync_native_workspace(
             binding_id, expected_native_thread_id=binding.native_thread_id,
@@ -135,7 +135,7 @@ class NativeQueryRuntime(ForkRuntime):
             cwd = _native_cwd(getattr(response, "thread", None), thread.id)
         except Exception as error:
             raise SteerRace(
-                "无法确认恢复后的原生工作目录，本条消息未执行；请稍后重新发送。"
+                "无法确认恢复后的 Codex 工作目录，本条消息未执行；请稍后重新发送。"
             ) from error
         return self._adopt_native_cwd(
             binding_id=binding_id, thread_id=thread.id, native_cwd=cwd,

@@ -655,7 +655,7 @@ class CompletionPresentationChannel(ChannelReplies):
             notice = {
                 SideTopicState.CLOSED: "本临时对话已结束，历史消息仍可查看。",
                 SideTopicState.EXPIRED: "本临时对话已因空闲超时或服务重启而过期；历史消息仍可查看。",
-                SideTopicState.FAILED: "Side 创建失败，已释放可确认的原生资源。",
+                SideTopicState.FAILED: "Side 创建失败，已释放可确认的 Codex 资源。",
             }.get(record.state)
             await self._update_side_card(record, notice=notice)
             return

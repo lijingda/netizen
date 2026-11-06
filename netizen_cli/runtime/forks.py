@@ -104,7 +104,7 @@ class ForkRuntime(BindingOccupancyRuntime):
             raise SteerRace("来源会话或配置已变化，请重新发送 /fork。")
         if current.native_thread_id is None:
             raise ThreadNotMaterialized(
-                "当前会话尚无原生上下文；请先发送一条任务，再使用 /fork。"
+                "当前会话尚无 Codex 上下文；请先发送一条任务，再使用 /fork。"
             )
         project = self._bindings.get_project(current.project_alias)
         if not project.enabled:
@@ -140,10 +140,10 @@ class ForkRuntime(BindingOccupancyRuntime):
                 getattr(native, "id", None) != current.native_thread_id
                 or getattr(native, "ephemeral", None) is not False
             ):
-                raise ThreadLifecycleError("无法确认来源原生会话身份，本次未创建分支。")
+                raise ThreadLifecycleError("无法确认来源 Codex 会话身份，本次未创建分支。")
             if _thread_status_type(native) not in {"idle", "notLoaded"}:
                 raise ThreadRunningConfiguration(
-                    "来源原生会话尚未确认空闲，本次未创建分支。"
+                    "来源 Codex 会话尚未确认空闲，本次未创建分支。"
                 )
             # Source settings and Project admission may change during the
             # read-only awaits. No new native request follows a stale snapshot.
@@ -160,7 +160,7 @@ class ForkRuntime(BindingOccupancyRuntime):
                 ) from error
             except Exception as error:
                 raise ThreadLifecycleError(
-                    "原生分支创建结果未确认；本次不自动重试，可能需人工核查。"
+                    "Codex 分支创建结果未确认；本次不自动重试，可能需人工核查。"
                 ) from error
             if (
                 not isinstance(getattr(thread, "id", None), str)
@@ -189,7 +189,7 @@ class ForkRuntime(BindingOccupancyRuntime):
                 or current.scope_key != binding.scope_key
                 or current.project_alias != binding.project_alias
             ):
-                raise SteerRace("分支绑定身份已变化，不能登记原生订阅。")
+                raise SteerRace("分支绑定身份已变化，不能登记 Codex 订阅。")
             record = self._mark_thread_subscribed_locked(current, thread)
             try:
                 if name is not None:

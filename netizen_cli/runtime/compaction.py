@@ -77,7 +77,7 @@ class CompactionRuntime(TurnControlRuntime):
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
                 raise ThreadNotMaterialized(
-                    "当前会话尚未创建原生 Codex Thread；"
+                    "当前会话尚未在 Codex 中创建；"
                     "请先发送一条真实任务，再使用 /compact。"
                 )
             try:
@@ -108,17 +108,17 @@ class CompactionRuntime(TurnControlRuntime):
                 raise
             except Exception as error:
                 raise ThreadCompactStartFailed(
-                    "无法读取原生 Codex Thread，未开始压缩；请重试。"
+                    "无法读取 Codex 会话，未开始压缩；请重试。"
                 ) from error
             status = _thread_status_type(baseline)
             if status != "idle":
                 if status == "active":
                     raise ThreadRunningConfiguration(
-                        "原生 Codex Thread 当前正在执行其他任务，不能压缩；"
+                        "Codex 会话当前正在执行其他任务，不能压缩；"
                         "请等待其完成。"
                     )
                 raise ThreadCompactStartFailed(
-                    f"原生 Codex Thread 状态异常：{status!r}，未开始压缩。"
+                    f"Codex 会话状态异常：{status!r}，未开始压缩。"
                 )
             before_turn_ids = frozenset(
                 str(turn_id)
@@ -126,7 +126,7 @@ class CompactionRuntime(TurnControlRuntime):
                 if (turn_id := getattr(turn, "id", None))
             )
             if not before_turn_ids:
-                raise ThreadNotMaterialized("当前会话还没有可压缩的原生 Turn。")
+                raise ThreadNotMaterialized("当前会话还没有可压缩的 Codex 任务。")
 
             receipt_attempted = asyncio.Event()
             active = _ActiveCompaction(
@@ -354,10 +354,10 @@ class CompactionRuntime(TurnControlRuntime):
                 raise CompactionFailed(
                     message
                     if isinstance(message, str) and message
-                    else "原生 Codex 上下文压缩失败。"
+                    else "Codex 上下文压缩失败。"
                 )
             if status == "interrupted":
-                message = "原生 Codex 上下文压缩被中断。"
+                message = "Codex 上下文压缩被中断。"
                 native_error = getattr(compact_turn, "error", None)
                 if native_error is not None:
                     message += f"中断原因：{describe_error(native_turn_failure(native_error))}"

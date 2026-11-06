@@ -12,7 +12,7 @@
 ## `/status`
 
 `/status` 用卡片展示当前状态和操作入口，按会话概览、模型配置、上下文用量和任务进展分组。
-完整的 Codex 会话 ID（Thread ID）、Netizen 会话编号（Binding ID）和连接信息放在可展开的
+完整的 Codex 会话 ID（Thread ID）、Netizen 会话编号和连接信息放在可展开的
 「会话详情与订阅」中：前者供跨会话工具引用，后者供 `/resume` 等管理操作使用。再次发送
 `/status` 或点击“查看状态”会发送一张新的状态卡。
 

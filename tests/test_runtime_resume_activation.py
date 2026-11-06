@@ -184,7 +184,7 @@ class ResumeActivationTest(unittest.IsolatedAsyncioTestCase):
                     raise RuntimeError("local activation failed")
 
                 with patch.object(self.store, "activate", side_effect=failing_activate):
-                    with self.assertRaisesRegex(ThreadResumeFailed, "原生 Codex 会话已恢复，但本地切换结果未确认"):
+                    with self.assertRaisesRegex(ThreadResumeFailed, "Codex 会话已恢复，但本地切换结果未确认"):
                         await self.runtime.activate_exact(target.id)
                 self.assertEqual(
                     self.store.active_binding(self.scope.key).id,

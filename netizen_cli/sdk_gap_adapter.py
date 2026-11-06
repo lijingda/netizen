@@ -650,7 +650,7 @@ class AppServerGoalControl:
         snapshot = _goal_snapshot(goal)
         if snapshot.thread_id != thread_id:
             raise GoalControlError(
-                "Codex Goal 响应与请求的原生 Thread 不一致。"
+                "Codex Goal 响应与请求的 Codex 会话不一致。"
             )
         return snapshot
 
@@ -732,7 +732,7 @@ class AppServerGoalControl:
                 and error.code == -32600
                 and error.message == f"cannot update goal for thread {thread_id}: no goal exists"
             ):
-                raise GoalMutationRejected("原生 Goal 已不存在，本次状态修改未执行。") from error
+                raise GoalMutationRejected("Codex Goal 已不存在，本次状态修改未执行。") from error
             raise GoalMutationStateUnknown(
                 "Codex Goal 状态修改结果未确认；不能自动重试。"
             ) from error

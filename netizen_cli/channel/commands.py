@@ -447,7 +447,7 @@ class CommandChannel(CardControlChannel):
             return
         if binding.native_thread_id is None:
             raise ThreadNotMaterialized(
-                "当前会话尚未创建原生 Codex Thread；"
+                "当前会话尚未在 Codex 中创建；"
                 "请先发送一条真实任务，再使用 /rename。"
             )
         if not intent.arguments:
@@ -488,7 +488,7 @@ class CommandChannel(CardControlChannel):
             return
         if binding.native_thread_id is None:
             raise ThreadNotMaterialized(
-                "Lazy 会话没有原生历史可归档；如不再需要，请使用 /delete。"
+                "Lazy 会话没有 Codex 历史可归档；如不再需要，请使用 /delete。"
             )
         metadata = await self._read_thread_metadata((binding,))
         await self._reply(
@@ -517,7 +517,7 @@ class CommandChannel(CardControlChannel):
         ):
             raise ThreadDeleteUnavailable(
                 "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
-                "本次未调用 Codex，Binding 与原生历史均未改变。"
+                "本次未调用 Codex，会话与 Codex 历史均未改变。"
             )
         metadata = (
             await self._read_thread_metadata((binding,))
@@ -554,14 +554,14 @@ class CommandChannel(CardControlChannel):
             ) from error
         disposition = released.disposition
         if disposition is ReleaseDisposition.NOT_MATERIALIZED:
-            notice = "当前会话尚未物化，没有原生 Thread 订阅可释放。"
+            notice = "当前会话尚未开始，没有 Codex 会话订阅可释放。"
         elif disposition is ReleaseDisposition.NOT_SUBSCRIBED:
             notice = (
-                "本进程当前没有该 Thread 的订阅；Binding 与原生历史均保留。"
+                "本进程当前没有该 Thread 的订阅；会话与 Codex 历史均保留。"
             )
         else:
             notice = (
-                "已取消本进程对当前 Thread 的订阅；Binding 与原生历史均保留，"
+                "已取消本进程对当前 Thread 的订阅；会话与 Codex 历史均保留，"
                 "下次消息仍会 resume 同一 Thread。"
                 "这不表示 App Server writer 已立即释放。"
             )
@@ -685,5 +685,5 @@ class CommandChannel(CardControlChannel):
             await self._reply(
                 message,
                 "当前是重启前或外部客户端启动的 active Goal；"
-                "本服务无法安全重挂并中断，请先在原生 Codex 中暂停。",
+                "本服务无法安全重挂并中断，请先在 Codex 中暂停。",
             )

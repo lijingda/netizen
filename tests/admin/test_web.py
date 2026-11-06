@@ -3017,10 +3017,10 @@ class AdminStaticAssetsTest(unittest.TestCase):
             javascript,
         )
         self.assertIn(
-            'window.confirm("永久删除这个 Lazy Binding？") && mutate("/api/v1/sessions/delete-lazy"',
+            'window.confirm("永久删除这个尚未开始的会话？") && mutate("/api/v1/sessions/delete-lazy"',
             javascript,
         )
-        self.assertIn("spawned descendants", javascript)
+        self.assertIn("派生会话", javascript)
         self.assertNotIn("delete-session-confirmation", html)
         self.assertIn('link.rel = "noopener noreferrer"', javascript)
         self.assertIn("await refresh(state.tab)", javascript)

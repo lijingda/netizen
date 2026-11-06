@@ -446,7 +446,7 @@ class SubmissionRuntime(CompactionRuntime):
                 # without consuming an admission revision. Its cwd no longer
                 # belongs to the lazy directory used for Skill discovery.
                 raise SteerRace(
-                    "准备 Skill 输入期间原生会话身份已变化，本条消息未执行，请重新发送。"
+                    "准备 Skill 输入期间 Codex 会话身份已变化，本条消息未执行，请重新发送。"
                 )
             if prepared_skill_thread is not None:
                 prepared_thread, prepared_subscription, generation = prepared_skill_thread
@@ -982,7 +982,7 @@ class SubmissionRuntime(CompactionRuntime):
             raise SkillReferenceError("同一条消息不能重复引用一个 Skill。")
         catalog = self._skill_catalog
         if catalog is None:
-            raise SkillReferenceError("当前原生 Skills discovery 不可用。")
+            raise SkillReferenceError("当前 Codex Skills 发现功能不可用。")
         snapshot = await catalog.list(cwd, force_reload=True)
         if snapshot.errors:
             raise SkillReferenceError(

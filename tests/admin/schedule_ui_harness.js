@@ -1016,7 +1016,7 @@ async function chooseScheduleTarget(value) {
   assert(scheduleInput("target-note").textContent.includes("实际工作目录"));
   assert(scheduleInput("binding-summary").textContent.includes("已登记工作目录：/managed/original/subproject"));
   assert(scheduleInput("binding-summary").textContent.includes("worktree：wt-original"));
-  assert(scheduleInput("binding-summary").textContent.includes("本次未查询原生目录"));
+  assert(scheduleInput("binding-summary").textContent.includes("本次未查询 Codex 中的工作目录"));
   assert.equal(scheduleEditorHasChanges(), false);
   assert(scheduleInheritedWorkspace({ effective_workspace: { working_cwd: "/selected/lazy",
     native_cwd_unresolved: false } }).includes("已选工作目录：/selected/lazy"));

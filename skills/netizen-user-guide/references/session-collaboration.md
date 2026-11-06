@@ -26,7 +26,7 @@ Netizen 会在当前聊天中新建普通话题。来源已经是话题时，新
 
 可以直接提供完整 **Codex 会话 ID（Thread ID）**，例如“读取 Codex 会话 `<完整 ID>`
 最近的回答”。在 `/status` 详情、`/sessions`、归档列表或 Admin 的标识区域取得完整值；
-查看 ID 不需要把目标切回当前。不要把 **Netizen 会话编号（Binding ID）** 或飞书聊天/
+查看 ID 不需要把目标切回当前。不要把 **Netizen 会话编号** 或飞书聊天/
 话题 ID 填成跨会话目标；短 Netizen 编号继续用于原有 `/resume` 等人工控制。
 尚未收到首条任务的空会话可能还没有 Codex 会话 ID，界面会明确提示。
 

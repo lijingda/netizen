@@ -138,7 +138,7 @@ class StatusCommandsTest(unittest.IsolatedAsyncioTestCase):
         scope, card = await self.panel()
         binding = self.store.active_binding(scope.key)
         await self.app.handle_card_action(self.event(card, "归档"))
-        self.assertIn("Lazy 会话没有原生历史可归档", self.channel.replies[-1][1])
+        self.assertIn("Lazy 会话没有 Codex 历史可归档", self.channel.replies[-1][1])
         self.assertEqual(self.runtime.archive_binding_calls, [])
         self.runtime.materialize(binding.id, "native-one", cwd=self.fixture.project)
         self.runtime.active[binding.id] = ActiveTurnSnapshot(

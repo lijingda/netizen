@@ -1090,7 +1090,7 @@ class InstanceManagementService:
         if not self.native_delete_available and any(
             item.binding.native_thread_id is not None for item in snapshot.bindings
         ):
-            raise ThreadDeleteUnavailable("原生会话删除能力不可用，Project 未删除。")
+            raise ThreadDeleteUnavailable("Codex 会话删除能力不可用，Project 未删除。")
 
     def _project_side_ids(self, alias: str) -> tuple[str, ...]:
         return tuple(side.side_id for side in self._runtime.project_side_snapshots(alias))
@@ -2112,7 +2112,7 @@ class InstanceManagementService:
             binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
                 raise ThreadDeleteTargetChanged(
-                    "会话的原生 Thread 已变化，本删除确认未执行。"
+                    "会话对应的 Codex 会话已变化，本删除确认未执行。"
                 )
         deleted = await self._runtime.delete_exact(
             binding.id,
@@ -2134,7 +2134,7 @@ class InstanceManagementService:
             binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
                 raise ThreadDeleteTargetChanged(
-                    "归档会话的原生 Thread 已变化，本删除确认未执行。"
+                    "归档会话对应的 Codex 会话已变化，本删除确认未执行。"
                 )
         deleted = await self._runtime.delete_archived_exact(
             binding.id,

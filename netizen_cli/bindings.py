@@ -987,7 +987,7 @@ class BindingStore:
                 worktree_id=source.worktree_id,
             )
         except sqlite3.IntegrityError as error:
-            raise BindingConflict("原生分支已绑定到其他会话，本次未覆盖。") from error
+            raise BindingConflict("Codex 分支已绑定到其他会话，本次未覆盖。") from error
 
     def _create_binding(
         self,
@@ -1388,7 +1388,7 @@ class BindingStore:
                 ),
             )
             if cursor.rowcount != 1:
-                raise BindingConflict("Binding configuration changed concurrently")
+                raise BindingConflict("会话配置已被其他操作修改")
         return self.get(binding_id)
 
     def commit_context_anchor(
@@ -1575,7 +1575,7 @@ class BindingStore:
         with self._transaction():
             binding = self.get(binding_id)
             if binding.native_thread_id != expected_native_thread_id:
-                raise BindingConflict("原生会话身份已变化，本次未同步 worktree 关联。")
+                raise BindingConflict("Codex 会话身份已变化，本次未同步 worktree 关联。")
             self.worktrees.require_binding_not_deleting(binding_id)
             self.worktrees.require_cwd_not_deleting(working_cwd)
             project = self.get_project(binding.project_alias)

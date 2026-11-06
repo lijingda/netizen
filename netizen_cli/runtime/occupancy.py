@@ -91,7 +91,7 @@ class BindingOccupancyRuntime(ThreadSubscriptionRuntime):
             if record.thread_id != binding.native_thread_id:
                 self.close_admission()
                 raise ThreadReleaseStateUnknown(
-                    "本进程记录的 Thread 订阅与当前 Binding 不一致；"
+                    "本进程记录的 Thread 订阅与当前会话不一致；"
                     "服务已停止接收新任务。"
                 )
             self._cancel_subscription_idle(record)
@@ -166,7 +166,7 @@ class BindingOccupancyRuntime(ThreadSubscriptionRuntime):
                     raise RuntimeError("native Goal Thread is not confirmed idle")
         except Exception as error:
             raise GoalStateUnknown(
-                "本次 Goal 观察已停止，尚未确认原生会话空闲；"
+                "本次 Goal 观察已停止，尚未确认 Codex 会话空闲；"
                 "本次操作未执行，请稍后重试。其他会话可继续使用。"
             ) from error
         if self._goals.get(binding.id) is not active:
@@ -213,7 +213,7 @@ class BindingOccupancyRuntime(ThreadSubscriptionRuntime):
         if active.state is GoalOperationState.EXTERNAL_ACTIVE:
             return ExternalGoalActive(
                 "当前 Thread 有重启前或外部客户端启动的 active Goal；"
-                "本服务不会猜测重挂，请先在原生 Codex 中暂停，再查看或清除。"
+                "本服务不会猜测重挂，请先在 Codex 中暂停，再查看或清除。"
             )
         if active.state in {GoalOperationState.STARTING, GoalOperationState.RUNNING}:
             return ThreadGoalActive(
@@ -222,5 +222,5 @@ class BindingOccupancyRuntime(ThreadSubscriptionRuntime):
         if active.state is GoalOperationState.PAUSING:
             return ThreadGoalActive("当前 Goal 正在暂停，完成前暂不接受新任务。")
         return GoalStateUnknown(
-            "当前 Goal 状态未确认；该会话保持占用，不能开始新的原生操作。"
+            "当前 Goal 状态未确认；该会话保持占用，不能开始新的 Codex 操作。"
         )

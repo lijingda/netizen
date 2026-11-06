@@ -275,7 +275,7 @@ def _thread_subscription_status_line(
     if snapshot.state is ThreadSubscriptionState.RELEASE_PENDING:
         suffix = _subscription_release_countdown(snapshot.release_in_seconds)
         return f"Netizen 订阅：本进程已订阅；{suffix}"
-    return "Netizen 订阅：本进程已订阅（当前有原生活动）"
+    return "Netizen 订阅：本进程已订阅（当前有 Codex 活动）"
 
 
 def _subscription_release_countdown(seconds: float | None) -> str:

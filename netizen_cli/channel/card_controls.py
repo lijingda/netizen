@@ -562,7 +562,7 @@ class CardControlChannel(TurnFileChannel):
                 short_id=archived.short_id,
                 project_alias=archived.project_alias,
                 message=(
-                    "✅ 原生 Codex 会话已归档，当前 Scope 已没有 active 会话。"
+                    "✅ Codex 会话已归档，当前 Scope 已没有 active 会话。"
                     "\n\n发送 `/sessions archived` 可查看和恢复。"
                 ),
             ),
@@ -595,7 +595,7 @@ class CardControlChannel(TurnFileChannel):
                 project_alias=deleted.project_alias,
                 message=(
                     (
-                        "✅ 原生 Codex 会话及本地 Binding 已永久删除，"
+                        "✅ Codex 会话及 Netizen 中的会话记录已永久删除，"
                         "当前 Scope 已没有 active 会话。"
                         if deleted.native_thread_id is not None
                         else "✅ 当前 Lazy 会话已删除，当前 Scope 已没有 active 会话。"
@@ -632,7 +632,7 @@ class CardControlChannel(TurnFileChannel):
                 title="会话已恢复并切换",
                 short_id=restored.short_id,
                 project_alias=restored.project_alias,
-                message="✅ 已恢复原生 Codex 会话，并切换为当前会话。",
+                message="✅ 已恢复 Codex 会话，并切换为当前会话。",
             ),
         )
         if not updated:
@@ -722,7 +722,7 @@ class CardControlChannel(TurnFileChannel):
             raise BindingNotFound(intent.binding_id)
         if binding.native_thread_id != intent.expected_native_thread_id:
             raise CardActionError(
-                "会话的原生历史已变化，请重新发送 /sessions 后再删除。"
+                "会话的 Codex 历史已变化，请重新发送 /sessions 后再删除。"
             )
         if (
             binding.native_thread_id is not None
@@ -777,13 +777,13 @@ class CardControlChannel(TurnFileChannel):
             )
         except ThreadDeleteTargetChanged as error:
             raise CardActionError(
-                "会话的原生历史已变化，本次删除未执行；"
+                "会话的 Codex 历史已变化，本次删除未执行；"
                 "请重新发送 /sessions。"
             ) from error
         success_notice = (
             (
-                f"✅ 已永久删除原生 Codex 会话 {deleted.short_id}"
-                f"（{deleted.project_alias}）及本地 Binding。"
+                f"✅ 已永久删除 Codex 会话 {deleted.short_id}"
+                f"（{deleted.project_alias}）及 Netizen 中的会话记录。"
             )
             if deleted.native_thread_id is not None
             else (
@@ -833,7 +833,7 @@ class CardControlChannel(TurnFileChannel):
         notices = {
             StopDisposition.NOT_RUNNING: "✅ 该会话的任务刚刚已经结束。",
             StopDisposition.REQUESTED: (
-                "已请求中断 exact Codex Turn；确认终态前会话仍显示为停止中。"
+                "已请求中断这一轮 Codex 任务；确认终态前会话仍显示为停止中。"
             ),
             StopDisposition.STOPPING: (
                 "该会话正在停止；已再次尝试完成中断与终端清理。"
@@ -918,7 +918,7 @@ class CardControlChannel(TurnFileChannel):
             raise BindingNotFound(intent.binding_id)
         if binding.native_thread_id != intent.expected_native_thread_id:
             raise CardActionError(
-                "归档会话的原生历史已变化，请刷新后再删除。"
+                "归档会话的 Codex 历史已变化，请刷新后再删除。"
             )
         if NativeCapability.DELETE not in self._runtime.available_capabilities:
             raise ThreadDeleteUnavailable(
@@ -968,11 +968,11 @@ class CardControlChannel(TurnFileChannel):
             )
         except ThreadDeleteTargetChanged as error:
             raise CardActionError(
-                "归档会话的原生历史已变化，本次删除未执行；请刷新。"
+                "归档会话的 Codex 历史已变化，本次删除未执行；请刷新。"
             ) from error
         success_notice = (
             f"✅ 已永久删除归档会话 {deleted.short_id}"
-            f"（{deleted.project_alias}）、派生会话及本地 Binding。"
+            f"（{deleted.project_alias}）、派生会话及 Netizen 中的会话记录。"
         )
         try:
             refreshed = await self._safe_update_card(

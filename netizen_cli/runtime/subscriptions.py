@@ -179,7 +179,7 @@ class ThreadSubscriptionRuntime(RuntimeState):
                     self.close_admission()
                     logger.exception("could not schedule resumed Thread subscription")
                 raise ThreadResumeFailed(
-                    "原生 Codex 会话已恢复，但本地切换结果未确认；"
+                    "Codex 会话已恢复，但本地切换结果未确认；"
                     + (
                         "请检查当前会话后再操作。"
                         if self._accepting
@@ -403,7 +403,7 @@ class ThreadSubscriptionRuntime(RuntimeState):
                     delay=self._ordinary_thread_idle_seconds,
                 )
                 raise ThreadReleaseError(
-                    "无法确认原生 Thread 已空闲，本次未释放订阅。"
+                    "无法确认 Codex 会话已空闲，本次未释放订阅。"
                 ) from error
             self._schedule_subscription_release_locked(
                 record,
@@ -418,7 +418,7 @@ class ThreadSubscriptionRuntime(RuntimeState):
             )
             if explicit:
                 raise ThreadReleaseError(
-                    f"原生 Thread 状态为 {status!r}，本次未释放订阅。"
+                    f"Codex 会话状态为 {status!r}，本次未释放订阅。"
                 )
             return ReleaseDisposition.NOT_SUBSCRIBED
 

@@ -212,7 +212,7 @@ class WorktreeRuntimeCwdTest(unittest.IsolatedAsyncioTestCase):
     async def test_resume_cwd_read_failure_rejects_only_this_input(self):
         self.materialize()
         self.codex.read_errors.append(RuntimeError("read unavailable"))
-        with self.assertRaisesRegex(SteerRace, "无法确认恢复后的原生工作目录"):
+        with self.assertRaisesRegex(SteerRace, "无法确认恢复后的 Codex 工作目录"):
             await self.runtime.submit(
                 binding=self.binding, cwd=self.selected, input="prepared", owner_id="user", origin=object(),
             )
@@ -282,7 +282,7 @@ class WorktreeRuntimeCwdTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(catalog, "list", side_effect=discover), patch.object(
             self.runtime, "_commit_context_cursor_locked",
         ) as commit:
-            with self.assertRaisesRegex(SteerRace, "原生会话身份已变化"):
+            with self.assertRaisesRegex(SteerRace, "Codex 会话身份已变化"):
                 await self.runtime.submit(
                     binding=self.binding, cwd=self.selected, input="$review inspect",
                     owner_id="user", origin=object(), skill_names=("review",),

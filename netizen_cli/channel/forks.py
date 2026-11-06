@@ -71,7 +71,7 @@ class ForkChannel(SideChannel):
             await self._reply_no_current_binding(message, intent.scope)
             return
         if binding.native_thread_id is None:
-            raise ThreadNotMaterialized("当前会话尚无原生上下文；请先发送任务，再使用 /fork。")
+            raise ThreadNotMaterialized("当前会话尚无 Codex 上下文；请先发送任务，再使用 /fork。")
         project = self._bindings.get_project(binding.project_alias)
         self._bindings.require_project_not_deleting(binding.project_alias)
         if not project.enabled:
@@ -270,7 +270,7 @@ class ForkChannel(SideChannel):
                     named = await self._runtime.adopt_fork(binding, thread, name=intent.name)
                 status = "success"
                 if not named:
-                    detail = "会话已创建；原生名称更新未确认，可稍后使用 /rename 修改。"
+                    detail = "会话已创建；Codex 名称更新未确认，可稍后使用 /rename 修改。"
             except asyncio.CancelledError:
                 raise
             except Exception as error:

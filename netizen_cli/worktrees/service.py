@@ -411,7 +411,7 @@ class WorktreeService:
         if any(side.parent_binding_id not in associated | project_deletion_bindings for side in sides):
             reasons.append("仍有非级联会话的 Side 使用此目录，请先结束该 Side。")
         if delete_sessions and any(binding.native_thread_id for binding in snapshot.bindings) and not self._management.native_delete_available:
-            reasons.append("原生会话删除能力不可用。")
+            reasons.append("Codex 会话删除能力不可用。")
         return reasons
 
     async def _delete_check(self, record: WorktreeRecord) -> tuple[WorktreeState, list[str]]:

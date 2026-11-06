@@ -99,5 +99,5 @@ def validate_topic_message(result: SendResult, chat_id: str) -> TopicMessage:
         or message_id is None or _nonempty_field(data, "message_id") != message_id
         or _nonempty_field(data, "chat_id") != chat_id
     ):
-        raise TopicPublishError("飞书消息响应缺少一致的 exact 消息和聊天标识。", unknown=True)
+        raise TopicPublishError("飞书消息响应缺少一致的消息和聊天标识。", unknown=True)
     return TopicMessage(message_id, chat_id, _nonempty_field(data, "thread_id"), _nonempty_field(data, "root_id"), _nonempty_field(data, "parent_id"))

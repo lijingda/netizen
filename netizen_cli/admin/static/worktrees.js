@@ -310,7 +310,7 @@ window.NetizenWorktrees = (() => {
       const bindings = preview.bindings || [];
       const identity = bindings.map((binding) => `${binding.shortId || binding.bindingId || binding.id}${binding.nativeThreadId ? ` (${binding.nativeThreadId})` : ""}`).join("、");
       const protectedNotice = preview.protectedSessionCount ? `\n另有 ${preview.protectedSessionCount} 个已知目录使用者，不在级联清单中，将保留其会话与原 cwd。` : "";
-      if (!window.confirm(`${preview.resource.state === "missing" ? "清理已缺失 worktree 的登记" : "删除受管 worktree"}？\ncheckout 根目录：${preview.resource.root || resource.root}\n会话工作目录：${preview.resource.cwd || resource.cwd}\n\n本实例关联会话：${bindings.length}${identity ? `\n${identity}` : ""}\n${preview.deleteSessions ? "同时永久删除关联会话及原生派生历史，无法恢复。" : "保留会话历史与原工作目录；目录删除后继续请求可能失败，不自动切回项目目录。"}${protectedNotice}\n仅依据本实例已知引用，无法排除外部客户端使用。目录没有快照恢复；操作会复核安全状态，部分成功不回滚。`)) {
+      if (!window.confirm(`${preview.resource.state === "missing" ? "清理已缺失 worktree 的登记" : "删除受管 worktree"}？\ncheckout 根目录：${preview.resource.root || resource.root}\n会话工作目录：${preview.resource.cwd || resource.cwd}\n\n本实例关联会话：${bindings.length}${identity ? `\n${identity}` : ""}\n${preview.deleteSessions ? "同时永久删除关联会话及 Codex 派生历史，无法恢复。" : "保留会话历史与原工作目录；目录删除后继续请求可能失败，不自动切回项目目录。"}${protectedNotice}\n仅依据本实例已知引用，无法排除外部客户端使用。目录没有快照恢复；操作会复核安全状态，部分成功不回滚。`)) {
         message("已取消，未提交删除。"); return;
       }
       submitted = true;

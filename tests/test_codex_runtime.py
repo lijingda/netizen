@@ -4986,7 +4986,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(message=message):
                 self.delete_control.errors.append(ThreadDeleteRejected(message))
-                with self.assertRaisesRegex(ThreadLifecycleError, "Binding 已保留"):
+                with self.assertRaisesRegex(ThreadLifecycleError, "会话已保留"):
                     await self.runtime.delete_exact(
                         binding.id, expected_native_thread_id="native-1",
                     )
@@ -8919,7 +8919,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_compact_requires_materialized_idle_binding(self) -> None:
         lazy = self.binding()
-        with self.assertRaisesRegex(ThreadNotMaterialized, "尚未创建"):
+        with self.assertRaisesRegex(ThreadNotMaterialized, "尚未在 Codex 中创建"):
             await self.runtime.compact(
                 binding=lazy,
                 owner_id="ou_user",
@@ -9075,7 +9075,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 detail = str(outcome.error)
                 self.assertIn("压缩被中断", detail)
                 if message is None:
-                    self.assertEqual(detail, "原生 Codex 上下文压缩被中断。")
+                    self.assertEqual(detail, "Codex 上下文压缩被中断。")
                 else:
                     self.assertIn("tooManyDenials", detail)
                     if message.startswith("API_KEY"):

@@ -120,7 +120,7 @@ class GoalRuntime(TurnObservationRuntime):
                 ):
                     self._mark_goal_observation_unavailable(active)
                     raise GoalStateUnknown(
-                        "当前原生 Goal 已变化，本次观察无法继续；"
+                        "当前 Codex Goal 已变化，本次观察无法继续；"
                         "稍后发送消息或查看 /goal 时会重新检查该会话是否空闲。"
                     )
                 if active.terminal_observed and snapshot is None and not active.goal_cleared:
@@ -177,7 +177,7 @@ class GoalRuntime(TurnObservationRuntime):
             if persisted is not None and persisted.status is GoalStatus.ACTIVE:
                 self._track_external_goal(binding, persisted, thread=thread)
                 raise ExternalGoalActive(
-                    "当前原生 Thread 已有外部 active Goal；不能启动第二个 Goal。"
+                    "当前 Codex 会话已有外部 active Goal；不能启动第二个 Goal。"
                 )
             receipt_attempted = asyncio.Event()
             active = _ActiveGoal(
@@ -220,7 +220,7 @@ class GoalRuntime(TurnObservationRuntime):
             receipt_attempted.set()
             self.close_admission()
             active.state = GoalOperationState.UNKNOWN
-            raise GoalStateUnknown("Goal handle 与原生 Thread 不一致。")
+            raise GoalStateUnknown("Goal handle 与 Codex 会话不一致。")
         active.handle = handle
         try:
             started = await control.get(thread.id)
@@ -281,7 +281,7 @@ class GoalRuntime(TurnObservationRuntime):
             self._bindings.worktrees.require_binding_not_deleting(binding.id)
             if binding.id in self._compacting or self._active.get(binding.id) is not None:
                 raise ThreadRunningConfiguration(
-                    "当前会话有其他原生操作，不能恢复 Goal。"
+                    "当前会话有其他 Codex 操作，不能恢复 Goal。"
                 )
             existing = self._goals.get(binding.id)
             if existing is not None:
@@ -333,7 +333,7 @@ class GoalRuntime(TurnObservationRuntime):
                 )
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
-                raise GoalNotMaterialized("当前会话还没有原生 Codex Thread。")
+                raise GoalNotMaterialized("当前会话尚未在 Codex 中创建。")
             thread = await self._open_goal_thread(binding=binding, creation_cwd=None)
             cwd = await self._validate_goal_thread_ready(thread)
             self._bindings.sync_native_workspace(
@@ -400,7 +400,7 @@ class GoalRuntime(TurnObservationRuntime):
             receipt_attempted.set()
             self.close_admission()
             active.state = GoalOperationState.UNKNOWN
-            raise GoalStateUnknown("恢复后的 Goal handle 与原生 Thread 不一致。")
+            raise GoalStateUnknown("恢复后的 Goal handle 与 Codex 会话不一致。")
         active.handle = handle
         try:
             resumed = await control.get(thread.id)
@@ -508,7 +508,7 @@ class GoalRuntime(TurnObservationRuntime):
             self._guard_no_lifecycle_locked(binding.id)
             if binding.id in self._compacting:
                 raise ThreadRunningConfiguration(
-                    "当前会话有其他原生操作，不能清除 Goal。"
+                    "当前会话有其他 Codex 操作，不能清除 Goal。"
                 )
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
@@ -615,7 +615,7 @@ class GoalRuntime(TurnObservationRuntime):
             if binding.native_thread_id is None:
                 if creation_cwd is None:
                     raise GoalNotMaterialized(
-                        "当前会话还没有原生 Codex Thread。"
+                        "当前会话尚未在 Codex 中创建。"
                     )
                 thread = await self._codex.thread_start(cwd=str(creation_cwd))
                 self._bindings.assign_native_thread_id(binding.id, thread.id)
@@ -649,21 +649,21 @@ class GoalRuntime(TurnObservationRuntime):
                     "当前 SDK 尚不能在零 Turn 的新 Thread 上启动 Goal；"
                     "该能力未通过 live persistence 门禁。"
                 ) from error
-            raise GoalControlError("无法读取 Goal 对应的原生 Thread。") from error
+            raise GoalControlError("无法读取 Goal 对应的 Codex 会话。") from error
         except Exception as error:
-            raise GoalControlError("无法读取 Goal 对应的原生 Thread。") from error
+            raise GoalControlError("无法读取 Goal 对应的 Codex 会话。") from error
         native = getattr(response, "thread", None)
         status = _thread_status_type(native)
         if status != "idle":
             raise ThreadRunningConfiguration(
-                f"原生 Thread 状态为 {status!r}，不能修改 Goal。"
+                f"Codex 会话状态为 {status!r}，不能修改 Goal。"
             )
         if getattr(native, "ephemeral", None) is not False:
-            raise GoalNotMaterialized("Goal 只允许使用已持久化的原生 Thread。")
+            raise GoalNotMaterialized("Goal 只允许使用已持久化的 Codex 会话。")
         path = getattr(native, "path", None)
         if not isinstance(path, str) or not path:
             raise GoalNotMaterialized(
-                "原生 Thread 尚未持久化 path，当前不能启动或恢复 Goal。"
+                "Codex 会话尚未持久化 path，当前不能启动或恢复 Goal。"
             )
         return _native_cwd(native, thread.id)
 
@@ -734,7 +734,7 @@ class GoalRuntime(TurnObservationRuntime):
     ) -> StopDisposition:
         if active.state is GoalOperationState.UNKNOWN:
             raise GoalStateUnknown(
-                "Goal 状态未确认；/stop 不会再次发起原生 mutation。"
+                "Goal 状态未确认；/stop 不会再次发起 Codex 状态修改。"
             )
         handle = active.handle
         if handle is None:

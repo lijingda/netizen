@@ -102,7 +102,7 @@ class ExperienceTest(unittest.TestCase):
             resolved_references.skill_names,
             ("code-review", "test-triage"),
         )
-        with self.assertRaisesRegex(InvalidInteraction, "discovery 不可用"):
+        with self.assertRaisesRegex(InvalidInteraction, "Codex Skills 发现功能不可用"):
             self.parse("$code-review inspect")
 
     def test_supported_commands_are_typed_controls(self) -> None:
@@ -323,7 +323,7 @@ class ExperienceTest(unittest.TestCase):
         self.assertIn("/rename [名称]", help_text)
         self.assertIn("/sessions [archived]", help_text)
         self.assertIn("/unarchive <会话短 ID>", help_text)
-        self.assertIn("永久删除当前会话及其原生历史", help_text)
+        self.assertIn("永久删除当前会话及其 Codex 历史", help_text)
         self.assertIn("不保证前台工具进程退出", help_text)
         self.assertNotIn("/model", help_text)
         self.assertNotIn("/goal", help_text)

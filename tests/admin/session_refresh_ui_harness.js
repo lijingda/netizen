@@ -64,7 +64,7 @@
     // not schedule retry requests. A later manual refresh recovers immediately.
     const visible = body.textContent;
     const timestamp = freshness.textContent;
-    const readFailure = kind === "session" ? "原生会话目录读取失败，请稍后刷新。" : "list read unavailable";
+    const readFailure = kind === "session" ? "Codex 会话目录读取失败，请稍后刷新。" : "list read unavailable";
     const rejected = async () => { throw new Error(readFailure); };
     if (kind === "side") sideAnswer = rejected;
     else ordinaryAnswer = rejected;

@@ -3549,9 +3549,9 @@ def _map_error(error: BaseException) -> AdminWebError | None:
     if isinstance(error, BindingQueryTimeout):
         return AdminWebError(504, "query_timeout", "查询超时，请缩小筛选范围。")
     if isinstance(error, ThreadCatalogDeadlineExceeded):
-        return AdminWebError(504, "query_timeout", "原生会话查询超时。")
+        return AdminWebError(504, "query_timeout", "Codex 会话查询超时。")
     if isinstance(error, ThreadCatalogError):
-        return AdminWebError(503, "catalog_unavailable", "原生会话目录读取失败，请稍后刷新。")
+        return AdminWebError(503, "catalog_unavailable", "Codex 会话目录读取失败，请稍后刷新。")
     if isinstance(error, TimeoutError):
         return AdminWebError(504, "deadline_exceeded", "操作等待超时，请刷新对账。")
     if isinstance(

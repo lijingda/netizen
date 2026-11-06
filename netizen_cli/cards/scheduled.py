@@ -465,7 +465,7 @@ def _binding_workspace_summary(workspace: Mapping[str, Any] | None) -> str:
         if workspace.get("working_cwd"):
             lines.append("登记工作目录：" + str(workspace["working_cwd"]))
         if workspace.get("native_cwd_unresolved"):
-            lines.append("实际工作目录以原生会话为准；此处未重新读取。")
+            lines.append("实际工作目录以 Codex 会话为准；此处未重新读取。")
     return "\n".join(lines)
 
 

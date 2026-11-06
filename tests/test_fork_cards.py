@@ -563,7 +563,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         link = elements(success.card, "button")[0]
         self.assertEqual(link["behaviors"], [{"type": "open_url", "default_url": "https://example.test/topic"}])
         failed = fork_status_card(**display, status="failed", native_thread_id="native-created", detail="话题已有会话。")
-        self.assertIn("原生分支已创建", str(failed.card))
+        self.assertIn("Codex 分支已创建", str(failed.card))
         self.assertIn("绑定未完成", str(failed.card))
         self.assertIn("不要直接重试", str(failed.card))
         self.assertIn("native-created", str(failed.card))

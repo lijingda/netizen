@@ -3095,7 +3095,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(
             FakeMessage("/release", message_id="om_release_lazy")
         )
-        self.assertIn("尚未物化", str(self.channel.replies[-1][1]))
+        self.assertIn("尚未开始", str(self.channel.replies[-1][1]))
 
         binding = self.store.active_binding(
             FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key
@@ -3534,7 +3534,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/delete", message_id="om_delete")
         )
         card = self.channel.replies[-1][1]
-        self.assertIn("只删除本地 Binding", str(card.card))
+        self.assertIn("只删除 Netizen 中的会话记录", str(card.card))
         button = next(
             item
             for item in _elements(card.card, "button")
@@ -3573,7 +3573,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         card = self.channel.replies[-1][1]
         serialized = str(card.card)
-        self.assertIn("原生 Codex Thread", serialized)
+        self.assertIn("Codex 会话", serialized)
         self.assertIn("native-thread:v1:native-one", serialized)
         self.assertIn("Materialized", serialized)
         self.assertEqual(self.runtime.thread_summary_calls, ["native-one"])
@@ -3595,7 +3595,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.delete_binding_calls, [binding.id])
         with self.assertRaises(BindingNotFound):
             self.store.get(binding.id)
-        self.assertIn("原生 Codex 会话", str(self.channel.updates[-1][1]))
+        self.assertIn("Codex 会话", str(self.channel.updates[-1][1]))
 
     async def test_delete_materialized_binding_is_unavailable_without_capability(
         self,
@@ -3771,7 +3771,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         confirmation = self.channel.updates[-1][1]
-        self.assertIn("spawned descendants", str(confirmation))
+        self.assertIn("派生会话", str(confirmation))
         delete = next(
             button
             for button in _elements(confirmation, "button")
@@ -4218,7 +4218,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.delete_binding_calls, [])
         confirmation = self.channel.updates[-1][1]
         self.assertEqual(confirmation["header"]["template"], "red")
-        self.assertIn("只永久删除本地 Binding", str(confirmation))
+        self.assertIn("只永久删除 Netizen 中的会话记录", str(confirmation))
         final = next(
             button
             for button in _elements(confirmation, "button")
@@ -4294,7 +4294,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         confirmation = self.channel.updates[-1][1]
-        self.assertIn("spawned descendants", str(confirmation))
+        self.assertIn("派生会话", str(confirmation))
         self.assertIn("Delete target", str(confirmation))
         final = next(
             button
@@ -4483,7 +4483,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.store.get(target.id).native_thread_id,
             "native-raced",
         )
-        self.assertIn("原生历史已变化", str(self.channel.updates[-1][1]))
+        self.assertIn("Codex 历史已变化", str(self.channel.updates[-1][1]))
 
     async def test_sessions_delete_surfaces_native_lifecycle_failure(
         self,
@@ -4583,7 +4583,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.active_binding(scope.key).id, current.id)
         reply = self.channel.replies[-1][1]
         self.assertIsInstance(reply, str)
-        self.assertIn("✅ 已永久删除原生 Codex 会话", reply)
+        self.assertIn("✅ 已永久删除 Codex 会话", reply)
 
     async def test_sessions_delete_refresh_keeps_position_and_offers_home(self) -> None:
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)

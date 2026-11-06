@@ -98,7 +98,7 @@ class SideRuntime(SubmissionRuntime):
             raise SteerRace("当前会话已切换，本次 Side 未创建。")
         if prepared.native_thread_id is None:
             raise ThreadNotMaterialized(
-                "当前会话尚未创建原生 Codex Thread；请先发送一条真实任务，"
+                "当前会话尚未在 Codex 中创建；请先发送一条真实任务，"
                 "再使用 /side。"
             )
         prepared_revision = prepared.settings_revision
@@ -127,7 +127,7 @@ class SideRuntime(SubmissionRuntime):
                 raise SteerRace("当前会话已切换，本次 Side 未创建。")
             if current.native_thread_id is None:
                 raise ThreadNotMaterialized(
-                    "当前会话尚未创建原生 Codex Thread；请先发送一条真实任务，"
+                    "当前会话尚未在 Codex 中创建；请先发送一条真实任务，"
                     "再使用 /side。"
                 )
             if current.settings_revision != prepared_revision:
@@ -736,7 +736,7 @@ class SideRuntime(SubmissionRuntime):
                     )
                 )
                 raise SideCloseFailed(
-                    "Side 正在关闭，但原生中断或终态未确认；"
+                    "Side 正在关闭，但 Codex 中断或终态未确认；"
                     "不会清理或退订，请再次结束 Side。"
                 ) from errors[0]
 
@@ -747,7 +747,7 @@ class SideRuntime(SubmissionRuntime):
             )
             if outcome.error is not None:
                 raise SideCloseFailed(
-                    "Side 已停止接收消息，但原生清理未全部确认。"
+                    "Side 已停止接收消息，但 Codex 清理未全部确认。"
                 ) from outcome.error
             return outcome
 

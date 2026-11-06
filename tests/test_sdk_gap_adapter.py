@@ -1003,7 +1003,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
             async with AsyncCodex(_config(log_path, "wrong-goal-thread")) as codex:
                 process = codex._client._sync._proc
                 control = AppServerGoalControl(codex)
-                with self.assertRaisesRegex(GoalControlError, "Thread 不一致"):
+                with self.assertRaisesRegex(GoalControlError, "Codex 会话不一致"):
                     await control.get("thread-goal")
             _close_probe_pipes(process)
             gc.collect()

@@ -95,7 +95,7 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
         binding = self._bindings.get(binding_id)
         self._bindings.require_project_not_deleting(binding.project_alias)
         if binding.native_thread_id is None:
-            raise ThreadNotMaterialized("当前会话尚未创建原生 Codex Thread，请先发送一条真实任务。")
+            raise ThreadNotMaterialized("当前会话尚未在 Codex 中创建，请先发送一条真实任务。")
         return binding
 
     async def rename_exact(
@@ -127,7 +127,7 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
             binding = self._bindings.get(binding_id)
             if binding.native_thread_id is None:
                 raise ThreadNotMaterialized(
-                    "当前会话尚未创建原生 Codex Thread；"
+                    "当前会话尚未在 Codex 中创建；"
                     "请先发送一条真实任务，再使用 /rename。"
                 )
             operation = self._begin_lifecycle_locked(
@@ -152,7 +152,7 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
                 if mutation_attempted:
                     self._retain_unknown_lifecycle(operation)
                     raise ThreadLifecycleStateUnknown(
-                        "Codex 会话重命名结果未确认；当前 Binding "
+                        "Codex 会话重命名结果未确认；当前会话"
                         "的生命周期状态待对账。"
                     ) from error
                 self._finish_lifecycle_locked(operation)
@@ -161,7 +161,7 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
                     binding.native_thread_id,
                 )
                 raise ThreadLifecycleError(
-                    "无法打开当前原生 Codex Thread，未执行重命名。"
+                    "无法打开当前 Codex 会话，未执行重命名。"
                 ) from error
             self._finish_lifecycle_locked(operation)
             self._schedule_known_subscription_locked(

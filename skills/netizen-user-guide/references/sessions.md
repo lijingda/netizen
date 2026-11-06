@@ -151,7 +151,7 @@ Project 重新以同名登记后，项目目录策略可以恢复使用；“使
   原生 Thread、历史、配置和 Task Feedback，下一条普通消息仍 resume 同一 native ID。
   运行中、状态未知或有已登记后台 terminal 时会拒绝；Side 使用 `/side close`。
 
-这里的短 ID 是 **Netizen 会话编号（Binding ID）** 的前缀，只用于在当前聊天位置中选择会话。
+这里的短 ID 是 **Netizen 会话编号** 的前缀，只用于在当前聊天位置中选择会话。
 不能用另一个聊天或话题里的短 ID 跨位置切换。**Codex 会话 ID（Thread ID）**
 则是完整原生标识，供[会话协作工具](session-collaboration.md)指定目标；列表和状态详情
 会明确区分两者，并提供完整原生 ID 文本。查看后台或归档会话的 ID 不需要先切换或恢复。

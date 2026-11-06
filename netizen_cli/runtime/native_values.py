@@ -116,13 +116,13 @@ def _is_transient_thread_rpc_error(error: BaseException) -> bool:
 def _thread_creation_cwd(binding: ThreadBinding, requested: Path | None) -> Path:
     cwd = Path(binding.working_cwd) if binding.working_cwd is not None else requested
     if not isinstance(cwd, Path) or not cwd.is_absolute():
-        raise SteerRace("新建原生会话需要明确的绝对工作目录。")
+        raise SteerRace("新建 Codex 会话需要明确的绝对工作目录。")
     return cwd
 
 
 def _accepted_execution_cwd(cwd: Path | None) -> Path:
     if not isinstance(cwd, Path) or not cwd.is_absolute():
-        raise SteerRace("无法确认当前任务的原生工作目录，不能使用调用方或 Project 目录替代。")
+        raise SteerRace("无法确认当前任务的 Codex 工作目录，不能使用调用方或 Project 目录替代。")
     return cwd
 
 
@@ -136,7 +136,7 @@ def _native_cwd(native_thread: object, thread_id: str) -> Path:
         or not cwd
         or not Path(cwd).is_absolute()
     ):
-        raise ThreadCatalogError("原生 Thread 未返回匹配身份的绝对工作目录，不能回退到 Project 目录。")
+        raise ThreadCatalogError("Codex 会话未返回匹配身份的绝对工作目录，不能回退到 Project 目录。")
     return Path(cwd)
 
 

@@ -287,7 +287,7 @@ def fork_form_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
         )
         builder = _builder("创建会话分支", _label(project_alias, 120))
         builder.raw(_plain(f"来源：{_label(source_title, 120)}\n"
-                           "新会话继承当前原生上下文。两个会话共享项目文件，修改会相互可见。"))
+                           "新会话继承当前 Codex 上下文。两个会话共享项目文件，修改会相互可见。"))
         builder.raw(_notice(target_notice))
         fields = [
             {"tag": "input", "name": _NAME_FIELD, "width": "fill",
@@ -342,11 +342,11 @@ def fork_status_card(*, name: str, source_title: str, project_alias: str,
                 "behaviors": [{"type": "open_url", "default_url": topic_url}]})
     elif native_thread_id is not None:
         builder.raw(_notice(
-            "原生分支和本地会话已保存，但创建交接未完成。请先核查，不要重新创建。"
-            if binding_saved else "原生分支已创建，但新话题会话绑定未完成或结果未确认。请先人工核查，不要直接重试。",
+            "Codex 分支和本地会话已保存，但创建交接未完成。请先核查，不要重新创建。"
+            if binding_saved else "Codex 分支已创建，但新话题会话绑定未完成或结果未确认。请先人工核查，不要直接重试。",
             error=True,
         ))
-        builder.raw(_plain(f"原生会话：{native_thread_id}"))
+        builder.raw(_plain(f"Codex 会话：{native_thread_id}"))
     if detail:
         builder.raw(_notice(detail, error=status == "failed"))
     return OutboundCard(card=builder.to_dict())

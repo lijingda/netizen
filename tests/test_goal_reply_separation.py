@@ -136,7 +136,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
                 if action == "pause":
                     self.assertIn("goal-paused", rendered(self.channel.updates[-1][1]))
                 else:
-                    self.assertIn("当前原生 Thread 没有 Goal", rendered(self.channel.updates[-1][1]))
+                    self.assertIn("当前 Codex 会话没有 Goal", rendered(self.channel.updates[-1][1]))
                 await self.app.handle_completion(self.outcome(
                     goal=None if action == "clear" else native_goal(GoalStatus.PAUSED),
                     finalization=GoalFinalizationStatus.CLEARED if action == "clear" else GoalFinalizationStatus.NOT_APPLICABLE,
@@ -234,7 +234,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(FakeMessage("/goal", message_id="om_unknown"))
         text = rendered(self.channel.replies[-1][1])
         self.assertIn("Goal 状态未确认", text)
-        self.assertNotIn("当前原生 Thread 没有 Goal", text)
+        self.assertNotIn("当前 Codex 会话没有 Goal", text)
         self.assertNotIn('"intent": "goal.clear"', text)
 
     async def test_accepted_start_keeps_receipt_and_task_presentation_when_status_card_fails(self):
