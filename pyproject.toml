@@ -77,7 +77,6 @@ module = [
     "netizen_cli.management.blocking_io",
     "netizen_cli.management.chat_directory",
     "netizen_cli.message_content",
-    "netizen_cli.runtime.forks",
     "netizen_cli.runtime.lifecycle",
     "netizen_cli.runtime.naming",
     "netizen_cli.runtime.queries",
@@ -117,7 +116,6 @@ disable_error_code = ["operator"]
 module = [
     "netizen_cli.channel.input_preparation",
     "netizen_cli.mcp_transport",
-    "netizen_cli.runtime.submission",
     "netizen_cli.schedules.scheduler",
 ]
 disable_error_code = ["union-attr"]

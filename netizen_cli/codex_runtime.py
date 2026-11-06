@@ -20,7 +20,9 @@ so a dependency on a later lifecycle is a type error rather than a convention:
     sides          ephemeral Side sessions
     shutdown       service shutdown, interrupt and drain
 
-Shared mutable state is declared once on ``RuntimeState`` and initialized here.
+Shared state is declared on ``RuntimeState`` and initialized here. State used
+only by one lifecycle and higher layers is declared and initialized by its lowest
+owning layer; this facade calls those small initialization hooks in layer order.
 This module remains the import location for the runtime and its contracts.
 """
 
@@ -41,7 +43,6 @@ from .domain import (
     GoalOperationState,
 )
 from .progress_card_settings import ProgressCardSettings
-from .runtime.name_writes import ThreadNameWrites
 from .runtime.thread_naming import ThreadNamer
 # Preserve existing public imports as aliases of the shared contract types.
 from .runtime.contracts import (
@@ -292,15 +293,11 @@ class CodexRuntime(ShutdownRuntime):
         self._thread_subscription_control = thread_subscription_control
         self._background_terminal_inspector = background_terminal_inspector
         self._thread_delete_control = thread_delete_control
-        self._turn_plan_observer = turn_plan_observer
         self._progress_card_defaults = progress_card_defaults
         self._on_completion = on_completion
         self._on_question: QuestionHandler | None = None
         self._on_input_received: InputReceivedHandler | None = None
         self._poll_interval_seconds = poll_interval_seconds
-        self._compaction_timeout_seconds = compaction_timeout_seconds
-        self._side_idle_seconds = side_idle_seconds
-        self._ordinary_thread_idle_seconds = ordinary_thread_idle_seconds
         self._active: dict[str, _ActiveTurn] = {}
         # ExternalMessage may start the next native Turn while the previous
         # Turn is still materializing its Result/Files. Its existing consumer
@@ -313,17 +310,17 @@ class CodexRuntime(ShutdownRuntime):
         self._subscriptions: dict[str, _ThreadSubscription] = {}
         self._sides: dict[str, _SideSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        self._side_locks: dict[str, asyncio.Lock] = {}
         self._admission_revisions: dict[str, int] = {}
         self._tasks: set[asyncio.Task[None]] = set()
-        self._fork_creations: dict[asyncio.Task[object], str] = {}
-        self._side_idle_tasks: set[asyncio.Task[None]] = set()
-        self._subscription_idle_tasks: set[asyncio.Task[None]] = set()
-        self._name_writes = ThreadNameWrites()
+        self._init_subscription_state(ordinary_thread_idle_seconds=ordinary_thread_idle_seconds)
+        self._init_fork_state()
+        self._init_activity_state(turn_plan_observer=turn_plan_observer)
+        self._init_naming_state(automatic_thread_naming=automatic_thread_naming)
+        self._init_compaction_state(compaction_timeout_seconds=compaction_timeout_seconds)
+        self._init_submission_state()
+        self._init_side_state(side_idle_seconds=side_idle_seconds)
         self._name_generation_requests: dict[str, asyncio.Event] = {}
-        self._automatic_thread_naming = automatic_thread_naming
         self._accepting = True
-        self._shutdown_requested = False
         self._thread_namer = (
             ThreadNamer(
                 codex=codex,

@@ -44,6 +44,9 @@ logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 class CompactionRuntime(TurnControlRuntime):
     """Native context compaction and its terminal observation."""
 
+    def _init_compaction_state(self, *, compaction_timeout_seconds: float) -> None:
+        self._compaction_timeout_seconds = compaction_timeout_seconds
+
     async def compact(
         self,
         *,

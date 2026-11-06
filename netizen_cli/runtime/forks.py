@@ -45,6 +45,9 @@ logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 class ForkRuntime(BindingOccupancyRuntime):
     """Persistent fork creation and topic-creation tracking."""
 
+    def _init_fork_state(self) -> None:
+        self._fork_creations: dict[asyncio.Task[object], str] = {}
+
     @asynccontextmanager
     async def track_topic_creation(self, project_alias: str) -> AsyncIterator[None]:
         """Own an ordinary topic creation through its final Binding handoff."""
@@ -81,7 +84,8 @@ class ForkRuntime(BindingOccupancyRuntime):
 
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，本次会话创建未完成。")
-        if self._fork_creations.get(asyncio.current_task()) != project_alias:
+        task = asyncio.current_task()
+        if task is None or self._fork_creations.get(task) != project_alias:
             raise RuntimeError("topic creation handoff is not owned by this task")
         self._bindings.require_project_not_deleting(project_alias)
 
@@ -131,6 +135,7 @@ class ForkRuntime(BindingOccupancyRuntime):
 
         async with self._lock(source.id):
             current = self._require_fork_source_locked(source, expected_project_revision)
+            assert current.native_thread_id is not None
             await self._guard_no_goal_locked(current)
             response = await self._thread_handle(current.native_thread_id).read(
                 include_turns=False,
@@ -148,6 +153,7 @@ class ForkRuntime(BindingOccupancyRuntime):
             # Source settings and Project admission may change during the
             # read-only awaits. No new native request follows a stale snapshot.
             current = self._require_fork_source_locked(source, expected_project_revision)
+            assert current.native_thread_id is not None
             try:
                 thread = await self._codex.thread_fork(
                     current.native_thread_id, ephemeral=False, include_turns=False,

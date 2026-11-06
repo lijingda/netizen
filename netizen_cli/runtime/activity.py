@@ -24,7 +24,7 @@ from ..turn_activity import (
     TurnActivityNotificationProjection,
     TurnActivityStatus,
 )
-from ..turn_plan_observer import TurnActivityObservation
+from ..turn_plan_observer import TurnActivityObservation, TurnActivityObserver
 
 from .state import (
     RUNTIME_LOGGER_NAME,
@@ -40,6 +40,9 @@ logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 
 class TurnActivityRuntime(NativeQueryRuntime):
     """Activity, progress and Partial Answer snapshots for live work."""
+
+    def _init_activity_state(self, *, turn_plan_observer: TurnActivityObserver | None) -> None:
+        self._turn_plan_observer = turn_plan_observer
 
     def active_turn(self, binding_id: str) -> ActiveTurnSnapshot | None:
         active = self._active.get(binding_id)

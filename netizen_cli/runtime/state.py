@@ -34,7 +34,6 @@ from ..domain import (
 from ..model_settings import TurnModelSettings
 from ..partial_answers import PartialAnswer
 from ..progress_card_settings import ProgressCardSettings
-from .name_writes import ThreadNameWrites
 from .thread_naming import ThreadNamer
 from .contracts import (
     NativeTurnHandle,
@@ -74,7 +73,6 @@ from ..turn_activity import (
     TurnActivityEntrySnapshot,
     TurnPlanStepSnapshot,
 )
-from ..turn_plan_observer import TurnActivityObserver
 from ..user_questions import (
     BindingQuestionTarget,
     QuestionRequest,
@@ -107,12 +105,6 @@ class _TurnResumeRequired(_TurnViewUnverified):
 
 async def _ignore_completion(_outcome: RuntimeOutcome) -> None:
     return None
-
-
-@dataclass(slots=True)
-class _ScheduledInitialSubmission:
-    run_id: str
-    begun: bool = False
 
 
 @dataclass(slots=True)
@@ -342,15 +334,11 @@ class RuntimeState:
     _thread_subscription_control: ThreadSubscriptionControl | None
     _background_terminal_inspector: BackgroundTerminalInspector | None
     _thread_delete_control: ThreadDeleteControl | None
-    _turn_plan_observer: TurnActivityObserver | None
     _progress_card_defaults: Callable[[], ProgressCardSettings]
     _on_completion: CompletionHandler
     _on_question: QuestionHandler | None
     _on_input_received: InputReceivedHandler | None
     _poll_interval_seconds: float
-    _compaction_timeout_seconds: float
-    _side_idle_seconds: float
-    _ordinary_thread_idle_seconds: float
     _active: dict[str, _ActiveTurn]
     _retiring_turns: dict[tuple[str, str], _ActiveTurn]
     _compacting: dict[str, _ActiveCompaction]
@@ -360,17 +348,10 @@ class RuntimeState:
     _subscriptions: dict[str, _ThreadSubscription]
     _sides: dict[str, _SideSession]
     _locks: dict[str, asyncio.Lock]
-    _side_locks: dict[str, asyncio.Lock]
     _admission_revisions: dict[str, int]
     _tasks: set[asyncio.Task[None]]
-    _fork_creations: dict[asyncio.Task[object], str]
-    _side_idle_tasks: set[asyncio.Task[None]]
-    _subscription_idle_tasks: set[asyncio.Task[None]]
-    _name_writes: ThreadNameWrites
     _name_generation_requests: dict[str, asyncio.Event]
-    _automatic_thread_naming: bool
     _accepting: bool
-    _shutdown_requested: bool
     _thread_namer: ThreadNamer | None
 
     def _thread_handle(self, thread_id: str) -> AsyncThread:

@@ -52,7 +52,6 @@ from .native_values import (
     _accepted_execution_cwd,
 )
 from .state import (
-    _ScheduledInitialSubmission,
     _ActiveTurn,
     _ActiveGoal,
     _ThreadSubscription,
@@ -65,6 +64,12 @@ _REVISION_RACES = (
     "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。",
     "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。",
 )
+
+
+@dataclass(slots=True)
+class _ScheduledInitialSubmission:
+    run_id: str
+    begun: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,9 @@ def _require_unchanged_revisions(
 
 class SubmissionRuntime(CompactionRuntime):
     """Ordinary input admission, start/steer submission and Skill input preparation."""
+
+    def _init_submission_state(self) -> None:
+        self._shutdown_requested = False
 
     async def configure_context_exact(
         self,
@@ -925,10 +933,11 @@ class SubmissionRuntime(CompactionRuntime):
             self._redeem_submission_admission(
                 binding_id=binding_id, active=active, admission=admission, goal=goal,
             )
-            if goal is not None or active is not None:
+            accepted = goal if goal is not None else active
+            if accepted is not None:
                 # Steer belongs to the already accepted physical Turn, not a
                 # fresh resume or a caller's earlier read-only cwd snapshot.
-                accepted_cwd = _accepted_execution_cwd(goal.cwd if goal is not None else active.cwd)
+                accepted_cwd = _accepted_execution_cwd(accepted.cwd)
                 return accepted_cwd, None
             if binding.native_thread_id is None:
                 # Lazy Skill validation must remain free of thread/start.

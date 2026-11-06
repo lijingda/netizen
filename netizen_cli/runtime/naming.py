@@ -15,6 +15,7 @@ from ..bindings import (
     ThreadBinding,
 )
 from ..model_settings import ModelCatalogError, TurnModelSettings
+from .name_writes import ThreadNameWrites
 from .thread_naming import NamingJob, ThreadNameGenerationError
 from .contracts import (
     NativeThread,
@@ -35,6 +36,10 @@ logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 
 class ThreadNamingRuntime(ThreadLifecycleRuntime):
     """Manual and automatic native Thread naming."""
+
+    def _init_naming_state(self, *, automatic_thread_naming: bool) -> None:
+        self._name_writes = ThreadNameWrites()
+        self._automatic_thread_naming = automatic_thread_naming
 
     async def generate_name_exact(self, binding_id: str) -> str:
         """Generate a candidate from the exact Thread without resuming or renaming it."""

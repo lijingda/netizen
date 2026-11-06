@@ -71,6 +71,11 @@ logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 class SideRuntime(SubmissionRuntime):
     """Ephemeral Side sessions: creation, submission, observation and close."""
 
+    def _init_side_state(self, *, side_idle_seconds: float) -> None:
+        self._side_idle_seconds = side_idle_seconds
+        self._side_locks: dict[str, asyncio.Lock] = {}
+        self._side_idle_tasks: set[asyncio.Task[None]] = set()
+
     async def create_side(
         self,
         *,

@@ -48,6 +48,10 @@ logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 class ThreadSubscriptionRuntime(RuntimeState):
     """Process-local native Thread subscription tracking and idle release."""
 
+    def _init_subscription_state(self, *, ordinary_thread_idle_seconds: float) -> None:
+        self._ordinary_thread_idle_seconds = ordinary_thread_idle_seconds
+        self._subscription_idle_tasks: set[asyncio.Task[None]] = set()
+
     def thread_subscription_snapshot(
         self,
         binding_id: str,
