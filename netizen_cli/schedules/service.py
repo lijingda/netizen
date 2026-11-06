@@ -195,7 +195,7 @@ class ScheduleService:
                 size = _page_size(data)
                 identity = {**filters, "name": name}
                 after = _decode_cursor(data.get("cursor"), identity)
-                plans = self._store.list(**filters, now=now, name=name, after=after, limit=size + 1)
+                plans = await self._store.list(**filters, now=now, name=name, after=after, limit=size + 1)
                 return {"ok": True, "plans": await self._plans(plans[:size], now), "snapshot_at": now,
                         "next_cursor": _encode_cursor(plans[size - 1].id, identity) if len(plans) > size else None,
                         "default_timezone": self.default_timezone}

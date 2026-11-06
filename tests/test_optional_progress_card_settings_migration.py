@@ -57,7 +57,7 @@ class OptionalProgressCardSettingsMigrationTest(unittest.TestCase):
                              ProgressCardSettings())
             self.assertEqual(store.schedules.get("plan-topic").session_settings.task_feedback.progress_card_settings, custom)
         before_noop = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=20)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=21)["steps"], [])
         self.assertEqual(self.contents(), before_noop)
 
     def test_old_version_rejects_null_intent_without_silently_reinterpreting_data(self):

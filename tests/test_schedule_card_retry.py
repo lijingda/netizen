@@ -75,7 +75,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         form[next(key for key in form if key.startswith("cron_name"))] = "独立话题计划"
         form.update(cron_kind="daily", cron_instructions="检查项目")
         await self.push(form=form)
-        plan, = self.fixture.store.schedules.list(app_id="app")
+        plan, = (await self.fixture.store.schedules.list(app_id="app"))
         self.assertEqual(plan.target_kind, "new_topic")
         self.assertIn("计划已保存", str(self.fixture.channel.updates[-1]))
 
@@ -93,7 +93,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
             cron_group_id="", cron_chat_id="oc_inactive")
         request_id = option_value(values["cron_project"])["request_id"]
         await self.push(form=values)
-        self.assertEqual(self.fixture.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.fixture.store.schedules.list(app_id="app")), ())
         retry = SimpleNamespace(card=self.fixture.channel.updates[-1][1])
         search = callback(retry, "查找群聊")
         restored = form_values(retry)
@@ -103,7 +103,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         restored["cron_chat_query"] = "另一个"
         self.fixture.management.query_available_chats.return_value = AvailableChatPage((other,), None)
         await self.push(value=search, form=restored)
-        self.assertEqual(self.fixture.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.fixture.store.schedules.list(app_id="app")), ())
         searched = SimpleNamespace(card=self.fixture.channel.updates[-1][1])
         candidates = next(item for item in elements(searched.card, "select_static") if item["name"] == "cron_group_id")
         self.assertEqual([option["value"] for option in candidates["options"]], ["oc_other"])
@@ -121,13 +121,13 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.fixture.management.query_available_chats = AsyncMock(return_value=AvailableChatPage((), None))
         await self.push(value=callback(card, "查找群聊"), form=values)
         self.fixture.management.query_available_chats.assert_awaited_once_with(query="", page_token=None, page_size=20)
-        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        self.assertFalse((await self.fixture.store.schedules.list(app_id="app")))
         restored = self.restored_form()
         self.assertEqual(option_value(restored["cron_project"])["project"], "retired")
         restored[next(key for key in restored if key.startswith("cron_name"))] = "不可保存的任务"
         restored.update(cron_instructions="指令", cron_kind="daily")
         await self.push(form=restored)
-        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        self.assertFalse((await self.fixture.store.schedules.list(app_id="app")))
         self.assertIn("Project", str(self.fixture.channel.updates[-1]))
         self.assertIn("停用", str(self.fixture.channel.updates[-1]))
 
@@ -142,7 +142,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         form.update(cron_kind="daily", cron_instructions="继续原问题")
         replacement = self.new_binding()  # Nor is switching before saving.
         await self.push(form=form)
-        plan, = self.fixture.store.schedules.list(app_id="app")
+        plan, = (await self.fixture.store.schedules.list(app_id="app"))
         self.assertEqual(plan.target_binding_id, original.id)
         self.assertEqual(self.fixture.store.active_binding(self.scope.key).id, replacement.id)
         self.assertIn("计划已保存", str(self.fixture.channel.updates[-1]))
@@ -159,7 +159,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.target_binding_id, original.id)
         detail = SimpleNamespace(card=self.fixture.channel.updates[-1][1])
         await self.push(value=callback(detail, "删除计划"))
-        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        self.assertFalse((await self.fixture.store.schedules.list(app_id="app")))
         self.assertEqual(self.fixture.store.active_binding(self.scope.key).id, replacement.id)
 
     async def test_binding_create_unknown_response_replays_after_switch_without_duplicate(self):
@@ -179,13 +179,13 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.fixture.management.schedules.manage = lose_first_write_response
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(form=form)
-        plan, = self.fixture.store.schedules.list(app_id="app")
+        plan, = (await self.fixture.store.schedules.list(app_id="app"))
         restored = self.restored_form()
         self.assertEqual(decode_schedule_action(scope=self.scope, value=None, form=restored).request_id,
             decode_schedule_action(scope=self.scope, value=None, form=form).request_id)
         replacement = self.new_binding()
         await self.push(form=restored)
-        replayed, = self.fixture.store.schedules.list(app_id="app")
+        replayed, = (await self.fixture.store.schedules.list(app_id="app"))
         self.assertEqual((replayed.id, replayed.target_binding_id), (plan.id, original.id))
         self.assertEqual(self.fixture.store.active_binding(self.scope.key).id, replacement.id)
         self.assertIn("计划已保存", str(self.fixture.channel.updates[-1]))
@@ -217,7 +217,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.fixture.channel.get_chat_info = AsyncMock(side_effect=OSError("temporary target lookup failure"))
         first_key = await self.push(form=form)
         self.assertEqual(self.handler_calls, 1)
-        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        self.assertFalse((await self.fixture.store.schedules.list(app_id="app")))
         restored = self.restored_form()
         self.assertEqual(decode_schedule_action(scope=self.scope, value=None, form=restored), original)
         self.fixture.channel.get_chat_info = lookup
@@ -226,7 +226,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         second_key = await self.push(form=restored)
         self.assertNotEqual(first_key, second_key)
         self.assertEqual(self.handler_calls, 2)
-        self.assertEqual(len(self.fixture.store.schedules.list(app_id="app")), 1)
+        self.assertEqual(len((await self.fixture.store.schedules.list(app_id="app"))), 1)
 
     async def test_unknown_write_response_retries_same_business_request_without_duplicate_create(self):
         form = self.new_form()
@@ -243,18 +243,18 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.fixture.management.schedules.manage = lose_first_write_response
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(form=form)
-        self.assertEqual(len(self.fixture.store.schedules.list(app_id="app")), 1)
-        self.assertTrue(self.fixture.store.schedules.list(app_id="app")[0].auto_archive)
+        self.assertEqual(len((await self.fixture.store.schedules.list(app_id="app"))), 1)
+        self.assertTrue((await self.fixture.store.schedules.list(app_id="app"))[0].auto_archive)
         restored = self.restored_form()
         self.assertEqual(restored["cron_auto_archive"], "true")
         self.assertEqual(decode_schedule_action(scope=self.scope, value=None, form=restored).request_id,
             decode_schedule_action(scope=self.scope, value=None, form=form).request_id)
         await self.push(form={**restored, "cron_instructions": "不能把未知结果变成另一项创建"})
-        self.assertEqual(len(self.fixture.store.schedules.list(app_id="app")), 1)
-        self.assertEqual(self.fixture.store.schedules.list(app_id="app")[0].instructions, form["cron_instructions"])
+        self.assertEqual(len((await self.fixture.store.schedules.list(app_id="app"))), 1)
+        self.assertEqual((await self.fixture.store.schedules.list(app_id="app"))[0].instructions, form["cron_instructions"])
         await self.push(form=restored)
         self.assertEqual(self.handler_calls, 3)
-        self.assertEqual(len(self.fixture.store.schedules.list(app_id="app")), 1)
+        self.assertEqual(len((await self.fixture.store.schedules.list(app_id="app"))), 1)
         self.assertIn("计划已保存", str(self.fixture.channel.updates[-1]))
 
     async def test_scope_lookup_failure_only_restores_ui_then_revalidates_before_write(self):
@@ -263,12 +263,12 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.fixture.channel.fetch_message = AsyncMock(side_effect=OSError("temporary message lookup failure"))
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(form=form)
-        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        self.assertFalse((await self.fixture.store.schedules.list(app_id="app")))
         restored = self.restored_form()
         self.fixture.channel.fetch_message = fetch
         await self.push(form=restored)
         self.assertEqual(self.handler_calls, 2)
-        self.assertEqual(len(self.fixture.store.schedules.list(app_id="app")), 1)
+        self.assertEqual(len((await self.fixture.store.schedules.list(app_id="app"))), 1)
 
     async def test_validation_failure_keeps_inputs_and_allows_correction_through_sdk(self):
         form = self.new_form()
@@ -280,7 +280,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         restored["cron_timezone"] = "UTC"
         await self.push(form=restored)
         self.assertEqual(self.handler_calls, 2)
-        plans = self.fixture.store.schedules.list(app_id="app")
+        plans = (await self.fixture.store.schedules.list(app_id="app"))
         self.assertEqual([(plan.name, plan.instructions) for plan in plans], [("原样重试计划", "保留完整指令")])
 
     async def test_retry_card_update_failure_has_one_bounded_feedback_and_no_write(self):
@@ -292,7 +292,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.fixture.channel.updates), 1)
         self.assertEqual(len(self.fixture.channel.replies), 1)
         self.assertIn("未能恢复", str(self.fixture.channel.replies[-1]))
-        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        self.assertFalse((await self.fixture.store.schedules.list(app_id="app")))
 
     async def test_button_unknown_response_retries_same_exact_mutation(self):
         plan_id = self.fixture.manager_plan("可暂停")

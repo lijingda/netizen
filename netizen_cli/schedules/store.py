@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-import time
 import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -24,8 +23,8 @@ if TYPE_CHECKING:
 
 
 MAX_INSTRUCTIONS_JSON_BYTES = 48 * 1024
-# Exact-key expiry remains synchronous; physical cleanup may wait one minute.
-_REQUEST_EXPIRY_INTERVAL_SECONDS = 60.0
+# Each indexed sweep reclaims only the oldest expired request receipts.
+_REQUEST_EXPIRY_BATCH = 16
 
 
 _RUN_TABLE = """CREATE TABLE schedule_runs (
@@ -53,6 +52,8 @@ _RUN_INDEXES = (
     "CREATE UNIQUE INDEX schedule_runs_binding ON schedule_runs(binding_id) WHERE binding_id IS NOT NULL AND target_kind = 'new_topic'",
     "CREATE UNIQUE INDEX schedule_runs_root ON schedule_runs(app_id, chat_id, root_message_id) WHERE root_message_id IS NOT NULL AND target_kind = 'new_topic'",
     "CREATE UNIQUE INDEX schedule_runs_topic ON schedule_runs(app_id, chat_id, topic_id) WHERE topic_id IS NOT NULL AND target_kind = 'new_topic'",
+    "CREATE INDEX schedule_runs_binding_target ON schedule_runs(binding_id) WHERE target_kind = 'binding'",
+    "CREATE INDEX schedule_runs_project_pending ON schedule_runs(project_alias, run_id) WHERE barrier != 'released' OR error_code = 'publishing_unknown'",
     "CREATE UNIQUE INDEX schedule_runs_barrier ON schedule_runs(plan_id) WHERE barrier != 'released'",
 )
 SCHEMA = (
@@ -76,6 +77,7 @@ SCHEMA = (
     )""",
     "CREATE INDEX schedule_plans_due ON schedule_plans(app_id, enabled, next_due_at) WHERE deleted = 0",
     "CREATE INDEX schedule_plans_project ON schedule_plans(project_alias, deleted)",
+    "CREATE INDEX schedule_plans_binding_target ON schedule_plans(target_binding_id) WHERE target_kind = 'binding' AND deleted = 0",
     _RUN_TABLE,
     *_RUN_INDEXES,
     """CREATE TABLE schedule_requests (
@@ -83,6 +85,7 @@ SCHEMA = (
         plan_id TEXT NOT NULL, revision INTEGER NOT NULL, expires_at REAL NOT NULL,
         run_id TEXT
     )""",
+    "CREATE INDEX schedule_requests_expiry ON schedule_requests(expires_at)",
 )
 TABLE_COLUMNS = {
     "schedule_plans": {
@@ -253,13 +256,16 @@ def _has_trigger(
     )
 
 
+def register_query_functions(connection: sqlite3.Connection) -> None:
+    connection.create_function("netizen_schedule_has_trigger", 5, _has_trigger, deterministic=True)
+
+
 class ScheduleStore:
     """A component of one Store; never opens or owns a database connection."""
 
     def __init__(self, owner: BindingStore) -> None:
         self.owner = owner
-        self._next_request_expiry = 0.0
-        self._db.create_function("netizen_schedule_has_trigger", 5, _has_trigger, deterministic=True)
+        register_query_functions(self._db)
 
     @property
     def _db(self) -> sqlite3.Connection:
@@ -328,14 +334,15 @@ class ScheduleStore:
     def _request(self, request_id: str, operation: str, payload: object, now: float) -> MutationResult | None:
         if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
             raise ScheduleError("写操作需要稳定的 request_id（最多 200 字符）。")
-        monotonic_now = time.monotonic()
-        if monotonic_now >= self._next_request_expiry:
-            self._db.execute("DELETE FROM schedule_requests WHERE expires_at <= ?", (now,))
-            self._next_request_expiry = monotonic_now + _REQUEST_EXPIRY_INTERVAL_SECONDS
+        self._db.execute(
+            "DELETE FROM schedule_requests WHERE rowid IN ("
+            "SELECT rowid FROM schedule_requests WHERE expires_at <= ? "
+            "ORDER BY expires_at LIMIT ?)", (now, _REQUEST_EXPIRY_BATCH),
+        )
         digest = hashlib.sha256(_json(payload).encode()).hexdigest()
         row = self._db.execute("SELECT * FROM schedule_requests WHERE request_id = ?", (request_id,)).fetchone()
         if row is not None and row["expires_at"] <= now:
-            # Also permits reusing this key in _remember before the next sweep.
+            # Exact expiry also applies to keys beyond this sweep's batch.
             self._db.execute("DELETE FROM schedule_requests WHERE request_id = ?", (request_id,))
             return None
         if row is not None:
@@ -513,7 +520,7 @@ class ScheduleStore:
                 raise ScheduleNotFound("定时计划不存在或已删除。")
             return _plan(row)
 
-    def list(self, *, app_id: str, chat_id: str | None = None, project_alias: str | None = None, enabled: bool | None = None, ended: bool | None = None, now: float | None = None, name: str | None = None, after: str | None = None, limit: int = 20, target_kind: str | None = None, target_binding_id: str | None = None) -> tuple[Plan, ...]:
+    async def list(self, *, app_id: str, chat_id: str | None = None, project_alias: str | None = None, enabled: bool | None = None, ended: bool | None = None, now: float | None = None, name: str | None = None, after: str | None = None, limit: int = 20, target_kind: str | None = None, target_binding_id: str | None = None, deadline_seconds: float = 2.0) -> tuple[Plan, ...]:
         if type(limit) is not int or not 1 <= limit <= 1001:
             raise ScheduleError("列表数量必须在 1 到 1001 之间。")
         if ended is not None and type(ended) is not bool:
@@ -539,9 +546,11 @@ class ScheduleStore:
         if name is not None:
             where.append("instr(name, ?) > 0")
             values.append(name)
-        with self.owner._lock:
-            rows = self._db.execute("SELECT * FROM schedule_plans WHERE " + " AND ".join(where) + " ORDER BY plan_id LIMIT ?", (*values, limit)).fetchall()
+        def operation(connection: sqlite3.Connection) -> tuple[Plan, ...]:
+            rows = connection.execute("SELECT * FROM schedule_plans WHERE " + " AND ".join(where) + " ORDER BY plan_id LIMIT ?", (*values, limit)).fetchall()
             return tuple(_plan(row) for row in rows)
+
+        return await self.owner._submit_query(operation, deadline_seconds=deadline_seconds)
 
     def due_plans(self, *, app_id: str, now: float | None = None, limit: int = 100) -> tuple[Plan, ...]:
         with self.owner._lock:
@@ -578,7 +587,8 @@ class ScheduleStore:
         with self.owner._lock:
             rows = self._db.execute(
                 "SELECT * FROM schedule_runs WHERE project_alias=? "
-                "AND (barrier != 'released' OR (target_kind='new_topic' AND error_code='publishing_unknown')) "
+                "AND (barrier != 'released' OR error_code='publishing_unknown') "
+                "AND (barrier != 'released' OR target_kind='new_topic') "
                 "ORDER BY run_id", (alias,),
             ).fetchall()
             return tuple(_run(row) for row in rows)
@@ -805,8 +815,6 @@ class ScheduleStore:
             (binding_id,),
         ).fetchall()
         if binding_removed:
-            # The existing partial Binding index only covers new-topic Runs.
-            # Binding-target history still needs a scan until a schema change.
             rows.extend(self._db.execute(
                 "SELECT run_id,plan_id FROM schedule_runs WHERE binding_id=? AND target_kind='binding'",
                 (binding_id,),

@@ -165,7 +165,7 @@ class DefaultsWorktreeChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_deleted_project_and_same_alias_reregistration_never_adopt_old_workspace(self):
         resource, rule = await self.existing_rule_with_fallback()
-        preview = self.f.projects.preview_delete("test")
+        preview = (await self.f.projects.preview_delete("test"))
         reserved = self.f.projects.begin_delete(
             alias="test", expected_revision=preview.project.revision,
             expected_inventory_fingerprint=preview.fingerprint,

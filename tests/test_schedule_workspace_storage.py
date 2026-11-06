@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -114,7 +115,7 @@ class ScheduleWorkspaceStorageTest(unittest.TestCase):
         with self.assertRaises(ScheduleConflict) as caught:
             self.create(workspace=policy, checked_project_revision=1)
         self.assertEqual(caught.exception.code, "project_unavailable")
-        self.assertEqual(self.schedules.list(app_id="app"), ())
+        self.assertEqual(asyncio.run(self.schedules.list(app_id="app")), ())
 
     def test_explicit_project_revision_does_not_revalidate_saved_workspace(self):
         record = self.resource()
@@ -158,7 +159,7 @@ class ScheduleWorkspaceStorageTest(unittest.TestCase):
 
     def test_project_reregistration_cannot_adopt_old_workspace(self):
         record = self.resource()
-        preview = self.store.preview_project_delete("p")
+        preview = asyncio.run(self.store.preview_project_delete("p"))
         reserved = self.store.begin_project_delete(
             alias="p", expected_revision=preview.project.revision,
             expected_inventory_fingerprint=preview.fingerprint,

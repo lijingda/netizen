@@ -83,8 +83,8 @@ class PersistentForkRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 source or self.source, expected_project_revision=self.project_revision,
             )
 
-    def begin_delete(self):
-        snapshot = self.store.preview_project_delete("project")
+    async def begin_delete(self):
+        snapshot = await self.store.preview_project_delete("project")
         self.store.begin_project_delete(
             alias="project", expected_revision=snapshot.project.revision,
             expected_inventory_fingerprint=snapshot.fingerprint,
@@ -152,7 +152,7 @@ class PersistentForkRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ProjectDisabled):
             await self.fork()
-        self.begin_delete()
+        await self.begin_delete()
         with self.assertRaises(ProjectDeleting):
             await self.fork()
         self.assertEqual(self.codex.read_calls, [])
@@ -164,7 +164,7 @@ class PersistentForkRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.codex.read_entered.wait(), 1)
         self.assertTrue(self.runtime.project_has_fork_creation("project"))
         self.assertFalse(self.runtime.project_has_fork_creation("unrelated"))
-        self.begin_delete()
+        await self.begin_delete()
         self.codex.read_gate.set()
         with self.assertRaises(ProjectDeleting):
             await creating

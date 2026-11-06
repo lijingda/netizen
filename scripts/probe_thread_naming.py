@@ -264,7 +264,7 @@ async def _runtime_scenario(
         if native.name != generated_title:
             raise AssertionError("Runtime wrote a name different from its generated result")
         await _prove_ephemeral(codex, job.thread, first.thread_id)
-        inventory = store.preview_project_delete("naming-probe")
+        inventory = (await store.preview_project_delete("naming-probe"))
         if len(inventory.bindings) != 1 or inventory.sides:
             raise AssertionError("naming created a Binding or persisted Side")
         if runtime.project_side_snapshots("naming-probe"):

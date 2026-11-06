@@ -295,7 +295,7 @@ class ProjectFilesWebTest(unittest.IsolatedAsyncioTestCase):
                     request = asyncio.create_task(self.get("content", identity=root["identity"], path="readme.md"))
                     try:
                         self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-                        snapshot = self.store.preview_project_delete("test")
+                        snapshot = (await self.store.preview_project_delete("test"))
                         reserved = self.store.begin_project_delete(alias="test",
                             expected_revision=snapshot.project.revision,
                             expected_inventory_fingerprint=snapshot.fingerprint)

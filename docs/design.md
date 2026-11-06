@@ -2165,7 +2165,7 @@ blocking-I/O executor 写入既有 YAML。每个配置服务仅串行化写操�
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v20 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v21 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
 `schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
 v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
@@ -2184,6 +2184,13 @@ JSON null，以及完整 SessionSettings 的 `progress_card_settings` 为 null�
 v20 为 `schedule_plans` 增加独立的 `auto_archive` 布尔列；所有旧计划与删除墓碑迁移为
 false，只有有效 `new_topic` 计划可开启。冻结 v19 → v20 迁移保留其余数据和回执，
 不向 `schedule_runs` 增加归档状态、执行终态、策略快照或结果历史。
+v21 仅增加五个非唯一查询索引，不改变记录或解释：`dedup_keys` 与
+`schedule_requests` 的 `expires_at` 索引、Binding-target Run 的 `binding_id` 部分索引、
+有效 Binding-target Plan 的 `target_binding_id` 部分索引，以及按 Project alias/run ID
+排列的未释放或发布未知 Run 部分索引。当前结构校验要求这五个索引的列与谓词完整。
+每次 dedup mark／管理请求查重沿 expiry 索引最多清理 16 条最早到期记录；不保留分钟级
+清理节流状态。`seen` 与请求 exact-key lookup 始终按当前时间判定到期，未轮到物理清理
+的记录不能继续去重或重放。mark 的清理与 upsert 共用一个同步事务，不跨 await。
 受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
 创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
 不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
@@ -2206,7 +2213,7 @@ Codex 配置或卡片 session，也不与 Project 或 Worktree 删除级联。
 Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
 每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
-数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18 → v19 → v20；基线仍为 v14，沿用
+数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18 → v19 → v20 → v21；基线仍为 v14，沿用
 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
 历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
 在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
@@ -2229,7 +2236,11 @@ queue 表，也不保存 Admin credential、session、action/CSRF token、native
 audit record。
 
 文件数据库使用 WAL、`synchronous=FULL` 和有界 writer busy timeout。Admin 的 keyset
-分页查询只通过 Store-owned `query_only` connection 与单 worker executor 执行，SQL 有
+分页查询、定时计划列表（含按当前时间计算的 `ended` 过滤）和 Project 删除的 advisory
+预览快照通过 Store-owned `query_only` connection 与单 worker executor 执行；reader 注册
+与 writer 相同的纯定时时间函数。Project 预览在 reader 的单次读事务内完成 SQL 与解码，
+不持有 writer lock；返回后复核内存删除 intent。正式删除仍在 writer 的原同步事务内复读
+清单、核对 revision/fingerprint 并发布内存 intent，预览不授权跳过这些检查。SQL 有
 progress deadline 和提交前容量门禁；执行中与排队中合计最多 32 个查询，等待以异步方式
 进行，排队与执行共用从提交开始计算的总 deadline。容量满时明确报忙；排队期间已超时的
 查询轮到执行时直接失败，不执行 SQL。调用方超时或取消不提前释放底层任务的容量，

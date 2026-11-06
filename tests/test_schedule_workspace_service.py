@@ -119,7 +119,7 @@ class ScheduleWorkspaceServiceTest(unittest.IsolatedAsyncioTestCase):
                 native_thread_id="native-a",
             )
             self.assertEqual(result["error"]["code"], "workspace_unavailable")
-            self.assertEqual(self.store.schedules.list(app_id="app"), ())
+            self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         finally:
             self.store.worktrees.release_delete(resource.id)
 
@@ -135,7 +135,7 @@ class ScheduleWorkspaceServiceTest(unittest.IsolatedAsyncioTestCase):
             await self.service.manage(
                 self.create_request(workspace={"mode": "new"}), native_thread_id="native-a",
             )
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
 
     async def test_project_change_cannot_keep_a_foreign_worktree(self):
         resource = self.resource()
@@ -203,7 +203,7 @@ class ScheduleWorkspaceServiceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("private transport details", str(result))
         rejected = await self.service.manage(self.create_request(), native_thread_id="native-a")
         self.assertFalse(rejected["ok"], rejected)
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
 
     async def test_form_option_groups_start_concurrently_and_preserve_independent_results(self):
         support.ScheduleServiceTest.session_catalog(self)
@@ -247,7 +247,7 @@ class ScheduleWorkspaceServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["error"]["code"], "project_changed")
         self.worktrees.validate_policy.assert_not_awaited()
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
 
     async def test_explicit_project_revision_is_honored_for_metadata_only_updates(self):
         plan = await self.create()

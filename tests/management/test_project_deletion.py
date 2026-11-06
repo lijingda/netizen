@@ -255,6 +255,27 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
             ("delete", source.id, "native-source"), ("delete", lazy.id, None),
         ])
 
+    async def test_delete_recaptures_runtime_orphans_after_advisory_reader(self) -> None:
+        parent = self.binding("orphan-parent")
+        orphan = self.side(parent, SideTopicState.OPEN, live=False)
+        self.store.delete_binding(parent.id)
+        snapshot = await self.preview()
+        original = self.projects.preview_delete
+
+        async def preview(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            self.runtime.side_snapshots[orphan.id] = SimpleNamespace(
+                side_id=orphan.id, parent_binding_id=parent.id, project_alias="test",
+            )
+            return result
+
+        with patch.object(self.projects, "preview_delete", side_effect=preview):
+            with self.assertRaises(ProjectError):
+                await self.delete(snapshot)
+        self.assertTrue(self.store.get_project("test").enabled)
+        self.assertFalse(self.store.project_delete_in_progress("test"))
+        self.assertEqual(self.store.get_side_topic(orphan.id).state, SideTopicState.OPEN)
+
     async def test_preexisting_orphan_side_is_closed_before_removing_empty_project(self) -> None:
         parent = self.binding("deleted-parent", native="native-parent")
         side = self.side(parent, SideTopicState.OPEN, live=True)
@@ -426,6 +447,21 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.deleted)
         self.assertEqual(self.native_deletes(), [("delete", lazy.id, None)])
 
+    def watch_deletion(self, binding_id):
+        deleted = asyncio.Event()
+        original = self.store.delete_binding
+
+        def delete(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if result.id == binding_id:
+                deleted.set()
+            return result
+
+        patcher = patch.object(self.store, "delete_binding", side_effect=delete)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return deleted
+
     async def test_lazy_cascade_yields_with_locks_released_and_intent_retained(self) -> None:
         first = self.binding("first")
         second = self.binding("second")
@@ -434,7 +470,10 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.service._runtime = ManagementRuntimePort(runtime)
         snapshot = await self.preview()
 
+        first_deleted = self.watch_deletion(first.id)
+
         async def observe_between_deletions():
+            await first_deleted.wait()
             with self.assertRaises(BindingNotFound):
                 self.store.get(first.id)
             self.assertEqual(self.store.get(second.id).id, second.id)
@@ -460,7 +499,10 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
         second = self.binding("second")
         snapshot = await self.preview()
 
+        first_deleted = self.watch_deletion(first.id)
+
         async def materialize_remaining():
+            await first_deleted.wait()
             with self.assertRaises(BindingNotFound):
                 self.store.get(first.id)
             self.store.assign_native_thread_id(second.id, "native-inflight")
@@ -483,7 +525,10 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
         deleting = asyncio.create_task(self.delete(snapshot))
         self.tasks.append(deleting)
 
+        first_deleted = self.watch_deletion(first.id)
+
         async def cancel_between_deletions():
+            await first_deleted.wait()
             with self.assertRaises(BindingNotFound):
                 self.store.get(first.id)
             self.assertTrue(self.store.project_delete_in_progress("test"))

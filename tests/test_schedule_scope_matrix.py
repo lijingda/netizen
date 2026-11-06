@@ -213,7 +213,7 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
                     await self.card_action(state, form=old_save)
                     self.assertEqual(len(state.channel.updates), updates)
                     self.assertIn("/cron", str(state.channel.replies[-1]))
-                    self.assertEqual(state.store.schedules.list(app_id="app", chat_id=old_scope.chat_id), ())
+                    self.assertEqual((await state.store.schedules.list(app_id="app", chat_id=old_scope.chat_id)), ())
                     self.assertEqual(state.store.active_binding(old_scope.key).id, state.source.id)
                     self.assertIsNone(state.store.active_binding(state.scope.key))
 
@@ -221,7 +221,7 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
                     listed = state.channel.replies[-1][1]
                     form = await self.card_action(state, value=callback(listed, "新建定时任务"))
                     await self.card_action(state, form=self.fill(form, name="new topic draft", instructions="new instructions"))
-                    plans = state.store.schedules.list(app_id="app", chat_id=state.scope.chat_id)
+                    plans = (await state.store.schedules.list(app_id="app", chat_id=state.scope.chat_id))
                     self.assertEqual([(plan.name, plan.instructions) for plan in plans], [("new topic draft", "new instructions")])
                     self.assertEqual(state.store.active_binding(old_scope.key).id, state.source.id)
                     self.assertIsNone(state.store.active_binding(state.scope.key))
@@ -234,7 +234,7 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(state.decoy_id, str(listed.card))
             form = await self.card_action(state, value=callback(listed, "新建定时任务"))
             detail = await self.card_action(state, form=self.fill(form, name=state.label, instructions="check resource"))
-            plans = state.store.schedules.list(app_id="app", chat_id=state.scope.chat_id)
+            plans = (await state.store.schedules.list(app_id="app", chat_id=state.scope.chat_id))
             self.assertEqual(len(plans), 1)
             plan = plans[0]
         else:

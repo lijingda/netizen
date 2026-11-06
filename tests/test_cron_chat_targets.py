@@ -102,7 +102,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
             retry = await self.action(form=values)
 
         worktrees.validate_policy.assert_awaited_once()
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.assertEqual(self.stable_form(form_values(retry)), self.stable_form(values))
         self.assertIn("定时任务操作未确认", str(retry.card))
         self.assertEqual(len(captured.records), 1)
@@ -171,7 +171,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
             replace(drafted, fields={key: value for key, value in drafted.fields.items() if key != "cron_chat_page"}))
         self.management.query_available_chats.assert_not_awaited()
         self.assertEqual(self.store._connection.total_changes, before)
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.assertEqual(self.targets.calls, [])
 
     async def test_new_defaults_current_and_edit_loads_saved_group_avatar(self):
@@ -189,7 +189,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
                          {"oc_group": "img_current", "oc_other": "img_other"})
         await self.action(form=self.complete(card,
             cron_target_mode="group", cron_group_id="oc_other", cron_chat_id="oc_residual"))
-        saved, = self.store.schedules.list(app_id="app")
+        saved, = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(saved.chat_id, "oc_other")
         self.assertEqual(self.targets.calls, ["oc_other"])
         # An edited target not in the current directory batch is resolved for
@@ -213,10 +213,10 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(scope=scope):
                 card = await self.editor(scope=scope)
                 self.assertEqual(form_values(card)["cron_target_mode"], "current")
-                previous = {plan.id for plan in self.store.schedules.list(app_id="app")}
+                previous = {plan.id for plan in (await self.store.schedules.list(app_id="app"))}
                 await self.action(scope=scope, form=self.complete(card,
                     cron_group_id={"malformed": "inactive"}, cron_chat_id=["oc_other"]))
-                saved, = (plan for plan in self.store.schedules.list(app_id="app") if plan.id not in previous)
+                saved, = (plan for plan in (await self.store.schedules.list(app_id="app")) if plan.id not in previous)
                 self.assertEqual(saved.chat_id, scope.chat_id)
         self.assertEqual(self.targets.calls, [scope.chat_id for scope in scopes])
         self.management.query_available_chats.assert_not_awaited()
@@ -226,13 +226,13 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         card = await self.editor()
         values = self.complete(card, cron_target_mode="id", cron_chat_id="  ", cron_group_id="oc_other")
         retry = await self.action(form=values)
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.assertEqual(self.targets.calls, [])
         self.assertEqual(self.stable_form(form_values(retry)), self.stable_form(values))
         restored = form_values(retry)
         restored["cron_chat_id"] = "oc_other"
         await self.action(form=restored)
-        saved, = self.store.schedules.list(app_id="app")
+        saved, = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(saved.chat_id, "oc_other")
 
     async def test_id_target_accepts_p2p_ignores_group_and_reports_saved_outside_filter(self):
@@ -240,7 +240,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         card = await self.editor()
         rendered = await self.action(form=self.complete(card,
             cron_target_mode="id", cron_chat_id="oc_private", cron_group_id="oc_other"))
-        saved, = self.store.schedules.list(app_id="app")
+        saved, = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(saved.chat_id, "oc_private")
         self.assertEqual(saved.session_settings.message_context_mode.value, "current-only")
         self.assertEqual(self.targets.calls, ["oc_private"])
@@ -260,14 +260,14 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         card = await self.editor()
         values = self.complete(card, cron_target_mode="group", cron_group_id="", cron_chat_id="oc_other")
         retry = await self.action(form=values)
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.assertEqual(self.targets.calls, [])
         self.assertIn("请选择飞书群聊", str(retry.card))
         restored = form_values(retry)
         self.assertEqual(self.stable_form(restored), self.stable_form(values))
         restored["cron_group_id"] = "oc_other"
         await self.action(form=restored)
-        saved, = self.store.schedules.list(app_id="app")
+        saved, = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(saved.chat_id, "oc_other")
 
     async def test_server_rejects_unreachable_target_without_saving_and_preserves_retry_identity(self):
@@ -275,17 +275,17 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         card = await self.editor()
         values = self.complete(card, cron_target_mode="id", cron_chat_id="oc_denied", cron_group_id="oc_other")
         retry = await self.action(form=values)
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.assertIn("机器人无法访问", str(retry.card))
         self.assertEqual(self.targets.calls, ["oc_denied"])
         restored = form_values(retry)
         self.assertEqual(self.stable_form(restored), self.stable_form(values))
         restored["cron_chat_id"] = "oc_other"
         await self.action(form=restored)
-        saved, = self.store.schedules.list(app_id="app")
+        saved, = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(saved.chat_id, "oc_other")
         await self.action(form=restored)
-        self.assertEqual(len(self.store.schedules.list(app_id="app")), 1)
+        self.assertEqual(len((await self.store.schedules.list(app_id="app"))), 1)
 
     async def test_directory_failure_keeps_id_flow_and_current_private_default(self):
         self.management.query_available_chats.side_effect = TimeoutError("directory unavailable")
@@ -300,7 +300,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.management.query_available_chats.assert_awaited_once_with(query="", page_token=None, page_size=20)
         values = self.complete(card, cron_target_mode="current", cron_chat_id="oc_other", cron_group_id="oc_other")
         await self.action(form=values, scope=scope)
-        saved, = self.store.schedules.list(app_id="app")
+        saved, = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(saved.chat_id, "oc_private")
         self.assertEqual(self.targets.calls, ["oc_private"])
         self.management.validate_available_chat.assert_not_awaited()
@@ -428,7 +428,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(any(button["text"]["content"] == "跳转" for button in elements(result.card, "button")))
                 self.assertEqual(self.stable_form(form_values(result)), self.stable_form({**values, "cron_group_id": ""}))
                 self.assertFalse(any(call.args[0] for call in self.avatars.await_args_list))
-                self.assertEqual(self.store.schedules.list(app_id="app"), ())
+                self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.assertEqual(self.targets.calls, [])
 
     async def test_search_and_business_error_preserve_complete_model_catalog(self):
@@ -456,7 +456,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         retry = await self.action(form=submitted, scope=scope)
         self.assertEqual({name: self.field(retry, name)["options"] for name in config_names}, original)
         self.assertNotIn("模型目录暂不可用", str(retry.card))
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.management.schedules.form_options.assert_not_awaited()
         self.channel.get_chat_info.assert_not_awaited()
         self.store.query_bindings.assert_not_awaited()
@@ -509,7 +509,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.management.query_available_chats.assert_not_awaited()
         values.update(cron_target_mode="id", cron_chat_id="oc_other")
         await self.action(form=values, scope=scope)
-        saved, = self.store.schedules.list(app_id="app")
+        saved, = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(saved.chat_id, "oc_other")
         self.assertEqual(saved.session_settings.message_context_mode, MentionContextMode.CATCH_UP)
         self.assertEqual(self.store.get(source.id), source)
@@ -523,7 +523,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.store.create_channel_binding(scope=topic, project_alias="work", creator_id="ou_user")
         fixed = await self.editor(scope=topic, label="在当前 Agent 会话中定时执行")
         self.assertEqual(elements(fixed.card, "input"), [])
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.management.query_available_chats.assert_not_awaited()
 
     async def test_fixed_agent_target_stays_exact_after_switch_and_edit_from_other_chat(self):
@@ -542,7 +542,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("oc_private", str(card.card))
         self.assertIn("omt_original", str(card.card))
         await self.action(form=values, scope=origin)
-        saved, = self.store.schedules.list(app_id="app")
+        saved, = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(saved.target_binding_id, original.id)
         self.assertEqual(self.store.active_binding(origin.key).id, replacement.id)
         edited = await self.editor(plan_id=saved.id)

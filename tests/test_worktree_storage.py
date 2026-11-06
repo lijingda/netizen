@@ -47,8 +47,8 @@ class WorktreeStorageTest(unittest.IsolatedAsyncioTestCase):
             working_cwd=record.cwd, worktree_id=record.id,
         )
 
-    def delete_project(self) -> None:
-        snapshot = self.store.preview_project_delete("repo")
+    async def delete_project(self) -> None:
+        snapshot = await self.store.preview_project_delete("repo")
         reserved = self.store.begin_project_delete(
             alias="repo", expected_revision=snapshot.project.revision,
             expected_inventory_fingerprint=snapshot.fingerprint,
@@ -71,7 +71,7 @@ class WorktreeStorageTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sentinel.read_text(), "keep")
             with self.assertRaises(WorktreeNotFound):
                 self.store.worktrees.get(record.id)
-            self.assertEqual(self.store.preview_project_delete("repo").worktrees, ())
+            self.assertEqual((await self.store.preview_project_delete("repo")).worktrees, ())
 
     async def test_discard_unstarted_cannot_forget_unknown_ready_or_restarted_resources(self) -> None:
         pending = self.reserve("pending")
@@ -129,7 +129,7 @@ class WorktreeStorageTest(unittest.IsolatedAsyncioTestCase):
         disabled = self.store.set_project_enabled(alias="repo", enabled=False, expected_revision=1)
         enabled = self.store.set_project_enabled(alias="repo", enabled=True, expected_revision=disabled.revision)
         self.assertEqual(enabled.generation, 1)
-        self.delete_project()
+        await self.delete_project()
         new = self.store.register_project(alias="repo", cwd="/repo")
         self.assertEqual(new.generation, 2)
         self.assertEqual(self.store.worktrees.get(record.id), record)
@@ -138,17 +138,17 @@ class WorktreeStorageTest(unittest.IsolatedAsyncioTestCase):
             self.bind(record)
 
     async def test_project_delete_tracks_worktrees_and_blocks_pending_creation(self) -> None:
-        preview = self.store.preview_project_delete("repo")
+        preview = (await self.store.preview_project_delete("repo"))
         record = self.reserve()
         with self.assertRaises(WorktreeConflict):
-            self.store.preview_project_delete("repo")
+            (await self.store.preview_project_delete("repo"))
         self.store.worktrees.mark_unknown(record.id)
         with self.assertRaises(ProjectInventoryConflict):
             self.store.begin_project_delete(
                 alias="repo", expected_revision=preview.project.revision,
                 expected_inventory_fingerprint=preview.fingerprint,
             )
-        current = self.store.preview_project_delete("repo")
+        current = (await self.store.preview_project_delete("repo"))
         self.assertEqual(current.worktrees[0].creation_state, "unknown")
 
     async def test_independent_origin_record_survives_creator_deletion(self) -> None:
@@ -305,7 +305,7 @@ class WorktreeStorageTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_workspace_sync_respects_project_generation_and_creation_origin(self) -> None:
         old = self.ready()
-        self.delete_project()
+        await self.delete_project()
         self.store.register_project(alias="repo", cwd="/repo")
         source = self.store.create_channel_binding(scope=self.scope, project_alias="repo", creator_id="user")
         self.store.assign_native_thread_id(source.id, "native")
@@ -349,7 +349,7 @@ class WorktreeStorageTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_orphan_usage_remains_unassociated_and_incoming_native_path_obeys_intent(self) -> None:
         record = self.ready()
-        self.delete_project()
+        await self.delete_project()
         self.store.register_project(alias="repo", cwd="/repo")
         source = self.store.create_channel_binding(scope=self.scope, project_alias="repo", creator_id="user")
         self.store.assign_native_thread_id(source.id, "native")

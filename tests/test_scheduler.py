@@ -286,7 +286,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.scheduler.tick(), 1)
         await self.until(entered.is_set)
         self.assertIsNone(self.store.get(plan_id).next_due_at)
-        self.assertEqual(self.store.list(app_id="app", ended=True, now=160), ())
+        self.assertEqual(await self.store.list(app_id="app", ended=True, now=160), ())
         self.now = 220
         self.assertEqual(await self.scheduler.tick(), 0)
         with self.assertLogs("netizen_cli.schedules.scheduler", level="WARNING"):
@@ -294,7 +294,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await self.scheduler.drain(asyncio.get_running_loop().time() + 1))
         self.assertEqual(len(self.dispatched), 1)
         self.assertEqual(self.store.list_runs(plan_id)[0].error_code, "dispatch_failed")
-        self.assertEqual([plan.id for plan in self.store.list(app_id="app", ended=True, now=220)], [plan_id])
+        self.assertEqual([plan.id for plan in await self.store.list(app_id="app", ended=True, now=220)], [plan_id])
 
     async def test_recovery_misses_before_cutoff_and_prevents_later_dispatch(self):
         plan_id = self.plan(schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=0,
@@ -312,7 +312,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.now = 240
         self.assertEqual(await self.scheduler.tick(), 0)
         self.assertEqual(len(self.dispatched), 1)
-        self.assertEqual([plan.id for plan in self.store.list(app_id="app", ended=True, now=240)], [plan_id])
+        self.assertEqual([plan.id for plan in await self.store.list(app_id="app", ended=True, now=240)], [plan_id])
 
     async def test_busy_skips_without_polling_fresh_ordinary_consumer(self):
         plan_id = self.plan()
