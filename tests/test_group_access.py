@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import threading
 import unittest
@@ -16,7 +17,7 @@ from netizen_cli.group_access import GroupAccessRule, GroupAccessService, GroupA
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.lark_app import encode_lark_app
 from netizen_cli.settings import Settings, SettingsError
-from tests.support.channel_fixtures import channel_fixture
+from tests.support.channel_fixtures import channel_fixture, side_channel_fixture
 from tests.support.channel_messages import FakeMessage
 
 
@@ -277,6 +278,31 @@ class GroupAccessChannelTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(handler.await_count, int(expected))
         self.assertEqual(self.fixture.store._connection.total_changes, before)
 
+    async def test_direct_scope_read_failure_uses_chat_lookup_and_fails_closed(self):
+        self.app._group_access = GroupAccessService(GroupAccessRule("only"))
+        for kind in ("p2p", "group", "unknown", "error"):
+            with self.subTest(kind=kind), ExitStack() as stack:
+                direct = stack.enter_context(patch.object(
+                    self.app._bindings, "has_direct_scope", side_effect=OSError("private details")))
+                lookup = stack.enter_context(patch.object(self.channel, "get_chat_info", AsyncMock(
+                    return_value=SimpleNamespace(chat_mode=kind),
+                    side_effect=OSError("lookup failed") if kind == "error" else None)))
+                stack.enter_context(patch("netizen_cli.channel.entry.is_status_command", return_value=True))
+                handler = stack.enter_context(patch.object(self.app, "_handle_status_command", new_callable=AsyncMock))
+                logs = stack.enter_context(self.assertLogs("netizen_cli.channel_app", level="WARNING"))
+                self.channel.replies.clear()
+                await self.app.handle_card_action(SimpleNamespace(
+                    chat_id="oc_target", message_id="om_card", action=object()))
+                direct.assert_called_once_with("cli_test", "oc_target")
+                lookup.assert_awaited_once_with("oc_target")
+                self.assertEqual(handler.await_count, int(kind == "p2p"))
+                self.assertEqual(len(self.channel.replies), int(kind != "p2p"))
+                self.assertEqual(logs.records[0].chat_id, "oc_target")
+                self.assertEqual(logs.records[0].error_type, "OSError")
+                self.assertNotIn("private details", str(logs.output))
+                if kind != "p2p":
+                    self.assertIn(GROUP_ACCESS_NOTICE, self.channel.replies[-1][1])
+
     async def test_all_and_listed_card_admission_skip_database_and_chat_lookup(self):
         for rule in (GroupAccessRule(), GroupAccessRule("only", ("oc_target",))):
             self.app._group_access = GroupAccessService(rule)
@@ -420,13 +446,11 @@ class EnableGroupChannelTest(unittest.IsolatedAsyncioTestCase):
                 write.assert_not_called()
             self.assertIn("不接受参数", self.channel.replies[-1][1])
 
-    async def test_conflict_external_edit_limit_and_write_failure_do_not_change_rule_or_config(self):
-        for failure in ("revision", "external", "limit", "write"):
+    async def test_external_edit_limit_and_write_failure_do_not_change_rule_or_config(self):
+        for failure in ("external", "limit", "write"):
             with self.subTest(failure=failure), ExitStack() as stack:
                 service = self.configure(ids=tuple(f"oc_{i}" for i in range(1000)) if failure == "limit" else ())
-                if failure == "revision":
-                    stack.enter_context(patch.object(service, "enable_chat", side_effect=GroupAccessConflict("changed")))
-                elif failure == "external":
+                if failure == "external":
                     self.path.write_text(self.path.read_text() + "# external change\n")
                 elif failure == "write":
                     stack.enter_context(patch("netizen_cli.admin.port_config.os.replace", side_effect=OSError("read only")))
@@ -439,7 +463,7 @@ class EnableGroupChannelTest(unittest.IsolatedAsyncioTestCase):
                 if failure == "limit":
                     self.assertIn("1000", self.channel.replies[-1][1])
 
-    async def test_revision_conflicts_with_admin_save_and_write_runs_off_event_loop(self):
+    async def test_admin_save_still_checks_revision_and_enable_write_runs_off_event_loop(self):
         service = self.app._group_access
         before = service.snapshot()[1]
         event_loop_thread = threading.get_ident()
@@ -456,6 +480,102 @@ class EnableGroupChannelTest(unittest.IsolatedAsyncioTestCase):
             service.update(GroupAccessRule(), expected_revision=before)
         old = service.snapshot()[1]
         service.update(GroupAccessRule("all", ("oc_admin_edit",)), expected_revision=old)
-        with self.assertRaises(GroupAccessConflict):
-            service.enable_chat("oc_new", expected_revision=old)
-        self.assertEqual(service.snapshot()[0], GroupAccessRule("all", ("oc_admin_edit",)))
+        rule, added = service.enable_chat("oc_new")
+        self.assertTrue(added)
+        self.assertEqual(rule, GroupAccessRule("all", ("oc_admin_edit", "oc_new")))
+
+
+    async def test_enables_from_same_entry_snapshot_preserve_both_chats(self):
+        service = self.app._group_access
+        submit = self.app._management._blocking_io.submit
+        arrived = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_submit(*args, **kwargs):
+            arrived.set()
+            await release.wait()
+            return await submit(*args, **kwargs)
+
+        with patch.object(self.app._management._blocking_io, "submit", side_effect=delayed_submit):
+            second = asyncio.create_task(self.app.handle_message(self.message(chat_id="oc_second")))
+            try:
+                await asyncio.wait_for(arrived.wait(), 2)
+                # Both command entries have seen the original admission snapshot.
+                with patch.object(self.app._management._blocking_io, "submit", side_effect=submit):
+                    await self.app.handle_message(self.message())
+                release.set()
+                await asyncio.wait_for(second, 2)
+            finally:
+                release.set()
+                await second
+        self.assertEqual(service.snapshot()[0], GroupAccessRule("only", ("oc_group", "oc_second")))
+        self.assertEqual([text for _, text in self.channel.replies], ["已启用本群，之后的消息会正常执行。"] * 2)
+
+    async def test_admin_save_between_enable_entry_and_write_preserves_latest_rule(self):
+        service = self.app._group_access
+        submit = self.app._management._blocking_io.submit
+
+        async def admin_save_then_submit(*args, **kwargs):
+            service.update(GroupAccessRule("all", ("oc_admin_edit",)),
+                           expected_revision=service.snapshot()[1])
+            return await submit(*args, **kwargs)
+
+        with patch.object(self.app._management._blocking_io, "submit", side_effect=admin_save_then_submit):
+            await self.app.handle_message(self.message())
+        self.assertEqual(service.snapshot()[0], GroupAccessRule("all", ("oc_admin_edit", "oc_group")))
+        self.assertEqual(yaml.safe_load(self.path.read_text())["groupAccess"], service.snapshot()[0].to_dict())
+        self.assertIn("已将本群加入名单", self.channel.replies[-1][1])
+
+    async def test_enable_timeout_reports_unknown_without_retrying_or_cancelling_write(self):
+        service = self.app._group_access
+        executor = self.app._management._blocking_io
+        submit = executor.submit
+        enable = service.enable_chat
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def blocked_enable(chat_id):
+            if not release.wait(5):
+                raise TimeoutError("test did not release write")
+            return enable(chat_id)
+
+        async def expire_submit(*args, deadline, **kwargs):
+            self.assertAlmostEqual(deadline - loop.time(), 10, delta=1)
+            return await submit(*args, deadline=loop.time(), **kwargs)
+
+        with patch.object(service, "enable_chat", side_effect=blocked_enable) as write, \
+             patch.object(executor, "submit", side_effect=expire_submit) as submission, \
+             self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs:
+            try:
+                await asyncio.wait_for(self.app.handle_message(self.message()), 2)
+                self.assertEqual(self.channel.replies[-1][1],
+                                 "暂时无法保存群聊准入配置，请稍后重试或在 Admin 中启用。")
+                self.assertEqual(logs.records[-1].error_type, "BlockingIOResultUnknown")
+                self.assertEqual(executor.in_flight, 1)
+                self.assertEqual(service.snapshot()[0].chat_ids, ())
+                submission.assert_awaited_once()
+            finally:
+                release.set()
+                await executor.drain(deadline=loop.time() + 5)
+            write.assert_called_once_with("oc_group")
+        self.assertEqual(service.snapshot()[0].chat_ids, ("oc_group",))
+
+    async def test_enable_in_allowed_side_topic_uses_whole_chat_in_both_modes(self):
+        async with side_channel_fixture() as fixture:
+            fixture.app._is_instance_admin = self.app._is_instance_admin
+            source = self.message("/side", message_id="om_side")
+            fixture.binding_for(source)
+            fixture.queue_promoted_topic(chat_id="oc_group", root_id="om_root",
+                                         seed_id="om_seed", topic_id="omt_side")
+            await fixture.app.handle_message(source)
+            for mode in ("all", "only"):
+                with self.subTest(mode=mode):
+                    service = self.configure(mode, ("oc_group",) if mode == "only" else ())
+                    fixture.app._group_access = service
+                    with patch.object(fixture.app, "_prompt", new_callable=AsyncMock) as ordinary, \
+                         patch.object(fixture.app, "_side_prompt", new_callable=AsyncMock) as side:
+                        await fixture.app.handle_message(self.message(thread_id="omt_side"))
+                        ordinary.assert_not_called()
+                        side.assert_not_called()
+                    self.assertEqual(service.snapshot()[0], GroupAccessRule(mode, ("oc_group",)))
+                    self.assertIn("已将本群加入名单" if mode == "all" else "本群已启用", fixture.channel.replies[-1][1])

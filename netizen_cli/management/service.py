@@ -914,10 +914,11 @@ class InstanceManagementService:
         )
 
     async def enable_group_access(
-        self, service: GroupAccessService, chat_id: str, *, expected_revision: str,
+        self, service: GroupAccessService, chat_id: str,
     ) -> tuple[GroupAccessRule, bool]:
         return await self._blocking_io.submit(
-            service.enable_chat, chat_id, expected_revision=expected_revision,
+            service.enable_chat, chat_id,
+            deadline=asyncio.get_running_loop().time() + 10,
         )
 
     async def group_access_chats(self, chat_ids: Sequence[str]) -> dict[str, Any]:

@@ -7602,6 +7602,31 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(("om_steer", "已接收调整。"), self.channel.replies)
 
+    async def test_accepted_steer_reply_failure_is_only_a_presentation_warning(self) -> None:
+        await self.fixture.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STEERED, binding.id, "native-one", "turn-one",
+        )
+        with patch.object(self.app, "_safe_add_reaction", AsyncMock(return_value=False)), \
+             patch.object(self.app, "_reply", AsyncMock(side_effect=OSError("private details"))) as reply, \
+             patch.object(self.app, "_report_input_error", new_callable=AsyncMock) as report, \
+             self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs:
+            message = FakeMessage("new direction", message_id="om_steer")
+            await self.app.handle_message(message)
+            reply.assert_awaited_once_with(message, "已接收调整。")
+            report.assert_not_called()
+        self.assertEqual(len(self.runtime.submit_calls), 1)
+        record, = logs.records
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertEqual(record.binding_id, binding.id)
+        self.assertEqual(record.thread_id, "native-one")
+        self.assertEqual(record.turn_id, "turn-one")
+        self.assertEqual(record.error_type, "OSError")
+        self.assertIsNone(record.exc_info)
+        self.assertNotIn("private details", str(logs.output))
+
     async def test_any_delivered_sender_can_manage_a_group_scope(self) -> None:
         await self.fixture.new()
         self.assertEqual(
@@ -9009,6 +9034,30 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             await self.app.handle_message(prompt)
 
         self.assertIn((prompt.id, "已接收 Side 调整。"), self.channel.replies)
+
+    async def test_side_accepted_steer_reply_failure_is_only_a_presentation_warning(self) -> None:
+        _binding, side = await self.open_direct_side()
+        self.runtime.side_submission = SideSubmission(
+            SubmitDisposition.STEERED, side.id, "native-side-1", "side-turn-1",
+        )
+        prompt = FakeMessage("adjust side", message_id="om_side_steer", chat_id="oc-direct",
+                             chat_type="p2p", thread_id=side.topic_id, mentioned_bot=False)
+        with patch.object(self.app, "_safe_add_reaction", AsyncMock(return_value=False)), \
+             patch.object(self.app, "_reply", AsyncMock(side_effect=OSError("private details"))) as reply, \
+             patch.object(self.app, "_report_input_error", new_callable=AsyncMock) as report, \
+             self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs:
+            await self.app.handle_message(prompt)
+            reply.assert_awaited_once_with(prompt, "已接收 Side 调整。")
+            report.assert_not_called()
+        self.assertEqual(len(self.runtime.submit_side_calls), 1)
+        record, = logs.records
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertEqual(record.side_id, side.id)
+        self.assertEqual(record.thread_id, "native-side-1")
+        self.assertEqual(record.turn_id, "side-turn-1")
+        self.assertEqual(record.error_type, "OSError")
+        self.assertIsNone(record.exc_info)
+        self.assertNotIn("private details", str(logs.output))
 
     async def test_side_failed_and_interrupted_turns_keep_terminal_reactions(
         self,

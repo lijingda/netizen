@@ -633,8 +633,9 @@ Channel 通过注入的窄身份检查，按本实例 App ID 和发送者 open_i
 成员资格；非管理员拒绝，身份无效或管理员名单不可用时不启用。单聊直接说明无需启用。
 群已在名单中时只回复当前状态，不重复写入；all 模式也可添加，并说明限制模式下生效。
 写入通过共享 blocking I/O helper 在事件循环外执行，在 GroupAccessService 写锁内追加准确
-chat ID，复用 revision 检查和 ConfigFileEditor 原子更新，保留当前模式和其他群。
-配置冲突、外部文件修改、名单上限或写入失败均不重试，记录日志并提示稍后重试或在 Admin
+chat ID，基于锁内最新规则调用 ConfigFileEditor 原子更新，保留当前模式和其他群；
+不要求命令入口的 revision 仍有效，Admin 整体保存仍检查 revision。
+外部文件修改、名单上限、写入失败或 10 秒内结果未确认均不重试，记录日志并提示稍后重试或在 Admin
 启用。`/enable` 是飞书中唯一使用实例管理员身份授权的命令；移除群和切换模式仍通过 Admin。
 
 Admin 编辑沿用同源认证、一次性 action grant、配置冲突检测与原子写入契约，成功后
