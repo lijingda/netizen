@@ -141,8 +141,16 @@ class ChannelEntry(CommandChannel):
     async def handle_card_action(self, event: Any) -> None:
         group_rule, _ = self._group_access.snapshot()
         chat_id = str(getattr(event, "chat_id", "") or "")
-        if (not group_rule.allows(chat_id, None)
-                and not self._bindings.has_direct_scope(self._app_id, chat_id)):
+        known_direct = False
+        if not group_rule.allows(chat_id, None):
+            try:
+                known_direct = self._bindings.has_direct_scope(self._app_id, chat_id)
+            except Exception as error:
+                logger.warning(
+                    "group admission could not read direct scope",
+                    extra={"chat_id": chat_id, "error_type": type(error).__name__},
+                )
+        if not group_rule.allows(chat_id, None) and not known_direct:
             chat_info = None
             chat_kind = None
             try:

@@ -676,29 +676,32 @@ class BindingStoreTest(unittest.TestCase):
         self.now = 111
         self.assertFalse(self.store.seen("msg:one"))
 
-    def test_dedup_sweeps_once_per_monotonic_minute_without_delaying_expiry(self) -> None:
-        statements = []
-        self.store._connection.set_trace_callback(statements.append)
-        with patch("netizen_cli.bindings.time.monotonic", return_value=1000.0) as clock:
-            self.store.mark("expired", 10)
-            self.store.mark("renewed", 10)
-            self.store.mark("backlog", 10)
-            self.now = 111
-            self.store.mark("renewed", 100)
-            self.assertFalse(self.store.seen("expired"))
-            self.assertTrue(self.store.seen("renewed"))
-            self.assertIsNotNone(self.store._connection.execute(
-                "SELECT 1 FROM dedup_keys WHERE dedup_key='backlog'",
-            ).fetchone())
-            # Wall-clock movement must not trigger another whole-table sweep.
-            self.now = 10000
-            clock.return_value = 1059.9
-            self.store.mark("live", 100)
-            self.assertEqual(sum(sql.startswith("DELETE FROM dedup_keys WHERE expires_at") for sql in statements), 1)
-            clock.return_value = 1060.0
-            self.store.mark("live", 100)
-            self.assertEqual(sum(sql.startswith("DELETE FROM dedup_keys WHERE expires_at") for sql in statements), 2)
-            self.assertEqual([row[0] for row in self.store._connection.execute("SELECT dedup_key FROM dedup_keys")], ["live"])
+    def test_dedup_sweeps_oldest_bounded_batch_without_delaying_expiry(self) -> None:
+        from netizen_cli.bindings import _DEDUP_EXPIRY_BATCH
+
+        count = _DEDUP_EXPIRY_BATCH * 4
+        self.store._connection.executemany(
+            "INSERT INTO dedup_keys VALUES (?, ?)",
+            ((f"expired-{i:04d}", i) for i in reversed(range(count))),
+        )
+        self.now = count
+        self.store.mark("live", 100)
+        remaining = [row[0] for row in self.store._connection.execute(
+            "SELECT dedup_key FROM dedup_keys WHERE expires_at<=? ORDER BY expires_at", (self.now,),
+        )]
+        self.assertEqual(remaining, [f"expired-{i:04d}" for i in range(_DEDUP_EXPIRY_BATCH, count)])
+        # The exact key remains logically expired even beyond this sweep's batch.
+        self.assertFalse(self.store.seen(f"expired-{count - 1:04d}"))
+        self.store.mark(f"expired-{count - 2:04d}", 100)
+        self.assertTrue(self.store.seen(f"expired-{count - 2:04d}"))
+        self.assertTrue(self.store.seen("live"))
+        self.now += 100
+        self.assertFalse(self.store.seen("live"))
+        plan = self.store._connection.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM dedup_keys WHERE expires_at<=? ORDER BY expires_at LIMIT ?",
+            (self.now, _DEDUP_EXPIRY_BATCH),
+        ).fetchall()
+        self.assertTrue(any("USING COVERING INDEX dedup_keys_expiry" in row[3] for row in plan), plan)
 
     def test_memory_store_admin_reads_share_the_test_connection(self) -> None:
         binding = self.create("test")

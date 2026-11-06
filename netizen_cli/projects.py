@@ -170,16 +170,17 @@ class ProjectRegistry:
             raise ProjectError(str(error)) from error
         return _project(record)
 
-    def preview_delete(
+    async def preview_delete(
         self,
         alias: str,
         *,
         limit: int = PROJECT_DELETE_LIMIT,
         extra_side_ids: tuple[str, ...] = (),
+        deadline_seconds: float = 2.0,
     ) -> ProjectDeleteSnapshot:
         try:
-            return self._store.preview_project_delete(
-                alias, limit=limit, extra_side_ids=extra_side_ids,
+            return await self._store.preview_project_delete(
+                alias, limit=limit, extra_side_ids=extra_side_ids, deadline_seconds=deadline_seconds,
             )
         except StoredProjectNotFound as error:
             raise UnknownProject(alias) from error

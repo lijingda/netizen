@@ -172,7 +172,7 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("worktree", raised.exception.details)
             self.assertEqual((await self.service.query())["items"], [])
             self.assertEqual(tuple((self.root / "managed").iterdir()), ())
-            self.assertEqual(self.store.preview_project_delete("repo").worktrees, ())
+            self.assertEqual((await self.store.preview_project_delete("repo")).worktrees, ())
 
     async def test_reset_not_started_does_not_discard_successful_add_receipt(self):
         original = self.service._git._run
@@ -421,7 +421,7 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         finally:
             self.store.worktrees.release_delete(resource["id"])
 
-        snapshot = self.store.preview_project_delete("repo")
+        snapshot = (await self.store.preview_project_delete("repo"))
         reserved = self.store.begin_project_delete(alias="repo", expected_revision=snapshot.project.revision,
             expected_inventory_fingerprint=snapshot.fingerprint)
         try:
@@ -448,7 +448,7 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         finally:
             self.store.worktrees.discard_unstarted(pending)
 
-        snapshot = self.store.preview_project_delete("repo")
+        snapshot = (await self.store.preview_project_delete("repo"))
         reserved = self.store.begin_project_delete(alias="repo", expected_revision=snapshot.project.revision,
             expected_inventory_fingerprint=snapshot.fingerprint)
         self.store.finish_project_delete(alias="repo", expected_revision=reserved.project.revision,

@@ -1292,19 +1292,19 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         values["cron_instructions"] = "完整指令在卡片中"
         values["cron_kind"] = "daily"
         saved_settings = decode_schedule_action(scope=scope, value=None, form=values).payload["session_settings"]
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         await self.app.close()
         self.app = ChannelApplication(app_id="app", channel=self.channel, runtime=self.runtime,
             bindings=self.store, projects=self.projects, management=self.management, message_history=self.history)
         self.addAsyncCleanup(self.app.close)
         result = await self.card_action(form=values)
-        plans = self.store.schedules.list(app_id="app")
+        plans = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(len(plans), 1)
         self.assertEqual(plans[0].instructions, "完整指令在卡片中")
         self.assertEqual(plans[0].session_settings.to_dict(), saved_settings)
         self.assertEqual(callback(result, "编辑")["navigation"]["filter"], "all")
         await self.card_action(form=values)
-        self.assertEqual(len(self.store.schedules.list(app_id="app")), 1)
+        self.assertEqual(len((await self.store.schedules.list(app_id="app"))), 1)
 
     async def test_cron_without_binding_can_create_directly_pause_and_delete(self):
         scope = FeishuScope("app", "oc_group", ScopeKind.GROUP)
@@ -1317,13 +1317,13 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         form["cron_instructions"] = "检查明确资源"
         form["cron_timezone"] = "UTC"
         form["cron_kind"] = "daily"
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         detail = await self.card_action(form=form)
-        plans = self.store.schedules.list(app_id="app")
+        plans = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(len(plans), 1)
         self.assertEqual(plans[0].chat_id, scope.chat_id)
         await self.card_action(form=form)
-        self.assertEqual(len(self.store.schedules.list(app_id="app")), 1)
+        self.assertEqual(len((await self.store.schedules.list(app_id="app"))), 1)
         paused = await self.card_action(value=callback(detail, "暂停"))
         self.assertFalse(self.store.schedules.get(plans[0].id).enabled)
         self.assertFalse(self.store.schedules.get(plans[0].id).deleted)
@@ -1333,7 +1333,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.schedules.get(plans[0].id, include_deleted=True).deleted)
         replay = await self.card_action(form=form)
         self.assertIn("不会重新创建", str(replay.card))
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         self.assertIsNone(self.store.active_binding(scope.key))
 
     async def test_private_cron_direct_save_and_list_default_to_current_chat(self):
@@ -1348,7 +1348,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         form["cron_timezone"] = "UTC"
         form["cron_kind"] = "daily"
         await self.card_action(form=form)
-        plans = self.store.schedules.list(app_id="app")
+        plans = (await self.store.schedules.list(app_id="app"))
         self.assertEqual(len(plans), 1)
         self.assertEqual(plans[0].chat_id, scope.chat_id)
         self.assertEqual(self.app._schedule_default_chat(scope, {"mode": "list"}), {"mode": "list", "chat_id": scope.chat_id})
@@ -1399,12 +1399,12 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.channel.updates), 1)
         self.assertEqual(self.channel.updates[-1][0], "om_card")
         self.assertIn("时区", str(self.channel.updates[-1][1]))
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
         # Correct the recovered form, whose transport identity was renewed.
         form = form_values(SimpleNamespace(card=self.channel.updates[-1][1]))
         form["cron_timezone"] = "UTC"
         await self.card_action(form=form)
-        plans = self.store.schedules.list(app_id="app")
+        plans = (await self.store.schedules.list(app_id="app"))
         self.assertEqual([(plan.name, plan.instructions) for plan in plans], [("保留我的输入", "保留完整任务内容")])
 
     async def test_topic_group_card_direct_save_defaults_to_current_group(self):
@@ -1416,8 +1416,8 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         form["cron_instructions"] = "检查指定资源"
         form["cron_kind"] = "daily"
         await self.card_action(form=form, topic_id=scope.topic_id)
-        self.assertEqual(len(self.store.schedules.list(app_id="app")), 1)
-        self.assertEqual(self.store.schedules.list(app_id="app")[0].chat_id, scope.chat_id)
+        self.assertEqual(len((await self.store.schedules.list(app_id="app"))), 1)
+        self.assertEqual((await self.store.schedules.list(app_id="app"))[0].chat_id, scope.chat_id)
 
 
 if __name__ == "__main__":

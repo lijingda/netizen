@@ -914,10 +914,11 @@ class InstanceManagementService:
         )
 
     async def enable_group_access(
-        self, service: GroupAccessService, chat_id: str, *, expected_revision: str,
+        self, service: GroupAccessService, chat_id: str,
     ) -> tuple[GroupAccessRule, bool]:
         return await self._blocking_io.submit(
-            service.enable_chat, chat_id, expected_revision=expected_revision,
+            service.enable_chat, chat_id,
+            deadline=asyncio.get_running_loop().time() + 10,
         )
 
     async def group_access_chats(self, chat_ids: Sequence[str]) -> dict[str, Any]:
@@ -1094,9 +1095,9 @@ class InstanceManagementService:
         deadline: float,
         delete_worktrees: bool = False,
     ) -> ProjectDeleteSnapshot:
-        snapshot = await self._blocking_io.submit(
-            self._projects.preview_delete, alias,
-            extra_side_ids=self._project_side_ids(alias), deadline=deadline,
+        snapshot = await self._projects.preview_delete(
+            alias, extra_side_ids=self._project_side_ids(alias),
+            deadline_seconds=deadline - asyncio.get_running_loop().time(),
         )
         if snapshot.project.revision != expected_revision:
             raise StaleProject("Project 已改变，请刷新后重新确认。")
@@ -1145,9 +1146,12 @@ class InstanceManagementService:
         if deadline <= loop.time():
             raise TimeoutError("Project deletion deadline elapsed")
         extra_side_ids = self._project_side_ids(alias)
-        self._require_project_delete_capability(self._projects.preview_delete(
-            alias, extra_side_ids=extra_side_ids,
+        self._require_project_delete_capability(await self._projects.preview_delete(
+            alias, extra_side_ids=extra_side_ids, deadline_seconds=deadline - loop.time(),
         ))
+        # The advisory reader can yield; capture current orphan Side ownership
+        # again before the synchronous inventory validation and reservation.
+        extra_side_ids = self._project_side_ids(alias)
         snapshot = self._projects.begin_delete(
             alias=alias,
             expected_revision=expected_revision,

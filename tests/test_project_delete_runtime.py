@@ -70,8 +70,8 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.store.close()
             self.directory.cleanup()
 
-    def begin_delete(self) -> None:
-        snapshot = self.store.preview_project_delete("test")
+    async def begin_delete(self) -> None:
+        snapshot = await self.store.preview_project_delete("test")
         self.store.begin_project_delete(
             alias="test",
             expected_revision=snapshot.project.revision,
@@ -87,7 +87,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_preexisting_reservation_cannot_fork_after_deletion_starts(self) -> None:
-        self.begin_delete()
+        await self.begin_delete()
 
         with self.assertRaises(ProjectConflict):
             await self.create_side()
@@ -103,7 +103,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(1):
             while not self.codex.resume_calls:
                 await asyncio.sleep(0)
-        self.begin_delete()
+        await self.begin_delete()
         draining = asyncio.create_task(
             self.runtime.drain_project_side_creation(self.binding.id)
         )
@@ -135,7 +135,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         creating = asyncio.create_task(self.create_side())
         self.tasks.append(creating)
         await asyncio.wait_for(entered.wait(), 1)
-        self.begin_delete()
+        await self.begin_delete()
 
         # A bounded management wait can expire without cancelling the admitted
         # native fork or falsely proving that its session is absent.
@@ -353,7 +353,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         starting = asyncio.create_task(operation)
         self.tasks.append(starting)
         await asyncio.wait_for(entered.wait(), 1)
-        self.begin_delete()
+        await self.begin_delete()
         exact_delete = asyncio.create_task(
             self.runtime.delete_exact(binding.id, expected_native_thread_id=None)
         )

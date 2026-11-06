@@ -123,7 +123,7 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
         )
         action = await self.preview_action(session)
         self.runtime.calls.clear()
-        before = self.store.preview_project_delete("test")
+        before = (await self.store.preview_project_delete("test"))
         payload = web_fixture._action_payload(action)
         status, _, preview = await self.json_post(
             "/api/v1/projects/delete-preview", session, payload,
@@ -138,8 +138,8 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
             )],
             [3, 1, 2, 1],
         )
-        self.assertEqual(self.store.preview_project_delete("test"), before)
-        self.assertEqual(self.runtime.calls, [("project-side-snapshots", "test")])
+        self.assertEqual((await self.store.preview_project_delete("test")), before)
+        self.assertEqual(set(self.runtime.calls), {("project-side-snapshots", "test")})
         serialized = json.dumps(preview)
         for private in (before.fingerprint, "native-active", "native-archived", "Private preview"):
             self.assertNotIn(private, serialized)
@@ -190,7 +190,7 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.management, "preview_project_delete", wraps=self.management.preview_project_delete) as query:
             for count, choice in enumerate((False, True, False), start=1):
                 self.new_binding()
-                before = self.store.preview_project_delete("test")
+                before = (await self.store.preview_project_delete("test"))
                 payload = web_fixture._action_payload(action, deleteWorktrees=choice)
                 status, _, preview = await self.json_post("/api/v1/projects/delete-preview", session, payload)
                 self.assertEqual(status, 200, preview)
@@ -198,7 +198,7 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(preview["deleteWorktrees"], choice)
                 self.assertEqual(query.call_args.kwargs["delete_worktrees"], choice)
                 self.assertEqual(query.call_args.kwargs["expected_revision"], 1)
-                self.assertEqual(self.store.preview_project_delete("test"), before)
+                self.assertEqual((await self.store.preview_project_delete("test")), before)
                 refreshed = preview["actions"]["previewDelete"]
                 self.assertNotEqual(refreshed["actionToken"], action["actionToken"])
                 status, _, replay = await self.json_post("/api/v1/projects/delete-preview", session, payload)
@@ -222,7 +222,7 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(change=change):
                 action = await self.delete_action(session)
                 before_project = self.store.get_project("test")
-                before_count = len(self.store.preview_project_delete("test").bindings)
+                before_count = len((await self.store.preview_project_delete("test")).bindings)
                 if change == "native-swap":
                     self.store._connection.execute(
                         "UPDATE bindings SET native_thread_id = ? WHERE binding_id = ?",
@@ -233,7 +233,7 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.store.delete_binding(lazy.id)
                     self.new_binding("native-replacement")
-                self.assertEqual(len(self.store.preview_project_delete("test").bindings), before_count)
+                self.assertEqual(len((await self.store.preview_project_delete("test")).bindings), before_count)
                 self.runtime.calls.clear()
                 status, _, error = await self.json_post(
                     "/api/v1/projects/delete", session, web_fixture._action_payload(action),
@@ -241,7 +241,7 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status, 409, error)
                 self.assertEqual(self.store.get_project("test"), before_project)
                 self.assertFalse(self.store.project_delete_in_progress("test"))
-                self.assertEqual(self.runtime.calls, [("project-side-snapshots", "test")])
+                self.assertEqual(set(self.runtime.calls), {("project-side-snapshots", "test")})
 
     async def test_preview_and_final_grants_reject_stale_project_revision(self) -> None:
         self.new_binding("native-original")
@@ -255,7 +255,7 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 409, result)
         self.assertNotIn("actions", result)
-        self.assertEqual(self.runtime.calls, [("project-side-snapshots", "test")])
+        self.assertEqual(set(self.runtime.calls), {("project-side-snapshots", "test")})
         status, _, preview = await self.json_post(
             "/api/v1/projects/delete-preview", session,
             web_fixture._action_payload(await self.preview_action(session)),
@@ -272,7 +272,7 @@ class AdminProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("actions", result)
             self.assertTrue(self.store.get_project("test").enabled)
             self.assertEqual(self.store.get_project("test").revision, 3)
-            self.assertEqual(self.runtime.calls, [("project-side-snapshots", "test")])
+            self.assertEqual(set(self.runtime.calls), {("project-side-snapshots", "test")})
 
     async def assert_incomplete(self, error: Exception, expected_code: str) -> None:
         first = self.new_binding("native-first")

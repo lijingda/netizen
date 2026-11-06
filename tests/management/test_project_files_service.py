@@ -39,8 +39,8 @@ class ProjectFileServiceTest(unittest.IsolatedAsyncioTestCase):
         return await self.files.content(project=project, worktree=worktree,
             identity=identity, path=path, deadline=self.deadline())
 
-    def reserve_project_delete(self):
-        snapshot = self.store.preview_project_delete("test")
+    async def reserve_project_delete(self):
+        snapshot = await self.store.preview_project_delete("test")
         return self.store.begin_project_delete(alias="test", expected_revision=snapshot.project.revision,
             expected_inventory_fingerprint=snapshot.fingerprint)
 
@@ -62,7 +62,7 @@ class ProjectFileServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_project_deletion_and_same_alias_reregistration_invalidate_open_view(self):
         old = await self.root()
-        reserved = self.reserve_project_delete()
+        reserved = await self.reserve_project_delete()
         for operation in (self.root, lambda: self.content(old["identity"])):
             with self.assertRaises(FileBrowseError) as raised:
                 await operation()
@@ -106,7 +106,7 @@ class ProjectFileServiceTest(unittest.IsolatedAsyncioTestCase):
             pending = asyncio.create_task(self.content(old["identity"]))
             try:
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-                reserved = self.reserve_project_delete()
+                reserved = await self.reserve_project_delete()
                 self.finish_project_delete(reserved)
                 self.store.register_project(alias="test", cwd=str(self.project))
             finally:
@@ -141,7 +141,7 @@ class ProjectFileServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(root["rootId"], resource["id"])
         self.assertEqual(preview.text, "worktree file")
         self.assertEqual(resolve.await_count, 2)
-        self.assertEqual(self.store.preview_project_delete("test").bindings, ())
+        self.assertEqual((await self.store.preview_project_delete("test")).bindings, ())
 
     @unittest.skipUnless(shutil.which("git"), "Git is required")
     async def test_worktree_requires_current_project_ownership_ready_state_and_live_identity(self):
@@ -176,7 +176,7 @@ class ProjectFileServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_worktree_from_an_old_project_generation_is_not_adopted(self):
         worktrees = await self.enable_git_worktrees()
         resource = await worktrees.create(project_alias="test")
-        reserved = self.reserve_project_delete()
+        reserved = await self.reserve_project_delete()
         self.finish_project_delete(reserved)
         self.store.register_project(alias="test", cwd=str(self.project))
         with self.assertRaises(WorktreeError):

@@ -139,7 +139,7 @@ class WorktreeToolIntegrationTest(unittest.IsolatedAsyncioTestCase):
         old = await self.call("create_worktree")
         self.assertNotIn("error", old)
         self.store.delete_binding(self.source.id)
-        snapshot = self.store.preview_project_delete("test")
+        snapshot = (await self.store.preview_project_delete("test"))
         reserved = self.store.begin_project_delete(
             alias="test", expected_revision=snapshot.project.revision,
             expected_inventory_fingerprint=snapshot.fingerprint,

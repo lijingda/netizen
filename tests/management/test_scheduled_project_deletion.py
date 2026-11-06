@@ -85,7 +85,7 @@ class ScheduledProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
 
         self.projects.register(alias="test", path=str(self.cwd), create_directory=False)
         self.assertTrue(self.store.get_project("test").enabled)
-        self.assertEqual(self.store.schedules.list(app_id="cli_test", project_alias="test"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="cli_test", project_alias="test")), ())
         self.assert_tombstone(plan)
         fresh = self.plan()
         self.assertNotEqual(fresh.id, plan.id)

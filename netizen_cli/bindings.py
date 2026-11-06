@@ -32,22 +32,21 @@ from .defaults.store import (
 )
 from .schedules.models import Run, ScheduleConflict
 from .schedules.store import (
-    ScheduleStore, create_schema, require_schema,
+    ScheduleStore, create_schema, require_schema, register_query_functions, _run,
 )
 from .progress_card_settings import ProgressCardSettings
 from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
-from .worktrees.models import WorktreeRecord
-from .worktrees.store import WorktreeStore, create_schema as create_worktree_schema
+from .worktrees.models import WorktreeRecord, WorktreeConflict
+from .worktrees.store import WorktreeStore, create_schema as create_worktree_schema, _record as _worktree_record
 
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # Includes the running query and all submitted queries waiting for the reader.
 _ADMIN_QUERY_CAPACITY = 32
 PROJECT_DELETE_LIMIT = 1000
-# Logical expiry is checked by seen(); sweep at most once a minute so each
-# message does not scan the TTL table (the SDK marks two keys per message).
-_DEDUP_EXPIRY_INTERVAL_SECONDS = 60.0
+# Logical expiry stays exact in seen(); each mark reclaims a small indexed batch.
+_DEDUP_EXPIRY_BATCH = 16
 
 
 _CONTEXT_INTEGRITY_TRIGGERS = (
@@ -470,7 +469,7 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
     _require_project_metadata_schema(connection)
     require_schema(connection)
     require_defaults_schema(connection)
-    from .migrations.v20 import validate
+    from .migrations.v21 import validate
     validate(connection)
 
 
@@ -591,7 +590,6 @@ class BindingStore:
         self._connection_uri = not create
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._wall_clock = wall_clock
-        self._next_dedup_expiry = 0.0
         self._lock = threading.RLock()
         self._project_delete_intents: dict[str, ProjectDeleteSnapshot] = {}
         self._query_state_lock = threading.Lock()
@@ -747,6 +745,7 @@ class BindingStore:
                     dedup_key TEXT PRIMARY KEY,
                     expires_at REAL NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS dedup_keys_expiry ON dedup_keys(expires_at);
                 CREATE TABLE IF NOT EXISTS side_topics (
                     side_id TEXT PRIMARY KEY,
                     app_id TEXT NOT NULL,
@@ -883,6 +882,7 @@ class BindingStore:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 0")
             connection.execute("PRAGMA query_only = ON")
+            register_query_functions(connection)
         except BaseException:
             connection.close()
             raise
@@ -1795,21 +1795,38 @@ class BindingStore:
             if alias in self._project_delete_intents:
                 raise ProjectDeleting(f"Project {alias} 正在删除，请稍后刷新。")
 
-    def preview_project_delete(
+    async def preview_project_delete(
         self,
         alias: str,
         *,
         limit: int = PROJECT_DELETE_LIMIT,
         extra_side_ids: tuple[str, ...] = (),
+        deadline_seconds: float = 2.0,
     ) -> ProjectDeleteSnapshot:
         with self._lock:
             self.require_project_not_deleting(alias)
-            return self._project_delete_snapshot(
-                alias, limit=limit, extra_side_ids=extra_side_ids,
-            )
+            creating = frozenset(self.worktrees._creating)
+
+        def operation(connection: sqlite3.Connection) -> ProjectDeleteSnapshot:
+            connection.execute("BEGIN")
+            try:
+                return self._project_delete_snapshot(
+                    connection, alias, limit=limit, extra_side_ids=extra_side_ids,
+                    creating_worktrees=creating,
+                )
+            finally:
+                connection.rollback()
+
+        snapshot = await self._submit_query(operation, deadline_seconds=deadline_seconds)
+        with self._lock:
+            self.require_project_not_deleting(alias)
+            if any(item.id in self.worktrees._creating for item in snapshot.worktrees):
+                raise WorktreeConflict("Project 仍有在途 worktree 创建，请完成后重试。")
+        return snapshot
 
     def _project_delete_snapshot(
-        self, alias: str, *, limit: int, extra_side_ids: tuple[str, ...] = ()
+        self, connection: sqlite3.Connection, alias: str, *, limit: int,
+        extra_side_ids: tuple[str, ...] = (), creating_worktrees: frozenset[str],
     ) -> ProjectDeleteSnapshot:
         if type(limit) is not int or not 1 <= limit <= PROJECT_DELETE_LIMIT:
             raise ValueError(
@@ -1825,17 +1842,29 @@ class BindingStore:
             raise ValueError("Extra Side IDs must be a tuple of exact IDs")
         if len(extra_side_ids) > limit:
             raise ProjectDeleteLimitExceeded(limit_message)
-        project = self.get_project(alias)
-        self.worktrees.require_no_creation(alias, project.generation)
-        worktrees = self.worktrees.list_for_project(alias, generation=project.generation, limit=limit)
-        binding_rows = self._connection.execute(
+        project_row = connection.execute(
+            _PROJECT_SELECT + " WHERE alias=? AND deleted=0", (alias,),
+        ).fetchone()
+        if project_row is None:
+            raise ProjectNotFound(alias)
+        project = _project_record(project_row)
+        worktree_rows = connection.execute(
+            "SELECT * FROM managed_worktrees WHERE project_alias=? AND project_generation=? "
+            "ORDER BY worktree_id LIMIT ?", (alias, project.generation, limit + 1),
+        ).fetchall()
+        if len(worktree_rows) > limit:
+            raise WorktreeConflict("关联 worktree 超过单次操作上限，请先分批处理。")
+        worktrees = tuple(_worktree_record(row) for row in worktree_rows)
+        if any(item.id in creating_worktrees for item in worktrees):
+            raise WorktreeConflict("Project 仍有在途 worktree 创建，请完成后重试。")
+        binding_rows = connection.execute(
             _BINDING_INVENTORY_SELECT
             + " WHERE b.project_alias = ? LIMIT ?",
             (alias, limit + 1),
         ).fetchall()
         if len(binding_rows) > limit:
             raise ProjectDeleteLimitExceeded(limit_message)
-        side_rows = self._connection.execute(
+        side_rows = connection.execute(
             _SIDE_TOPIC_SELECT
             + " WHERE parent_binding_id IN "
             "(SELECT binding_id FROM bindings WHERE project_alias = ?) LIMIT ?",
@@ -1847,7 +1876,7 @@ class BindingStore:
         for side_id in extra_side_ids:
             if side_id in side_by_id:
                 continue
-            row = self._connection.execute(
+            row = connection.execute(
                 _SIDE_INVENTORY_SELECT + " WHERE st.side_id = ?", (side_id,)
             ).fetchone()
             if row is None or row["parent_project_alias"] not in {None, alias}:
@@ -1866,13 +1895,14 @@ class BindingStore:
         sides = tuple(
             sorted(side_by_id.values(), key=lambda side: side.id)
         )
-        plan_rows = self._connection.execute(
+        plan_rows = connection.execute(
             "SELECT plan_id, revision FROM schedule_plans WHERE project_alias=? "
             "AND deleted=0 ORDER BY plan_id LIMIT ?", (alias, limit + 1),
         ).fetchall()
-        run_rows = self._connection.execute(
-            "SELECT run_id FROM schedule_runs WHERE project_alias=? "
-            "AND (barrier != 'released' OR (target_kind='new_topic' AND error_code='publishing_unknown')) "
+        run_rows = connection.execute(
+            "SELECT * FROM schedule_runs WHERE project_alias=? "
+            "AND (barrier != 'released' OR error_code='publishing_unknown') "
+            "AND (barrier != 'released' OR target_kind='new_topic') "
             "ORDER BY run_id LIMIT ?", (alias, limit + 1),
         ).fetchall()
         if len(plan_rows) > limit or len(run_rows) > limit:
@@ -1880,7 +1910,7 @@ class BindingStore:
                 f"Project {alias} 的计划或未决调度交接超过单次上限 {limit}。"
             )
         scheduled_plans = tuple((row["plan_id"], row["revision"]) for row in plan_rows)
-        scheduled_runs = tuple(self.schedules.get_run(row["run_id"]) for row in run_rows)
+        scheduled_runs = tuple(_run(row) for row in run_rows)
         identity = {
             "project_alias": alias,
             "project_generation": project.generation,
@@ -1929,7 +1959,8 @@ class BindingStore:
             with self._transaction():
                 self.require_project_not_deleting(alias)
                 snapshot = self._project_delete_snapshot(
-                    alias, limit=limit, extra_side_ids=extra_side_ids,
+                    self._connection, alias, limit=limit, extra_side_ids=extra_side_ids,
+                    creating_worktrees=frozenset(self.worktrees._creating),
                 )
                 if snapshot.project.revision != expected_revision:
                     raise ProjectRevisionConflict(alias)
@@ -2682,18 +2713,17 @@ class BindingStore:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         now = self._wall_clock()
-        with self._lock:
-            monotonic_now = time.monotonic()
-            if monotonic_now >= self._next_dedup_expiry:
-                self._connection.execute(
-                    "DELETE FROM dedup_keys WHERE expires_at <= ?",
-                    (now,),
-                )
-                self._next_dedup_expiry = monotonic_now + _DEDUP_EXPIRY_INTERVAL_SECONDS
+        with self._transaction():
+            self._connection.execute(
+                "DELETE FROM dedup_keys WHERE rowid IN ("
+                "SELECT rowid FROM dedup_keys WHERE expires_at <= ? "
+                "ORDER BY expires_at LIMIT ?)", (now, _DEDUP_EXPIRY_BATCH),
+            )
             self._connection.execute(
                 """
                 INSERT INTO dedup_keys(dedup_key, expires_at) VALUES (?, ?)
                 ON CONFLICT(dedup_key) DO UPDATE SET expires_at = excluded.expires_at
+                WHERE dedup_keys.expires_at != excluded.expires_at
                 """,
                 (key, now + ttl_seconds),
             )

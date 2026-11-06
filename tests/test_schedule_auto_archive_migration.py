@@ -31,8 +31,8 @@ class ScheduleAutoArchiveMigrationTest(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_version'",
             )]
             before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
-        expected = {"source_version": 19, "target_version": 20,
-                    "steps": [{"from_version": 19, "to_version": 20}]}
+        expected = {"source_version": 19, "target_version": 21,
+                    "steps": [{"from_version": 19, "to_version": 20}, {"from_version": 20, "to_version": 21}]}
         original = self.contents()
         self.assertEqual(migrations.plan_channel_database(self.path), expected)
         self.assertEqual(self.contents(), original)
@@ -49,7 +49,7 @@ class ScheduleAutoArchiveMigrationTest(unittest.TestCase):
             for identifier in ("plan-topic", "plan-binding", "deleted-new_topic", "deleted-binding"):
                 self.assertIs(store.schedules.get(identifier, include_deleted=True).auto_archive, False)
         migrated = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=20)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=21)["steps"], [])
         self.assertEqual(self.contents(), migrated)
 
     def test_fresh_and_migrated_schema_and_policy_persistence_match(self):
@@ -80,7 +80,7 @@ class ScheduleAutoArchiveMigrationTest(unittest.TestCase):
 
         before = self.contents()
         step = migrations.Migration(19, 20, v20.apply, fail)
-        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:-1], step)):
+        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:5], step, *migrations.MIGRATIONS[6:])):
             with self.assertRaisesRegex(RuntimeError, "after auto archive validation"):
                 migrations.migrate_channel_database(self.path, expected_source_version=19)
         self.assertEqual(self.contents(), before)

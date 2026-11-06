@@ -633,8 +633,9 @@ Channel 通过注入的窄身份检查，按本实例 App ID 和发送者 open_i
 成员资格；非管理员拒绝，身份无效或管理员名单不可用时不启用。单聊直接说明无需启用。
 群已在名单中时只回复当前状态，不重复写入；all 模式也可添加，并说明限制模式下生效。
 写入通过共享 blocking I/O helper 在事件循环外执行，在 GroupAccessService 写锁内追加准确
-chat ID，复用 revision 检查和 ConfigFileEditor 原子更新，保留当前模式和其他群。
-配置冲突、外部文件修改、名单上限或写入失败均不重试，记录日志并提示稍后重试或在 Admin
+chat ID，基于锁内最新规则调用 ConfigFileEditor 原子更新，保留当前模式和其他群；
+不要求命令入口的 revision 仍有效，Admin 整体保存仍检查 revision。
+外部文件修改、名单上限、写入失败或 10 秒内结果未确认均不重试，记录日志并提示稍后重试或在 Admin
 启用。`/enable` 是飞书中唯一使用实例管理员身份授权的命令；移除群和切换模式仍通过 Admin。
 
 Admin 编辑沿用同源认证、一次性 action grant、配置冲突检测与原子写入契约，成功后
@@ -1085,42 +1086,32 @@ interrupted 后注销 route。新版本在连续三次无活动的中断后可�
 
 ### SDK 适配边界
 
-穿透 `AsyncCodex` 高层 facade 的窄兼容边界都复用同一个 App Server，不
-启动第二客户端、不扫描或 signal 任意进程。ADR 0009 的 experimental terminal cleanup
-固定 method/params/空响应，并继续校验精确 SDK 版本、整个源码包指纹、内部持有类型和
-`experimentalApi`；它只覆盖官方登记的 background terminal，空响应不是 foreground
-process exit attestation。ADR 0014 的 SDK Gap Adapter 则只为 Goal 与 Skills 暴露
-`GoalControl` / `SkillCatalog` 语义口；ADR 0074 增加只设置当前进程额外 Skill 目录的
-`AppServerSkillRoots.set_roots`，固定 `skills/extraRoots/set`，不持久化用户配置。它同样
-使用 generated models、shape/synthetic/live 验证及公开 facade 移除触发器；发现目录不等于
-证明模型执行加载。ADR 0021 同类地只增加 Side 专用的
-`SideBoundaryControl.inject_boundary`。ADR 0028 将可复用的
-`ThreadSubscriptionControl.unsubscribe` 拆成独立能力：两项都固定 method 和安装 SDK 的 generated model，
-不提供通用 request，不维护运行时版本 allowlist。SDK 升级必须通过 per-capability shape、
-真实 SDK client synthetic harness 与目标环境 live probe；facade 出现对应公开能力时，
-migration sentinel 阻止继续永久保留 shim，并要求逐项切回公开 provider。ADR 0037 的
-`ThreadDeleteControl` 同样只暴露固定 `thread/delete`，生产服务在独立
-shape/synthetic 门禁通过时构造；按 ADR 0078 区分可信的 RPC 拒绝与传输/响应未知，
-Runtime 只在原生成功响应后删除 Binding，不追加目录对账或自动重试。
-ADR 0077 的 `AppServerAccountRateLimits.read` 只读固定 `account/rateLimits/read`，
-复用相同 initialized client、generated models 和 shape/synthetic/live 门禁；公开等价
-facade 出现后删除适配，不消费通知或维护账号状态。
-ADR 0083 的 `AppServerThreadHistory` 只读固定 `thread/turns/list` 与 `thread/items/list`，
-用于协作 read/wait 的原生分页；同样复用 initialized client/generated models，并接受
-shape、synthetic、原生探针与 facade migration sentinel。它不替代运行终态和 Files 的
-现有证据读取，不增加全历史失败兜底或通用 RPC 入口。
-ADR 0020/0052 的 `PinnedTurnActivityObserver` 精确校验 SDK 版本、整包源码指纹、generated
-payload、内部持有类型与 retained event-store shape；它在 exact ordinary Turn 的问题观察、
-ordinary/Side 的阶段性答案观察、显式 `/status` 或 steer freshness bookkeeping 中，在 router RLock
-下复制绝对 cursor 后的通知引用；校验 exact Turn 的保留区间及序号连续性，不调用 RPC、
-不注册/关闭订阅、不消费/裁剪事件、不改订阅者游标、不新建 worker。
-它只向 Runtime 交付 sanitized Activity event、ADR 0071 的 structured question projection
-与 [ADR 0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md) 的稳定答案片段；
-Activity 的 opaque item identity 仅用于进程内 lifecycle 合并，Channel Snapshot 会移除它；
-问题保留 item identity 供卡片生成原生回答格式。Goal 不读取该 event store，而是在现有 logical stream
-的唯一 `next_notification` 消费链内 tap 同一受限投影。rename/archive/
-unarchive 全部使用高层公开 API。原生名称、归档状态、plan 与终态仍以 Codex 为事实源，不
-增加本地 lifecycle 或 progress 状态列。
+穿透 `AsyncCodex` 高层 facade 的批准窄适配只复用同一个 initialized client/App Server，
+不复制协议、不启动第二客户端、不扫描或 signal 任意进程、不暴露通用 request/RPC。
+下表“能力门禁”指安装 SDK 的 generated models、独立 shape、真实 SDK client synthetic
+harness 与目标环境 live probe，不维护运行时版本 allowlist；两个 pinned 门禁另列。能力适配的
+公开等价 facade 出现时 migration sentinel 要求通过同一行为门禁、逐项显式切回公开 provider
+并删除 shim；各行列出对应替代能力。
+rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan 与终态仍以 Codex 为
+事实源，不增加本地 lifecycle/progress 状态列。各适配的固定边界和替代条件如下。
+
+| 适配／用途 | 固定方法或观察面 | 本项门禁与限制 | 替代／移除触发器 |
+| --- | --- | --- | --- |
+| Terminal cleanup（[0009](adr/0009-use-version-gated-experimental-terminal-cleanup.md)） | `thread/backgroundTerminals/clean`，exact `threadId`，空 object 响应 | **精确 SDK 版本、整个源码包指纹、内部持有类型、initialized client、`experimentalApi`**；失败拒绝服务启动。只清理官方登记的 background terminal，空响应不证明 foreground 退出。 | 公开等价 cleanup 通过同一 fake contract 与 Linux marker/resume 探针后，删除适配、指纹及运行时例外。 |
+| `GoalControl`（[0014](adr/0014-use-removable-sdk-gap-adapters.md)） | 固定 `thread/goal/get`、`thread/goal/set`、`thread/goal/clear` 及 SDK 原有 route/start/logical stream 编排 | 能力门禁；保留唯一 `next_notification` 消费链的受限 Tap，Goal 不读普通 event store。 | 公开等价 Goal facade，独立迁移。 |
+| `SkillCatalog`（0014） | 固定 `skills/list`；实际输入仍用公开 typed Skill input | 能力门禁。 | 公开等价 Skills facade，独立于 Goal 迁移。 |
+| `AppServerSkillRoots.set_roots`（[0074](adr/0074-deploy-independent-instances-by-root.md)） | 固定 `skills/extraRoots/set`，只设当前 App Server 进程额外目录 | 能力门禁；不持久化用户配置，目录发现不证明模型执行加载。 | 公开等价 extra-roots facade，通过 parity 验证。 |
+| `SideBoundaryControl.inject_boundary`（[0021](adr/0021-support-multi-turn-ephemeral-side-topics.md)） | 固定 `thread/inject_items`，只注入 Side boundary | 能力门禁，固定 request/response。 | 公开等价 inject。 |
+| `ThreadSubscriptionControl.unsubscribe`（[0028](adr/0028-release-idle-persistent-thread-subscriptions.md)） | 固定 `thread/unsubscribe`，供普通 Binding/Side 复用 | 能力门禁，固定 request/response。 | 公开等价 unsubscribe，独立于 Side boundary。 |
+| `ThreadDeleteControl`（[0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)、[0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)） | 固定 `thread/delete` | 生产构造须过独立 shape/synthetic，另需 disposable live；区分可信 RPC 拒绝与传输/响应未知，仅原生成功响应后删 Binding，无目录对账或自动重试。 | 公开等价 Delete facade。 |
+| `AppServerAccountRateLimits.read`（[0077](adr/0077-read-account-rate-limits-on-demand.md)） | 只读固定 `account/rateLimits/read` | 能力门禁；不消费通知、不维护账号状态。 | 公开等价额度读取 facade。 |
+| `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 分页 | shape/synthetic 与原生 paginated/legacy 探针；不替代运行终态或 Files 证据读取，不以全历史读取兜底失败。 | 公开等价历史分页 facade。 |
+| `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
+
+Activity observer 与 Goal Tap 只交付 sanitized Activity、[0071](adr/0071-answer-native-questions-through-binding-input.md)
+的 structured question 与 [0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)
+的稳定答案片段。Activity opaque item identity 只供进程内 lifecycle 合并，Channel Snapshot
+移除它；问题保留 item identity 以生成原生回答格式。
 
 开放式 `CodexErrorInfo` 字符串/对象仍只做受限错误投影，unknown、损坏 known 与 HTTP
 variant 不得泄露任意对象或改变 exact Turn 归属。SDK 可注册/解析 `thread/prediction/updated`，
@@ -1471,14 +1462,22 @@ Goal 换物理 Turn 继续重置 Activity。完整取舍见
 
 ### Activity 安全投影
 
-Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection，并为
-Goal 当前 exact 物理 Turn 与 exact active Side Turn 暴露同样受限的 Activity Snapshot。
-投影包含 accepted 后的 running/stopping/pausing 状态、ADR 0020 的完整 plan/checklist、
-按捕获设置保留的 completed commentary、通用操作，以及文件修改和子任务的安全数量聚合；
-默认仍为四条进展、八个操作。安全硬上限与展示容量分开，观察链只保留有界投影。
-steer 次数与动态清单过期提示仅用于普通/Side Turn；Goal 清单固定标明最近一次原生上报，
-可能尚未反映追加消息，不另行累计次数。每条 commentary 和通用操作还携带 exact SDK
-item lifecycle 毫秒时间戳。
+Runtime 为 exact Ordinary Active Turn、Goal 当前 exact 物理 Turn 与 exact active Side Turn
+维护带 revision 的有界投影；包含 accepted 后的 running/stopping/pausing、完整原生
+plan/checklist、completed commentary、通用操作和文件/子任务安全数量聚合。进展/操作默认
+保留最近四条/八个，按执行时捕获设置选择窗口，安全硬上限与展示容量分开。
+checklist 只接受匹配 current `thread_id + turn_id` 的 fixed generated `turn/plan/updated`，
+每次整体替换。cursor、步骤、进展、操作、计数与 freshness 只在 active Runtime 内存，
+不保存历史或进入 SQLite；`terminal_observed` 后不再读/展示活动投影，公开 usage stream
+仍按原序唯一排空。成功 steer 的次数/freshness 仅用于普通/Side，Goal 不累计次数，清单
+固定标明最近一次原生上报、可能尚未反映追加消息。
+
+同一 item ID 的 started/completed 只更新一个 identity-free 操作行，并以 exact
+`completedAtMs` 替换 `startedAtMs`；commentary 使用 exact `completedAtMs`，checklist
+无 item lifecycle 时间，不显示时间。毫秒时间原样进入 v4/v5 manifest，以 Card 2.0
+`local_datetime` 的 `date_num` 与 `time` 交给客户端按查看者时区/语言渲染到分钟；不是
+服务端当前时间或 elapsed time，旧 manifest 无时间字段时不补造。
+
 commentary 保留内部换行；CRLF/CR 统一为 LF，tab 展开为四个空格，其他不可展示控制字符
 替换为 Unicode replacement character。该布局规范化不折叠合法 Markdown 空白。
 命令使用 typed `commandActions` 的读取/列举路径或搜索查询和范围；原生分类未知、复合或
@@ -1495,14 +1494,13 @@ Activity 不显示 reasoning、partial/final answer、delta、MCP server、工�
 usage；不生成 elapsed time、百分比或 ETA，commentary/checklist 沿用估算过滤，原生命令/
 查询中的同名字面内容不作估算解释。它不是原生终态事实或历史记录。
 
-Progress Card 开启时，Runtime 的既有 consumer/poll loop 更新快照，Channel Presenter 每秒
-只读取 projection 并在 revision 变化时重绘；关闭时普通/Side Turn 不创建 Activity 卡，Goal
-不展示 Activity 模块。普通 Binding、Side 与 Goal 仍使用各自同一 observer cursor / logical Tap
-提取阶段性答案，并在已注册的问题 handler 路径接收结构化问题；关闭 Progress 不停止这些
-观察，仍由原有唯一消费链取得结果。pinned observer
-保持版本/源码指纹、generated shape、exact `thread_id + turn_id`、非消费 event store 和完整 plan
-replacement 门禁；只接受 ADR 0052/0071/0079 的事件白名单，未知事件忽略，白名单 shape 变化 fail
-closed，不能扩展成任意通知或私有 RPC gateway。
+Progress Card 开启时，Runtime 既有 consumer/poll loop 更新同一投影，Presenter 每秒
+仅在 revision 变化时重绘，不访问 queue；关闭时普通/Side 无 Activity 卡、Goal 无 Activity
+模块。各自同一 observer cursor/logical Tap 仍提取阶段性答案，并在已注册的问题 handler
+路径接收结构化问题，不增加消费者。event-store 及 Goal 唯一 Tap 门禁统一见
+[SDK 适配边界](#sdk-适配边界)；只接受 ADR 0052/0071/0079 白名单，未知事件忽略，白名单
+shape 变化 fail closed，不扩展为任意通知或私有 RPC gateway。进度卡、`/status` 和分页
+callback 共用上述窗口、时间与过滤规则；观察/展示失败不改变 Turn、steer、stop、终态或最终回复。
 
 ### 阶段性答案
 
@@ -2164,7 +2162,7 @@ blocking-I/O executor 写入既有 YAML。每个配置服务仅串行化写操�
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v20 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v21 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
 `schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
 v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
@@ -2183,6 +2181,13 @@ JSON null，以及完整 SessionSettings 的 `progress_card_settings` 为 null�
 v20 为 `schedule_plans` 增加独立的 `auto_archive` 布尔列；所有旧计划与删除墓碑迁移为
 false，只有有效 `new_topic` 计划可开启。冻结 v19 → v20 迁移保留其余数据和回执，
 不向 `schedule_runs` 增加归档状态、执行终态、策略快照或结果历史。
+v21 仅增加五个非唯一查询索引，不改变记录或解释：`dedup_keys` 与
+`schedule_requests` 的 `expires_at` 索引、Binding-target Run 的 `binding_id` 部分索引、
+有效 Binding-target Plan 的 `target_binding_id` 部分索引，以及按 Project alias/run ID
+排列的未释放或发布未知 Run 部分索引。当前结构校验要求这五个索引的列与谓词完整。
+每次 dedup mark／管理请求查重沿 expiry 索引最多清理 16 条最早到期记录；不保留分钟级
+清理节流状态。`seen` 与请求 exact-key lookup 始终按当前时间判定到期，未轮到物理清理
+的记录不能继续去重或重放。mark 的清理与 upsert 共用一个同步事务，不跨 await。
 受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
 创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
 不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
@@ -2205,7 +2210,7 @@ Codex 配置或卡片 session，也不与 Project 或 Worktree 删除级联。
 Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
 每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
-数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18 → v19 → v20；基线仍为 v14，沿用
+数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18 → v19 → v20 → v21；基线仍为 v14，沿用
 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
 历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
 在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
@@ -2228,7 +2233,11 @@ queue 表，也不保存 Admin credential、session、action/CSRF token、native
 audit record。
 
 文件数据库使用 WAL、`synchronous=FULL` 和有界 writer busy timeout。Admin 的 keyset
-分页查询只通过 Store-owned `query_only` connection 与单 worker executor 执行，SQL 有
+分页查询、定时计划列表（含按当前时间计算的 `ended` 过滤）和 Project 删除的 advisory
+预览快照通过 Store-owned `query_only` connection 与单 worker executor 执行；reader 注册
+与 writer 相同的纯定时时间函数。Project 预览在 reader 的单次读事务内完成 SQL 与解码，
+不持有 writer lock；返回后复核内存删除 intent。正式删除仍在 writer 的原同步事务内复读
+清单、核对 revision/fingerprint 并发布内存 intent，预览不授权跳过这些检查。SQL 有
 progress deadline 和提交前容量门禁；执行中与排队中合计最多 32 个查询，等待以异步方式
 进行，排队与执行共用从提交开始计算的总 deadline。容量满时明确报忙；排队期间已超时的
 查询轮到执行时直接失败，不执行 SQL。调用方超时或取消不提前释放底层任务的容量，
@@ -3109,31 +3118,14 @@ stream 失败只影响 usage 展示和 diff 补充；structured items
 
 ### 状态查询中的 Activity
 
-checklist 来自 App Server 的完整 `turn/plan/updated`，每个有效事件整体替换旧计划，
-只接受同时匹配 current `thread_id + turn_id` 的 fixed generated payload。步骤映射为
-`✓ completed`、`→ inProgress`、`○ pending`，最多显示 12 项且单步折叠空白后最多 160
-字符。成功 native steer 后才增加计数并把已有计划标记为“可能尚未反映最近一次调整”；
-steer 请求开始后到达的下一次 exact plan update 清除标记，失败 steer 不更新。没有 plan
-时显示 Codex 尚未生成，observer gate 或快照失败时只显示暂不可用。`terminal_observed`
-后不再读取或展示这项投影；cursor、步骤、commentary、通用操作、计数与 freshness 仅存在
-于 active Runtime 内存，不保存历史，不进入 SQLite。observer 不消费通知，终态后的公开
-usage stream 仍按原顺序排空同一队列。`/status` 只在用户请求时刷新；Progress Card 开启时，
-同一个 Turn Activity Projection 由 Runtime 按既有节奏更新，Presenter 本身不访问 queue；
-关闭后不展示 Activity 卡，但普通 Binding、Goal 与 Side 仍沿同一观察路径提取阶段性答案，
-并在已注册的问题 handler 路径接收结构化问题。
+`/status` 只在用户请求时刷新[同一 Activity 投影](#activity-安全投影)。checklist 步骤显示
+`✓ completed`、`→ inProgress`、`○ pending`，最多 12 项，单步折叠空白后最多 160 字符。
+成功 native steer 才增加普通/Side 计数并把已有计划标为“可能尚未反映最近一次调整”；
+以请求前观察的 cursor 为边界，之后首个 exact plan update 整体替换并清除标记，失败 steer
+不更新。没有 plan 显示 Codex 尚未生成，observer gate 或快照失败只显示暂不可用。
 SDK `0.154.0` 的 `update_plan` 工具默认关闭；需要原生 checklist 时由用户在 Codex
-配置中开启 `tools.update_plan.enabled`。Netizen 继续继承工具配置，不自动开启或用提示词
-模拟计划。其他 Activity item 不依赖这一工具。
-
-completed commentary 默认保留最近四条，通用操作默认保留最近八个，过程卡容量按捕获设置选择；同一 item ID 的 started/
-completed 只更新一个 identity-free 行，并把 `startedAtMs` 替换为 `completedAtMs`。commentary
-使用 exact `completedAtMs`；checklist 没有 item lifecycle 时间，不显示时间。时间戳不是服务端
-当前时间或 elapsed time，而是原样进入 v4/v5 manifest，并通过 Card 2.0 `local_datetime`
-的 `date_num` 与 `time` 组合交给飞书客户端按查看者时区和语言渲染到分钟；旧 manifest 没有
-时间字段时保持无时间展示，不补造。
-
-进度卡、`/status` 与分页 callback 共用[Activity 安全投影](#activity-安全投影)的内容边界与
-过滤规则。Activity 观察或展示失败不能改变 Turn、steer、stop、终态和最终回复。
+配置中开启 `tools.update_plan.enabled`。Netizen 继承工具配置，不自动开启或用提示词
+模拟计划；其他 Activity item 不依赖此工具。
 
 ### 模型目录与配置校验
 
@@ -3311,58 +3303,28 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
   `ExitTimeOut` 都以 75 秒外层 deadline 兜底，CLI 再以 90 秒完成精确退出确认。
   共享管理服务由 ServiceCore 统一关闭，ChannelApplication 只关闭自己的展示资源；
   首次管理 I/O 排空未完成时，ServiceCore 在同一总时限内再做一次有界补充清理。
-- Admin mutation 发出后遇到 response loss/cancellation 不自动重试。一次性 grant 已消费，
-  页面只报告已知结果；native archive/unarchive/delete lifecycle 结果未知只保留目标 Binding-local
-  `lifecycle-unknown`，不扩大为全局 admission 关闭。选择会话时的直接 resume 结果未知则
-  沿用共享 Runtime 的全局 admission 关闭语义。结构化日志不含 credential、cookie/token、cwd、
-  name/preview 或 request body。
-- Project 删除部分失败、超时或取消后保留停用 Project，展示已完成与剩余项，不恢复已删
-  会话，也不在重启后自动续删；原生结果未知继续限制在 exact Binding/Side 边界。
-- 没有 durable prompt/final-delivery queue；崩溃后原生历史仍在，但飞书最终回复
-  可能丢失。
+- 没有 durable prompt/final-delivery queue；崩溃后原生历史仍在，但飞书最终回复可能丢失。
 - CLI 新增消息不回填飞书；飞书 Thread 必须能在 CLI 原生 resume。
 - 同用户 Full Access 能读取 Channel DB 和 Secret 文件，这是已接受的 Pilot 风险。
-- 原生 `handle.run()` 的请求窗口 completion 通知保留与公开 `thread.read` recovery
-  均有 synthetic 门禁。普通持久 Thread
-  继续以公开 read 确认 exact Turn 终态；ephemeral Side 使用唯一 `handle.run()`，
-  不增加持久 history recovery。当前兼容性证据见部署文档。
-- Ordinary Turn 因可恢复 I/O 或可收敛视图暂时无法取得 exact `active/inProgress` 或 terminal
-  权威观测时，只做一次最多 5 秒/三次原生 I/O 的短恢复。exact `active/inProgress` 回到
-  普通无时限轮询；仍不可验证则进入无周期 I/O 的 Binding-local
-  `turn-observation-unavailable`。用户可在 `/sessions` 有界重检、停止、归档或删除；
-  lifecycle 不依赖观测先恢复。start、steer 取消或 Goal receipt 身份不可验证、Context Boundary
-  提交、Goal/compaction 或已经开始的不可逆 lifecycle 等副作用未知边界，才沿用各自的
-  fail-closed 规则；lifecycle unknown 本身只隔离目标 Binding。
-- Python SDK interrupt 后前台工具进程可能继续运行；ADR 0009 的 experimental clean
-  只处理 App Server 已登记的后台 terminal。ADR 0010 将这一项改为显式产品缺口：
-  `/stop` 必须警告用户，不得用 cleanup 空响应声称前台进程已停止。精确 Linux 探针
-  负责分类并保证不遗留自己的测试进程，结果记录在 `docs/deployment.md`。
-- 引用回查是非持久的外部读取；权限、撤回、超时或 exact-Turn 条件变化时，
-  当前消息明确失败且不自动重试。群聊引用要求应用额外开启
-  `im:message.group_msg`。
-- 当前 Prompt sender 姓名由 Channel SDK 的 chat member roster 补全；应用缺少
-  `im:chat.members:read`、权限尚未随版本发布或仍无法解析姓名时，当前消息明确失败且
-  不调用 Codex。不会使用“未知发送者”占位符继续执行。
-- `compact()` 的空响应不是终态；若公开 history 无法确认唯一的新
-  `contextCompaction` candidate、出现多个 candidate 或 10 分钟内没有终态，运行时
-  保持 Binding reserved 并关闭新 admission，不能把可能仍在压缩的 Thread 当作 idle。
-- 一般 steer SDK/RPC 错误按 [ADR 0088](adr/0088-align-steer-failures-and-input-resume-rejections.md)
-  保留原执行并反馈本次追加未确认；不自动重试、不登记成功，不单独改变 Side/Goal 状态或
-  关闭其他会话准入。取消和 Goal receipt 身份不可验证仍执行原有保护。
-- Goal 控制 mutation、通知流、四重终态证据或 complete-only clear 无法确认时保留 Goal slot；
-  可能发生副作用的 start/resume/clear 会关闭进程级 admission，绝不自动重试。paused、
-  blocked 与额度限制不自动 clear；权威结果即使在收尾不确定时仍通过普通任务回复展示。重启后发现外部 active
-  Goal 只做只读隔离，当前 SDK 不能安全重挂是显式产品限制。
-- Side fork/boundary/topic promotion 失败会保留 creating/failed route 防止落入普通
-  Binding；interrupt、terminal cleanup 或 unsubscribe 未确认时保持 closing 且拒绝新
-  Prompt，重复 close 只重试未确认步骤。服务重启不恢复 ephemeral Thread，而是在 handler
-  注册前把遗留 creating/open route 转为 expired。
-- Thread rename mutation 一旦开始而结果无法确认，保留目标 Binding 的 lifecycle slot。
-  unarchive 按 ADR 0082 处理两条精确移动前拒绝和后续 resume 明确拒绝；已完成阶段须如实
-  反馈，未知结果只保留目标 Binding-local lifecycle slot，不自动重试或目录对账。原生已
-  成功、本地提交未确认时保留已知订阅，不声称 current 回滚。
-  archive 正常响应后提交本地映射，异常只做一次有界 catalog 对账，不重发 mutation。
-  exact ID 只在 archived 时提交，仍 active 时释放 reservation，无法确认时只隔离目标。
-  Delete 仅在本次原生成功响应后删除 Binding；明确 RPC 拒绝保留 Binding、清理可能失效的
-  活动投影并允许重新确认；传输/响应未知保留 Binding-local lifecycle slot。Delete 不追加
-  list/read 对账、自动重试或把 not-found 当作成功，其他 Binding admission 保持可用。
+- 结构化日志不含 credential、cookie/token、cwd、name/preview 或 request body。
+
+各操作按下表区分明确未提交、仍在执行和未知副作用；不能用展示或观测故障泛化关闭范围。
+
+| 操作／失败 | 输入与占用／隔离范围 | 允许的恢复与禁止事项 | 详细契约 |
+| --- | --- | --- | --- |
+| Admin mutation response loss/cancellation | grant 已消费，只报告已知结果 | 不自动重试；native 操作按下列各自范围隔离 | [管理动作](#管理动作与确认) |
+| Project 删除部分失败/超时/取消 | 保留停用 Project 与完成/剩余项；未知限 exact Binding/Side | 不回滚已删对象、不在重启后续删，重新预览确认 | [Project 删除](#project-删除与交接) |
+| 引用回查或 sender 姓名不可解析 | 本条明确失败、不调用 Codex；回查非持久 | 不自动重试、不用“未知发送者”；群引用需 `im:message.group_msg`；roster 缺 `im:chat.members:read`、权限未随版本发布或仍缺名均拒绝，撤回/超时/身份变化按输入规则 | [引用](#引用读取与-sdk-内容适配)、[sender](#当前消息与来源投影) |
+| start/resume、Context Boundary 提交副作用未知 | 按对应规则保留占用、关闭进程级 admission；已验证 resume 明确拒绝只拒绝本次输入 | 保留 Binding，不新建替代 Thread/自动重放；直接 resume unknown 不套用 unarchive 的局部边界 | [身份](#scopebinding-与会话配置)、[生命周期](#普通会话生命周期)、[边界](#补充历史与上下文边界) |
+| ordinary 权威观测暂不可得 | 一次≤5 秒/3 次 I/O 恢复；仍未知则 Binding-local `turn-observation-unavailable`、无周期 I/O | exact active/inProgress 恢复无时限轮询；可经 `/sessions` 重检、停止、归档/删除，lifecycle 不等观察恢复 | [普通终态](#普通-turn-终态与观测恢复) |
+| completion 请求窗口／read recovery | `handle.run()` 请求窗口通知保留与公开 read recovery 均有 synthetic 门禁 | 普通持久 Thread 用公开 read；Side 仅唯一 `handle.run()`、不加持久 recovery；[证据](deployment.md#代码门禁与按需实时兼容性验证) | [普通终态](#普通-turn-终态与观测恢复)、[Side](#side-运行与关闭) |
+| ordinary/Side/Goal 一般 steer 错误 | 原执行/观察保持、本次追加未确认，不改变 Side/Goal 状态或其他 Binding 准入 | 不重试/登记成功；取消仍全局关闭、Side closing/Goal unknown；Goal receipt 畸形或 physical Turn 不符同样 unknown/关闭 | [共享 steer 规则](#普通-turn-停止与压缩)（ADR 0088） |
+| interrupt/cleanup 未确认 | 保持 stopping；cleanup 仅已登记后台 terminal | 按确认阶段重试；`/stop` 警告前台可能继续，空响应不证明退出；[Linux 探针](deployment.md#代码门禁与按需实时兼容性验证)分类且清理测试进程 | [停止](#普通-turn-停止与压缩) |
+| compact candidate/终态未知 | 保留 Binding reserved，关闭新 admission | ACK 不是终态；多 candidate、无法确认唯一 candidate 或 10 分钟无终态均不能视为 idle | [压缩](#普通-turn-停止与压缩) |
+| Goal 流／四证的纯观察失败 | 只保留当前 Goal slot，其他 Binding 可用 | consumer handoff 后按需有界只读确认 idle/非 active/无 inProgress 才释放；不自动 pause/clear 或补造回复 | [Goal](#goal-物理-turn-与逻辑终态) |
+| Goal mutation／complete-only clear 未确认 | 保留 slot；有副作用可能的 start/resume/clear 关闭进程级 admission | 不重试、不按纯观察恢复释放；paused/blocked/限额不自动 clear，仍显示权威结果；重启外部 active 只读隔离、不能安全重挂 | [Goal](#goal-物理-turn-与逻辑终态) |
+| Side 创建失败／close 未确认 | creating/failed route 防落入普通 Binding；关闭未知保持 closing、拒绝 Prompt | 重试仅未确认步骤；重启不恢复 ephemeral Thread，在 handler 注册前把遗留 creating/open 转 expired；start/终态未知按 Side 全局边界 | [创建](#side-创建与路由)、[关闭](#side-运行与关闭) |
+| rename mutation 未确认 | 保留目标 lifecycle slot | 不声称回滚；后台自动命名按自身边界 | [生命周期](#普通会话生命周期) |
+| unarchive/resume | 按 ADR 0082 两条精确移动前拒绝及 resume 拒绝分类；未知只隔离目标 Binding | 报告部分结果，不重试/目录对账；原生成功、本地未确认保留已知订阅，不声称 current 回滚 | [归档恢复](#普通会话生命周期) |
+| archive 异常 | 一次有界 catalog 对账：archived 才提交、active 释放、无法确认仅隔离目标 | 不重发 mutation，取消不追加目录 I/O | [归档](#原生归档与删除) |
+| Delete 拒绝／未知 | 仅本次原生成功才删 Binding；明确拒绝清失效投影后可重新确认；未知 Binding-local slot、其他 Binding 可用 | 保留关联，不 list/read 对账/自动重试，不把 not-found 当成功 | [删除](#原生归档与删除) |

@@ -226,7 +226,7 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_project_deletion_does_not_delete_rules_or_pin_alias_revision(self):
         rule = await self.save(expected_project_revision=1)
-        before = self.projects.preview_delete("p")
+        before = (await self.projects.preview_delete("p"))
         reserved = self.projects.begin_delete(alias="p", expected_revision=1,
             expected_inventory_fingerprint=before.fingerprint)
         self.projects.finish_delete(alias="p", expected_revision=reserved.project.revision,
@@ -428,7 +428,7 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
         worktrees = self.enable_worktrees()
         resource = await worktrees.create(project_alias="p")
         rule = await self.save(workspace={"mode": "existing", "worktree_id": resource["id"]})
-        before = self.projects.preview_delete("p")
+        before = (await self.projects.preview_delete("p"))
         reserved = self.projects.begin_delete(alias="p", expected_revision=1,
             expected_inventory_fingerprint=before.fingerprint)
         self.projects.finish_delete(alias="p", expected_revision=reserved.project.revision,

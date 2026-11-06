@@ -90,23 +90,21 @@ class GroupAccessService:
 
     def update(self, rule: GroupAccessRule, *, expected_revision: str) -> None:
         with self._write_lock:
-            self._update(rule, expected_revision=expected_revision)
-
-    def enable_chat(self, chat_id: str, *, expected_revision: str) -> tuple[GroupAccessRule, bool]:
-        """Add one chat without overwriting a concurrent Admin edit or mode change."""
-        with self._write_lock:
             if expected_revision != self._snapshot[1]:
                 raise GroupAccessConflict("group access changed; refresh before saving")
+            self._update(rule)
+
+    def enable_chat(self, chat_id: str) -> tuple[GroupAccessRule, bool]:
+        """Add one chat without overwriting a concurrent Admin edit or mode change."""
+        with self._write_lock:
             rule = self._snapshot[0]
             if chat_id in rule.chat_ids:
                 return rule, False
             rule = GroupAccessRule(rule.mode, (*rule.chat_ids, chat_id))
-            self._update(rule, expected_revision=expected_revision)
+            self._update(rule)
             return rule, True
 
-    def _update(self, rule: GroupAccessRule, *, expected_revision: str) -> None:
-        if expected_revision != self._snapshot[1]:
-            raise GroupAccessConflict("group access changed; refresh before saving")
+    def _update(self, rule: GroupAccessRule) -> None:
         if self._editor is None:
             raise GroupAccessError("instance configuration is unavailable")
         self._editor.update_section("groupAccess", rule.to_dict())

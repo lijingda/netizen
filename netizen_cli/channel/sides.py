@@ -11,6 +11,8 @@ from lark_channel import (
     SendOpts,
 )
 
+from ..admin.port_config import AdminPortConfigurationError
+from ..group_access import GroupAccessLimitExceeded
 from ..bindings import (
     SideTopicConflict,
     SideTopicNotFound,
@@ -244,7 +246,18 @@ class SideChannel(PromptChannel):
             prepared = None
         if submission.disposition is SubmitDisposition.STEERED:
             if not await self._safe_add_reaction(reply_origin, constants.STEER_REACTION):
-                await self._reply(reply_origin, "已接收 Side 调整。")
+                try:
+                    await self._reply(reply_origin, "已接收 Side 调整。")
+                except Exception as error:
+                    logger.warning(
+                        "accepted Side steer presentation failed",
+                        extra={
+                            "side_id": submission.side_id,
+                            "thread_id": submission.thread_id,
+                            "turn_id": submission.turn_id,
+                            "error_type": type(error).__name__,
+                        },
+                    )
             return
         release = submission.release_receipt_attempt
         assert release is not None
@@ -287,12 +300,52 @@ class SideChannel(PromptChannel):
         finally:
             release()
 
+    async def _command_enable(self, message: Any, intent: ControlIntent) -> None:
+        if _message_chat_type(message) == "p2p":
+            await self._reply(message, "单聊无需启用。")
+            return
+        try:
+            if self._is_instance_admin is None:
+                raise ValueError("administrator check is unavailable")
+            is_admin = self._is_instance_admin(
+                self._app_id, getattr(getattr(message, "sender", None), "open_id", None),
+            )
+        except Exception as error:
+            logger.warning("group enable administrator check failed", extra={"error_type": type(error).__name__})
+            await self._reply(message, "暂时无法确认管理员身份，本群未启用。")
+            return
+        if not is_admin:
+            await self._reply(message, "只有实例管理员可以启用本群。")
+            return
+        try:
+            rule, added = await self._management.enable_group_access(
+                self._group_access, intent.scope.chat_id,
+            )
+        except Exception as error:
+            if isinstance(error, AdminPortConfigurationError):
+                reason = "实例配置文件已变化"
+            elif isinstance(error, GroupAccessLimitExceeded):
+                reason = "已达到 1000 个群聊的上限"
+            else:
+                reason = "暂时无法保存群聊准入配置"
+            logger.warning("group enable failed", extra={"error_type": type(error).__name__, "chat_id": intent.scope.chat_id})
+            await self._reply(message, reason + "，请稍后重试或在 Admin 中启用。")
+            return
+        if rule.mode == "all":
+            result = "已将本群加入名单" if added else "本群已在名单中"
+            await self._reply(message, result + "；当前为全部群聊模式，切换为限制模式后生效。")
+        else:
+            await self._reply(message, "已启用本群，之后的消息会正常执行。" if added else "本群已启用。")
+
     async def _side_control(
         self,
         message: Any,
         intent: ControlIntent,
         record: SideTopicRecord,
     ) -> None:
+        if intent.name is ControlName.ENABLE:
+            await self._command_enable(message, intent)
+            return
         if intent.name is ControlName.USAGE:
             await self._usage(message)
             return

@@ -724,7 +724,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
             {"mode": "list", "chat_id": ""}, native_thread_id="native-a",
         )
         self.assertFalse(response["ok"], response)
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
 
     async def test_default_timezone_is_visible_and_persisted(self):
         plan = await self.create(schedule={"kind": "daily", "at": "09:00"})
@@ -882,7 +882,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(retry["replayed"])
         self.assertEqual(retry["plan"]["id"], first["plan"]["id"])
         self.assertEqual(retry["plan"]["schedule"], first["plan"]["schedule"])
-        self.assertEqual(len(self.store.schedules.list(app_id="app")), 1)
+        self.assertEqual(len((await self.store.schedules.list(app_id="app"))), 1)
         self.assertEqual(self.chats.calls, ["group-a"])
         changed = await self.service.manage({**request, "instructions": "Different"}, native_thread_id="native-a")
         self.assertEqual(changed["error"]["code"], "request_conflict")
@@ -903,7 +903,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         after_delete = await self.service.manage(request, native_thread_id="native-a")
         self.assertTrue(after_delete["ok"], after_delete)
         self.assertTrue(after_delete["deleted"])
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
 
     async def test_app_namespaces_do_not_expose_or_mutate_each_others_plans(self):
         plan = await self.create()
@@ -953,7 +953,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
                 if state == "disabled":
                     self.store.set_project_enabled(alias=alias, enabled=False, expected_revision=project.revision)
                 else:
-                    snapshot = self.store.preview_project_delete(alias)
+                    snapshot = (await self.store.preview_project_delete(alias))
                     self.store.begin_project_delete(alias=alias, expected_revision=project.revision,
                         expected_inventory_fingerprint=snapshot.fingerprint)
             messages = []
@@ -968,7 +968,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("选择", response["error"]["message"])
                     messages.append(response["error"]["message"])
             self.assertEqual(len(set(messages)), 1)
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
 
     async def test_invalid_and_unreachable_chat_preserve_zero_mutation(self):
         for chat, value in (("unknown", ("private", "unknown")), ("gone", None), ("error", OSError("no access"))):
@@ -977,7 +977,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
                 self.create_request(chat_id=chat), native_thread_id="native-a",
             )
             self.assertFalse(response["ok"], response)
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
 
     async def test_same_submitted_target_is_revalidated_but_successful_replay_is_not(self):
         request = self.create_request(chat_id="oc_target")
@@ -1004,7 +1004,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         rejected = await self.service.manage(self.create_request(), native_thread_id="native-a")
         self.assertEqual(rejected["error"]["code"], "chat_query_unavailable")
         self.assertEqual(self.chats.calls, [])
-        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual((await self.store.schedules.list(app_id="app")), ())
 
     async def run_fixture(self, *, schedule=None):
         plan = await self.create(schedule=schedule or {"kind": "interval", "every_minutes": 1})

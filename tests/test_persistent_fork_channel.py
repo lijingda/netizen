@@ -723,7 +723,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         send = self.channel.send
         async def deleting_send(*args, **kwargs):
             result = await send(*args, **kwargs)
-            snapshot = self.store.preview_project_delete("test")
+            snapshot = (await self.store.preview_project_delete("test"))
             self.store.begin_project_delete(alias="test", expected_revision=snapshot.project.revision,
                 expected_inventory_fingerprint=snapshot.fingerprint)
             return result

@@ -318,7 +318,18 @@ class PromptChannel(CompletionPresentationChannel):
                 raise
         if submission.disposition is SubmitDisposition.STEERED:
             if not await self._safe_add_reaction(message, constants.STEER_REACTION):
-                await self._reply(message, "已接收调整。")
+                try:
+                    await self._reply(message, "已接收调整。")
+                except Exception as error:
+                    logger.warning(
+                        "accepted ordinary steer presentation failed",
+                        extra={
+                            "binding_id": submission.binding_id,
+                            "thread_id": submission.thread_id,
+                            "turn_id": submission.turn_id,
+                            "error_type": type(error).__name__,
+                        },
+                    )
             return
 
         await self._present_ordinary_receipt(submission, message)

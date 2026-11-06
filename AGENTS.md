@@ -76,30 +76,19 @@ their cited ADRs before changing that boundary.
   materialized Thread cwd comes from Codex, never an implicit Project fallback.
   Do not add a global semaphore, Project lock, workspace copy, per-Binding
   `CODEX_HOME`, or cross-Thread execution limit.
-- Channel SQLite owns only the documented Scope/Binding/Project metadata,
-  schema version, deduplication TTL keys, explicit Binding choices/revisions,
-  and Side routes/tombstones. ADR 0061/0070 narrowly add current Scheduled Plan
-  instructions, minimal dispatch/Run metadata, exact initial or accepted physical Turn references,
-  and bounded management-request deduplication.
-  ADR 0073 also permits chat default rules, explicit creation settings and ordering
-  revisions, independent of Project lifecycle. ADR 0085 adds managed Worktree
-  identity/creation receipts, Project registration generation, and Binding working-cwd
-  choices/associations; do not persist Git state or duplicate native cwd authority.
-  Never store other prompts,
-  message bodies, responses, Turn history/activity, card sessions, effective
-  Codex configuration, or Admin sessions/tokens/indexes/audit records.
+- Channel SQLite may store only the metadata and narrow exceptions explicitly listed
+  in the [current data contract](docs/design.md#channel-数据库与结构校验).
+  Do not persist Git state or duplicate native cwd authority. Never store prompts
+  beyond those exceptions, message bodies, responses, Turn history/activity, card
+  sessions, effective Codex configuration, or Admin sessions/tokens/indexes/audit records.
   Side routes never store native Thread IDs.
-- Use exact-pinned official SDKs and public high-level APIs. Approved narrow
-  adapters are terminal cleanup (ADR 0009), Goal/Skills (0014), Side boundary
-  (0021), Thread unsubscribe (0028), Thread Delete (0037), and non-consuming
-  Activity observation (0020/0052), process-local Skill roots (0074), and read-only
-  account rate limits ([0077](docs/adr/0077-read-account-rate-limits-on-demand.md)),
-  and fixed read-only history pages ([0083](docs/adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)).
-  Do not add a generic/private RPC gateway,
-  parse CLI output, patch SDK internals, copy protocol models, or signal
-  arbitrary processes. New gaps require an accepted ADR and a removal trigger.
-  The narrow Feishu Admin OAuth/ticket HTTP exception and its SDK replacement
-  trigger are defined in [ADR 0080](docs/adr/0080-authenticate-admins-with-feishu-identities.md).
+- Use exact-pinned official SDKs and public high-level APIs. Only the approved
+  [narrow adapters](docs/design.md#sdk-适配边界) may cross that boundary.
+  Do not add a generic/private RPC gateway, parse CLI output, patch SDK internals,
+  copy protocol models, or signal arbitrary processes. New gaps require an accepted
+  ADR and a removal trigger. The separate narrow Feishu Admin OAuth/ticket HTTP
+  exception and its SDK replacement trigger remain defined in
+  [ADR 0080](docs/adr/0080-authenticate-admins-with-feishu-identities.md).
 - Preserve each adapter's documented gate: cleanup and Activity retain exact
   version/fingerprint checks; the other adapters use capability shape,
   synthetic, and live harnesses. Delete also requires disposable live coverage

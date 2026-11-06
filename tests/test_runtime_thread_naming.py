@@ -521,7 +521,7 @@ class RuntimeThreadNamingTest(unittest.IsolatedAsyncioTestCase):
     async def test_project_deletion_freeze_prevents_write(self):
         first = await self.submit()
         child = await self.naming_handle()
-        preview = self.store.preview_project_delete("test")
+        preview = (await self.store.preview_project_delete("test"))
         self.store.begin_project_delete(
             alias="test", expected_revision=preview.project.revision,
             expected_inventory_fingerprint=preview.fingerprint,

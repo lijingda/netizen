@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 
 from netizen_cli.bindings import (
@@ -88,7 +89,7 @@ class PersistentForkBindingTest(unittest.TestCase):
             self.store.get_scope(self.target.key)
 
     def test_project_delete_reservation_prevents_late_binding(self) -> None:
-        snapshot = self.store.preview_project_delete("work")
+        snapshot = asyncio.run(self.store.preview_project_delete("work"))
         self.store.begin_project_delete(
             alias="work", expected_revision=1,
             expected_inventory_fingerprint=snapshot.fingerprint,

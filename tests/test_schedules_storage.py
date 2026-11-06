@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import sqlite3
 import tempfile
@@ -8,7 +9,6 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
 
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import (
@@ -266,7 +266,7 @@ class BindingScheduleStorageTest(unittest.TestCase):
         run = self.schedules.finish_binding_submission(claim.run.id, "turn", "steered")
         self.schedules.abandon_pending_deliveries()
         self.assertIsNone(self.schedules.get_run(run.id).delivery_state)
-        self.assertEqual(self.schedules.list(app_id="app", target_kind="binding"), ())
+        self.assertEqual(asyncio.run(self.schedules.list(app_id="app", target_kind="binding")), ())
 
     def test_input_receipts_are_bounded_without_independent_result_delivery(self):
         plan_id = self.create()
@@ -298,7 +298,7 @@ class BindingScheduleStorageTest(unittest.TestCase):
             self.schedules.release(claim.run.id, error_code="publishing_unknown")
         self.assertEqual(len(self.schedules.list_runs(plan_id, limit=1001)), 100)
         self.assertEqual(self.schedules.project_pending_runs("p"), ())
-        inventory = self.store.preview_project_delete("p")
+        inventory = asyncio.run(self.store.preview_project_delete("p"))
         self.assertEqual(inventory.scheduled_runs, ())
 
 
@@ -344,45 +344,47 @@ class ScheduleStorageTest(unittest.TestCase):
             request_id=request_id or self.request(), now=now,
         )
 
-    def test_request_sweeps_are_throttled_but_expired_keys_can_be_reused(self):
-        statements = []
-        self.store._connection.set_trace_callback(statements.append)
-        with patch("netizen_cli.schedules.store.time.monotonic", return_value=1000.0) as clock:
-            original = self.create(request_id="reuse", request_payload={"v": 1})
-            self.create(request_id="backlog", request_payload={})
-            replay = self.schedules.lookup_request("reuse", "create", {"v": 1})
-            self.assertEqual(replay.plan_id, original.plan_id)
-            self.assertTrue(replay.replayed)
-            with self.assertRaises(ScheduleRequestConflict):
-                self.schedules.lookup_request("reuse", "update", {"v": 1})
-            self.now += 7 * 86400
-            clock.return_value = 1059.9
-            self.assertIsNone(self.schedules.lookup_request("absent", "create", {}))
-            self.assertIsNotNone(self.store._connection.execute(
-                "SELECT 1 FROM schedule_requests WHERE request_id='reuse'",
-            ).fetchone())
-            renewed = self.create(request_id="reuse", request_payload={"v": 2})
-            self.assertFalse(renewed.replayed)
-            self.assertNotEqual(renewed.plan_id, original.plan_id)
-            self.assertEqual(sum(sql.startswith("DELETE FROM schedule_requests WHERE expires_at") for sql in statements), 1)
-            clock.return_value = 1060.0
-            self.assertIsNone(self.schedules.lookup_request("absent", "create", {}))
-            self.assertEqual(sum(sql.startswith("DELETE FROM schedule_requests WHERE expires_at") for sql in statements), 2)
-            self.assertEqual([row[0] for row in self.store._connection.execute("SELECT request_id FROM schedule_requests")], ["reuse"])
+    def test_request_sweeps_oldest_batch_and_expired_keys_can_be_reused(self):
+        from netizen_cli.schedules.store import _REQUEST_EXPIRY_BATCH
+
+        original = self.create(request_id="reuse", request_payload={"v": 1})
+        replay = self.schedules.lookup_request("reuse", "create", {"v": 1})
+        self.assertEqual(replay.plan_id, original.plan_id)
+        self.assertTrue(replay.replayed)
+        with self.assertRaises(ScheduleRequestConflict):
+            self.schedules.lookup_request("reuse", "update", {"v": 1})
+        count = _REQUEST_EXPIRY_BATCH * 4
+        self.store._connection.executemany(
+            "INSERT INTO schedule_requests VALUES (?, 'create', 'digest', ?, 1, ?, NULL)",
+            ((f"expired-{i:04d}", original.plan_id, i) for i in reversed(range(count))),
+        )
+        self.now += 7 * 86400
+        self.assertIsNone(self.schedules.lookup_request("absent", "create", {}))
+        remaining = [row[0] for row in self.store._connection.execute(
+            "SELECT request_id FROM schedule_requests WHERE request_id LIKE 'expired-%' ORDER BY expires_at",
+        )]
+        self.assertEqual(remaining, [f"expired-{i:04d}" for i in range(_REQUEST_EXPIRY_BATCH, count)])
+        # Reuse is exact even while older expired receipts occupy the next batch.
+        renewed = self.create(request_id="reuse", request_payload={"v": 2})
+        self.assertFalse(renewed.replayed)
+        self.assertNotEqual(renewed.plan_id, original.plan_id)
+        plan = self.store._connection.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM schedule_requests WHERE expires_at<=? ORDER BY expires_at LIMIT ?",
+            (self.now, _REQUEST_EXPIRY_BATCH),
+        ).fetchall()
+        self.assertTrue(any("USING COVERING INDEX schedule_requests_expiry" in row[3] for row in plan), plan)
 
     def test_expired_request_cleanup_rollback_does_not_revive_replay(self):
-        with patch("netizen_cli.schedules.store.time.monotonic", return_value=1000.0) as clock:
-            original = self.create(request_id="reuse", request_payload={"v": 1})
-            self.now += 7 * 86400
-            clock.return_value = 1060.0
-            with self.assertRaises(ScheduleError):
-                self.create(request_id="reuse", request_payload={"v": 2}, instructions="")
-            self.assertIsNotNone(self.store._connection.execute(
-                "SELECT 1 FROM schedule_requests WHERE request_id='reuse'",
-            ).fetchone())
-            renewed = self.create(request_id="reuse", request_payload={"v": 2})
-            self.assertFalse(renewed.replayed)
-            self.assertNotEqual(renewed.plan_id, original.plan_id)
+        original = self.create(request_id="reuse", request_payload={"v": 1})
+        self.now += 7 * 86400
+        with self.assertRaises(ScheduleError):
+            self.create(request_id="reuse", request_payload={"v": 2}, instructions="")
+        self.assertIsNotNone(self.store._connection.execute(
+            "SELECT 1 FROM schedule_requests WHERE request_id='reuse'",
+        ).fetchone())
+        renewed = self.create(request_id="reuse", request_payload={"v": 2})
+        self.assertFalse(renewed.replayed)
+        self.assertNotEqual(renewed.plan_id, original.plan_id)
 
     def test_archive_uses_partial_run_index_and_delete_releases_both_target_kinds(self):
         new_topic_plan = self.create().plan_id
@@ -402,7 +404,14 @@ class ScheduleStorageTest(unittest.TestCase):
         self.assertEqual(self.schedules.get_run(new_topic_run.run.id).barrier, "released")
         self.assertEqual(self.schedules.get_run(binding_run.run.id).barrier, "held")
         self.assertFalse(self.schedules.get(binding_plan).deleted)
+        statements.clear()
+        self.store._connection.set_trace_callback(statements.append)
         self.store.delete_binding(binding.id)
+        self.store._connection.set_trace_callback(None)
+        query = next(sql for sql in statements if sql.startswith("SELECT run_id,plan_id FROM schedule_runs")
+                     and "target_kind='binding'" in sql)
+        plan = self.store._connection.execute("EXPLAIN QUERY PLAN " + query).fetchall()
+        self.assertTrue(any("USING INDEX schedule_runs_binding_target" in row[3] for row in plan), plan)
         for run_id in (new_topic_run.run.id, binding_run.run.id):
             run = self.schedules.get_run(run_id)
             self.assertEqual(run.barrier, "released")
@@ -484,7 +493,7 @@ class ScheduleStorageTest(unittest.TestCase):
         with self.assertRaises(ProjectDisabled):
             self.manual(plan_id)
         self.assertEqual(self.schedules.list_runs(plan_id), ())
-        snapshot = self.store.preview_project_delete("p")
+        snapshot = asyncio.run(self.store.preview_project_delete("p"))
         self.store.begin_project_delete(alias="p", expected_revision=snapshot.project.revision, expected_inventory_fingerprint=snapshot.fingerprint)
         with self.assertRaises(ScheduleNotFound):
             self.manual(plan_id)
@@ -574,13 +583,13 @@ class ScheduleStorageTest(unittest.TestCase):
         self.schedules.set_run(claim.run.id, barrier="unknown")
         state = self.lifecycle(plan_id, now=220)
         self.assertEqual((state.ended, state.has_future, state.has_trigger), (False, False, False))
-        self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=False, now=220)], [plan_id])
+        self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=False, now=220))], [plan_id])
         self.assertIsNone(self.claim(plan_id, at=220))
         self.store.release_scheduled_initial_turn(binding.id, "different")
         self.assertFalse(self.lifecycle(plan_id, now=220).ended)
         self.store.release_scheduled_initial_turn(binding.id, "last-turn")
         self.assertTrue(self.lifecycle(plan_id, now=220).ended)
-        self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=True, now=220)], [plan_id])
+        self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=True, now=220))], [plan_id])
         self.assertEqual(len(self.schedules.list_runs(plan_id)), 1)
 
     def test_pause_and_cutoff_edits_restore_future_without_replaying_processed_time(self):
@@ -663,8 +672,8 @@ class ScheduleStorageTest(unittest.TestCase):
         before = tuple(self.store._connection.iterdump())
         changes = self.store._connection.total_changes
         for _ in range(2):
-            first = self.schedules.list(app_id="app", ended=True, now=220, limit=2)
-            second = self.schedules.list(app_id="app", enabled=True, ended=True, now=220, limit=2, after=first[-1].id)
+            first = asyncio.run(self.schedules.list(app_id="app", ended=True, now=220, limit=2))
+            second = asyncio.run(self.schedules.list(app_id="app", enabled=True, ended=True, now=220, limit=2, after=first[-1].id))
             self.assertEqual([plan.id for plan in (*first, *second)], ended)
             self.assertTrue(all(not self.lifecycle(plan_id, now=220).has_trigger for plan_id in plan_ids))
         self.assertEqual(self.store._connection.total_changes, changes)
@@ -679,8 +688,8 @@ class ScheduleStorageTest(unittest.TestCase):
         after = self.lifecycle(once, now=181)
         self.assertEqual((after.ended, after.has_future, after.has_trigger), (True, False, False))
         self.assertFalse(self.lifecycle(recurring, now=181).ended)
-        self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", enabled=False, ended=True, now=181)], [once])
-        self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", enabled=False, ended=False, now=181)], [recurring])
+        self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", enabled=False, ended=True, now=181))], [once])
+        self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", enabled=False, ended=False, now=181))], [recurring])
 
     def test_due_grace_and_expiry_are_read_only_and_use_one_explicit_clock(self):
         once = self.create(schedule=ScheduleRule("once", "UTC", at="1970-01-01T00:03Z")).plan_id
@@ -692,10 +701,10 @@ class ScheduleStorageTest(unittest.TestCase):
                 state = self.lifecycle(once, now=now)
                 self.assertEqual((state.ended, state.has_future, state.has_trigger), expected)
                 for _ in range(2):
-                    self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=state.ended, now=now)], [once])
-                    self.assertEqual(self.schedules.list(app_id="app", ended=not state.ended, now=now), ())
+                    self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=state.ended, now=now))], [once])
+                    self.assertEqual(asyncio.run(self.schedules.list(app_id="app", ended=not state.ended, now=now)), ())
         self.now = 240.001
-        self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=True)], [once])
+        self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=True))], [once])
         self.assertEqual(self.store._connection.total_changes, changes)
         self.assertEqual(tuple(self.store._connection.iterdump()), before)
 
@@ -707,7 +716,7 @@ class ScheduleStorageTest(unittest.TestCase):
             with self.subTest(now=now):
                 state = self.lifecycle(once, now=now)
                 self.assertEqual((state.ended, state.has_future, state.has_trigger), (True, False, False))
-                self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=True, now=now)], [once])
+                self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=True, now=now))], [once])
         # Even a newly selected time after the rolled-back wall clock remains
         # consumed when it is earlier than the durable processed boundary.
         with self.assertRaises(ScheduleError):
@@ -715,7 +724,7 @@ class ScheduleStorageTest(unittest.TestCase):
                 changes={"schedule": ScheduleRule("once", "UTC", at="1970-01-01T00:02Z")}, now=100)
         self.assertEqual(self.schedules.get(once).processed_through, 180)
         self.assertTrue(self.lifecycle(once, now=100).ended)
-        self.assertEqual(self.schedules.list(app_id="app", ended=False, now=100), ())
+        self.assertEqual(asyncio.run(self.schedules.list(app_id="app", ended=False, now=100)), ())
 
     def test_last_claim_is_unfinished_through_handoff_and_unknown_until_exact_release(self):
         once = self.create(schedule=ScheduleRule("once", "UTC", at="1970-01-01T00:03Z")).plan_id
@@ -724,8 +733,8 @@ class ScheduleStorageTest(unittest.TestCase):
         def assert_pending():
             state = self.lifecycle(once, now=300)
             self.assertEqual((state.ended, state.has_future, state.has_trigger), (False, False, False))
-            self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=False, now=300)], [once])
-            self.assertEqual(self.schedules.list(app_id="app", ended=True, now=300), ())
+            self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=False, now=300))], [once])
+            self.assertEqual(asyncio.run(self.schedules.list(app_id="app", ended=True, now=300)), ())
 
         assert_pending()
         self.schedules.begin_publication(claimed.run.id)
@@ -742,7 +751,7 @@ class ScheduleStorageTest(unittest.TestCase):
         assert_pending()
         self.store.release_scheduled_initial_turn(binding.id, "initial")
         self.assertTrue(self.lifecycle(once, now=300).ended)
-        self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=True, now=300)], [once])
+        self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=True, now=300))], [once])
 
     def test_recent_skipped_occurrence_does_not_hide_an_older_pending_run(self):
         plan_id = self.create().plan_id
@@ -756,10 +765,10 @@ class ScheduleStorageTest(unittest.TestCase):
             self.schedules.set_run(claimed.run.id, barrier=barrier)
             state = self.lifecycle(plan_id, now=301)
             self.assertEqual((state.ended, state.has_trigger), (False, False))
-            self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=False, now=301)], [plan_id])
+            self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=False, now=301))], [plan_id])
         self.schedules.release(claimed.run.id)
         self.assertTrue(self.lifecycle(plan_id, now=301).ended)
-        self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=True, now=301)], [plan_id])
+        self.assertEqual([plan.id for plan in asyncio.run(self.schedules.list(app_id="app", ended=True, now=301))], [plan_id])
 
     def test_ended_and_enabled_filters_apply_before_limit_with_other_filters(self):
         once = ScheduleRule("once", "UTC", at="1970-01-01T00:03Z")
@@ -784,8 +793,8 @@ class ScheduleStorageTest(unittest.TestCase):
                               if (enabled is None or state[0] == enabled) and (ended is None or state[1] == ended)]
                     seen, after = [], None
                     while True:
-                        page = self.schedules.list(app_id="app", chat_id="chat", project_alias="p", name="daily",
-                            enabled=enabled, ended=ended, now=181, after=after, limit=2)
+                        page = asyncio.run(self.schedules.list(app_id="app", chat_id="chat", project_alias="p", name="daily",
+                            enabled=enabled, ended=ended, now=181, after=after, limit=2))
                         self.assertEqual([plan.id for plan in page], wanted[len(seen):len(seen) + 2])
                         seen.extend(plan.id for plan in page)
                         if len(page) < 2:
@@ -796,7 +805,7 @@ class ScheduleStorageTest(unittest.TestCase):
     def test_ended_filter_rejects_non_boolean_values(self):
         for invalid in (0, 1, "true", "false", [], {}):
             with self.subTest(ended=invalid), self.assertRaises(ScheduleError):
-                self.schedules.list(app_id="app", ended=invalid)
+                asyncio.run(self.schedules.list(app_id="app", ended=invalid))
 
     def test_scheduled_binding_rejects_terminal_side_topic_or_root_without_mutation(self):
         parent = self.store.create_channel_binding(
@@ -831,7 +840,7 @@ class ScheduleStorageTest(unittest.TestCase):
     def test_invalid_write_is_atomic_and_idempotency_retains_original_identity(self):
         with self.assertRaises(ScheduleError):
             self.create(instructions="", request_id="failed")
-        self.assertEqual(self.schedules.list(app_id="app"), ())
+        self.assertEqual(asyncio.run(self.schedules.list(app_id="app")), ())
         first = self.create(request_id="stable")
         repeated = self.create(request_id="stable")
         self.assertEqual(repeated.plan_id, first.plan_id)
@@ -857,7 +866,7 @@ class ScheduleStorageTest(unittest.TestCase):
         invalid = ScheduleRule("interval", "UTC", every_minutes=3_000_000_000, anchor=100)
         with self.assertRaises(ScheduleError):
             self.create(schedule=invalid, request_id="invalid-create")
-        self.assertEqual(self.schedules.list(app_id="app"), ())
+        self.assertEqual(asyncio.run(self.schedules.list(app_id="app")), ())
         plan = self.create()
         before = self.schedules.get(plan.plan_id)
         with self.assertRaises(ScheduleError):
@@ -1084,7 +1093,7 @@ class ScheduleStorageTest(unittest.TestCase):
             claim = self.claim(plan.plan_id, 220 + 60 * index)
             self.schedules.release(claim.run.id, error_code="test_no_start")
         self.assertEqual(self.schedules.get_run(first.run.id).root_message_id, "uncertain-root")
-        snapshot = self.store.preview_project_delete("p")
+        snapshot = asyncio.run(self.store.preview_project_delete("p"))
         self.assertEqual([run.id for run in snapshot.scheduled_runs], [first.run.id])
         reserved = self.store.begin_project_delete(alias="p", expected_revision=snapshot.project.revision, expected_inventory_fingerprint=snapshot.fingerprint)
         with self.assertRaises(ProjectInventoryConflict):
@@ -1230,12 +1239,12 @@ class ScheduleStorageTest(unittest.TestCase):
 
     def test_project_delete_checks_plan_revision_and_keeps_pending_inventory(self):
         plan = self.create()
-        stale = self.store.preview_project_delete("p")
+        stale = asyncio.run(self.store.preview_project_delete("p"))
         self.schedules.update(plan.plan_id, expected_revision=1, request_id=self.request(), changes={"name": "edited"})
         with self.assertRaises(ProjectInventoryConflict):
             self.store.begin_project_delete(alias="p", expected_revision=stale.project.revision, expected_inventory_fingerprint=stale.fingerprint)
         claim = self.claim(plan.plan_id)
-        snapshot = self.store.preview_project_delete("p")
+        snapshot = asyncio.run(self.store.preview_project_delete("p"))
         self.assertEqual(snapshot.scheduled_plans, ((plan.plan_id, 2),))
         self.assertEqual(snapshot.scheduled_runs[0].id, claim.run.id)
         reserved = self.store.begin_project_delete(alias="p", expected_revision=snapshot.project.revision, expected_inventory_fingerprint=snapshot.fingerprint)
@@ -1256,10 +1265,10 @@ class ScheduleStorageTest(unittest.TestCase):
         first = self.create(name="100% literal _ report")
         second = self.create(name="other")
         self.create(app_id="other-app")
-        records = self.schedules.list(app_id="app", limit=1)
-        more = self.schedules.list(app_id="app", after=records[0].id)
+        records = asyncio.run(self.schedules.list(app_id="app", limit=1))
+        more = asyncio.run(self.schedules.list(app_id="app", after=records[0].id))
         self.assertEqual({records[0].id, more[0].id}, {first.plan_id, second.plan_id})
-        self.assertEqual(self.schedules.list(app_id="app", name="% literal _")[0].id, first.plan_id)
+        self.assertEqual(asyncio.run(self.schedules.list(app_id="app", name="% literal _"))[0].id, first.plan_id)
         self.assertIsNone(self.schedules.claim_due(first.plan_id, app_id="other-app", now=160))
 
 
