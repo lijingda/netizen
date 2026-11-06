@@ -144,6 +144,76 @@ class FeishuClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(tokens.refresh_expires_at)
         self.assertEqual(tokens.scopes, ())
 
+    async def test_long_tokens_support_identity_refresh_and_selector(self):
+        for access_length, refresh_length in ((8837, 8905), (70_000, 80_000)):
+            with self.subTest(access_length=access_length, refresh_length=refresh_length):
+                access, refresh = "a" * access_length, "r" * refresh_length
+                response = token_response(access_token=access, refresh_token=refresh)
+                responses = iter([
+                    httpx.Response(200, json=response),
+                    httpx.Response(200, json=response),
+                    httpx.Response(200, json={
+                        "code": 0, "data": {"ticket": "synthetic-ticket", "expire_in": 7200},
+                    }),
+                ])
+                client, _ = await self.make_client(
+                    lambda _: next(responses),
+                    sdk_result=GetUserInfoResponse({"code": 0, "data": {"open_id": "ou_test_user"}}),
+                )
+                tokens = await client.poll_login("synthetic-device-code")
+                self.assertEqual(tokens.access_token, access)
+                self.assertEqual(tokens.refresh_token, refresh)
+                profile = await client.user_info(tokens.access_token)
+                self.assertEqual(profile.open_id, "ou_test_user")
+                self.assertEqual(self.sdk_get.call_args.args[1].user_access_token, access)
+                renewed = await client.refresh(tokens.refresh_token)
+                self.assertEqual(renewed.access_token, access)
+                self.assertEqual(renewed.refresh_token, refresh)
+                self.assertEqual(json.loads(self.requests[1].content)["refresh_token"], refresh)
+                config = await client.selector_config(renewed.access_token, profile.open_id,
+                                                      "http://localhost:8787/")
+                self.assertEqual(self.requests[2].headers["Authorization"], "Bearer " + access)
+                self.assertEqual(config["openId"], profile.open_id)
+                for secret in (access, refresh):
+                    self.assertNotIn(secret, repr(tokens))
+                    self.assertNotIn(secret, repr(config))
+
+    async def test_large_token_response_preserves_all_granted_scopes(self):
+        scopes = tuple(f"scope_{index}:" + "x" * 300 for index in range(300))
+        response = httpx.Response(200, json=token_response(scope=" ".join((*scopes, scopes[0]))))
+        self.assertGreater(len(response.content), 65_536)
+        client, _ = await self.make_client(lambda _: response)
+        tokens = await client.poll_login("synthetic-device-code")
+        self.assertEqual(tokens.scopes, scopes)
+
+    async def test_malformed_tokens_are_rejected_before_api_requests(self):
+        client, _ = await self.make_client()
+        for token in (None, 42, b"synthetic-private-token", "", "synthetic\nprivate",
+                      "synthetic\x00private", "synthetic\x7fprivate"):
+            for operation in (
+                lambda: client.user_info(token),
+                lambda: client.refresh(token),
+                lambda: client.selector_config(token, "ou_test_user", "http://localhost:8787/"),
+            ):
+                with self.subTest(token=token), self.assertRaises(feishu.FeishuError) as caught:
+                    await operation()
+                self.assertEqual(caught.exception.code, "upstream_format")
+                self.assertNotIn("synthetic", str(caught.exception))
+        self.assertEqual(self.requests, [])
+        self.sdk_get.assert_not_awaited()
+
+    async def test_token_responses_reject_malformed_access_and_refresh_tokens(self):
+        for field in ("access_token", "refresh_token"):
+            for token in (42, "", "synthetic\nprivate", "synthetic\x00private", "synthetic\x7fprivate"):
+                with self.subTest(field=field, token=token):
+                    client, _ = await self.make_client(lambda _: httpx.Response(
+                        200, json=token_response(**{field: token}),
+                    ))
+                    with self.assertRaises(feishu.FeishuError) as caught:
+                        await client.poll_login("synthetic-device-code")
+                    self.assertEqual(caught.exception.code, "upstream_format")
+                    self.assertNotIn("synthetic", str(caught.exception))
+
     async def test_refresh_uses_json_and_returns_rotated_credentials(self):
         client, _ = await self.make_client(lambda _: httpx.Response(200, json=token_response(
             access_token="new-access", refresh_token="new-refresh",

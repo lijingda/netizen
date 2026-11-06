@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -25,6 +26,8 @@ from netizen_cli.cli_data import (
     validate_prepared_instance,
 )
 from netizen_cli import database_migrations as migrations
+from netizen_cli.admin.credentials import credential_path
+from netizen_cli.admin.users import AdminIdentity, write_private_json
 from netizen_cli.bindings import BindingStore
 from netizen_cli.instance import INSTANCE_ROOT_MARKER
 from tests.test_database_migrations import STEP_15, future_schema, validate_15
@@ -63,6 +66,15 @@ class CliDataTest(unittest.TestCase):
 
         with patch("netizen_cli.cli_data.BindingStore", side_effect=frozen_store):
             self.initialize()
+
+    def credential(self, identity: AdminIdentity, *, access_token: str = "access") -> Path:
+        path = credential_path(self.root, identity)
+        write_private_json(path, {
+            "version": 1, "appId": identity.app_id, "openId": identity.open_id,
+            "addRevision": 1, "accessToken": access_token, "refreshToken": "refresh",
+            "expiresAt": 1, "refreshExpiresAt": 2, "scopes": [], "refreshAttempted": True,
+        }, maximum=None)
+        return path
 
     def version(self, path: Path | None = None) -> int:
         with sqlite3.connect(path or self.database) as connection:
@@ -352,6 +364,91 @@ class CliDataTest(unittest.TestCase):
             with self.assertRaisesRegex(InstanceDataError, "changed since confirmation"):
                 purge_instance_data(self.root, expected_inventory=inventory, lifetime_descriptor=descriptor)
         self.assertTrue(self.database.exists())
+
+    def test_purge_individual_credentials_includes_all_apps_and_preserves_unknown_names(self) -> None:
+        self.initialize()
+        credentials = [
+            self.credential(AdminIdentity("cli_first", "ou_alice"), access_token="a" * 1_048_577),
+            self.credential(AdminIdentity("cli_first", "ou_bob")),
+            self.credential(AdminIdentity("cli_second", "ou_alice")),
+        ]
+        unknowns = [self.root / "credentials" / name for name in (
+            "notes.json", "admin-user-short.json", f"admin-user-{'A' * 64}.json",
+            f"admin-user-{'a' * 64}.json.backup",
+        )]
+        for path in unknowns:
+            path.write_text("keep")
+        inventory = purge_inventory(self.root)
+        for path in credentials:
+            self.assertIn(path, inventory)
+        with instance_lifetime_lock(self.root) as descriptor:
+            purge_instance_data(self.root, expected_inventory=inventory, lifetime_descriptor=descriptor)
+        self.assertTrue(all(not path.exists() for path in credentials))
+        for path in unknowns:
+            self.assertEqual(path.read_text(), "keep")
+
+    def test_purge_rejects_unrecognized_individual_credential_payload(self) -> None:
+        self.initialize()
+        path = self.credential(AdminIdentity("cli_app", "ou_alice"))
+        original = json.loads(path.read_text())
+        for changes in (
+            {"version": 2}, {"version": True}, {"appId": "cli_other"},
+            {"openId": "ou_other"}, {"openId": None},
+        ):
+            with self.subTest(changes=changes):
+                payload = json.dumps(original | changes)
+                path.write_text(payload)
+                with self.assertRaisesRegex(InstanceDataError, "unrecognized user credential"):
+                    purge_inventory(self.root)
+                self.assertEqual(path.read_text(), payload)
+                self.assertTrue(self.database.exists())
+        path.write_text("invalid JSON")
+        with self.assertRaisesRegex(InstanceDataError, "unrecognized user credential"):
+            purge_inventory(self.root)
+        self.assertEqual(path.read_text(), "invalid JSON")
+
+    def test_purge_rejects_unsafe_individual_credential_files(self) -> None:
+        self.initialize()
+        path = self.credential(AdminIdentity("cli_app", "ou_alice"))
+        external = self.parent / "external-credential"
+        external.write_bytes(path.read_bytes())
+        external.chmod(0o600)
+        path.unlink()
+        for link in (lambda: path.symlink_to(external), lambda: os.link(external, path)):
+            link()
+            with self.assertRaisesRegex(InstanceDataError, "unsafe instance file"):
+                purge_inventory(self.root)
+            path.unlink()
+            self.assertTrue(external.is_file())
+        path.write_bytes(external.read_bytes())
+        path.chmod(0o644)
+        with self.assertRaisesRegex(InstanceDataError, "unsafe instance file"):
+            purge_inventory(self.root)
+        self.assertTrue(path.is_file())
+
+    def test_purge_protects_individual_credentials_under_project_or_codex_paths(self) -> None:
+        self.initialize()
+        path = self.credential(AdminIdentity("cli_app", "ou_alice"))
+        original = self.config.read_text()
+        self.config.write_text(f"instance:\n  projectRoot: {path}\n")
+        with self.assertRaisesRegex(InstanceDataError, "overlaps Project"):
+            purge_inventory(self.root)
+        self.config.write_text(original)
+        with self.assertRaisesRegex(InstanceDataError, "shared Codex state"):
+            purge_inventory(self.root, protected_codex_home=path.parent)
+        self.assertTrue(path.is_file())
+
+    def test_purge_requires_confirmation_for_new_individual_credentials(self) -> None:
+        self.initialize()
+        first = self.credential(AdminIdentity("cli_app", "ou_alice"))
+        inventory = purge_inventory(self.root)
+        second = self.credential(AdminIdentity("cli_app", "ou_bob"))
+        with instance_lifetime_lock(self.root) as descriptor:
+            with self.assertRaisesRegex(InstanceDataError, "changed since confirmation"):
+                purge_instance_data(self.root, expected_inventory=inventory, lifetime_descriptor=descriptor)
+        self.assertTrue(first.is_file())
+        self.assertTrue(second.is_file())
+        self.assertTrue(self.database.is_file())
 
     def test_purge_accepts_service_shutdown_removing_confirmed_ready_file(self) -> None:
         self.initialize()

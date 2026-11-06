@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-10-11
 amends: 0031, 0062, 0066, 0074, 0076
+amended-by: 0091
 ---
 
 # 用飞书身份登录并维护实例管理员
@@ -12,6 +13,9 @@ Project ACL 或 Channel 准入规则。选择 Device Flow 是为了不要求每�
 配置 OAuth 回调。删除旧 secret 的生成、读取和登录依赖，不保留认证提供者框架或回退。
 
 ## 身份、凭证与会话
+
+凭证文件布局、加载方式及旧格式处理由
+[ADR 0091](0091-load-admin-user-credentials-on-demand.md) 修订；其余身份与会话边界保留。
 
 名单保存到实例私有 `state/admin-users.json`，当前用户凭证保存到独立私有
 `credentials/admin-user-tokens.json`，均不进入 Channel SQLite 或应用 profile。在线只有

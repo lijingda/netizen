@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import time
 from contextlib import asynccontextmanager
@@ -12,7 +13,8 @@ from typing import Callable
 
 from .feishu import AuthExpired, FeishuClient, UserProfile, UserTokens
 from .users import (
-    AdminIdentity, AdminUsers, AdminUsersUnavailable, PrivateJSONError, read_private_json, write_private_json,
+    AdminIdentity, AdminUsers, AdminUsersUnavailable, PrivateJSONError,
+    delete_private_json, read_private_json, write_private_json,
 )
 
 
@@ -23,11 +25,22 @@ class _Credential:
     refresh_attempted: bool = False
 
 
+def credential_path(root: Path, identity: AdminIdentity) -> Path:
+    """Stable, bounded filename for the exact application/user identity."""
+    digest = hashlib.sha256(f"{identity.app_id}\n{identity.open_id}".encode("utf-8")).hexdigest()
+    return root / "credentials" / f"admin-user-{digest}.json"
+
+
+def _token(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and not any(ord(c) < 32 or ord(c) == 127 for c in value)
+
+
 class AdminCredentials:
-    """One current credential per member, with single-flight per-user renewal.
+    """On-demand private credentials, with single-flight per-user renewal.
 
     All asynchronous calls belong to the Admin event loop. The roster's lock
     protects membership checks and durable commits; no network call holds it.
+    Tokens live only in the operation using them, never in a resident cache.
     """
 
     def __init__(self, root: Path, users: AdminUsers, client: FeishuClient,
@@ -35,73 +48,56 @@ class AdminCredentials:
         self.users = users
         self.client = client
         self._clock = clock
-        self._path = root / "credentials" / "admin-user-tokens.json"
-        self._records: dict[AdminIdentity, _Credential] = {}
+        self._root = root
         self._locks: dict[AdminIdentity, tuple[asyncio.Lock, int]] = {}
         self._closed = False
-        self._load()
         users.subscribe_revocation(self._revoke)
 
-    def _load(self) -> None:
-        data = read_private_json(self._path, missing_ok=True)
+    def _read(self, identity: AdminIdentity) -> _Credential | None:
+        data = read_private_json(credential_path(self._root, identity), missing_ok=True, maximum=None)
         if data is None:
-            return
+            return None
         try:
-            if set(data) != {"version", "appId", "users"} or type(data["version"]) is not int or data["version"] != 1:
+            if (set(data) != {
+                "version", "appId", "openId", "addRevision", "accessToken", "refreshToken",
+                "expiresAt", "refreshExpiresAt", "scopes", "refreshAttempted",
+            } or type(data["version"]) is not int or data["version"] != 1
+                    or AdminIdentity(data["appId"], data["openId"]) != identity):
                 raise ValueError
-            if not isinstance(data["appId"], str) or not isinstance(data["users"], list):
+            revision = data["addRevision"]
+            if type(revision) is not int or revision < 1 or type(data["refreshAttempted"]) is not bool:
                 raise ValueError
-            seen: set[str] = set()
-            for row in data["users"]:
-                if not isinstance(row, dict) or set(row) != {
-                    "openId", "addRevision", "accessToken", "refreshToken",
-                    "expiresAt", "refreshExpiresAt", "scopes", "refreshAttempted",
-                }:
+            refresh = data["refreshToken"]
+            if not _token(data["accessToken"]) or (refresh is not None and not _token(refresh)):
+                raise ValueError
+            for key in ("expiresAt", "refreshExpiresAt"):
+                value = data[key]
+                if value is None and key == "refreshExpiresAt":
+                    continue
+                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                     raise ValueError
-                identity = AdminIdentity(data["appId"], row["openId"])
-                if identity.open_id in seen:
-                    raise ValueError
-                seen.add(identity.open_id)
-                revision = row["addRevision"]
-                if type(revision) is not int or revision < 1 or type(row["refreshAttempted"]) is not bool:
-                    raise ValueError
-                if not isinstance(row["accessToken"], str) or not row["accessToken"] or len(row["accessToken"]) > 16384:
-                    raise ValueError
-                refresh = row["refreshToken"]
-                if refresh is not None and (not isinstance(refresh, str) or not refresh or len(refresh) > 16384):
-                    raise ValueError
-                for key in ("expiresAt", "refreshExpiresAt"):
-                    value = row[key]
-                    if value is None and key == "refreshExpiresAt":
-                        continue
-                    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-                        raise ValueError
-                scopes = row["scopes"]
-                if not isinstance(scopes, list) or len(scopes) > 256 or any(not isinstance(s, str) or not s or len(s) > 256 for s in scopes):
-                    raise ValueError
-                member = self.users.get_membership(identity)
-                if member is not None and member.add_revision == revision:
-                    self._records[identity] = _Credential(revision, UserTokens(
-                        access_token=row["accessToken"], refresh_token=refresh,
-                        expires_at=row["expiresAt"], refresh_expires_at=row["refreshExpiresAt"],
-                        scopes=tuple(scopes),
-                    ), row["refreshAttempted"])
-        except (ValueError, TypeError, KeyError):
+            scopes = data["scopes"]
+            if not isinstance(scopes, list) or any(not isinstance(s, str) or not s for s in scopes):
+                raise ValueError
+            return _Credential(revision, UserTokens(
+                access_token=data["accessToken"], refresh_token=refresh,
+                expires_at=data["expiresAt"], refresh_expires_at=data["refreshExpiresAt"],
+                scopes=tuple(scopes),
+            ), data["refreshAttempted"])
+        except (ValueError, TypeError, KeyError, OverflowError):
             raise PrivateJSONError() from None
 
-    def _write(self, records: dict[AdminIdentity, _Credential]) -> None:
-        write_private_json(self._path, {
-            "version": 1, "appId": self.users.app_id,
-            "users": [{
-                "openId": identity.open_id, "addRevision": record.add_revision,
-                "accessToken": record.tokens.access_token,
-                "refreshToken": record.tokens.refresh_token,
-                "expiresAt": record.tokens.expires_at,
-                "refreshExpiresAt": record.tokens.refresh_expires_at,
-                "scopes": list(record.tokens.scopes),
-                "refreshAttempted": record.refresh_attempted,
-            } for identity, record in sorted(records.items(), key=lambda item: item[0].open_id)],
-        })
+    def _write(self, identity: AdminIdentity, record: _Credential) -> None:
+        write_private_json(credential_path(self._root, identity), {
+            "version": 1, "appId": identity.app_id, "openId": identity.open_id,
+            "addRevision": record.add_revision,
+            "accessToken": record.tokens.access_token,
+            "refreshToken": record.tokens.refresh_token,
+            "expiresAt": record.tokens.expires_at,
+            "refreshExpiresAt": record.tokens.refresh_expires_at,
+            "scopes": list(record.tokens.scopes),
+            "refreshAttempted": record.refresh_attempted,
+        }, maximum=None)
 
     def _member(self, identity: AdminIdentity, revision: int) -> None:
         member = self.users.get_membership(identity)
@@ -130,25 +126,19 @@ class AdminCredentials:
                 self._member(identity, expected_add_revision)
                 if not is_current():
                     raise AuthExpired("auth_expired", "本次登录已失效。")
-                updated = dict(self._records)
-                updated[identity] = _Credential(expected_add_revision, tokens)
-                try:
-                    self._write(updated)
-                except Exception:
-                    # The rename may have committed. Never refresh an older
-                    # in-memory RT when the persisted version is uncertain.
-                    old = self._records.get(identity)
-                    if old is not None:
-                        self._records[identity] = _Credential(old.add_revision, old.tokens, True)
-                    raise
-                self._records = updated
+                # There is no older cached pair to invalidate on an uncertain
+                # write: the next operation re-reads the actual private file.
+                self._write(identity, _Credential(expected_add_revision, tokens))
 
     async def access_token(self, identity: AdminIdentity, add_revision: int, *, force_refresh: bool = False,
                            rejected_token: str | None = None) -> str:
         async with self._single_user(identity):
             with self.users.lock:
                 self._member(identity, add_revision)
-                record = self._records.get(identity)
+                try:
+                    record = self._read(identity)
+                except PrivateJSONError:
+                    raise AuthExpired("auth_expired", "飞书凭证不可用，请重新登录。") from None
                 if record is None or record.add_revision != add_revision:
                     raise AuthExpired("auth_expired", "请重新登录。")
                 tokens = record.tokens
@@ -164,19 +154,15 @@ class AdminCredentials:
                 with self.users.lock:
                     self._member(identity, add_revision)
                     record = _Credential(add_revision, tokens, True)
-                    self._records[identity] = record
                     # Persist before sending: timeout/cancellation/restart may
                     # otherwise consume the same single-use refresh token twice.
-                    self._write(self._records)
+                    self._write(identity, record)
                 renewed = await self.client.refresh(tokens.refresh_token)
                 with self.users.lock:
                     self._member(identity, add_revision)
-                    if self._records.get(identity) is not record:
+                    if self._read(identity) != record:
                         raise AuthExpired("auth_expired", "飞书凭证已变化，请重新登录。")
-                    updated = dict(self._records)
-                    updated[identity] = _Credential(add_revision, renewed)
-                    self._write(updated)
-                    self._records = updated
+                    self._write(identity, _Credential(add_revision, renewed))
                     return renewed.access_token
             except asyncio.CancelledError:
                 raise
@@ -216,18 +202,15 @@ class AdminCredentials:
         return result
 
     def _revoke(self, identity: AdminIdentity) -> None:
-        # Invoked after roster removal. Memory is invalidated even when the
-        # physical cleanup fails. The member incarnation also gates reload.
+        # Invoked under the roster lock after removal. Membership is already
+        # revoked even if cleanup fails; re-addition gets a new incarnation.
         try:
             self.users.get_membership(identity)
         except AdminUsersUnavailable:
             # A roster IO failure closes authorization, but is not an explicit
             # deletion of every user's durable credential. Preserve disk state.
             return
-        if identity in self._records:
-            del self._records[identity]
-            self._write(self._records)
+        delete_private_json(credential_path(self._root, identity))
 
     def close(self) -> None:
         self._closed = True
-        self._records.clear()  # Restart intentionally does not touch disk.

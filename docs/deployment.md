@@ -62,7 +62,7 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
   .netizen-initialized                        # 显式初始化／清理阶段证据
   config.yaml                                # 私有 Channel 配置
   lark-app/config.json                       # 固定 netizen profile
-  credentials/admin-user-tokens.json         # 当前管理员用户凭证；私有，跨重启保留
+  credentials/admin-user-<sha256>.json        # 每个 App ID + Open ID 一份私有用户凭证
   worktrees/                                 # 默认受管 checkout 根；可在 Admin 改以后新建位置
   attachments/                              # 按需创建的私有输入原件目录；无全局初始化标记
     .staging/                               # 每次输入独立准备；旧残留不在启动时扫描
@@ -96,8 +96,9 @@ remove 默认仅解除系统服务及自启，保留数据；--purge 先展示�
 purge 删除 Channel 数据库后受管工作区登记也消失；磁盘目录保留不等于可自动恢复登记，
 重新初始化不会收编这些目录，清理前应自行保存必要的路径与成果。
 输入附件原件也保留，不纳入递归 purge；需要清理时可先使用 Admin“文件附件”。
-名单、用户凭证及遗留 `credentials/admin-web-secret` 均属于精确 purge 清单；普通
-setup/start/update 不自动删除遗留 secret，也不再生成或读取它。
+名单、经校验的新格式用户凭证、旧 `credentials/admin-user-tokens.json` 及遗留
+`credentials/admin-web-secret` 均属于精确 purge 清单；普通 setup/start/update 不自动删除
+旧凭证或遗留 secret，也不再读取它们。
 移除实例不卸载 Python 环境中的共享包。
 可选[netizen-herdr 扩展](../extensions/netizen-herdr/README.md)仍由用户从源码按说明安装，
 不是 wheel 自动安装的全局 Skill。
@@ -1783,6 +1784,10 @@ fake helper 和代码门禁不能冒充真实应用验收。
 
 ### Admin 飞书登录与管理员维护验收
 
+用户凭证布局现由 [ADR 0091](adr/0091-load-admin-user-credentials-on-demand.md) 改为按用户
+独立文件并按需读取，不迁移旧聚合文件。从旧格式升级后需重新完成飞书登录；下述历史
+验收记录不代表此变更已发布或部署，新版本仍须分别核对登录、刷新、重启及精确 purge。
+
 2026-10-11 本轮将 [ADR 0080](adr/0080-authenticate-admins-with-feishu-identities.md) 接入
 当前源码，未据此发布版本或部署真实实例。临时 demo 的真人登录、选人和本人 Open ID
 对应证据不等于正式链路通过；以下 live 项仍需在授权的隔离应用和实例完成：
@@ -1907,10 +1912,13 @@ CLI `1.0.95`，需用不含真实凭据的隔离 profile 验证目录选择、�
 
 Admin 使用同一应用的飞书登录，管理员名单与用户凭证分别保存在私有的
 `<NETIZEN_ROOT>/state/admin-users.json` 和
-`<NETIZEN_ROOT>/credentials/admin-user-tokens.json`，不进入上述 profile 或 Channel SQLite。
+`<NETIZEN_ROOT>/credentials/admin-user-<sha256>.json`，后者每个 `App ID + Open ID` 一份，
+摘要为 `App ID + "\n" + Open ID` 的 UTF-8 SHA-256，不进入上述 profile 或 Channel SQLite。
 文件由当前用户拥有、普通非 symlink、单硬链接，写入权限为 `0600`，读取也允许只读
 `0400`；原子替换。在线由服务统一修改，离线 setup 持有维护锁和 lifetime lock。
-不要在服务运行时直接编辑名单或 token 文件。首次无 TTY 安装可以完成浏览器初始化：
+用户凭证只在实际使用时读取当前用户文件，不启动全量读取或保留 token 缓存；单用户
+文件损坏不会阻止服务启动，也不会影响其他用户的凭证读取。不要在服务运行时直接编辑
+名单或 token 文件。首次无 TTY 安装可以完成浏览器初始化：
 
 ```bash
 netizen setup --root "<NETIZEN_ROOT>" </dev/null  # 按输出逐次转交应用绑定/管理员登录链接
@@ -1964,10 +1972,17 @@ Admin 登录会话不设闲置或绝对时间过期；退出登录、服务重�
 限速时按页面提示重试。登录后的操作凭据仍有十分钟有效期。Cookie 名带 rootDigest，
 同一 host 不同端口的实例可并行登录。Host/Origin、CSRF、容量与限速校验仍适用。
 
-用户 token 跨服务重启保留，但不会自动恢复匿名浏览器登录。仅在实际调用飞书时检查
-期限并按需刷新，不增加后台续期；刷新失败使当前请求的浏览器 session 失效，需要重新
-登录。普通退出只清除当前 session 和关联操作授权，保留共享用户凭证。每位管理员仅
-一份当前 UAT/RT；登录或刷新成功原子覆盖，token 不给前端、不写日志。
+新格式用户 token 跨服务重启保留，但不会自动恢复匿名浏览器登录。旧聚合文件
+`credentials/admin-user-tokens.json` 不读取、不迁移、不自动删除；从旧格式升级后，用户
+重新完成飞书登录即可生成新文件，不影响管理员名单、Project 或原生会话数据。显式
+purge 继续按精确清单处理旧文件。
+
+仅在实际调用飞书时读取凭证、检查期限并按需刷新，不增加后台续期；刷新失败使当前
+请求的浏览器 session 失效，需要重新登录。普通退出只清除当前 session 和关联操作授权，
+保留共享用户凭证。每位管理员仅一份当前 UAT/RT；登录或刷新成功原子覆盖，token 不给
+前端、不写日志。用户 token、scope、用户凭据文件和飞书认证响应不设置任意长度或大小
+接受阈值；类型、期限、身份和私密文件校验保留。上游响应仍完整读入、解析后提取必要
+字段，处理后不缓存完整响应；更大的响应仍增加本次调用的临时内存及解析成本。
 
 “系统管理 → 权限管理 → 管理员”使用飞书官方 Selector 搜索选人，管理员确认后由后端
 复核当前资格与名单 revision 再添加。管理员同权，可删除自己但不能删除最后一人；

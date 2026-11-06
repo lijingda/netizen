@@ -125,8 +125,10 @@ NETIZEN_ROOT=/absolute/path/netizen-dev/.netizen .venv/bin/python -m netizen_cli
 Project，不是默认 cwd；`projects` 只引导尚未登记项，后续使用飞书／Admin 管理。
 服务默认 Admin host 为 0.0.0.0，缺省端口首次实际绑定后写回，已有端口不漂移；
 Admin 是必备能力，不支持 `adminWeb.enabled`。管理员通过飞书登录，名单与用户凭证
-分别位于实例的 `state/admin-users.json`、`credentials/admin-user-tokens.json`；
-服务重启保留用户凭证，但浏览器 session 失效。安装统一开通 user 类型
+分别位于实例的 `state/admin-users.json`、`credentials/admin-user-<sha256>.json`；
+用户凭证按用户独立保存、使用时读取，不在启动时加载或驻留缓存。旧聚合文件不读取或
+迁移，升级后重新登录生成新文件（[ADR 0091](adr/0091-load-admin-user-credentials-on-demand.md)）。
+服务重启保留新格式用户凭证，但浏览器 session 失效。安装统一开通 user 类型
 `component:selector`、`offline_access`，新登录也请求这两项权限；名单展示不另申请通讯录权限。
 相关边界见 [ADR 0080](adr/0080-authenticate-admins-with-feishu-identities.md)，真人和平台验收
 见[部署手册](deployment.md#admin-飞书登录与管理员维护验收)，本地测试通过不代表已上线。

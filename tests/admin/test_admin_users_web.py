@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from netizen_cli.admin.auth import AdminAuth
-from netizen_cli.admin.credentials import AdminCredentials
+from netizen_cli.admin.credentials import AdminCredentials, credential_path
 from netizen_cli.admin.feishu import AuthExpired, FeishuError, UserTokens
 from netizen_cli.admin.users import AdminIdentity, AdminUsers
 from netizen_cli.admin.web import AdminWebApplication
@@ -154,8 +154,9 @@ class AdminUsersWebTest(unittest.IsolatedAsyncioTestCase):
             response, _ = await self.request("GET", "/api/v1/admin-users", session=session)
             self.assertEqual(response.status, 401)
         self.assertEqual((await self.roster(session=other_admin))["currentOpenId"], "ou_other")
-        saved = json.loads((self.root / "credentials/admin-user-tokens.json").read_text())
-        self.assertEqual([row["openId"] for row in saved["users"]], ["ou_other"])
+        self.assertFalse(credential_path(self.root, AdminIdentity("cli_test", "ou_admin")).exists())
+        saved = json.loads(credential_path(self.root, AdminIdentity("cli_test", "ou_other")).read_text())
+        self.assertEqual(saved["openId"], "ou_other")
 
     async def test_concurrent_old_delete_grant_cannot_remove_final_administrator(self) -> None:
         self.assertEqual((await self.add("ou_other"))[0].status, 200)

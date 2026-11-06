@@ -46,8 +46,10 @@ netizen setup --root /absolute/path/to/.netizen --admin-open-id ou_example
 
 App ID 来自该实例已绑定的应用，不填写 `tenant_key`。该参数只初始化首管理员，已有
 管理员时保留原名单；指定 ID 不是登录凭证，该用户之后仍须真实完成飞书登录。
-名单保存为 `<root>/state/admin-users.json`；已通过名单核对的用户凭证独立保存到
-`<root>/credentials/admin-user-tokens.json`，不进入应用 profile 或 Channel SQLite。
+名单保存为 `<root>/state/admin-users.json`；已通过名单核对的用户凭证按 `App ID + Open ID`
+独立保存到 `<root>/credentials/admin-user-<sha256>.json`，不进入应用 profile 或 Channel SQLite。
+摘要使用 `App ID + "\n" + Open ID` 的 UTF-8 SHA-256。凭证使用时读取，不启动全量加载或
+保留 token 缓存；文件私有权限及原子写约束不变。
 
 setup 在外部授权前记录“初始化中”，因此授权失败或取消后可以重试，也可用 remove
 --purge 清理已生成的精确文件；不会把已有实例缺库误当作首次创建。
@@ -219,9 +221,12 @@ Admin 只允许本实例管理与显式重启，不再安装或升级全局程�
 生成及读取依赖已移除，不提供备用入口。遗留 secret 文件不自动删除，仍属于显式
 `remove --purge` 的有限清单。
 
-浏览器 session 只在内存，重启或退出后需要重新登录；用户 token 跨重启保留，只有实际
-调用飞书时才检查并按需刷新。删除管理员立即撤销其登录与未使用操作授权并清理凭证，
-不会取消已经受理的任务。Admin 继续使用受信内网 HTTP。
+浏览器 session 只在内存，重启或退出后需要重新登录；新格式用户 token 跨重启保留，只有
+实际调用飞书时才读取当前用户文件、检查并按需刷新。旧 `admin-user-tokens.json` 不读取、
+不迁移、不自动删除；从旧格式升级后重新完成飞书登录即可，名单、Project 和原生会话
+数据不变。旧文件及经校验的新格式文件属于显式 `remove --purge` 的精确清单。
+删除管理员立即撤销其登录与未使用操作授权并精确清理该用户凭证，不会取消已经受理的
+任务。Admin 继续使用受信内网 HTTP。
 
 ## 验证与发布状态
 

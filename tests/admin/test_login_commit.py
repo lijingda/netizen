@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from netizen_cli.admin.auth import AdminAuth, LoginRejected
-from netizen_cli.admin.credentials import AdminCredentials
+from netizen_cli.admin.credentials import AdminCredentials, credential_path
 from netizen_cli.admin.feishu import DeviceChallenge, UserProfile, UserTokens
 from netizen_cli.admin.login import AdminLogin
 from netizen_cli.admin.users import AdminIdentity, AdminUsers
@@ -39,7 +39,7 @@ class LoginCommitTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.auth.close)
         self.addCleanup(self.credentials.close)
         self.addCleanup(self.login.close)
-        self.path = self.root / "credentials/admin-user-tokens.json"
+        self.path = credential_path(self.root, self.member.identity)
 
     def tokens(self, label, *, expired=False):
         return UserTokens("access-" + label, "refresh-" + label,
@@ -108,7 +108,7 @@ class LoginCommitTest(unittest.IsolatedAsyncioTestCase):
         result, session = await pending
         self.assertEqual(result["state"], "failed")
         self.assertIsNone(session)
-        self.assertEqual(json.loads(self.path.read_text())["users"][0]["accessToken"], "access-renewed")
+        self.assertEqual(json.loads(self.path.read_text())["accessToken"], "access-renewed")
 
     async def test_other_thread_delete_readd_after_token_save_cannot_issue_stale_session(self):
         bob = self.users.add(AdminIdentity("cli_test", "ou_bob"), actor=self.member.identity,
@@ -141,7 +141,7 @@ class LoginCommitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "failed")
         self.assertIsNone(session)
         self.assertEqual(self.auth.state_counts().sessions, 0)
-        self.assertEqual(json.loads(self.path.read_text())["users"], [])
+        self.assertFalse(self.path.exists())
         self.assertGreater(self.users.get_membership(self.member.identity).add_revision, self.member.add_revision)
 
 

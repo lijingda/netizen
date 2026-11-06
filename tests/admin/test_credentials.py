@@ -13,10 +13,11 @@ import httpx
 from lark_oapi.api.authen.v1 import GetUserInfoResponse
 
 from netizen_cli.admin.auth import AdminAuth, AdmissionClosed, SessionRejected
-from netizen_cli.admin.credentials import AdminCredentials
+from netizen_cli.admin.credentials import AdminCredentials, credential_path
 from netizen_cli.admin.feishu import AuthExpired, FeishuClient, FeishuError, UserProfile, UserTokens
 from netizen_cli.admin.users import (
     AdminIdentity, AdminUsers, AdminUsersUnavailable, PrivateJSONError, write_private_json,
+    read_private_json,
 )
 
 
@@ -38,7 +39,7 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
         self.credentials = AdminCredentials(self.root, self.users, self.client,
                                             clock=lambda: self.now)
         self.addCleanup(self.credentials.close)
-        self.path = self.root / "credentials/admin-user-tokens.json"
+        self.path = credential_path(self.root, self.alice.identity)
 
     def tokens(self, label: str, *, expired: bool = False) -> UserTokens:
         return UserTokens(f"private-access-{label}", f"private-refresh-{label}",
@@ -104,9 +105,11 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
         return credentials, read_tokens, refresh_requests
 
     async def test_private_tokens_survive_restart_without_restoring_browser_sessions(self) -> None:
-        tokens = self.tokens("first")
+        tokens = UserTokens("a" * 600_000, "r" * 600_000, self.now + 100,
+                            self.now + 1000, tuple(f"scope:{i}:" + "s" * 300 for i in range(300)))
         await self.save(tokens)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertGreater(self.path.stat().st_size, 1_048_576)
         auth = AdminAuth(self.users)
         session = auth.issue_session(self.alice.identity, source_ip="192.0.2.1",
                                      expected_add_revision=self.alice.add_revision)
@@ -118,6 +121,136 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SessionRejected):
             AdminAuth(self.users).authenticate(session.token)
         self.client.refresh.assert_not_awaited()
+        self.now += 101
+        self.client.refresh.return_value = self.tokens("renewed")
+        self.assertEqual(await restored.access_token(self.alice.identity, self.alice.add_revision),
+                         "private-access-renewed")
+        self.client.refresh.assert_awaited_once_with(tokens.refresh_token)
+
+    async def test_old_aggregate_file_is_ignored_and_login_creates_only_user_file(self) -> None:
+        old_path = self.root / "credentials/admin-user-tokens.json"
+        old = {
+            "version": 1, "appId": "cli_test", "users": [{
+                "openId": "ou_alice", "addRevision": self.alice.add_revision,
+                "accessToken": "private-legacy-access", "refreshToken": "private-legacy-refresh",
+                "expiresAt": self.now + 100, "refreshExpiresAt": self.now + 1000,
+                "scopes": [], "refreshAttempted": False,
+            }],
+        }
+        write_private_json(old_path, old)
+        for contents in (old_path.read_bytes(), b"invalid legacy file"):
+            with self.subTest(valid_legacy=contents.startswith(b"{")):
+                old_path.write_bytes(contents)
+                restored = AdminCredentials(self.root, self.users, self.client, clock=lambda: self.now)
+                self.addCleanup(restored.close)
+                with self.assertRaises(AuthExpired):
+                    await restored.access_token(self.alice.identity, self.alice.add_revision)
+                await restored.save_login(self.alice.identity, self.tokens("new-login"),
+                                          expected_add_revision=self.alice.add_revision)
+                self.assertEqual(await restored.access_token(self.alice.identity, self.alice.add_revision),
+                                 "private-access-new-login")
+                self.assertEqual(old_path.read_bytes(), contents)
+                self.path.unlink()
+        self.client.refresh.assert_not_awaited()
+
+    async def test_reads_only_requested_user_and_new_operations_observe_disk(self) -> None:
+        await self.save(self.tokens("alice"))
+        bob_path = credential_path(self.root, self.bob.identity)
+        write_private_json(bob_path, {"invalid": "private-bob-content"})
+        restored = AdminCredentials(self.root, self.users, self.client, clock=lambda: self.now)
+        self.addCleanup(restored.close)
+        with patch("netizen_cli.admin.credentials.read_private_json", wraps=read_private_json) as read:
+            self.assertEqual(await restored.access_token(self.alice.identity, self.alice.add_revision),
+                             "private-access-alice")
+            read.assert_called_once_with(self.path, missing_ok=True, maximum=None)
+        changed = json.loads(self.path.read_text())
+        changed["accessToken"] = "private-access-changed"
+        write_private_json(self.path, changed)
+        self.assertEqual(await restored.access_token(self.alice.identity, self.alice.add_revision),
+                         "private-access-changed")
+        with self.assertRaises(AuthExpired) as raised:
+            await restored.access_token(self.bob.identity, self.bob.add_revision)
+        self.assertNotIn("private-bob-content", str(raised.exception))
+        # A fresh authorized login repairs that user's invalid document.
+        await restored.save_login(self.bob.identity, self.tokens("bob"),
+                                  expected_add_revision=self.bob.add_revision)
+        self.assertEqual(await restored.access_token(self.bob.identity, self.bob.add_revision),
+                         "private-access-bob")
+        self.assertEqual(await self.access(), "private-access-changed")
+
+    async def test_different_apps_keep_independent_files_for_same_open_id(self) -> None:
+        await self.save(self.tokens("first-app"))
+        original = self.path.read_bytes()
+        other_users = AdminUsers(self.root, "cli_other")
+        other_member = other_users.add_initial(self.alice.identity.open_id)
+        other = AdminCredentials(self.root, other_users, self.client, clock=lambda: self.now)
+        self.addCleanup(other.close)
+        await other.save_login(other_member.identity, self.tokens("other-app"),
+                               expected_add_revision=other_member.add_revision)
+        self.assertEqual(await other.access_token(other_member.identity, other_member.add_revision),
+                         "private-access-other-app")
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertNotEqual(credential_path(self.root, other_member.identity), self.path)
+
+    async def test_invalid_user_document_is_rejected_only_on_access(self) -> None:
+        await self.save(self.tokens("valid"))
+        valid = json.loads(self.path.read_text())
+        cases = [
+            {"appId": "cli_other"}, {"openId": "ou_bob"}, {"version": True},
+            {"addRevision": True}, {"accessToken": ""}, {"accessToken": "secret\n"},
+            {"refreshToken": 123}, {"refreshToken": "secret\x7f"},
+            {"expiresAt": True}, {"expiresAt": 0}, {"refreshExpiresAt": "tomorrow"},
+            {"scopes": [""]}, {"scopes": "offline_access"}, {"refreshAttempted": 1},
+        ]
+        for changes in cases:
+            with self.subTest(fields=list(changes)):
+                write_private_json(self.path, {**valid, **changes})
+                restored = AdminCredentials(self.root, self.users, self.client, clock=lambda: self.now)
+                self.addCleanup(restored.close)
+                with self.assertRaises(AuthExpired):
+                    await restored.access_token(self.alice.identity, self.alice.add_revision)
+        self.client.refresh.assert_not_awaited()
+
+    async def test_unsafe_user_files_are_neither_used_overwritten_nor_deleted(self) -> None:
+        await self.save(self.tokens("valid"))
+        target = self.path.parent / "unrelated-private.json"
+        self.path.rename(target)
+        original = target.read_bytes()
+        for kind in ("symlink", "hardlink", "public-mode"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    self.path.symlink_to(target)
+                elif kind == "hardlink":
+                    os.link(target, self.path)
+                else:
+                    self.path.write_bytes(original)
+                    self.path.chmod(0o644)
+                with self.assertRaises(AuthExpired):
+                    await self.access()
+                with self.assertRaises(PrivateJSONError):
+                    await self.save(self.tokens("replacement"))
+                with self.assertRaises(AdminUsersUnavailable):
+                    self.remove_alice()
+                self.assertIsNone(self.users.get_membership(self.alice.identity))
+                self.assertTrue(self.path.exists())
+                self.assertEqual(target.read_bytes(), original)
+                self.path.unlink()
+                self.alice = self.add_alice_again()
+
+    async def test_revocation_cleanup_failure_does_not_restore_old_generation(self) -> None:
+        await self.save(self.tokens("old"))
+        old = self.path.read_bytes()
+        with patch("netizen_cli.admin.users.os.unlink", side_effect=OSError("cannot remove")):
+            with self.assertRaises(AdminUsersUnavailable):
+                self.remove_alice()
+        replacement = self.add_alice_again()
+        self.assertEqual(self.path.read_bytes(), old)
+        with self.assertRaises(AuthExpired):
+            await self.credentials.access_token(replacement.identity, replacement.add_revision)
+        await self.credentials.save_login(replacement.identity, self.tokens("replacement"),
+                                          expected_add_revision=replacement.add_revision)
+        self.assertEqual(await self.credentials.access_token(replacement.identity, replacement.add_revision),
+                         "private-access-replacement")
 
     async def test_concurrent_requests_refresh_one_time_and_persist_rotated_pair(self) -> None:
         await self.save(self.tokens("old", expired=True))
@@ -125,7 +258,7 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
         renewed = self.tokens("renewed")
 
         async def refresh(_token):
-            self.assertTrue(json.loads(self.path.read_text())["users"][0]["refreshAttempted"])
+            self.assertTrue(json.loads(self.path.read_text())["refreshAttempted"])
             entered.set()
             await release.wait()
             return renewed
@@ -137,7 +270,7 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
         release.set()
         self.assertEqual(await asyncio.gather(*requests), [renewed.access_token] * 9)
         self.client.refresh.assert_awaited_once_with("private-refresh-old")
-        stored = json.loads(self.path.read_text())["users"][0]
+        stored = json.loads(self.path.read_text())
         self.assertEqual((stored["accessToken"], stored["refreshToken"]),
                          (renewed.access_token, renewed.refresh_token))
         self.assertFalse(stored["refreshAttempted"])
@@ -186,7 +319,7 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(restored.close)
         with self.assertRaises(AuthExpired):
             await restored.access_token(replacement.identity, replacement.add_revision)
-        self.assertNotIn("private-access-late", self.path.read_text())
+        self.assertFalse(self.path.exists())
 
     async def test_logout_leaves_shared_credentials_and_other_browser_valid(self) -> None:
         await self.save(self.tokens("shared"))
@@ -219,6 +352,19 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
                 await self.save(self.tokens("uncommitted"))
         self.assertEqual(await self.access(), "private-access-current")
         self.assertNotIn("private-access-uncommitted", self.path.read_text())
+
+    async def test_login_write_failure_after_replace_uses_actual_file_next_time(self) -> None:
+        await self.save(self.tokens("old", expired=True))
+
+        def write_then_fail(path, value, **kwargs):
+            write_private_json(path, value, **kwargs)
+            raise PrivateJSONError()
+
+        with patch("netizen_cli.admin.credentials.write_private_json", side_effect=write_then_fail):
+            with self.assertRaises(PrivateJSONError):
+                await self.save(self.tokens("committed"))
+        self.assertEqual(await self.access(), "private-access-committed")
+        self.client.refresh.assert_not_awaited()
 
     async def test_roster_io_failure_closes_access_without_deleting_durable_credentials(self) -> None:
         await self.save(self.tokens("alice"))
@@ -313,10 +459,10 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
         await self.save(self.tokens("old", expired=True))
         self.client.refresh.return_value = self.tokens("renewed")
 
-        def write_except_renewal(path, value):
-            if any(row["accessToken"] == "private-access-renewed" for row in value["users"]):
+        def write_except_renewal(path, value, **kwargs):
+            if value["accessToken"] == "private-access-renewed":
                 raise PrivateJSONError()
-            write_private_json(path, value)
+            write_private_json(path, value, **kwargs)
 
         with patch("netizen_cli.admin.credentials.write_private_json", side_effect=write_except_renewal):
             with self.assertRaises(AuthExpired):
@@ -333,6 +479,88 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(AuthExpired):
                 await self.access()
         self.client.refresh.assert_not_awaited()
+
+    async def test_attempt_write_failure_after_replace_cannot_reuse_refresh_token(self) -> None:
+        await self.save(self.tokens("old", expired=True))
+
+        def write_then_fail(path, value, **kwargs):
+            write_private_json(path, value, **kwargs)
+            raise PrivateJSONError()
+
+        with patch("netizen_cli.admin.credentials.write_private_json", side_effect=write_then_fail):
+            with self.assertRaises(AuthExpired):
+                await self.access()
+        with self.assertRaises(AuthExpired):
+            await self.access()
+        self.client.refresh.assert_not_awaited()
+
+    async def test_rotation_write_failure_after_replace_reads_new_pair_without_second_refresh(self) -> None:
+        await self.save(self.tokens("old", expired=True))
+        self.client.refresh.return_value = self.tokens("renewed")
+
+        def fail_after_renewal(path, value, **kwargs):
+            write_private_json(path, value, **kwargs)
+            if value["accessToken"] == "private-access-renewed":
+                raise PrivateJSONError()
+
+        with patch("netizen_cli.admin.credentials.write_private_json", side_effect=fail_after_renewal):
+            with self.assertRaises(AuthExpired):
+                await self.access()
+        self.assertEqual(await self.access(), "private-access-renewed")
+        self.client.refresh.assert_awaited_once_with("private-refresh-old")
+
+    async def test_other_user_login_and_reads_do_not_wait_for_inflight_refresh(self) -> None:
+        await self.save(self.tokens("old", expired=True))
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def refresh(_token):
+            entered.set()
+            await release.wait()
+            return self.tokens("renewed")
+
+        self.client.refresh.side_effect = refresh
+        refreshing = asyncio.create_task(self.access())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(self.credentials.save_login(
+                self.bob.identity, self.tokens("bob"), expected_add_revision=self.bob.add_revision,
+            ), 1)
+            bob_path = credential_path(self.root, self.bob.identity)
+            before = bob_path.read_bytes()
+            self.assertEqual(await asyncio.wait_for(self.credentials.access_token(
+                self.bob.identity, self.bob.add_revision,
+            ), 1), "private-access-bob")
+        finally:
+            release.set()
+            await refreshing
+        self.assertEqual(bob_path.read_bytes(), before)
+
+    async def test_changed_file_during_refresh_is_not_overwritten_by_late_result(self) -> None:
+        for removed in (False, True):
+            with self.subTest(removed=removed):
+                await self.save(self.tokens("old", expired=True))
+
+                async def refresh(_token):
+                    # Simulate file drift despite the online single-writer
+                    # contract; a late network result must not replace it.
+                    if removed:
+                        self.path.unlink()
+                    else:
+                        changed = json.loads(self.path.read_text())
+                        changed["accessToken"] = "private-access-replaced"
+                        changed["refreshToken"] = "private-refresh-replaced"
+                        changed["expiresAt"] = self.now + 100
+                        changed["refreshAttempted"] = False
+                        write_private_json(self.path, changed)
+                    return self.tokens("late")
+
+                self.client.refresh.side_effect = refresh
+                with self.assertRaises(AuthExpired):
+                    await self.access()
+                if removed:
+                    self.assertFalse(self.path.exists())
+                else:
+                    self.assertEqual(await self.access(), "private-access-replaced")
 
     async def test_explicit_api_expiry_refreshes_and_retries_profile_and_ticket_once(self) -> None:
         for endpoint in ("profile", "selector_config"):
@@ -354,7 +582,7 @@ class AdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
                         "client_id": "cli_test", "client_secret": "private-app-secret",
                         "grant_type": "refresh_token", "refresh_token": "private-refresh-apparently-valid",
                     })
-                    stored, = json.loads(self.path.read_text())["users"]
+                    stored = json.loads(self.path.read_text())
                     self.assertEqual((stored["accessToken"], stored["refreshToken"]),
                                      ("private-access-renewed", "private-refresh-renewed"))
                     self.assertFalse(stored["refreshAttempted"])
