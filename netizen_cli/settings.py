@@ -14,6 +14,7 @@ import yaml
 
 from .lark_app import LARK_APP_RELATIVE_PATH, LarkAppConfigError, load_lark_app
 from .admin.port_config import ConfigFileSnapshot
+from .group_access import GroupAccessRule, GroupAccessError
 from .sessions.policy import SessionAccessPolicy, SessionPolicyError
 from .worktrees.settings import WorktreeSettings, WorktreeSettingsError
 from .progress_card_settings import ProgressCardSettings
@@ -41,6 +42,7 @@ class Settings:
     security_mode: str = "audit"
     admin_web: AdminWebSettings = AdminWebSettings()
     session_tools: SessionAccessPolicy = SessionAccessPolicy()
+    group_access: GroupAccessRule = GroupAccessRule()
     worktrees: WorktreeSettings = WorktreeSettings()
     progress_card: ProgressCardSettings = ProgressCardSettings()
     question_notifications: QuestionNotificationSettings = QuestionNotificationSettings()
@@ -74,6 +76,10 @@ class Settings:
         try:
             session_tools = SessionAccessPolicy.from_mapping(loaded.get("sessionTools", {}))
         except SessionPolicyError as error:
+            raise SettingsError(str(error)) from error
+        try:
+            group_access = GroupAccessRule.from_mapping(loaded.get("groupAccess", {}))
+        except GroupAccessError as error:
             raise SettingsError(str(error)) from error
         try:
             worktrees = WorktreeSettings.from_mapping(loaded.get("worktrees", {}))
@@ -132,6 +138,7 @@ class Settings:
             security_mode=security_mode,
             admin_web=admin_web,
             session_tools=session_tools,
+            group_access=group_access,
             worktrees=worktrees,
             progress_card=progress_card,
             question_notifications=question_notifications,

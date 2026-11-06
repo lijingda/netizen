@@ -52,9 +52,10 @@ from openai_codex import AsyncCodex, CodexConfig
 from .admin.web import AdminWebRunner
 from .admin.port_config import ConfigFileEditor
 from .progress_card_config import ProgressCardConfigService
+from .group_access import GroupAccessService
 from .question_notifications import QuestionNotificationConfigService
 from .worktrees.settings import WorktreeSettingsService
-from .admin.users import AdminUsers, AdminUsersError
+from .admin.users import AdminIdentity, AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
 from .cli_setup import require_admin_binding, SetupError
 from .bindings import BindingStore
@@ -224,6 +225,9 @@ class ServiceCore:
                 self._settings.session_tools,
                 config_editor=config_editor,
             )
+            group_access = GroupAccessService(
+                self._settings.group_access, config_editor=config_editor,
+            )
             progress_card_config = ProgressCardConfigService(
                 self._settings.progress_card, config_editor=config_editor,
             )
@@ -353,7 +357,7 @@ class ServiceCore:
             self._schedule_mcp.attach(manage_schedule)
             if self._admin is not None:
                 self._admin.attach_management(
-                    self._management, session_policy=self._session_policy,
+                    self._management, session_policy=self._session_policy, group_access=group_access,
                 )
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
@@ -369,6 +373,10 @@ class ServiceCore:
                 admin_loopback_only=self._admin.loopback_only if self._admin is not None else None,
                 instance_root=self._instance_root,
                 attachment_store=attachment_store,
+                group_access=group_access,
+                is_instance_admin=lambda app_id, open_id: users.get_membership(
+                    AdminIdentity(app_id, open_id),
+                ) is not None,
             )
             self._session_service = SessionService(
                 bindings=self._store,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,7 @@ from ..prompt_projection import (
     MATERIAL_MESSAGE_TYPES,
     MATERIAL_REQUEST,
 )
+from ..group_access import GroupAccessService
 from ..projects import ProjectRegistry
 from ..task_text import project_task_text
 from ..message_history import (
@@ -334,6 +336,8 @@ class ChannelState:
     """Shared Channel state and reply, card and scope utilities."""
 
     _app_id: str
+    _group_access: GroupAccessService
+    _is_instance_admin: Callable[[str, str], bool] | None
     _channel: ReplyChannel
     _chat_avatars: ChatAvatarImages
     _runtime: CodexRuntime

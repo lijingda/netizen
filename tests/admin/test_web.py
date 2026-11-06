@@ -2971,7 +2971,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         parser.feed(html)
 
         self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js",
-                                          "/static/session-access.js", "/static/progress-card.js", "/static/question-notifications.js", "/static/worktrees.js",
+                                          "/static/session-access.js", "/static/group-access.js", "/static/progress-card.js", "/static/question-notifications.js", "/static/worktrees.js",
                                           "/static/content-preview.js", "/static/file-browser.js", "/static/project-files.js",
                                           "/static/attachment-files.js", "/static/admin.js"])
         self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css", "/static/content-preview.css"])

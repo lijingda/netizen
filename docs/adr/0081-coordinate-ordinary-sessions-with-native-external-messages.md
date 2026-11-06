@@ -3,7 +3,7 @@ status: accepted
 date: 2026-10-15
 amends: 0023, 0030, 0061, 0067
 related: 0069, 0070, 0073, 0078, 0079, 0080
-amended_by: 0083
+amended_by: 0083, 0092
 ---
 
 # 普通会话协作使用原生工具形态与 ExternalMessage

@@ -58,3 +58,9 @@ adminWeb:
 # Administrator membership: <NETIZEN_ROOT>/state/admin-users.json
 # Private user credentials: <NETIZEN_ROOT>/credentials/admin-user-tokens.json
 # Admin browser sessions stay in memory and require login after service restart.
+
+# 群聊准入：默认全部群聊；only 仅在名单中的群执行，单聊不受影响。
+# 名单最多 1000 个精确 chat ID，all 模式仍保留名单。
+groupAccess:
+  mode: all
+  chatIds: []

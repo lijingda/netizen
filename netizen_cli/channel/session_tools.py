@@ -48,6 +48,7 @@ from ..domain import (
     ScopeKind,
 )
 from ..error_messages import describe_error
+from ..group_access import GROUP_ACCESS_NOTICE
 from ..worktrees.errors import WorktreeError
 from ..worktrees.models import WorktreeConflict
 from ..model_settings import ModelCatalogError
@@ -281,6 +282,7 @@ class SessionToolChannel(ForkChannel):
         model: str | None = None,
     ) -> dict[str, Any]:
         """Create an ordinary sibling topic after the session tool's admission."""
+        group_rule, _ = self._group_access.snapshot()
         binding = root = destination = card = None
         submission_attempted = False
         try:
@@ -309,6 +311,9 @@ class SessionToolChannel(ForkChannel):
                 project_generation=registered_project.generation,
             )
             target = await self._management.validate_chat_target(source_scope.chat_id)
+            if not group_rule.allows(source_scope.chat_id, target.chat_kind):
+                raise SessionToolError("group_not_enabled", GROUP_ACCESS_NOTICE,
+                                       {"netizen": {"accepted": False}})
             card = await self._session_agent_card(source, prompt, title=title)
             call_id = uuid.uuid4().hex
             async with self._runtime.track_topic_creation(project.alias):
@@ -371,6 +376,7 @@ class SessionToolChannel(ForkChannel):
         model: str | None = None,
     ) -> dict[str, Any]:
         """Deliver an admitted session tool call to its still-current exact Thread."""
+        group_rule, _ = self._group_access.snapshot()
         source = resolve_session_source(self._bindings, self._runtime, self._app_id, source_thread_id)
         if isinstance(source, ThreadBinding):
             source_binding_id, source_side_id = source.id, None
@@ -390,6 +396,9 @@ class SessionToolChannel(ForkChannel):
                     raise SessionToolError("invalid_model", "指定模型当前不可用。")
             cwd = self._binding_creation_cwd(binding)
             target = await self._management.validate_chat_target(scope.chat_id)
+            if not group_rule.allows(scope.chat_id, target.chat_kind):
+                raise SessionToolError("group_not_enabled", GROUP_ACCESS_NOTICE,
+                                       {"netizen": {"accepted": False}})
             reply_to = None
             if scope.kind is ScopeKind.TOPIC:
                 if self._message_history is None:

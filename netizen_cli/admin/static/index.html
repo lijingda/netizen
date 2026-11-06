@@ -11,6 +11,7 @@
   <script src="/static/chat-picker.js" defer></script>
   <script src="/static/identity.js" defer></script>
   <script src="/static/session-access.js" defer></script>
+  <script src="/static/group-access.js" defer></script>
   <script src="/static/progress-card.js" defer></script>
   <script src="/static/question-notifications.js" defer></script>
   <script src="/static/worktrees.js" defer></script>
@@ -636,6 +637,7 @@
       <div class="section-head"><div><p class="eyebrow">SYSTEM</p><h2 id="system-heading">系统管理</h2></div><button class="refresh" data-refresh="system">刷新</button></div>
       <div class="session-tabs system-tabs" role="tablist" aria-label="系统管理">
         <button id="system-tab-admins" class="session-tab" role="tab" data-system-tab="admins" aria-selected="true" aria-controls="system-admins" tabindex="0">管理员</button>
+        <button id="system-tab-groups" class="session-tab" role="tab" data-system-tab="groups" aria-selected="false" aria-controls="system-groups" tabindex="-1">群聊准入<span id="group-access-unsaved" class="tab-unsaved" hidden>未保存</span></button>
         <button id="system-tab-access" class="session-tab" role="tab" data-system-tab="access" aria-selected="false" aria-controls="system-access" tabindex="-1">跨会话工具权限<span id="session-access-unsaved" class="tab-unsaved" hidden>未保存</span></button>
         <button id="system-tab-progress" class="session-tab" role="tab" data-system-tab="progress" aria-selected="false" aria-controls="system-progress" tabindex="-1">过程卡<span id="global-card-unsaved" class="tab-unsaved" hidden>未保存</span></button>
         <button id="system-tab-notifications" class="session-tab" role="tab" data-system-tab="notifications" aria-selected="false" aria-controls="system-notifications" tabindex="-1">提问通知<span id="question-notifications-unsaved" class="tab-unsaved" hidden>未保存</span></button>
@@ -658,6 +660,26 @@
           <div class="identity-panel-actions"><button id="admin-selector-retry" class="refresh" hidden>重试加载</button><button id="admin-selector-reload" class="refresh" hidden>重新加载页面</button><button id="admin-user-confirm" class="action" disabled>确认添加</button></div>
         </section>
         <ul id="admin-users" class="admin-users" aria-label="管理员名单"></ul>
+      </div>
+      <div id="system-groups" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-groups" hidden>
+        <h3>群聊准入</h3>
+        <h4 id="group-access-current" role="status">正在读取当前模式…</h4>
+        <p id="group-access-risk">群成员共享服务账号的工具与文件权限，可按需限制为已启用的群聊。</p>
+        <p>单聊及单聊话题不受此设置影响。一个群的设置适用于该群全部话题。</p>
+        <p>实例管理员可在群里 @机器人并发送 /enable 启用该群。</p>
+        <form id="group-access-form" class="card-form session-access-form">
+          <fieldset id="group-access-fields" disabled>
+            <label>允许执行的群聊<select id="group-access-mode"><option value="all">全部群聊</option><option value="only">仅已启用的群聊</option></select></label>
+            <div id="group-access-picker"></div>
+            <label>已启用的群聊 ID，每行一个<textarea id="group-access-chats" rows="5" maxlength="257000" placeholder="oc_…"></textarea></label>
+            <ul id="group-access-selected" aria-label="已选择的群聊"></ul>
+            <p>最多 1000 个群；“全部群聊”模式会保留名单，切换回来时继续使用。</p>
+          </fieldset>
+          <div class="session-access-footer">
+            <p id="group-access-note" class="defaults-field-help" role="status"></p>
+            <div class="actions"><button id="group-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="group-access-save" class="action" type="submit" disabled>保存配置</button></div>
+          </div>
+        </form>
       </div>
       <div id="system-access" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-access" hidden>
         <h3 id="session-access-heading">跨会话工具权限</h3>

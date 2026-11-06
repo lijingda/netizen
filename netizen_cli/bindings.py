@@ -1623,6 +1623,14 @@ class BindingStore:
             raise BindingNotFound(binding_id)
         return _binding(row)
 
+    def has_direct_scope(self, app_id: str, chat_id: str) -> bool:
+        """Only an exact App/chat DIRECT scope proves a direct conversation."""
+        with self._lock:
+            return self._connection.execute(
+                "SELECT 1 FROM scopes WHERE app_id = ? AND chat_id = ? AND kind = ? LIMIT 1",
+                (app_id, chat_id, ScopeKind.DIRECT.value),
+            ).fetchone() is not None
+
     def list_bindings(self, scope_key: str) -> list[ThreadBinding]:
         with self._lock:
             rows = self._connection.execute(

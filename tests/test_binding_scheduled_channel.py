@@ -35,6 +35,7 @@ from netizen_cli.message_history import (
 )
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.progress_card_settings import ProgressCardSettings
+from netizen_cli.group_access import GroupAccessRule, GroupAccessService
 from netizen_cli.schedules.models import ScheduleRule
 from tests.support.channel_cards import elements
 from tests.support.channel_messages import FakeChannel, FakeMessage, FakeMessageHistory
@@ -121,6 +122,87 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         claim = self.store.schedules.claim_due(plan_id, app_id="app", now=self.now)
         self.assertIsNotNone(claim)
         return claim
+
+    async def test_group_access_blocks_before_anchor_preparation_and_submission(self):
+        for kind, error in ((ScopeKind.GROUP, None), (ScopeKind.TOPIC, OSError("capture failed"))):
+            with self.subTest(kind=kind):
+                _, binding = self.binding(kind=kind)
+                claim = self.claim(binding)
+                self.app._group_access = GroupAccessService(GroupAccessRule("only"))
+                with patch.object(self.runtime, "capture_submission_admission", AsyncMock(side_effect=error)) as admission, \
+                     patch.object(self.app, "_consume_prompt", new_callable=AsyncMock) as consume, \
+                     patch.object(self.runtime, "submit", new_callable=AsyncMock) as submit:
+                    await self.app.dispatch_scheduled_run(claim)
+                    admission.assert_awaited_once_with(binding.id)
+                    consume.assert_not_called()
+                    submit.assert_not_called()
+                run = self.store.schedules.get_run(claim.run.id)
+                self.assertEqual((run.error_code, run.barrier), ("group_not_enabled", "released"))
+                self.assertEqual(self.store.schedules.get(claim.plan.id).enabled, claim.plan.enabled)
+                self.assertEqual(self.store.schedules.get(claim.plan.id).revision, claim.plan.revision)
+        self.assertEqual(self.channel.send_calls, [])
+        self.history.resolve_topic_reply_anchor.assert_not_called()
+
+    async def test_group_access_keeps_original_chat_validation_after_capture(self):
+        for mode, kind, listed in (("all", ScopeKind.GROUP, False), ("only", ScopeKind.TOPIC, True),
+                                  ("only", ScopeKind.TOPIC, False), ("only", ScopeKind.DIRECT, False)):
+            for failure in (SimpleNamespace(chat_mode="unknown"), OSError("lookup failed")):
+                with self.subTest(mode=mode, kind=kind, listed=listed, failure=failure):
+                    scope, binding = self.binding(kind=kind)
+                    claim = self.claim(binding)
+                    self.app._group_access = GroupAccessService(GroupAccessRule(mode, (scope.chat_id,) if listed else ()))
+                    async def lookup(chat_id):
+                        admission.assert_awaited_once_with(binding.id)
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return failure
+                    with patch.object(self.channel, "get_chat_info", AsyncMock(side_effect=lookup)) as chat_lookup, \
+                         patch.object(self.runtime, "capture_submission_admission", new_callable=AsyncMock) as admission, \
+                         patch.object(self.store, "has_direct_scope") as direct:
+                        await self.app.dispatch_scheduled_run(claim)
+                        chat_lookup.assert_awaited_once_with(scope.chat_id)
+                        direct.assert_not_called()
+                    run = self.store.schedules.get_run(claim.run.id)
+                    self.assertEqual((run.error_code, run.barrier), ("input_rejected", "released"))
+        self.assertEqual(self.channel.send_calls, [])
+        self.history.resolve_topic_reply_anchor.assert_not_called()
+
+    async def test_unlisted_p2p_topic_captures_same_turn_before_chat_lookup_in_both_modes(self):
+        for mode in ("all", "only"):
+            with self.subTest(mode=mode):
+                scope, binding = self.binding(kind=ScopeKind.TOPIC)
+                self.channel.chat_types[scope.chat_id] = "p2p"
+                self.assertFalse(self.store.has_direct_scope("app", scope.chat_id))
+                self.app._group_access = GroupAccessService(GroupAccessRule(mode))
+                first = self.claim(binding)
+                self.queue_anchor(scope, "om_first")
+                await self.app.dispatch_scheduled_run(first)
+                handle = self.codex.handles[-1]
+                before = len(self.codex.turn_inputs)
+                followup = self.next_claim(first.plan.id, due=220)
+                self.queue_anchor(scope, "om_second")
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def lookup(chat_id):
+                    entered.set()
+                    await release.wait()
+                    return SimpleNamespace(chat_mode="p2p")
+
+                with patch.object(self.channel, "get_chat_info", AsyncMock(side_effect=lookup)) as chat_lookup, \
+                     patch.object(self.runtime, "capture_submission_admission", wraps=self.runtime.capture_submission_admission) as admission:
+                    task = asyncio.create_task(self.app.dispatch_scheduled_run(followup))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 1)
+                        admission.assert_awaited_once_with(binding.id)
+                        await self.finish()
+                    finally:
+                        release.set()
+                        await asyncio.wait_for(task, 1)
+                    chat_lookup.assert_awaited_once_with(scope.chat_id)
+                run = self.store.schedules.get_run(followup.run.id)
+                self.assertEqual((run.barrier, run.error_code), ("released", "input_rejected"))
+                self.assertEqual(len(self.codex.turn_inputs), before)
+                self.assertEqual(handle.steers, [])
 
     def queue_anchor(self, scope, message_id="om_trigger"):
         self.channel.send_results.append(sent_result(

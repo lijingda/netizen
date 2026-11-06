@@ -184,9 +184,11 @@ their cited ADRs before changing that boundary.
   intent and releasing Binding/Scope locks; do not pre-interrupt, cleanup, or
   wait for idle. Preserve bounded observation/reconciliation and Binding-local
   unknown states (ADR 0037/0049); never fabricate a terminal.
-- Feishu app availability and chat membership govern Channel admission. Instance
-  Administrators are separate, equal Admin Web authorities, not multi-role
-  RBAC, a Netizen allowlist, or Project ACLs. Native Codex controls model, tools,
+- Feishu app availability and chat membership govern Channel admission, with optional
+  instance group access under [ADR 0092](docs/adr/0092-restrict-execution-to-enabled-group-chats-on-demand.md).
+  Direct chats and their topics remain unaffected. Instance Administrators are separate,
+  equal Admin Web authorities (in Feishu they only add the ADR 0092 `/enable` group command),
+  not multi-role RBAC or Project ACLs. Native Codex controls model, tools,
   Skills, MCP, sandboxing, and environment policy except the documented Binding
   Model/Effort/Speed intent, non-login tool boundary, and dedicated temporary
   Scheduler/session collaboration MCP server entries (ADR 0061/0081). These public process overrides must not

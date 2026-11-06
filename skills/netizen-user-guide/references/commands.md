@@ -32,6 +32,7 @@
 | `/goal pause`、`/goal resume`、`/goal clear` | 暂停、恢复或显式结束当前 Goal | [Goal](fork-side-goal.md#goal) |
 | `/cron` | 管理定时计划；暂停计划不停止已认领的执行 | [定时任务](scheduled-tasks.md#定时任务) |
 | `/admin` | 返回当前实例已绑定的管理地址与根目录；无需 Project 或当前会话 | [Admin Web](admin.md#admin-web) |
+| `/enable` | 实例管理员在群里启用本群，不接受参数；无需创建会话 | [群聊准入](admin.md#群聊准入) |
 | `$skill-name ...` | 在普通消息开头显式调用一个或多个 Codex Skills | [Skills](native-capabilities.md#codex-skills) |
 | `/help`、`/` | 查看当前实例开放的帮助 | [能力差异](native-capabilities.md#与-codex-appcli-的差异) |
 

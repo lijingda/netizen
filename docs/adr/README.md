@@ -20,10 +20,11 @@
 [工程设计](../design.md)与[用户手册](../../skills/netizen-user-guide/references/user-guide.md)。
 ADR 可以很短，一段话说清背景、决定和理由即可。
 
-格式沿用本目录的现有约定：front matter 写 `status`（只用 `accepted` 或 `superseded`）和
-`date`；修订关系写在 `amends`/`amended_by`、`supersedes`/`superseded_by` 字段，不写进
-`status` 的值。修订已有决策时，在新旧两个 ADR 中各写一侧，并同时更新 design.md 中对应的
-当前契约和本索引。
+格式沿用本目录的现有约定：front matter 写 `status` 和 `date`。`status` 只用三个值：
+`proposed`（已起草、尚未接受和实施）、`accepted`、`superseded`；修订关系写在
+`amends`/`amended_by`、`supersedes`/`superseded_by` 字段，不写进 `status` 的值。草案只在
+自身写 `amends`；接受并实施时改为 `accepted`，再在被修订的 ADR 中补上 `amended_by`，并同时
+更新 design.md 中对应的当前契约和本索引。
 
 下表的“类型”帮助判断阅读优先级：**架构决策**是相关改动前必须了解的约束；
 **功能契约**是早期以 ADR 形式记录的单个功能行为，今后同类内容写入 design.md；
@@ -83,7 +84,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 | ADR | 标题 | 类型 | 状态 | 修订 |
 | --- | --- | --- | --- | --- |
-| [0081](0081-coordinate-ordinary-sessions-with-native-external-messages.md) | 普通会话协作使用原生工具形态与 ExternalMessage | 架构决策 | 有效 | 被 [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) 修订 |
+| [0081](0081-coordinate-ordinary-sessions-with-native-external-messages.md) | 普通会话协作使用原生工具形态与 ExternalMessage | 架构决策 | 有效 | 被 [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
 | [0085](0085-manage-worktrees-independently-of-sessions.md) | Worktree 作为独立受管资源，会话使用实际工作目录 | 架构决策 | 有效 |  |
 
 ## 消息输入
@@ -131,9 +132,9 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 | ADR | 标题 | 类型 | 状态 | 修订 |
 | --- | --- | --- | --- | --- |
-| [0061](0061-schedule-ordinary-threads-in-feishu-topics.md) | 在独立飞书话题中调度普通持久会话 | 架构决策 | 有效 | 被 [0063](0063-mention-task-initiators-in-terminal-results.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0085](0085-manage-worktrees-independently-of-sessions.md) 修订 |
+| [0061](0061-schedule-ordinary-threads-in-feishu-topics.md) | 在独立飞书话题中调度普通持久会话 | 架构决策 | 有效 | 被 [0063](0063-mention-task-initiators-in-terminal-results.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0085](0085-manage-worktrees-independently-of-sessions.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
 | [0068](0068-run-saved-scheduled-plans-manually.md) | 通过现有调度链路手动执行已保存的计划 | 功能契约 | 有效 | 被 [0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md) 修订 |
-| [0070](0070-schedule-inputs-in-existing-bindings.md) | 定时向原会话提交普通输入 | 架构决策 | 有效 |  |
+| [0070](0070-schedule-inputs-in-existing-bindings.md) | 定时向原会话提交普通输入 | 架构决策 | 有效 | 被 [0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
 
 ## Admin Web 与 Project 管理
 
@@ -144,7 +145,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md) | 通过共享安装器执行管理页手动升级 | 功能契约 | 有效 | 被 [0059](0059-support-explicit-admin-service-restart.md) 修订 |
 | [0059](0059-support-explicit-admin-service-restart.md) | 通过同一部署执行者支持管理页独立重启 | 功能契约 | 有效 |  |
 | [0060](0060-delete-projects-with-exact-session-inventory.md) | 按精确会话清单删除 Project | 架构决策 | 有效 | 被 [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 修订 |
-| [0080](0080-authenticate-admins-with-feishu-identities.md) | 用飞书身份登录并维护实例管理员 | 架构决策 | 有效 | 被 [0091](0091-load-admin-user-credentials-on-demand.md) 修订 |
+| [0080](0080-authenticate-admins-with-feishu-identities.md) | 用飞书身份登录并维护实例管理员 | 架构决策 | 有效 | 被 [0091](0091-load-admin-user-credentials-on-demand.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
 | [0091](0091-load-admin-user-credentials-on-demand.md) | 按用户独立存储并按需读取 Admin 飞书凭证 | 架构决策 | 有效 |  |
 | [0089](0089-browse-current-project-files-through-admin.md) | Admin 按需查看 Project 当前目录中的文件 | 架构决策 | 有效 |  |
 
@@ -156,6 +157,12 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0023](0023-keep-service-environment-authoritative-for-tools.md) | 让服务启动环境成为工具子进程的基线 | 架构决策 | 有效 |  |
 | [0066](0066-share-lark-app-credentials-with-optional-cli.md) | 用单一应用凭据文件与可选 Lark CLI 共享机器人身份 | 架构决策 | 有效 |  |
 | [0075](0075-migrate-channel-databases-during-installation.md) | 在安装事务中维护 Channel 数据库的前向迁移 | 架构决策 | 有效 |  |
+
+## Channel 准入
+
+| ADR | 标题 | 类型 | 状态 | 修订 |
+| --- | --- | --- | --- | --- |
+| [0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) | 按需限制机器人只在已启用的群聊中执行 | 架构决策 | 有效 |  |
 
 ## 安装、部署与发布
 
@@ -177,4 +184,4 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 ## 统计
 
-共 91 个 ADR：架构决策 58 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代。
+共 92 个 ADR：架构决策 59 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。

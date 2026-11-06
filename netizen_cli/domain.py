@@ -222,6 +222,7 @@ class ControlName(str, Enum):
     STATUS = "status"
     USAGE = "usage"
     ADMIN = "admin"
+    ENABLE = "enable"
     GOAL = "goal"
     HELP = "help"
 

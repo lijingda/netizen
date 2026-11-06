@@ -27,6 +27,7 @@ from ..cards import (
     fetched_card_topic_id,
     scope_from_fetched_card,
 )
+from ..group_access import GroupAccessRule, GroupNotEnabled
 from .messages import public_chat_kind as _public_chat_kind
 from .topics import TopicPublishError, complete_fresh_topic, send_topic_message
 from ..cards.scheduled import (
@@ -91,8 +92,9 @@ class ScheduleChannel(SessionToolChannel):
 
     async def dispatch_scheduled_run(self, claim: Claim) -> None:
         """Publish one claimed occurrence and hand it to the ordinary Runtime."""
+        group_rule, _ = self._group_access.snapshot()
         if claim.run.target_kind == "binding":
-            await self._dispatch_binding_input(claim)
+            await self._dispatch_binding_input(claim, group_rule)
             return
         plan, run = claim.plan, claim.run
         store = self._bindings.schedules
@@ -114,6 +116,8 @@ class ScheduleChannel(SessionToolChannel):
             chat_kind = _public_chat_kind(await self._channel.get_chat_info(run.chat_id))
             if chat_kind not in {"group", "p2p"}:
                 raise ScheduleError("无法确认目标是可访问的飞书会话，本次定时任务未启动。")
+            if not group_rule.allows(run.chat_id, chat_kind):
+                raise GroupNotEnabled()
             if plan.session_settings.message_context_mode is MentionContextMode.CATCH_UP and chat_kind != "group":
                 raise ScheduleError("私聊不支持读取群聊增量，请修改计划的消息读取范围。")
             assert plan.workspace is not None
@@ -234,6 +238,7 @@ class ScheduleChannel(SessionToolChannel):
                     else "scope_conflict" if isinstance(error, (ScheduleConflict, BindingConflict, ScopeConflict))
                     else "project_unavailable" if isinstance(error, (ProjectError, ProjectConflict, ProjectNotFound))
                     else "workspace_handoff_failed" if workspace is not None
+                    else "group_not_enabled" if isinstance(error, GroupNotEnabled)
                     else "dispatch_rejected"
                 )
                 # No native call occurred. The publication facts remain visible;
@@ -252,7 +257,7 @@ class ScheduleChannel(SessionToolChannel):
                 except Exception:
                     logger.warning("scheduled start notice was not delivered", extra={"run_id": run.id})
 
-    async def _dispatch_binding_input(self, claim: Claim) -> None:
+    async def _dispatch_binding_input(self, claim: Claim, group_rule: GroupAccessRule) -> None:
         """Give a saved input a real anchor and use ordinary message consumption."""
         plan, run = claim.plan, claim.run
         store = self._bindings.schedules
@@ -277,6 +282,8 @@ class ScheduleChannel(SessionToolChannel):
             chat_kind = _public_chat_kind(await self._channel.get_chat_info(scope.chat_id))
             if chat_kind not in {"p2p", "group"}:
                 raise ScheduleError("无法确认目标飞书会话，本次未执行。")
+            if not group_rule.allows(scope.chat_id, chat_kind):
+                raise GroupNotEnabled()
             reply_to = None
             if scope.kind is ScopeKind.TOPIC:
                 if self._message_history is None:
@@ -346,6 +353,7 @@ class ScheduleChannel(SessionToolChannel):
                         and current_run.phase == "publishing_topic"
                         and current_run.origin_message_id is None
                     )
+                    else "group_not_enabled" if isinstance(error, GroupNotEnabled)
                     else "input_rejected"
                 ))
             if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):

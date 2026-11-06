@@ -95,6 +95,11 @@ COMMAND_SPECS = (
         group=CommandGroup.START,
     ),
     CommandSpec(
+        "enable", ControlName.ENABLE, CommandOwner.CHANNEL, "/enable",
+        "启用本群（仅实例管理员）",
+        group=CommandGroup.START,
+    ),
+    CommandSpec(
         "help",
         ControlName.HELP,
         CommandOwner.CHANNEL,
@@ -422,6 +427,7 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
         ControlName.USAGE: 0,
         ControlName.FORK: 0,
         ControlName.ADMIN: 0,
+        ControlName.ENABLE: 0,
         ControlName.GOAL: None,
         ControlName.HELP: 0,
     }[name]

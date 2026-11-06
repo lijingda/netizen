@@ -25,6 +25,7 @@ Shared mutable state is declared once on ``ChannelState`` and initialized here.
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Callable
 
 
 from .bindings import (
@@ -52,6 +53,7 @@ from .management import (
     InstanceManagementService,
 )
 from .projects import ProjectRegistry
+from .group_access import GroupAccessService
 from .message_history import (
     MessageHistoryReader,
 )
@@ -117,7 +119,11 @@ class ChannelApplication(ChannelEntry):
         admin_loopback_only: bool | None = None,
         instance_root: Path | None = None,
         attachment_store: AttachmentStore | None = None,
+        group_access: GroupAccessService | None = None,
+        is_instance_admin: Callable[[str, str], bool] | None = None,
     ) -> None:
+        self._group_access = group_access or GroupAccessService()
+        self._is_instance_admin = is_instance_admin
         self._app_id = app_id
         self._channel = channel
         self._chat_avatars = ChatAvatarImages(channel)

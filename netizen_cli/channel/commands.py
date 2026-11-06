@@ -26,6 +26,8 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
+from ..admin.port_config import AdminPortConfigurationError
+from ..group_access import GroupAccessConflict, GroupAccessLimitExceeded
 from ..cards.status import (
     decode_status_command, session_status_card,
 )
@@ -163,6 +165,7 @@ class CommandChannel(CardControlChannel):
             ControlName.FORK: self._command_fork,
             ControlName.USAGE: self._command_usage,
             ControlName.ADMIN: self._command_admin,
+            ControlName.ENABLE: self._command_enable,
             ControlName.MENU: self._command_help,
             ControlName.HELP: self._command_help,
             ControlName.SIDE: self._command_side,
@@ -192,6 +195,46 @@ class CommandChannel(CardControlChannel):
 
     async def _command_admin(self, message: Any, intent: ControlIntent) -> None:
         await self._reply(message, self._admin_entry())
+
+    async def _command_enable(self, message: Any, intent: ControlIntent) -> None:
+        if _message_chat_type(message) == "p2p":
+            await self._reply(message, "单聊无需启用。")
+            return
+        try:
+            if self._is_instance_admin is None:
+                raise ValueError("administrator check is unavailable")
+            is_admin = self._is_instance_admin(
+                self._app_id, getattr(getattr(message, "sender", None), "open_id", None),
+            )
+        except Exception as error:
+            logger.warning("group enable administrator check failed", extra={"error_type": type(error).__name__})
+            await self._reply(message, "暂时无法确认管理员身份，本群未启用。")
+            return
+        if not is_admin:
+            await self._reply(message, "只有实例管理员可以启用本群。")
+            return
+        _, revision = self._group_access.snapshot()
+        try:
+            rule, added = await self._management.enable_group_access(
+                self._group_access, intent.scope.chat_id, expected_revision=revision,
+            )
+        except Exception as error:
+            if isinstance(error, GroupAccessConflict):
+                reason = "群聊准入已被修改"
+            elif isinstance(error, AdminPortConfigurationError):
+                reason = "实例配置文件已变化"
+            elif isinstance(error, GroupAccessLimitExceeded):
+                reason = "已达到 1000 个群聊的上限"
+            else:
+                reason = "暂时无法保存群聊准入配置"
+            logger.warning("group enable failed", extra={"error_type": type(error).__name__, "chat_id": intent.scope.chat_id})
+            await self._reply(message, reason + "，请稍后重试或在 Admin 中启用。")
+            return
+        if rule.mode == "all":
+            result = "已将本群加入名单" if added else "本群已在名单中"
+            await self._reply(message, result + "；当前为全部群聊模式，切换为限制模式后生效。")
+        else:
+            await self._reply(message, "已启用本群，之后的消息会正常执行。" if added else "本群已启用。")
 
     async def _command_help(self, message: Any, intent: ControlIntent) -> None:
         await self._reply(message, self._help())

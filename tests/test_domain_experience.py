@@ -298,6 +298,15 @@ class ExperienceTest(unittest.TestCase):
         self.assertIn("需要 @机器人", group_help)
         self.assertIn("无需 @机器人", direct_help)
 
+    def test_enable_is_an_argument_free_channel_control(self) -> None:
+        intent = self.parse("/enable")
+        self.assertIsInstance(intent, ControlIntent)
+        self.assertEqual(intent.name, ControlName.ENABLE)
+        self.assertEqual(intent.arguments, ())
+        self.assertIn("`/enable`", command_help())
+        with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
+            self.parse("/enable other")
+
     def test_skills_command_is_not_registered(self) -> None:
         with self.assertRaisesRegex(InvalidInteraction, "未知命令"):
             self.parse("/skills", NativeCapability.SKILLS)

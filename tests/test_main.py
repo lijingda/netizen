@@ -698,7 +698,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             settings=configured,
             instance_root=root,
             channel=SimpleNamespace(  # type: ignore[arg-type]
-                safety=None, update_policy=lambda **_kwargs: None,
+                safety=None, update_policy=lambda **_kwargs: None, get_chat_info=AsyncMock(),
             ),
             store=store,
             projects=ProjectRegistry(
@@ -860,9 +860,10 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 events.append("admin:bind")
                 self.urls = ("http://admin.example.test:8788/",)
 
-            def attach_management(self, management: object, *, session_policy: object) -> None:
+            def attach_management(self, management: object, *, session_policy: object, group_access: object) -> None:
                 self.management = management
                 self.session_policy = session_policy
+                self.group_access = group_access
                 events.append("admin:attach")
 
             def open_admission(self) -> None:
@@ -935,6 +936,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             channel = SimpleNamespace(
                 safety=None,
                 update_policy=lambda **_kwargs: events.append("feishu:closed"),
+                get_chat_info=AsyncMock(),
             )
             core = ServiceCore(
                 settings=configured,
@@ -979,6 +981,15 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(core.application._instance_root, instance_root)
                 self.assertTrue(core.application._admin_loopback_only)
                 self.assertIs(core._admin.session_policy, core._session_policy)
+                self.assertIs(core._admin.group_access, core.application._group_access)
+                self.assertTrue(core.application._is_instance_admin("cli_test", "ou_admin"))
+                self.assertFalse(core.application._is_instance_admin("cli_test", "ou_other"))
+                self.assertFalse(core.application._is_instance_admin("cli_other", "ou_admin"))
+                with self.assertRaises(ValueError):
+                    core.application._is_instance_admin("cli_test", "invalid")
+                self.assertEqual(core._session_service._create, core.application.create_session_thread)
+                self.assertEqual(core._session_service._send, core.application.send_session_message)
+                channel.get_chat_info.assert_not_called()
                 self.assertEqual(
                     core._session_mcp.callback, core._session_service.call,
                 )
@@ -1471,6 +1482,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             channel = SimpleNamespace(
                 safety=None,
                 update_card=update_card,
+                get_chat_info=AsyncMock(),
                 update_policy=lambda **_kwargs: None,
             )
             core = ServiceCore(
@@ -1618,6 +1630,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 instance_root=root,
                 channel=SimpleNamespace(  # type: ignore[arg-type]
                     safety=None,
+                    get_chat_info=AsyncMock(),
                     update_policy=lambda **_kwargs: None,
                 ),
                 store=store,

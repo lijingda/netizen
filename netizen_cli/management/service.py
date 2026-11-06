@@ -98,6 +98,7 @@ from ..worktrees.service import WorktreeService
 from ..worktrees.settings import WorktreeSettingsService
 from ..progress_card_config import ProgressCardConfigService
 from ..progress_card_settings import ProgressCardSettings
+from ..group_access import GroupAccessRule, GroupAccessService
 from ..question_notifications import QuestionNotificationConfigService, QuestionNotificationSettings
 from ..sessions.policy import SessionAccessPolicy, SessionPolicyService
 
@@ -903,6 +904,31 @@ class InstanceManagementService:
             service.update, policy, expected_revision=expected_revision,
             deadline=asyncio.get_running_loop().time() + 10,
         )
+
+    async def update_group_access(
+        self, service: GroupAccessService, rule: GroupAccessRule, *, expected_revision: str,
+    ) -> None:
+        await self._blocking_io.submit(
+            service.update, rule, expected_revision=expected_revision,
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
+
+    async def enable_group_access(
+        self, service: GroupAccessService, chat_id: str, *, expected_revision: str,
+    ) -> tuple[GroupAccessRule, bool]:
+        return await self._blocking_io.submit(
+            service.enable_chat, chat_id, expected_revision=expected_revision,
+        )
+
+    async def group_access_chats(self, chat_ids: Sequence[str]) -> dict[str, Any]:
+        labels = self.cached_chat_labels(chat_ids)
+        pending = [chat_id for chat_id in chat_ids if not labels[chat_id].resolved]
+        labels.update(await self.resolve_chat_labels(
+            pending[:20], deadline=asyncio.get_running_loop().time() + 3,
+        ))
+        return {
+            "chats": [{"chatId": chat_id, "name": labels[chat_id].display_name} for chat_id in chat_ids],
+        }
 
     def enable_schedules(self, *, app_id: str, chat_info: Any = None) -> ScheduleService:
         if self.schedules is None:

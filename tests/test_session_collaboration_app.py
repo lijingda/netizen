@@ -27,6 +27,7 @@ from netizen_cli.sdk_gap_adapter import GoalControlError, GoalMutationStateUnkno
 from netizen_cli.sessions.errors import SessionToolError
 from netizen_cli.sessions.delegation import SIDE_SOURCE_NOTICE, parse_delegated_prompt
 from netizen_cli.progress_card_settings import ProgressCardSettings
+from netizen_cli.group_access import GroupAccessRule, GroupAccessService
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_results import sent_result
 
@@ -147,6 +148,96 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.store.open_side_topic(record.id, "omt_side")
         return side
+
+    async def test_group_access_rejects_create_send_after_one_validation_before_side_effects(self):
+        self.target(topic=True)
+        self.app._group_access = GroupAccessService(GroupAccessRule("only"))
+        with patch.object(self.app, "_session_agent_card", new_callable=AsyncMock) as card, \
+             patch.object(self.app._message_history, "resolve_topic_reply_anchor", new_callable=AsyncMock, create=True) as history:
+            for name, args, chat_id in (
+                ("create_thread", {"prompt": "create"}, "oc_source"),
+                ("send_message_to_thread", {"threadId": "native-target", "prompt": "send"}, "oc_target"),
+            ):
+                self.channel.chat_info_calls.clear()
+                result = await self.service.call(name, args, "native-source")
+                self.assertEqual(result["error"]["code"], "group_not_enabled", result)
+                self.assertFalse(result["netizen"]["accepted"])
+                self.assertEqual(self.channel.chat_info_calls, [chat_id])
+            card.assert_not_called()
+            history.assert_not_called()
+        self.assertEqual(self.channel.send_calls, [])
+        self.runtime.submit_external.assert_not_called()
+
+    async def test_group_access_keeps_readsend_check_before_chat_validation(self):
+        self.target()
+        self.app._group_access = GroupAccessService(GroupAccessRule("only"))
+        self.policy.update(SessionAccessPolicy(read_send=SessionAccessRule("disabled")),
+                           expected_revision=self.policy.snapshot()[1])
+        for name, args in (("create_thread", {"prompt": "create"}),
+                           ("send_message_to_thread", {"threadId": "native-target", "prompt": "send"})):
+            result = await self.service.call(name, args, "native-source")
+            self.assertEqual(result["error"]["code"], "access_denied", result)
+            self.assertFalse(result["netizen"]["accepted"])
+        self.assertEqual(self.channel.chat_info_calls, [])
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_group_access_validation_failure_preserves_existing_error(self):
+        self.target()
+        for failure in (OSError("unavailable"), SimpleNamespace(chat_mode="unknown")):
+            with self.subTest(failure=failure):
+                lookup = AsyncMock(side_effect=failure) if isinstance(failure, Exception) else AsyncMock(return_value=failure)
+                with patch.object(self.channel, "get_chat_info", lookup):
+                    for name, args in (("create_thread", {"prompt": "create"}),
+                                       ("send_message_to_thread", {"threadId": "native-target", "prompt": "send"})):
+                        self.app._group_access = GroupAccessService()
+                        original = await self.service.call(name, args, "native-source")
+                        for ids in ((), ("oc_source", "oc_target")):
+                            self.app._group_access = GroupAccessService(GroupAccessRule("only", ids))
+                            result = await self.service.call(name, args, "native-source")
+                            self.assertEqual(result, original)
+                            self.assertNotEqual(result["error"]["code"], "group_not_enabled")
+                            self.assertFalse(result["netizen"]["accepted"])
+        self.assertEqual(self.channel.send_calls, [])
+        self.runtime.submit_external.assert_not_called()
+
+    async def test_group_access_create_send_allow_listed_groups_and_direct_topics_with_one_lookup(self):
+        self.target(topic=True)
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        for index, (mode, kind, ids) in enumerate((("all", "group", ()), ("only", "p2p", ()),
+                                                ("only", "topic", ("oc_source", "oc_target")))):
+            self.app._group_access = GroupAccessService(GroupAccessRule(mode, ids))
+            self.channel.chat_types.update(oc_source=kind, oc_target=kind)
+            self.channel.send_results.append(sent_result(
+                f"om_root_{index}", chat_id="oc_source", thread_id=f"omt_created_{index}", root_id=f"om_root_{index}",
+            ))
+            # Each create needs its own native ID as well as its own topic.
+            async def submit(**kwargs):
+                binding = kwargs["binding"]
+                if binding.native_thread_id is None:
+                    self.runtime.materialize(binding.id, f"native-created-{index}", cwd=self.project)
+                    binding = self.store.get(binding.id)
+                return Submission(SubmitDisposition.STARTED, binding.id, binding.native_thread_id, "turn-external",
+                                  lambda: self.receipts.append(binding.id))
+            self.runtime.submit_external.side_effect = submit
+            self.queue_target_message(topic=True)
+            self.channel.chat_info_calls.clear()
+            for name, args in (("create_thread", {"prompt": "create"}),
+                               ("send_message_to_thread", {"threadId": "native-target", "prompt": "send"})):
+                result = await self.service.call(name, args, "native-source")
+                self.assertTrue(result["netizen"]["accepted"], result)
+            self.assertEqual(self.channel.chat_info_calls, ["oc_source", "oc_target"])
+
+    async def test_group_access_snapshot_survives_validation_await(self):
+        self.app._group_access = GroupAccessService(GroupAccessRule("only", ("oc_source",)))
+        self.queue_topic()
+        async def lookup(chat_id):
+            self.app._group_access = GroupAccessService(GroupAccessRule("only"))
+            return SimpleNamespace(chat_mode="group")
+        with patch.object(self.channel, "get_chat_info", side_effect=lookup):
+            accepted = await self.service.call("create_thread", {"prompt": "create"}, "native-source")
+            rejected = await self.service.call("create_thread", {"prompt": "create"}, "native-source")
+        self.assertTrue(accepted["netizen"]["accepted"], accepted)
+        self.assertEqual(rejected["error"]["code"], "group_not_enabled", rejected)
 
     async def test_side_send_keeps_real_source_and_one_way_notice_for_start_and_join(self):
         side = await self.side_source()

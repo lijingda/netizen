@@ -168,6 +168,7 @@ from ..project_files import FileBrowseError
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 from ..defaults import DefaultConfigurationError
 from ..session_settings import SessionSettings, SessionSettingsError
+from ..group_access import GroupAccessRule, GroupAccessService, GroupAccessError, GroupAccessConflict
 from ..sessions.policy import (
     SessionAccessPolicy, SessionPolicyConflict, SessionPolicyError, SessionPolicyService,
 )
@@ -275,6 +276,7 @@ class AdminActionPreconditions:
     attachment_root_identity: ExpectedValue[str] = ExpectedValue.dont_check()
     attachment_file_version: ExpectedValue[str] = ExpectedValue.dont_check()
     question_notification_revision: ExpectedValue[str] = ExpectedValue.dont_check()
+    group_access_revision: ExpectedValue[str] = ExpectedValue.dont_check()
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +306,7 @@ class AdminWebApplication:
         credentials: AdminCredentials | None = None,
         login: AdminLogin | None = None,
         session_policy: SessionPolicyService | None = None,
+        group_access: GroupAccessService | None = None,
     ) -> None:
         self._auth = auth
         self._management = management
@@ -312,6 +315,7 @@ class AdminWebApplication:
         self._credentials = credentials
         self._login_flow = login
         self._session_policy = session_policy
+        self._group_access = group_access
         suffix = f"_{instance_digest(instance_root)}" if instance_root is not None else ""
         self._session_cookie = _SESSION_COOKIE + suffix
         self._preauth_cookie = _PREAUTH_COOKIE + suffix
@@ -612,6 +616,8 @@ class AdminWebApplication:
             )
         if route == ("GET", "/static/identity.js"):
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["identity.js"])
+        if route == ("GET", "/static/group-access.js"):
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["group-access.js"])
         if route == ("GET", "/static/session-access.js"):
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["session-access.js"])
         if route == ("GET", "/static/worktrees.js"):
@@ -627,6 +633,8 @@ class AdminWebApplication:
             return _json_response(200, {"openId": profile.open_id, "name": profile.name, "avatarUrl": _user_avatar(profile.avatar_url)})
         if route == ("GET", "/api/v1/admin-users"):
             return self._admin_users(context)
+        if route == ("GET", "/api/v1/group-access"):
+            return await self._group_access_view(context)
         if route == ("GET", "/api/v1/session-tool-access"):
             return self._session_tool_access(context)
         if context.method == "POST" and context.path in {
@@ -709,6 +717,7 @@ class AdminWebApplication:
             "/api/v1/question-notifications/settings": self._question_notification_save_settings,
             "/api/v1/worktrees/delete-preview": self._worktree_delete_preview,
             "/api/v1/worktrees/delete": self._worktree_delete,
+            "/api/v1/group-access/save": self._save_group_access,
             "/api/v1/session-tool-access/save": self._save_session_tool_access,
             "/api/v1/defaults/save": self._default_save,
             "/api/v1/defaults/delete": self._default_delete,
@@ -2457,6 +2466,48 @@ class AdminWebApplication:
             raise AdminWebError(503, "identity_unavailable", "飞书身份服务暂不可用。")
         return self._credentials
 
+    async def _group_access_view(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        service = self._group_access
+        if service is None:
+            raise AdminWebError(503, "unavailable", "群聊准入配置暂不可用。")
+        view = service.view()
+        chats = await self._management.group_access_chats(view["chatIds"])
+        return _json_response(200, {
+            **view, **chats,
+            "saveAction": self._grant(
+                context, "group-access.save", AdminActionTarget("group-access", "instance"),
+                _empty_preconditions(group_access_revision=ExpectedValue.expect(view["revision"])),
+            ) if service.editable else None,
+        })
+
+    async def _save_group_access(self, context: _RequestContext) -> Response:
+        payload, grant = self._redeem(context, "group-access.save",
+            expected_resource="group-access", allowed_extra={"mode", "chatIds"})
+        if grant.target.target_id != "instance":
+            raise StaleActionGrant()
+        revision = _expected_value(_grant_preconditions(grant).group_access_revision, "group access")
+        service = self._group_access
+        if service is None:
+            raise AdminWebError(503, "unavailable", "群聊准入配置暂不可用。")
+        try:
+            rule = GroupAccessRule.from_mapping({"mode": payload.get("mode"), "chatIds": payload.get("chatIds")})
+        except GroupAccessError as error:
+            raise AdminWebError(400, "invalid_group_access", str(error)) from None
+
+        async def apply() -> None:
+            try:
+                await self._management.update_group_access(service, rule, expected_revision=revision)
+            except GroupAccessConflict:
+                raise AdminWebError(409, "stale_group_access", "群聊准入已被修改，请刷新后再保存。") from None
+            except AdminPortConfigurationError:
+                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
+            except (GroupAccessError, OSError):
+                raise AdminWebError(503, "configuration_unavailable", "无法保存群聊准入配置，当前规则未更新。") from None
+
+        await self._mutation(context, "group-access.save", "instance", apply())
+        return await self._group_access_view(context)
+
     def _session_tool_access(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
         service = self._session_policy
@@ -2856,7 +2907,8 @@ class AdminWebRunner:
             raise
 
     def attach_management(self, management: InstanceManagementService, *,
-                          session_policy: SessionPolicyService | None = None) -> None:
+                          session_policy: SessionPolicyService | None = None,
+                          group_access: GroupAccessService | None = None) -> None:
         """Attach the sole application service after the closed listener binds."""
 
         if self._application is not None:
@@ -2864,7 +2916,7 @@ class AdminWebRunner:
         application = AdminWebApplication(
             auth=self._auth, management=management, instance_root=self._instance_root,
             credentials=self._credentials, login=self._login,
-            session_policy=session_policy,
+            session_policy=session_policy, group_access=group_access,
         )
         if self._authorities is not None:
             application.configure_authorities(self._authorities)
@@ -3036,7 +3088,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js", "progress-card.js", "question-notifications.js", "netizen.svg", *_CONTENT_VIEWER_ASSETS):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "group-access.js", "worktrees.js", "progress-card.js", "question-notifications.js", "netizen.svg", *_CONTENT_VIEWER_ASSETS):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 
@@ -3348,6 +3400,7 @@ def _empty_preconditions(
     attachment_root_identity: ExpectedValue[str] | None = None,
     attachment_file_version: ExpectedValue[str] | None = None,
     question_notification_revision: ExpectedValue[str] | None = None,
+    group_access_revision: ExpectedValue[str] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -3374,6 +3427,7 @@ def _empty_preconditions(
         attachment_root_identity or ExpectedValue.dont_check(),
         attachment_file_version or ExpectedValue.dont_check(),
         question_notification_revision or ExpectedValue.dont_check(),
+        group_access_revision or ExpectedValue.dont_check(),
     )
 
 

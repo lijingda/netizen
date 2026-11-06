@@ -72,6 +72,7 @@ function expireAdminSession() {
   if (notice) notice.hidden = false;
   window.NetizenIdentity?.expire();
   window.NetizenSessionAccess?.expire();
+  window.NetizenGroupAccess?.expire();
   window.NetizenProgressCard?.expire();
   window.NetizenQuestionNotifications?.expire();
   window.NetizenWorktrees?.expire();
@@ -3553,7 +3554,7 @@ function confirmDiscardChanges(changed) {
 
 function hasUnsavedEditors() {
   return projectEditorHasChanges() || sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
-    || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty())
+    || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty()) || Boolean(window.NetizenGroupAccess?.dirty())
     || Boolean(window.NetizenProgressCard?.dirty() || window.NetizenQuestionNotifications?.dirty())
     || Boolean(window.NetizenWorktrees?.dirty());
 }
@@ -3562,7 +3563,7 @@ function hasUnsavedEditors() {
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
 function confirmDiscardEditors() {
   if (projectEditor?.saving || sessionSettingsEditor?.saving || sessionRenameEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
-      || window.NetizenSessionAccess?.busy() || window.NetizenProgressCard?.busy() || window.NetizenQuestionNotifications?.busy()
+      || window.NetizenSessionAccess?.busy() || window.NetizenGroupAccess?.busy() || window.NetizenProgressCard?.busy() || window.NetizenQuestionNotifications?.busy()
       || window.NetizenWorktrees?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
   closeProjectEditor({ confirmed: true });
@@ -3573,6 +3574,7 @@ function confirmDiscardEditors() {
   if (scheduleEditor) closeScheduleEditor({ confirmed: true });
   cancelScheduleSelection({ confirmed: true });
   window.NetizenSessionAccess?.discard();
+  window.NetizenGroupAccess?.discard();
   window.NetizenProgressCard?.discard();
   window.NetizenQuestionNotifications?.discard();
   window.NetizenWorktrees?.discard();
@@ -3623,6 +3625,7 @@ function scheduleRunStatus(status) {
     released: "调度已收尾", recovery_no_start: "服务恢复，本次未启动",
     publishing_unknown: "话题投递待确认", deleted: "执行会话已删除",
     initial_start_rejected: "启动被拒绝", publishing_failed: "话题发布失败",
+    group_not_enabled: "目标群尚未启用，请联系实例管理员在 Admin 中启用",
     scope_conflict: "话题已有会话，未启动", dispatch_rejected: "未启动",
     input_started: "已启动新一轮", input_steered: "已追加当前任务", input_unknown: "输入接收情况待确认",
     input_rejected: "输入被拒绝", anchor_failed: "触发消息发送失败", anchor_unknown: "触发消息发送结果待确认",
@@ -5111,7 +5114,7 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "schedules" && await loadSchedules(cursor) === false) return false;
     if (tab === "defaults") await loadDefaults();
     if (tab === "system") {
-      const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load(),
+      const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load(), window.NetizenGroupAccess?.load(),
         window.NetizenProgressCard?.load(), window.NetizenQuestionNotifications?.load()]);
       if (results.includes(false)) return false;
     }
@@ -5151,6 +5154,7 @@ function selectSystemTab(name) {
   if (state.authExpired || state.systemTab === name) return;
   window.NetizenSelect?.close();
   if (state.systemTab === "admins") window.NetizenIdentity?.suspendSelector();
+  else if (state.systemTab === "groups") window.NetizenGroupAccess?.closePickers();
   else if (state.systemTab === "access") window.NetizenSessionAccess?.closePickers();
   state.systemTab = name;
   for (const button of document.querySelectorAll("[data-system-tab]")) {
