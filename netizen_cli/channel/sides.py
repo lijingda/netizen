@@ -274,6 +274,16 @@ class SideChannel(PromptChannel):
             )
             if presenters:
                 await asyncio.gather(*presenters)
+        except Exception as error:
+            logger.warning(
+                "accepted Side prompt presentation failed",
+                extra={
+                    "side_id": submission.side_id,
+                    "thread_id": submission.thread_id,
+                    "turn_id": submission.turn_id,
+                    "error_type": type(error).__name__,
+                },
+            )
         finally:
             release()
 

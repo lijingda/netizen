@@ -448,8 +448,16 @@ class ChannelState:
                 async with asyncio.timeout(5):
                     if await self._scheduled_message_confirmed(origin, message_id):
                         state = "sent"
-        except Exception:
-            logger.warning("scheduled result card destination was not confirmed", extra={"run_id": origin.run_id})
+        except Exception as diagnostic_error:
+            logger.warning(
+                "scheduled result card destination was not confirmed",
+                extra={
+                    "run_id": origin.run_id,
+                    "chat_id": origin.chat_id,
+                    "message_id": message_id,
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
         finally:
             self._record_scheduled_delivery(origin, state)
 
@@ -477,7 +485,15 @@ class ChannelState:
                         return False
                     if not await self._scheduled_message_confirmed(message, chunk_id):
                         return False
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "scheduled reply chunk destination was not confirmed",
+                extra={
+                    "run_id": message.run_id,
+                    "chat_id": message.chat_id,
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             return False
         return True
 
@@ -603,7 +619,8 @@ class ChannelState:
             raise
         except TimeoutError:
             raise CardActionError("群聊查找超时，请缩小关键词范围后重试，或填写聊天 ID；未展示不完整结果。") from None
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning("card chat search failed", extra={"error_type": type(diagnostic_error).__name__})
             raise CardActionError("群聊查找未完成，请重新查找，或填写聊天 ID；未展示不完整结果。") from None
         items = tuple(chats.values())
         avatars = await self._chat_avatars.prepare(items)

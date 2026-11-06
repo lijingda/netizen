@@ -193,10 +193,18 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
             self._thread_namer.start(binding_id, thread, turn_id, settings,
                                      preferred_title=preferred_title,
                                      external_input=external_input)
-        except Exception:
+        except Exception as diagnostic_error:
             # Auxiliary setup must never turn an accepted user Turn into an
             # apparent submission failure. Do not log user content or titles.
-            logger.warning("automatic naming setup failed", extra={"binding_id": binding_id})
+            logger.warning(
+                "automatic naming setup failed",
+                extra={
+                    "binding_id": binding_id,
+                    "thread_id": thread.id,
+                    "turn_id": turn_id,
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
 
     def _automatic_name_is_current(self, job: NamingJob) -> bool:
         if (
@@ -245,8 +253,13 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
             # No Binding/Scope lock, lifecycle reservation, admission
             # revision, ordinary task or user-visible result is involved.
             await job.parent.set_name(name)
-        except Exception:
+        except Exception as diagnostic_error:
             logger.warning(
                 "automatic name write unconfirmed",
-                extra={"binding_id": job.binding_id, "thread_id": job.parent.id},
+                extra={
+                    "binding_id": job.binding_id,
+                    "thread_id": job.parent.id,
+                    "turn_id": job.turn_id,
+                    "error_type": type(diagnostic_error).__name__,
+                },
             )

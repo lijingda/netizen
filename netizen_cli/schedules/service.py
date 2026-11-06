@@ -894,7 +894,18 @@ class ScheduleService:
                         async with slots:
                             status = await self._runtime.read_scheduled_turn(binding.id, run.initial_turn_id, deadline=deadline)
                     value["status"] = status if status in _NATIVE_STATUSES else "unknown"
-                except Exception:
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "scheduled Run status read unavailable",
+                        extra={
+                            "run_id": run.id,
+                            "binding_id": binding.id,
+                            "thread_id": binding.native_thread_id,
+                            "turn_id": run.initial_turn_id,
+                            "chat_id": run.chat_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
                     value["status"] = "unavailable"
         return value
 

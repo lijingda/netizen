@@ -9,6 +9,7 @@ disabled or replaced without coupling it to another.
 
 from __future__ import annotations
 
+import logging
 import asyncio
 import inspect
 from collections.abc import Callable
@@ -32,6 +33,9 @@ from .turn_activity import (
     TurnActivityProjectionUnavailable,
     project_turn_activity_notification,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 _SKILLS_LIST_METHOD = "skills/list"
@@ -842,8 +846,15 @@ class _GoalActivityTap:
             self._sink = None
             try:
                 sink(None)
-            except Exception:
-                pass
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "Goal activity unavailable notification failed",
+                    extra={
+                        "thread_id": self._thread_id,
+                        "turn_id": self._turn_id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
             return notification
         if projection.turn_started:
             self._turn_id = projection.turn_id
@@ -858,7 +869,15 @@ class _GoalActivityTap:
             return notification
         try:
             sink(projection)
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "Goal activity sink disabled after failure",
+                extra={
+                    "thread_id": self._thread_id,
+                    "turn_id": self._turn_id,
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             # Activity is display-only. A projection consumer can disable
             # itself but must never interrupt the one Goal notification stream.
             self._sink = None

@@ -106,7 +106,11 @@ class WorktreeService:
                     return WorktreeState("missing" if absent else "unknown")
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "managed worktree inspection unavailable",
+                    extra={"worktree_id": record.id, "error_type": type(diagnostic_error).__name__},
+                )
                 return WorktreeState("unknown")
 
     def _view(self, record: WorktreeRecord, state: WorktreeState) -> dict[str, Any]:

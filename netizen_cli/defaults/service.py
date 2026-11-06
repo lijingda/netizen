@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,9 @@ from ..session_settings import SessionSettings, SessionSettingsError
 from ..worktrees.errors import WorktreeError
 from .models import DefaultConfigurationError, DefaultRule
 from .store import MAX_GROUP_RULES
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..worktrees.service import WorktreeService
@@ -55,6 +59,10 @@ class SessionDefaultsService:
             async with asyncio.timeout(5):
                 info = await self._chat_info.get_chat_info(chat_id)
         except Exception as error:
+            logger.warning(
+                "default configuration chat validation failed",
+                extra={"chat_id": chat_id, "error_type": type(error).__name__},
+            )
             raise DefaultConfigurationError("无法读取聊天信息，请检查 chat_id 和机器人是否可访问该聊天。", code="chat_unavailable") from error
         kind = public_chat_kind(info)
         if kind is None:
@@ -99,6 +107,10 @@ class SessionDefaultsService:
         except ProjectError as error:
             raise DefaultConfigurationError(f"默认配置的 Project {rule.project} 不可用：{error}", code="project_unavailable") from error
         except Exception as error:
+            logger.warning(
+                "default configuration project validation failed",
+                extra={"rule_id": rule.id, "chat_id": rule.chat_id, "error_type": type(error).__name__},
+            )
             raise DefaultConfigurationError("暂时无法校验默认配置的 Project，请稍后重试。", code="project_unavailable") from error
         await self._validate_workspace(rule, project)
         if rule.session_settings.turn_settings is None:
@@ -110,6 +122,10 @@ class SessionDefaultsService:
         except ModelCatalogError as error:
             raise DefaultConfigurationError(f"默认配置的模型、思考强度或速度不可用：{error}", code="invalid_model_settings") from error
         except Exception as error:
+            logger.warning(
+                "default configuration model validation failed",
+                extra={"rule_id": rule.id, "chat_id": rule.chat_id, "error_type": type(error).__name__},
+            )
             raise DefaultConfigurationError("暂时无法校验默认配置的模型目录，请稍后重试。", code="model_catalog_unavailable") from error
         return project
 

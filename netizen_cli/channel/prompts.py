@@ -374,6 +374,16 @@ class PromptChannel(CompletionPresentationChannel):
             )
             if presenters:
                 await asyncio.gather(*presenters)
+        except Exception as error:
+            logger.warning(
+                "accepted ordinary prompt presentation failed",
+                extra={
+                    "binding_id": submission.binding_id,
+                    "thread_id": submission.thread_id,
+                    "turn_id": submission.turn_id,
+                    "error_type": type(error).__name__,
+                },
+            )
         finally:
             release()
 

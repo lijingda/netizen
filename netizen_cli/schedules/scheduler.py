@@ -259,6 +259,16 @@ class Scheduler:
                 self._store.set_run(current.id, barrier="unknown", error_code="read_cancelled")
             raise
         except Exception as error:
+            logger.warning(
+                "scheduled Run observation unavailable",
+                extra={
+                    "run_id": current.id,
+                    "binding_id": current.binding_id,
+                    "turn_id": current.initial_turn_id,
+                    "chat_id": current.chat_id,
+                    "error_type": type(error).__name__,
+                },
+            )
             code = getattr(error, "code", None)
             if not isinstance(code, str):
                 code = "read_timeout" if isinstance(error, TimeoutError) else "read_unavailable"

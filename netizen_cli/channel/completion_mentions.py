@@ -62,11 +62,16 @@ async def send_completion_mention(
         return True
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except Exception as diagnostic_error:
         # The request may already have notified the user. Do not retry or
         # trigger result recovery; notification delivery never changes execution.
         logger.warning(
             "completion reminder reply was not confirmed; not retrying",
-            extra={"message_id": anchor_id, "operation_id": operation_id},
+            extra={
+                "message_id": anchor_id,
+                "operation_id": operation_id,
+                "chat_id": scope.chat_id,
+                "error_type": type(diagnostic_error).__name__,
+            },
         )
         return False

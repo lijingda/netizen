@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import io
+import logging
 import os
 import select
 import stat
@@ -36,7 +38,10 @@ from netizen_cli.main import (
     _adopt_lifetime_lock,
     _clear_ready_marker,
     _cleanup_step,
+    _configure_logging,
     _configure_platform_trust,
+    _NetizenLogFormatter,
+    _LOG_EXTRA_VALUE_MAX_LENGTH,
     _open_core_admission,
     _publish_ready_marker,
     _register_channel_handlers,
@@ -70,6 +75,65 @@ def settings(root: Path) -> Settings:
 class MainConfigurationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.enterContext(patch("netizen_cli.main.require_admin_binding"))
+
+    def test_logging_formatter_bounds_and_orders_only_netizen_extra_fields(self) -> None:
+        class MultilineValue:
+            def __repr__(self):
+                return "line one\nline two\r\t\u2028end"
+
+        formatter = _NetizenLogFormatter("%(levelname)s %(name)s %(message)s")
+        for name in ("netizen_cli", "netizen_cli.runtime.sides"):
+            with self.subTest(name=name):
+                record = logging.makeLogRecord({
+                    "name": name, "levelname": "WARNING", "msg": "failure %s", "args": ("observed",),
+                    "turn_id": "turn-1", "error_type": "ValueError",
+                    "control": MultilineValue(), "long_value": "x" * 1_000,
+                })
+                rendered = formatter.format(record)
+                self.assertEqual(len(rendered.splitlines()), 1)
+                self.assertIn("control=line one\\nline two\\r\\t\\u2028end", rendered)
+                self.assertLess(rendered.index("control="), rendered.index("error_type="))
+                self.assertLess(rendered.index("error_type="), rendered.index("long_value="))
+                self.assertLess(rendered.index("long_value="), rendered.index("turn_id="))
+                long_value = rendered.split("long_value=", 1)[1].split(" turn_id=", 1)[0]
+                self.assertEqual(len(long_value), _LOG_EXTRA_VALUE_MAX_LENGTH)
+                self.assertTrue(long_value.endswith("..."))
+                self.assertNotIn("levelname=", rendered)
+                self.assertNotIn("message=", rendered)
+                self.assertEqual(formatter.format(record), rendered)
+
+        for name in ("lark_channel", "netizen_cli_other"):
+            record = logging.makeLogRecord({"name": name, "msg": "ordinary", "extra_value": "hidden"})
+            standard = logging.Formatter("%(levelname)s %(name)s %(message)s")
+            self.assertEqual(formatter.format(record), standard.format(record))
+
+    def test_logging_formatter_is_used_for_stderr_and_private_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "service.log"
+            for destination in ("", str(path)):
+                with self.subTest(destination=bool(destination)):
+                    stderr = io.StringIO()
+                    with (
+                        patch.dict(os.environ, {"NETIZEN_LOG_FILE": destination}),
+                        patch("sys.stderr", stderr),
+                        patch("netizen_cli.main.logging.basicConfig") as configure,
+                    ):
+                        _configure_logging()
+                    handler, = configure.call_args.kwargs["handlers"]
+                    try:
+                        record = logging.makeLogRecord({
+                            "name": "netizen_cli.runtime.sides", "levelname": "WARNING",
+                            "msg": "presentation failed", "turn_id": "turn-1", "error_type": "ValueError",
+                        })
+                        handler.handle(record)
+                        handler.flush()
+                        rendered = path.read_text() if destination else stderr.getvalue()
+                        self.assertIn("presentation failed error_type='ValueError' turn_id='turn-1'", rendered)
+                        self.assertEqual(len(rendered.splitlines()), 1)
+                        if destination:
+                            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    finally:
+                        handler.close()
 
     def test_platform_trust_uses_keychain_on_macos(self) -> None:
         calls: list[str] = []

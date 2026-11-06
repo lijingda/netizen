@@ -174,9 +174,18 @@ class SessionService:
             return {"error": {"code": "project_unavailable", "message": "The caller's Project no longer exists."}}
         except (BindingNotFound, ScopeNotFound):
             return {"error": {"code": "target_not_registered", "message": "The session was removed. Refresh the target information."}}
-        except Exception:
+        except Exception as diagnostic_error:
             # Native exception text may include prompts or sensitive SDK payloads.
-            logger.warning("Session tool failed (%s)", tool_name)
+            logger.warning(
+                "session tool failed",
+                extra={
+                    "operation": tool_name,
+                    "source_thread_id": native_thread_id,
+                    "source_turn_id": source_turn_id,
+                    "thread_id": locals().get("data", {}).get("threadId"),
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             if tool_name == "suppress_reply":
                 return {"error": {"code": "outcome_unknown" if invoked else "unavailable",
                                   "message": "Could not confirm reply suppression for the current physical Turn. This does not end the Turn."}}
@@ -279,7 +288,15 @@ class SessionService:
                     value["cwd"] = thread.get("cwd")
                     if not value["cwd"]:
                         value["netizen"]["cwdUnavailable"] = True
-                except Exception:
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "session metadata enrichment unavailable",
+                        extra={
+                            "thread_id": value["id"],
+                            "binding_id": value["netizen"]["bindingId"],
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
                     value["netizen"]["statusUnavailable"] = True
                     value["netizen"]["cwdUnavailable"] = True
             # Query snapshots may predate a foreground switch during I/O.
@@ -384,7 +401,15 @@ class SessionService:
                         break
                 except SessionToolError as error:
                     errors.append({"threadId": thread_id, "code": error.code, "message": str(error)})
-                except Exception:
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "session wait status read unavailable",
+                        extra={
+                            "thread_id": thread_id,
+                            "source_thread_id": source_thread_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
                     errors.append({"threadId": thread_id, "code": "unavailable", "message": "Could not read task status before the deadline."})
             if wake or not polls or loop.time() >= deadline:
                 # Revalidate registration after reading the other targets;

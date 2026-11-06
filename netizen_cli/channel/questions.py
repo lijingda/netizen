@@ -214,6 +214,15 @@ class QuestionChannel(ScheduleChannel):
                 target=context.target, sender=sender, request_text=answer.prompt,
             )
         except Exception as error:
+            logger.warning(
+                "question answer preparation failed",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "target": question_target_payload(context.target) if context is not None else None,
+                    "error_type": type(error).__name__,
+                },
+            )
             # No input has been handed off yet. Refresh the form's
             # transport nonce so an explicit retry can pass SDK dedup.
             if isinstance(error, TopicPublishError):
@@ -240,9 +249,17 @@ class QuestionChannel(ScheduleChannel):
                     if context is not None else error_card(notice)
                 )
                 updated = await self._safe_update_card(message_id, card)
-            except Exception:
+            except Exception as diagnostic_error:
                 updated = False
-                logger.warning("question answer card could not be rendered")
+                logger.warning(
+                    "question answer card could not be rendered",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "target": question_target_payload(context.target) if context is not None else None,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
             if not updated and scope is not None:
                 target = _CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(scope.topic_id))
                 try:
@@ -252,8 +269,18 @@ class QuestionChannel(ScheduleChannel):
                             reply_in_thread=scope.kind is ScopeKind.TOPIC,
                             reply_target_gone="fail",
                         ))
-                except Exception:
-                    logger.warning("question answer feedback unavailable")
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "question answer feedback unavailable",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "target": (
+                                question_target_payload(context.target) if context is not None else None
+                            ),
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
             return
 
         accepted = False

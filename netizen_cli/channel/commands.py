@@ -627,7 +627,15 @@ class CommandChannel(CardControlChannel):
         thread_metadata_lines = _thread_metadata_status_lines(binding, metadata)
         try:
             cwd = await self._binding_cwd(binding)
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "status working-directory read failed",
+                extra={
+                    "binding_id": binding.id,
+                    "thread_id": binding.native_thread_id,
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             git_branch_lines = ("工作目录状态暂不可用；未改用项目目录。",)
         else:
             git_branch_lines = (f"工作目录：{cwd}", *await _git_branch_status_lines(cwd))

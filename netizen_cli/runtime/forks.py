@@ -206,10 +206,14 @@ class ForkRuntime(BindingOccupancyRuntime):
                 return True
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as diagnostic_error:
                 logger.warning(
                     "persistent fork name write was not confirmed",
-                    extra={"binding_id": binding.id, "thread_id": thread.id},
+                    extra={
+                        "binding_id": binding.id,
+                        "thread_id": thread.id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
                 )
                 return False
             finally:

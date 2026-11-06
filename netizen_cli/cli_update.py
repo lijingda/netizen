@@ -7,6 +7,7 @@ processes for restoration and never imports the replaced package.
 
 from __future__ import annotations
 
+import logging
 import fcntl
 from contextlib import ExitStack
 import hashlib
@@ -20,6 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from . import cli_update_worker
+
+
+logger = logging.getLogger(__name__)
 
 
 class UpdateError(RuntimeError):
@@ -146,7 +150,11 @@ def _refresh_observed(manager: Any, instances: list[dict[str, Any]]) -> None:
                 item["state"] = "unregistered"
             else:
                 item["state"] = _observed_state(manager, current)
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "service inspection failed during update",
+                extra={"service_id": item.get("service"), "error_type": type(diagnostic_error).__name__},
+            )
             item["state"] = "unknown"
 
 

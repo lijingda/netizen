@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +12,9 @@ from lark_channel import SendOpts, SendResult
 
 from .messages import _nonempty_field, _object_field
 from .ports import ReplyChannel
+
+
+logger = logging.getLogger(__name__)
 
 
 class TopicPublishError(RuntimeError):
@@ -67,6 +72,15 @@ async def send_topic_message(channel: ReplyChannel, chat_id: str, content: Any, 
         try:
             result = await channel.send(chat_id, content, opts)
         except Exception as error:
+            logger.warning(
+                "topic message send failed",
+                extra={
+                    "chat_id": chat_id,
+                    "message_uuid": opts.uuid,
+                    "attempt": attempt + 1,
+                    "error_type": type(error).__name__,
+                },
+            )
             uncertain = True
             if attempt == 0:
                 continue

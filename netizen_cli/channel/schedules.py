@@ -248,14 +248,26 @@ class ScheduleChannel(SessionToolChannel):
             if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             if origin is not None:
+                notice_stage = "receipt_read"
                 try:
                     async with asyncio.timeout(5):
                         receipt = store.get_run(run.id)
                         resource_note = (f" 关联 worktree：{receipt.worktree_id}，请在 Admin 检查；不会自动删除或重建。"
                                          if receipt.worktree_id else "")
+                        notice_stage = "notice_send"
                         await self._reply(origin, f"定时任务未完成启动：{str(error)[:400]}。请通过 /cron 查看本次记录。" + resource_note)
-                except Exception:
-                    logger.warning("scheduled start notice was not delivered", extra={"run_id": run.id})
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "scheduled start notice read or delivery failed",
+                        extra={
+                            "stage": notice_stage,
+                            "run_id": run.id,
+                            "chat_id": run.chat_id,
+                            "binding_id": run.binding_id,
+                            "turn_id": run.initial_turn_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
 
     async def _dispatch_binding_input(self, claim: Claim, group_rule: GroupAccessRule) -> None:
         """Give a saved input a real anchor and use ordinary message consumption."""

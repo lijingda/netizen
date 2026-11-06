@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import asyncio
 from pathlib import Path
 from typing import Literal
@@ -44,6 +45,11 @@ from .native_values import (
     _final_agent_response,
 )
 from .forks import ForkRuntime
+
+from .state import RUNTIME_LOGGER_NAME
+
+
+logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 
 
 class NativeQueryRuntime(ForkRuntime):
@@ -170,7 +176,15 @@ class NativeQueryRuntime(ForkRuntime):
                 if await self._background_terminal_inspector.has_running(binding.native_thread_id):
                     return {"cwd": cwd, "status": "active"}
                 return {"cwd": cwd, "status": "idle"}
-            except Exception:
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "worktree usage read unavailable",
+                    extra={
+                        "binding_id": binding_id,
+                        "thread_id": binding.native_thread_id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
                 return {"cwd": cwd, "status": "active" if local_busy else "unknown"}
 
     async def latest_thread_answer(self, thread_id: str) -> NativeLatestAnswer:

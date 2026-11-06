@@ -179,6 +179,16 @@ class CardControlChannel(TurnFileChannel):
             except CardActionError as error:
                 notice = f"名称生成失败：{error}"
             except Exception as error:
+                logger.warning(
+                    "requested session name generation failed",
+                    extra={
+                        "binding_id": binding.id,
+                        "thread_id": binding.native_thread_id,
+                        "message_id": intent.source_id,
+                        "chat_id": intent.scope.chat_id,
+                        "error_type": type(error).__name__,
+                    },
+                )
                 notice = f"名称生成失败：{describe_error(error)}。可以重新生成或手动填写。"
             if not await redraw(name=name, notice=notice):
                 await self._safe_reply_to_card(

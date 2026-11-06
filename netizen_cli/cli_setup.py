@@ -1,6 +1,7 @@
 """Explicit, per-instance setup; package installation has no setup side effects."""
 from __future__ import annotations
 
+import logging
 import getpass
 import contextlib
 import json
@@ -14,6 +15,9 @@ from pathlib import Path
 from typing import Callable, IO
 
 from .lark_app import encode_lark_app, load_lark_app
+
+
+logger = logging.getLogger(__name__)
 
 
 class SetupError(RuntimeError):
@@ -222,7 +226,11 @@ def _bind_admin(root: Path, *, open_id: str | None, source: IO[str]) -> None:
 
         try:
             identity = run_admin_binding(credentials.app_id, credentials.app_secret, verification)
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "administrator binding authorization failed",
+                extra={"error_type": type(diagnostic_error).__name__},
+            )
             if not source.isatty():
                 raise SetupError("administrator authorization did not complete; rerun setup or supply --admin-open-id") from None
             print("Administrator authorization did not complete. Enter this app's Open ID manually, "

@@ -6,6 +6,7 @@ Only current messages and exact quoted messages may supply file references.
 """
 from __future__ import annotations
 
+import logging
 import asyncio
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -24,6 +25,9 @@ from .attachments import (
     PreparedAttachments,
 )
 from .message_content import normalized_content_type
+
+
+logger = logging.getLogger(__name__)
 
 
 FileSource = Literal["current_message", "quoted_message"]
@@ -271,6 +275,10 @@ class FileInputPreparer:
                 reference.file_key, resource_type="file", message_id=reference.message_id,
             )
         except Exception as error:
+            logger.warning(
+                "input attachment resource download failed",
+                extra={"message_id": reference.message_id, "error_type": type(error).__name__},
+            )
             if not result.abandoned:
                 result.error = error
         else:
@@ -331,6 +339,7 @@ class FileInputPreparer:
         # Bound retained batch bytes during slow filesystem workers as well as
         # network downloads. This never queues or limits native Turn execution.
         self._preparing += 1
+        stage = "download"
         try:
             async with asyncio.timeout(self._total_timeout):
                 files: list[AttachmentInput] = []
@@ -342,18 +351,36 @@ class FileInputPreparer:
                         raise _failure(current.file_name, "使本条消息超过附件总大小限制，请拆分后重新发送")
                     files.append(AttachmentInput(current.file_name or "attachment", body))
                     del body
+                stage = "prepare"
                 batch = await self._store.prepare_files(files)
                 files.clear()
+                stage = "publish"
                 await self._store.publish_files(batch)
                 return batch
         except BaseException as error:
+            logger.warning(
+                "input attachment preparation failed",
+                extra={
+                    "stage": stage,
+                    "message_id": current.message_id,
+                    "batch_id": batch.batch_id if batch is not None else None,
+                    "error_type": type(error).__name__,
+                },
+            )
             if batch is not None:
                 try:
                     await self._store.discard_files(batch)
-                except Exception:
+                except Exception as diagnostic_error:
                     # Ownership checks can intentionally retain unfamiliar
                     # material. No recursive fallback or native-state guess.
-                    pass
+                    logger.warning(
+                        "input attachment compensation failed",
+                        extra={
+                            "message_id": current.message_id,
+                            "batch_id": batch.batch_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
             if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit, FileInputError)):
                 raise
             if isinstance(error, TimeoutError):

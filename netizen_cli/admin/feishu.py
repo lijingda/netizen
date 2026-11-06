@@ -8,6 +8,7 @@ storage, refresh serialization, browser sessions, and authorization decisions.
 """
 from __future__ import annotations
 
+import logging
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,6 +24,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from ..feishu_app_onboarding import REQUIRED_USER_SCOPES
+
+
+logger = logging.getLogger(__name__)
 
 
 _DEVICE_URL = "https://accounts.feishu.cn/oauth/v1/device_authorization"
@@ -232,7 +236,11 @@ class FeishuClient:
                 )
         except (httpx.HTTPError, TimeoutError):
             raise FeishuError("upstream_unavailable", "暂时无法连接飞书，请稍后重试。") from None
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "administrator user-info lookup failed",
+                extra={"app_id": self.app_id, "error_type": type(diagnostic_error).__name__},
+            )
             # SDK decoding errors may include the upstream body or token.
             raise _invalid_response() from None
         raw = getattr(result, "raw", None)

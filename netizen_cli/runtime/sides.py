@@ -1000,32 +1000,43 @@ class SideRuntime(SubmissionRuntime):
             active.activity_observation_enabled = False
             result = await active.handle.run()
             active.terminal_observed = True
-            self._supplement_partial_answers(
-                active, thread_id=active.handle.thread_id, turn_id=active.handle.id,
-                items=tuple(getattr(result, "items", ())),
-            )
-            # Drain can include questions missed after observation fell back.
-            # Reuse delivery dedup and the live Side guard, without restarting
-            # observation or retrying earlier presentation attempts.
-            if self._on_question is not None:
-                for item in getattr(result, "items", ()):
-                    try:
-                        request = project_question(getattr(item, "root", None))
-                        if request is not None:
-                            self._deliver_question(active, active.handle.id, request)
-                    except Exception as caught:
-                        logger.warning(
-                            "Side result question presentation unavailable",
-                            extra={
-                                "side_id": session.side_id,
-                                "turn_id": active.handle.id,
-                                "error_type": type(caught).__name__,
-                            },
-                        )
         except asyncio.CancelledError:
             raise
         except BaseException as caught:
             error = caught
+        else:
+            try:
+                self._supplement_partial_answers(
+                    active, thread_id=active.handle.thread_id, turn_id=active.handle.id,
+                    items=tuple(getattr(result, "items", ())),
+                )
+                # Drain can include questions missed after observation fell back.
+                # Reuse delivery dedup and the live Side guard, without restarting
+                # observation or retrying earlier presentation attempts.
+                if self._on_question is not None:
+                    for item in getattr(result, "items", ()):
+                        try:
+                            request = project_question(getattr(item, "root", None))
+                            if request is not None:
+                                self._deliver_question(active, active.handle.id, request)
+                        except Exception as caught:
+                            logger.warning(
+                                "Side result question presentation unavailable",
+                                extra={
+                                    "side_id": session.side_id,
+                                    "turn_id": active.handle.id,
+                                    "error_type": type(caught).__name__,
+                                },
+                            )
+            except Exception as caught:
+                logger.warning(
+                    "Side terminal presentation unavailable",
+                    extra={
+                        "side_id": session.side_id,
+                        "turn_id": active.handle.id,
+                        "error_type": type(caught).__name__,
+                    },
+                )
         finally:
             if active.state is ActiveState.STOPPING and active.cleanup_required:
                 while (

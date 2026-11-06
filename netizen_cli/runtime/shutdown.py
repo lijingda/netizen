@@ -169,8 +169,15 @@ class ShutdownRuntime(SideRuntime):
         for handle in goal_handles:
             try:
                 await handle.aclose()
-            except Exception:
-                logger.debug("failed to close Goal stream during final teardown")
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "failed to close Goal stream during final teardown",
+                    extra={
+                        "thread_id": handle.thread_id,
+                        "logical_turn_id": handle.id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
         for task in tasks:
             task.cancel()
         for task in side_idle_tasks:

@@ -75,8 +75,17 @@ class SessionMcpRunner(EmbeddedMcpRunner):
                 else:
                     result = await self._callback(params.name, arguments, source_id)
             return _result(result)
-        except Exception:
-            logger.warning("Session tool callback failed (%s)", params.name)
+        except Exception as diagnostic_error:
+            logger.warning(
+                "session tool callback failed",
+                extra={
+                    "operation": params.name,
+                    "source_thread_id": source_id,
+                    "source_turn_id": source_turn_id,
+                    "thread_id": arguments.get("threadId"),
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             if params.name == "suppress_reply":
                 return _result({"error": {"code": "outcome_unknown", "message": "Could not confirm reply suppression for the current physical Turn. This does not end the Turn."}})
             mutation = params.name in _MUTATIONS

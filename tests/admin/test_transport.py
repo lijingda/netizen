@@ -420,7 +420,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("ATTACKER_SECRET")
 
         transport = await self._transport(handler)
-        with self.assertLogs("netizen_cli.admin.transport", level="ERROR") as captured:
+        with self.assertLogs("netizen_cli.admin.transport", level="WARNING") as captured:
             status, _headers, body = await self._request(
                 transport,
                 b"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
@@ -432,6 +432,9 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
         rendered_logs = "\n".join(captured.output)
         self.assertNotIn("ATTACKER_SECRET", rendered_logs)
         self.assertNotIn("Traceback", rendered_logs)
+        self.assertEqual(captured.records[-1].error_type, "RuntimeError")
+        self.assertEqual(captured.records[-1].stage, "handler_result")
+        self.assertTrue(captured.records[-1].request_id)
 
     async def test_get_keepalive_then_second_header_timeout(self) -> None:
         with (

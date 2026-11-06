@@ -2329,8 +2329,11 @@ class InstanceManagementService:
                 metadata = await self._read_thread_summary(thread_id, deadline=deadline)
                 if metadata is not None:
                     views[thread_id] = NativeThreadView(None, metadata)
-            except Exception:
-                pass  # The exact row remains visible with unknown state and its ID.
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "archived thread metadata unavailable",
+                    extra={"thread_id": thread_id, "error_type": type(diagnostic_error).__name__},
+                )
 
         unresolved = tuple(
             thread_id for thread_id, view in views.items()

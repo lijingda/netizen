@@ -2699,19 +2699,21 @@ class BindingStore:
                 return
             self._query_closing = True
             futures = tuple(self._query_futures)
-        for future in futures:
-            try:
-                future.result()
-            except BaseException:
-                pass
-        if self._query_connection is not None:
-            self._query_executor.submit(self._query_connection.close).result()
-            self._query_connection = None
-        self._query_executor.shutdown(wait=True, cancel_futures=False)
-        with self._lock:
-            self._connection.close()
-        with self._query_state_lock:
-            self._closed = True
+        try:
+            for future in futures:
+                try:
+                    future.result()
+                except Exception:
+                    pass
+        finally:
+            if self._query_connection is not None:
+                self._query_executor.submit(self._query_connection.close).result()
+                self._query_connection = None
+            self._query_executor.shutdown(wait=True, cancel_futures=False)
+            with self._lock:
+                self._connection.close()
+            with self._query_state_lock:
+                self._closed = True
 
     def _transaction(self):
         return _Transaction(self._connection, self._lock)

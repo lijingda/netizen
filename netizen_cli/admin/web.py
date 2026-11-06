@@ -391,9 +391,7 @@ class AdminWebApplication:
                 error.code,
                 error.message,
             )
-        except BaseException as error:
-            if isinstance(error, asyncio.CancelledError):
-                raise
+        except Exception as error:
             mapped = _map_error(error)
             if mapped is None:
                 # Exception text can originate in filesystem/native adapters

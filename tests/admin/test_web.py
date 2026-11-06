@@ -24,6 +24,7 @@ from netizen_cli.admin.feishu import DeviceChallenge, UserProfile, UserTokens
 from netizen_cli.admin.login import AdminLogin
 from netizen_cli.admin.users import AdminIdentity, AdminUsers
 from netizen_cli.admin.errors import AdminWebError
+from netizen_cli.admin.transport import Request
 from netizen_cli.admin.presentation import (
     _chat_open_url,
     _release_disposition_message,
@@ -1331,6 +1332,20 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 )
                 payload = json.loads(body)
                 self.assertEqual(payload["code"], "not_authenticated")
+
+    async def test_http_application_preserves_control_signals(self) -> None:
+        request = Request(
+            b"GET", b"/api/v1/projects", b"1.1", (), b"", None, None, "request-control",
+        )
+        application = self.runner.application
+        for phase in ("_context", "_dispatch"):
+            for signal in (KeyboardInterrupt(), SystemExit(7), asyncio.CancelledError()):
+                with self.subTest(phase=phase, signal=type(signal).__name__):
+                    with patch.object(application, "_context", return_value=object()):
+                        with patch.object(application, phase, side_effect=signal):
+                            with self.assertRaises(type(signal)) as raised:
+                                await application.handle(request)
+                    self.assertIs(raised.exception, signal)
 
     async def test_unknown_internal_error_logs_only_the_error_type(self) -> None:
         self.runner.open_admission()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import asyncio
 import hashlib
 import math
@@ -16,6 +17,9 @@ from .users import (
     AdminIdentity, AdminUsers, AdminUsersUnavailable, PrivateJSONError,
     delete_private_json, read_private_json, write_private_json,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,7 @@ class AdminCredentials:
                     tokens.refresh_expires_at is not None and tokens.refresh_expires_at <= self._clock()
                 ):
                     raise AuthExpired("auth_expired", "飞书凭证已过期，请重新登录。")
+            stage = "refresh_reservation"
             try:
                 with self.users.lock:
                     self._member(identity, add_revision)
@@ -157,7 +162,9 @@ class AdminCredentials:
                     # Persist before sending: timeout/cancellation/restart may
                     # otherwise consume the same single-use refresh token twice.
                     self._write(identity, record)
+                stage = "refresh_request"
                 renewed = await self.client.refresh(tokens.refresh_token)
+                stage = "persist_refreshed_credentials"
                 with self.users.lock:
                     self._member(identity, add_revision)
                     if self._read(identity) != record:
@@ -166,7 +173,16 @@ class AdminCredentials:
                     return renewed.access_token
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "administrator credential refresh or persistence failed",
+                    extra={
+                        "stage": stage,
+                        "app_id": identity.app_id,
+                        "open_id": identity.open_id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
                 # Deliberately one expiry path; do not delete the shared
                 # credential or coordinate other browsers on refresh failure.
                 raise AuthExpired("auth_expired", "飞书凭证已过期，请重新登录。") from None

@@ -6,6 +6,7 @@ They are a completion-time snapshot, not an atomic snapshot of the task tree.
 
 from __future__ import annotations
 
+import logging
 import asyncio
 from collections import deque
 from collections.abc import Sequence
@@ -23,6 +24,9 @@ from openai_codex.generated.v2_all import (
     ThreadReadResponse,
     ThreadSpawnSubAgentSource,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 _MAX_CHILDREN = 32
@@ -165,7 +169,15 @@ async def collect_turn_patch_children(
         async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
             try:
                 root = await _read_thread(codex, thread_id)
-            except Exception:
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "child patch root read failed",
+                    extra={
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
                 return TaskPatchChildren(complete=False)
             root_ids = [turn.id for turn in root.turns]
             # A newer root Turn may already have sent another task to the same
@@ -177,14 +189,27 @@ async def collect_turn_patch_children(
             enqueue(spawned, thread_id, frozenset(root_ids))
             while pending:
                 child_id, parent_id, ancestor_turns = pending.popleft()
+                stage = "read"
                 try:
                     child = await _read_thread(codex, child_id)
+                    stage = "identity_validation"
                     if not _has_parent(child, parent_id):
                         raise ValueError("native child patch read parent mismatch")
                     cwd = Path(child.cwd.root)
                     if not cwd.is_absolute():
                         raise ValueError("native child patch read cwd is not absolute")
-                except Exception:
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "child patch read or identity validation failed",
+                        extra={
+                            "stage": stage,
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "child_thread_id": child_id,
+                            "parent_thread_id": parent_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
                     complete = False
                     continue
                 own_turns = [
@@ -236,7 +261,15 @@ async def collect_turn_patch_children(
             if len(parents) > 1:
                 try:
                     final_root = await _read_thread(codex, thread_id)
-                except Exception:
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "child patch final root read failed",
+                        extra={
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
                     return TaskPatchChildren(complete=False)
                 if not final_root.turns or final_root.turns[-1].id != turn_id:
                     return TaskPatchChildren(complete=False)

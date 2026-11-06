@@ -2490,6 +2490,47 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 collect.assert_not_awaited()
                 self.assertEqual(self.outcomes[-1].result.status.value, status)
 
+    async def test_side_terminal_presentation_failure_preserves_result_and_admission(self) -> None:
+        binding, record, _ = await self.open_side()
+        self.runtime.set_question_handler(AsyncMock())
+        item = ThreadItem.model_validate({
+            "type": "agentMessage", "id": "answer", "text": "native answer",
+        })
+        for target in ("_supplement_partial_answers", "_deliver_question"):
+            with self.subTest(target=target):
+                started = await self.runtime.submit_side(
+                    side_id=record.id, input="work", owner_id="ou_owner", origin=object(),
+                )
+                session = self.runtime._sides[record.id]
+                active = session.active
+                handle = self.codex.handles[-1]
+                with (
+                    patch.object(self.runtime, target, side_effect=AttributeError("private detail")),
+                    patch("netizen_cli.runtime.sides.project_question", return_value=object()),
+                    self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs,
+                ):
+                    await self.finish_side_turn(started, response="native answer", items=(item,))
+
+                outcome = self.outcomes[-1]
+                self.assertTrue(active.terminal_observed)
+                self.assertEqual(outcome.final_response, "native answer")
+                self.assertEqual(outcome.status, "completed")
+                self.assertIsNone(outcome.error)
+                self.assertIsNone(session.active)
+                self.assertFalse(session.turn_terminal_state_unknown)
+                self.assertEqual(session.state, SideSessionState.OPEN)
+                self.assertTrue(self.runtime._accepting)
+                self.assertEqual(handle.run_calls, 1)
+                self.assertEqual(handle.stream_calls, 0)
+                log = logs.records[-1]
+                self.assertEqual((log.side_id, log.turn_id, log.error_type),
+                                 (record.id, started.turn_id, "AttributeError"))
+                self.assertNotIn("private detail", "\n".join(logs.output))
+
+        await self.runtime.capture_submission_admission(binding.id)
+        await self.runtime.close_side(record.id)
+        self.assertEqual(self.store.get_side_topic(record.id).state, SideTopicState.CLOSED)
+
     async def test_side_partial_answers_survive_high_water_and_terminal_backfill(self) -> None:
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer

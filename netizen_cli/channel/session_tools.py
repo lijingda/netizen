@@ -187,7 +187,17 @@ class SessionToolChannel(ForkChannel):
             result["netizen"]["isCurrent"] = self._bindings.get(binding.id).active
         except BindingNotFound:
             result["netizen"].update(isCurrent=False, targetDeleted=True)
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.warning(
+                "accepted session receipt state unavailable",
+                extra={
+                    "binding_id": binding.id,
+                    "thread_id": submission.thread_id,
+                    "turn_id": submission.turn_id,
+                    "chat_id": scope.chat_id,
+                    "error_type": type(diagnostic_error).__name__,
+                },
+            )
             result["netizen"].update(isCurrent=None, statusWarning="投递已接受；当前会话状态未能刷新。")
         return result
 
@@ -256,8 +266,15 @@ class SessionToolChannel(ForkChannel):
             except BindingNotFound:
                 current = False
                 details["netizen"]["targetDeleted"] = True
-            except Exception:
-                pass
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "session failure state enrichment unavailable",
+                    extra={
+                        "binding_id": binding.id,
+                        "thread_id": binding.native_thread_id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
             details["threadId"] = binding.native_thread_id
             details["netizen"].update(bindingId=binding.id, isCurrent=current)
         if scope is not None:

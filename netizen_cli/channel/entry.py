@@ -148,8 +148,11 @@ class ChannelEntry(CommandChannel):
             try:
                 chat_info = await self._channel.get_chat_info(chat_id)
                 chat_kind = public_chat_kind(chat_info)
-            except Exception:
-                logger.warning("group admission could not read card chat kind", extra={"chat_id": chat_id})
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "group admission could not read card chat kind",
+                    extra={"chat_id": chat_id, "error_type": type(diagnostic_error).__name__},
+                )
             if chat_kind is None:
                 logger.warning("group admission rejected unknown card chat kind", extra={"chat_id": chat_id})
             if not group_rule.allows(chat_id, chat_kind):
@@ -247,5 +250,8 @@ class ChannelEntry(CommandChannel):
             ))
             if not result.success:
                 logger.warning("group admission notice was rejected", extra={"chat_id": chat_id})
-        except Exception:
-            logger.warning("group admission notice was not delivered", extra={"chat_id": chat_id})
+        except Exception as diagnostic_error:
+            logger.warning(
+                "group admission notice was not delivered",
+                extra={"chat_id": chat_id, "error_type": type(diagnostic_error).__name__},
+            )

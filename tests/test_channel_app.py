@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, closing, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from lark_channel import (
@@ -8770,6 +8770,59 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         root = self.channel.updates[-1][1]
         self.assertEqual(root["header"]["subtitle"]["content"], "已结束")
         self.assertNotIn("side.close", str(root))
+
+    async def test_initial_side_accepted_prompt_survives_presenter_failure(self) -> None:
+        source = FakeMessage(
+            "/side accepted work", message_id="om-side-presenter-failure",
+            chat_id="oc-direct", chat_type="p2p", mentioned_bot=False,
+        )
+        self.fixture.binding_for(source)
+        self.fixture.queue_promoted_topic(
+            chat_id="oc-direct", root_id="om-root", seed_id="om-seed", topic_id="omt-side",
+        )
+        release = Mock()
+        submit = self.runtime.submit_side
+
+        async def accepted(**kwargs):
+            return replace(await submit(**kwargs), release_receipt_attempt=release)
+
+        with (
+            patch.object(self.runtime, "submit_side", side_effect=accepted),
+            patch.object(self.app._progress_cards, "start_side", side_effect=AttributeError("private detail")),
+            self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs,
+        ):
+            await self.app.handle_message(source)
+
+        self.assertEqual(len(self.runtime.submit_side_calls), 1)
+        release.assert_called_once_with()
+        self.assertFalse(any("首轮问题未执行" in str(reply) for reply in self.channel.replies))
+        record = self.store.side_topic_for_source(app_id="cli_test", source_message_id=source.id)
+        self.assertEqual(record.state, SideTopicState.OPEN)
+        self.assertEqual(logs.records[-1].error_type, "AttributeError")
+        self.assertNotIn("private detail", "\n".join(logs.output))
+
+    async def test_ordinary_accepted_prompt_survives_presenter_failure(self) -> None:
+        source = FakeMessage(
+            "accepted work", message_id="om-ordinary-presenter-failure",
+            chat_id="oc-direct", chat_type="p2p", mentioned_bot=False,
+        )
+        binding = self.fixture.binding_for(source)
+        release = Mock()
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED, binding.id, binding.native_thread_id, "turn-presenter-failure", release,
+        )
+        with (
+            patch.object(self.app._progress_cards, "start", side_effect=AttributeError("private detail")),
+            self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs,
+        ):
+            await self.app.handle_message(source)
+
+        self.assertEqual(len(self.runtime.submit_calls), 1)
+        release.assert_called_once_with()
+        self.assertEqual(self.channel.replies, [])
+        self.assertEqual(logs.records[-1].binding_id, binding.id)
+        self.assertEqual(logs.records[-1].error_type, "AttributeError")
+        self.assertNotIn("private detail", "\n".join(logs.output))
 
     async def test_initial_and_subsequent_side_share_task_mentions_without_changing_seed(self) -> None:
         mentions = [

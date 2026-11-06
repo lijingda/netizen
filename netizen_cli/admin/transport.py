@@ -454,8 +454,10 @@ class AdminHttpTransport:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
                 connection.handler_task = None
+                stage = "handler_result"
                 try:
                     response = handler_task.result()
+                    stage = "response_write"
                     await self._write_response(
                         parser,
                         writer,
@@ -464,12 +466,16 @@ class AdminHttpTransport:
                     )
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as diagnostic_error:
                     # Never render exception strings or tracebacks into either
                     # the response or logs; handler inputs can reach both.
-                    logger.error(
-                        "admin HTTP handler failed request_id=%s",
-                        request_id,
+                    logger.warning(
+                        "admin HTTP handler or response write failed",
+                        extra={
+                            "stage": stage,
+                            "request_id": request_id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
                     )
                     await self._safe_error(
                         parser, writer, 500, b"internal server error", request_id

@@ -401,6 +401,14 @@ class ThreadSubscriptionRuntime(RuntimeState):
             )
             raise
         except Exception as error:
+            logger.warning(
+                "subscription release idle read failed",
+                extra={
+                    "binding_id": binding.id,
+                    "thread_id": record.thread_id,
+                    "error_type": type(error).__name__,
+                },
+            )
             if explicit:
                 self._schedule_subscription_release_locked(
                     record,
@@ -435,6 +443,14 @@ class ThreadSubscriptionRuntime(RuntimeState):
             )
             raise
         except Exception as error:
+            logger.warning(
+                "subscription release terminal inspection failed",
+                extra={
+                    "binding_id": binding.id,
+                    "thread_id": record.thread_id,
+                    "error_type": type(error).__name__,
+                },
+            )
             self._schedule_subscription_release_locked(
                 record,
                 delay=self._ordinary_thread_idle_seconds,

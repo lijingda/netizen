@@ -5,6 +5,7 @@ lock. The shared reentrant lock also orders local session admission/revocation.
 """
 from __future__ import annotations
 
+import logging
 import contextlib
 import json
 import math
@@ -18,6 +19,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 class PrivateJSONError(RuntimeError):
@@ -269,7 +273,15 @@ class AdminUsers:
         for callback in self._revocations:
             try:
                 callback(identity)
-            except Exception:
+            except Exception as diagnostic_error:
+                logger.warning(
+                    "administrator revocation callback failed",
+                    extra={
+                        "app_id": identity.app_id,
+                        "open_id": identity.open_id,
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
                 # A failed credential-file cleanup cannot prevent local session
                 # revocation, regardless of listener registration order.
                 failed = True

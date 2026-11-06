@@ -307,8 +307,16 @@ class ThreadNamer:
             if job.run is not None and job.handle is not None and not job.run.cancelled():
                 try:
                     result = job.run.result()
-                except Exception:
-                    pass
+                except Exception as diagnostic_error:
+                    logger.warning(
+                        "late naming Turn result failed",
+                        extra={
+                            "binding_id": job.binding_id,
+                            "thread_id": job.handle.thread_id,
+                            "turn_id": job.handle.id,
+                            "error_type": type(diagnostic_error).__name__,
+                        },
+                    )
                 else:
                     # A terminal arriving after the bounded cleanup drain is
                     # still exact evidence; a consumer error or interrupt ACK
