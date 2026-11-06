@@ -1510,60 +1510,29 @@ terminal 继续运行或退出的实际结果，任一种结果均不作为独�
 UAT/RT、设备授权码或本地会话凭证。最后在两平台重跑真实 Codex Thread、steer、cleanup 和 exact-ID resume probes，
 按上述职责分别记录适配行为与原生能力结果；fake launchctl/systemctl 单测不能替代这些真机门禁。
 
-先通过 `/admin` 获取当前实例的实际端口，从另一台受信内网主机直接访问
-`http://<服务器 IP>:<实际端口>`：未登录的 `/` 返回 303
-重定向到 `/login`（不返回 HTML 或状态），未知 route 和受保护 API 必须返回 401。仅明确
-公开的登录页面、登录资源与授权端点允许进入预认证流程，仍需浏览器绑定和同源检查；
-`/health/ready` 只返回无细节状态。通过飞书登录并核对管理员名单后，检查各管理
-页面、筛选、分页与按需刷新。Sessions 默认进入“普通会话”，默认显示
-Active，最近更新时间默认最近三个月；普通会话目录状态为 Active/Archived/Lazy 单选，
-不提供 Missing/Unknown 筛选。Project 可搜索并包含停用项；Project/Scope/current 及 Side 状态
-仍为多选，满足同项“或”、跨项“且”，无 ID 输入框，列表 ID 仍可见。两类会话默认最近更新降序，创建时间与最近更新均可切换升降序；使用超过
-一页的匹配会话核对先全局排序后分页，同时间稳定以 ID 排序，缺失更新时间始终置末。
-验证普通会话重置恢复 Active、最近三个月更新时间、最近更新降序和每页 20 条；Side
-恢复其默认状态与全部时间。分别选择 10/20/50/100，确认前后翻页、
-页码与当前页条数正确；在 P2P、普通群和话题群 Binding 上确认显示真人/群名称与正确类型，
-重复刷新命中缓存，名称链接能打开对应飞书会话，话题行只承诺打开所在会话。100 条页面的
-首屏不得向单次 runtime snapshot 请求发送超过 50 个 ID。停留两个会话列表均不应发起
-周期查询或失败重试，手动刷新及操作后刷新仍生效，成功后更新时间、失败保留旧时间；
-登录和维护操作的轮询保持原样。依次验收 Project
-register/create/enable/disable，
-确认 Admin 不再展示新建会话入口，已登录请求旧 `/api/v1/sessions/create-lazy` 返回 404。
-在飞书准备两个 Scope 中 active/inactive、Lazy/materialized/archived Binding，验收 activate/
-configure/rename/archive/两种 unarchive/delete-lazy/Stop/Release，以及一个 open Side 的 exact
-Close。Sessions 的“临时会话”默认选择 creating/open，使用项目和群选择器、状态多选与
-创建时间，默认每页 20，支持 10/20/50/100 与前后翻页；没有 Parent/Topic/Root ID 筛选。
-反复切换两个二级 Tab，确认各自的筛选草稿、已应用查询、排序和分页保留，普通列表操作
-不变，隐藏 Tab 和旧页的异步结果不更新当前页面。查询失败时保留同一份列表、排序、页码和
-已应用条件，筛选草稿不丢失；延迟旧查询的成功或失败
-响应，确认都不能覆盖后来查询的结果或提示。切换排序回第一页且不提交筛选草稿；目录
-失败/恢复或会话更新后重新从第一页查询，不要求跨请求固定快照。无首轮问题的
-Side 创建期间打开列表，确认完成创建后手动刷新可显示可用状态及操作；同一任务追加消息
-不应禁用仍合法的结束操作。检查来源会话名称与话题链接、折叠 ID、来源已删除但仍存活
-Side 的项目展示和筛选，以及已结束记录没有“无进程内 Session”提示。
-在 disposable Side 执行中点击停止，确认只停止该 Turn，后续仍可继续；保留旧页并在飞书
-开始新 Turn，旧停止操作须明确拒绝，不得停止新 Turn。结束与飞书 `/side close` 的结果
-一致，关闭未确认时不显示已结束；只读运行态接口不能重新签发操作授权。
-再创建两个 disposable materialized Binding，分别保持 active catalog 与 archived
-catalog：两行仅在 Delete capability 可用时显示删除；点击后浏览器二次确认必须显示会话、
-Scope、short ID 与完整永久级联后果，取消必须零 mutation，确认后才删除对应
-Thread/descendants 与 Binding。删除 inactive 行不得改变其他 active pointer，删除 current 行
-才清空 pointer；不得先 activate、unarchive 或 Stop。Lazy 行仍通过既有二次确认删除本地
-Binding。
-另以 disposable Project 关联 Lazy、active、archived 会话和一个 open Side，确认 Project
-删除窗口计入所有关联项，不受 Sessions 筛选影响；取消零 mutation，确认后关闭 Side 并
-逐个删除会话，磁盘标记文件保留，Project 消失而 Side 墓碑仍在。执行期间从另一入口尝试
-新建关联会话、Side 或重新启用，均应拒绝。验证部分失败/断线后 Project 仍停用且显示
-剩余项，不把结果未知显示为整体成功。重启时 YAML 不应恢复已删除 Project；显式复用
-alias 后旧 revision/action 必须失效。数据库边界变更还应针对候选验证受支持版本迁移与
-不受支持库只读拒绝、当前库重装的 metadata 保留，以及失败／中断恢复和候选新数据
-保留；按[数据库迁移验收](#数据库迁移与中断恢复验收)记录与此边界相关的真实结果。
-双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact native
-identity 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
-墓碑不变；journal 不得出现 credential、cookie/action token、cwd、name/preview 或 body。
-最后占用 configured port 再启动实例，确认明确报错、不漂移端口，并保留已经提交的迁移；
-释放端口后显式 start。以上真实浏览器、跨主机与端口失败边界属于 Admin Web 首次
-上线或相关边界变更的 live 验收，本地 loopback 单测不能替代。
+Admin 矩阵须从另一台受信内网主机，经 `/admin` 给出的实际端口访问
+`http://<服务器 IP>:<实际端口>`。真实浏览器、跨主机和端口失败场景是首次上线或相关
+边界变更的 live 门禁，loopback 单测不能替代；各行同时核对当前契约。
+
+| 场景／注入 | 预期观察 | 证据类型 | 当前契约 |
+| --- | --- | --- | --- |
+| A01 未登录访问 `/`、未知 route、受保护 API、公开登录资源与 `/health/ready`；再飞书登录 | `/` 303 到 `/login`，不返回 HTML/状态；未知 route/API 401；仅明确公开的登录页、资源和授权端点进入预认证，仍有浏览器绑定/同源检查；ready 无细节。名单核验后各管理页可访问。 | 跨主机真实浏览器/HTTP | [认证](design.md#admin-http-与认证) |
+| A02 打开 Sessions 普通会话、组合筛选并重置 | 默认 Active、最近三个月更新时间；Active/Archived/Lazy 单选，无 Missing/Unknown。Project 可搜索含停用项；Project/Scope/current 及 Side 状态多选，同项或、跨项且；无 ID 输入框但列表 ID 可见。普通重置恢复 Active、三个月、最近更新降序、20 条；Side 恢复默认状态及全部时间。 | 真实浏览器 | [目录][验收2] |
+| A03 超过一页匹配会话，切换创建/最近更新时间升降序及 10/20/50/100 页容量 | 两类列表默认最近更新降序，先全局排序再分页、同时间按 ID 稳定排序、缺失更新时间置末；前后页、页码和条数正确。排序回第一页且不提交筛选草稿；目录失败/恢复或会话更新后从第一页重查，不要求跨请求固定快照。 | 真实浏览器/请求记录 | [目录][验收2] |
+| A04 P2P、普通群、话题群 Binding 刷新与名称链接 | 真人/群名、类型正确；重复刷新命中缓存；名称打开对应会话，话题行只承诺所在会话。 | 真实浏览器及飞书点击 | [位置链接](design.md#聊天名称与位置链接) |
+| A05 100 条首屏；停留两类列表、手动及操作后刷新 | 单次 runtime snapshot ≤50 ID；无周期查询/失败重试。成功更新刷新时间、失败留旧时间；登录/维护轮询不变。 | 浏览器网络记录 | [运行态](design.md#运行态投影与轮询) |
+| A06 Project register/create/enable/disable；查旧建会话入口 | 操作成功；Admin 无新建会话入口，已登录请求 `/api/v1/sessions/create-lazy` 返回 404。 | 真实浏览器/API | [管理动作][验收5]、[Project](design.md#project-登记与准入) |
+| A07 飞书准备两个 Scope 的 active/inactive、Lazy/materialized/archived Binding 和 open Side | 逐项验收 activate/configure/rename/archive、两种 unarchive、delete-lazy、Stop/Release 及 exact Side Close。 | 飞书准备＋真实浏览器/native 结果 | [管理动作][验收5] |
+| A08 临时会话筛选/分页，反复切换两个 Tab | Side 默认 creating/open、20 条，支持项目/群选择器、状态多选、创建时间及 10/20/50/100 前后页，无 Parent/Topic/Root ID 筛选。各 Tab 草稿/已应用查询/排序/分页独立保留，普通操作不变，隐藏 Tab/旧页异步结果不更新当前页。 | 真实浏览器 | [目录][验收2] |
+| A09 查询失败及旧查询延迟成功/失败 | 同份列表、排序、页码、已应用条件及草稿保留；旧响应不得覆盖新结果或提示。 | 浏览器故障/迟到响应注入 | [目录][验收2] |
+| A10 无首轮问题的 Side 创建中看列表，创建后刷新；同任务追加；删除来源后再查 | 刷新可见可用状态/操作，追加不禁用合法结束；来源名称、话题链接、折叠 ID 正确，来源已删的存活 Side 仍可按项目展示/筛选，已结束记录无“无进程内 Session”提示。 | 飞书＋真实浏览器 | [目录][验收2] |
+| A11 disposable Side 执行中停止；保留旧页后开始新 Turn；结束/未确认关闭 | 停止仅作用该 Turn，后续可继续；旧停止拒绝且不误停新 Turn；结束与 `/side close` 一致，未确认不显示已结束；只读运行态接口不重新签发授权。 | 真实浏览器/native；陈旧授权注入 | [管理动作][验收5] |
+| A12 active/archived 各一 disposable materialized 行及 Lazy 行：取消/确认 Delete | 仅 capability 可用时 materialized 显示删除；二次确认含会话、Scope、short ID、永久级联后果，取消零 mutation，确认才删 Thread/descendants/Binding；inactive 保留其他 pointer，current 才清空，不先 activate/unarchive/Stop。Lazy 仍确认后只删本地。 | 真实浏览器＋disposable native | [删除][验收7]、[管理动作][验收5] |
+| A13 disposable Project 关联 Lazy/active/archived 与 open Side；取消、确认；并发新建/重新启用 | 清单不受 Sessions 筛选影响，取消零 mutation；确认先关 Side 再逐项删会话，保留磁盘标记，Project 消失、Side 墓碑保留；执行期间新关联会话/Side/启用均拒绝。 | 真实浏览器/native＋并发入口 | [Project 删除][验收8] |
+| A14 Project 删除部分失败/断线；重启；显式复用 alias | Project 保持停用并展示剩余项，未知不报整体成功；YAML 不复活已删 Project，旧 revision/action 在 alias 复用后失效。 | 故障注入/重启＋浏览器 | [Project 删除][验收8] |
+| A15 数据库边界变化的候选 | 受支持版本迁移、不支持库只读拒绝、当前库重装 metadata 保留、失败/中断恢复及候选新数据保留均按[专项](#数据库迁移与中断恢复验收)记录真实结果。 | 受影响平台迁移实测 | [数据契约][验收9] |
+| A16 双击同 action；飞书并发操作同目标；重启并查 journal | 双击 stale/consumed，只有符合 exact native identity 的一方提交；旧 Admin session 失效，持久 Binding/设置/Side 墓碑不变；日志无 credential、cookie/action token、cwd、name/preview、body。 | 真实浏览器/飞书并发、重启与日志 | [管理动作][验收5]、[失败](design.md#失败语义) |
+| A17 占用 configured port 后启动，释放后显式 start | 明确失败、端口不漂移；已提交迁移保留，释放端口后可显式启动。 | 目标主机真实端口失败 | [部署事务](design.md#部署事务与操作状态) |
 
 1. P2P `/help`、exact `/new`、`/sessions`、`/status`（native=pending）；`/sessions`
    返回分页卡片，将 active Binding 置顶、将 lazy Binding 显示为“新会话”，有原生
@@ -1589,58 +1558,24 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    切换会话后旧面板拒绝操作；同会话换轮后停止当前轮，不能因面板生成时 Turn 不同而拒绝。
    Side 的 Parent 切换不影响按钮，Side 关闭／过期后拒绝；状态卡消息 ID 不得当作 Side 根 ID。
    入口重绘失败须提示重新发送 `/status`，不得因此重放刚才的命令。
-2. 通过 `/new` 卡片选择 `test` Project、inherit Codex，保持 Reaction Pulse 关闭并手动关闭
-   Progress Card 后发送首条 prompt：native accepted 后原消息常驻 `Typing`，但整轮零
-   `THINKING`、零进度卡和零心跳回复；成功 steer 的消息添加 `OnIt`，原任务锚点不迁移。
-   终态先添加 completed/failed/interrupted 对应的 `DONE`/`ERROR`/`CrossMark`，再移除
-   `Typing`。无文件终态仍是富文本/静态文本，有文件终态仍只有现有“最终回复 +
-   本轮文件”卡片。手机端可能把这些稀疏生命周期表情显示为少量独立消息，这是已接受的
-   取舍。故意使 `OnIt` 失败时，只在 native steer 已成功后收到文字 fallback。
+2. 反馈验收使用 `/new` 卡选择 `test` Project、inherit Codex；按矩阵切换 Reaction Pulse
+   与 Progress Card，并分别记录原生执行、实际飞书投递和客户端显示。
 
-   用 `/config` 只开启 Reaction Pulse 后再启动长 Turn：Lifecycle Reaction 与上述关闭组
-   相同，但 `THINKING` 按低频节奏显示/隐藏，终态再与 `Typing` 一起清理。
+   | 场景／注入 | 预期观察 | 证据类型 | 当前契约 |
+   | --- | --- | --- | --- |
+   | F01 保持 Pulse 关闭、手动关闭 Progress 后发送首条 prompt 并 steer；覆盖三种终态 | accepted 后原消息常驻 `Typing`，零 `THINKING`、进度卡、心跳；steer 成功消息有 `OnIt` 且锚点不迁移。终态先加 completed/failed/interrupted 对应 `DONE`/`ERROR`/`CrossMark` 再移除 `Typing`；无文件用富文本/静态文本，有文件仅现有“最终回复＋本轮文件”卡。手机少量独立生命周期表情消息是接受的取舍。 | 原生结果＋桌面/手机飞书 | [表情][验收13] |
+   | F02 使 `OnIt` 失败；`/config` 只开 Pulse 后启动长 Turn | 仅 native steer 成功后有文字 fallback；Lifecycle Reaction 同关闭组，`THINKING` 低频显隐，终态与 `Typing` 一起清理。 | 投递故障注入＋真实长 Turn | [表情][验收13] |
+   | F03 只开 Progress，产生 checklist、无 plan、observer unavailable | accepted 后除表情外仅一张运行卡、顶部过程展开；status/checklist `✓/→/○` 更新同一 message ID；无 plan 为“Codex 尚未生成”，不可观察为“暂不可用”。无耗时/百分比/ETA、reasoning、raw command/tool output、arguments、MCP server。 | 原生 Activity＋真实卡；故障注入 | [投影][验收14]、[呈现][验收15] |
+   | F04 至少一条最近进展和操作；操作 started→completed | Card 2.0 本地化日期/分钟正确，完成后切 exact completion 时间，checklist 无时间；进展最多四条，正文直接跟 `·`、无额外 `•`。 | 原生时间证据＋客户端渲染 | [投影][验收14] |
+   | F05 命令分类已知/未知/复合/空对象、非零退出码、文件/网页、多查询、MCP/dynamic tool 与特殊 Markdown | 显示原生路径/查询，分类不可用时原命令预览、不猜意图、保留非零码；文件/网页显示原生对象，进展保留普通路径/链接/代码而隐藏凭据。操作单行≤120 字符、文件/查询最多前三项、分页详情保留；工具名 exact，动态 Markdown 不注入标签。 | 原生字段＋客户端/分页，合成异常输入 | [投影][验收14] |
+   | F06 成功 steer 后等新 plan；完成有/无文件及有/无 partial | 旧 checklist 标过期，新 plan 整体替换；同卡终态折叠过程并显示结果，文件分页/callback 保留：无 partial 用 v4、有 partial 用 v5。 | 原生 steer/plan＋真实卡回调 | [状态 Activity](design.md#状态查询中的-activity)、[呈现][验收15] |
+   | F07 initial、中间一次及连续三次 card update 失败；失败期多 revision，随后恢复 | native Turn 始终继续；initial 直接回退；单次中间失败下一轮更新原卡，仅最新快照，成功清零失败计数；连续三次停轮询，恢复后终态仍独立更新原卡且不新增回复。 | 投递故障注入 | [呈现][验收15] |
+   | F08 单次/连续终态更新失败，或终态/关闭发生于轮询等待 | 单次重试原卡，成功只发一次结束提醒；连续失败最多三次、间隔 0.5 秒、整组≤5 秒，再标准回退；终态/关闭立即唤醒，不等剩余重试，零重试风暴。 | 投递故障及等待竞态注入 | [呈现][验收15] |
+   | F09 两项同时开，在 P2P、群主线、普通话题各一次 | 两套 presenter 并存且最终结果不重复。 | 三类真实飞书入口 | [反馈设置](design.md#反馈设置与结束提及) |
+   | F10 普通、持久 fork、Side 分别开/关 Progress，产生多个 completed partial | 初始无空模块，按原生顺序同卡更新或逐条富文本，零完成 @/DONE/提前槽释放；终态 partial 始终展开，保留 final 自身复述、不机械重发片段；partial-only 仅确认交付后相应收尾。 | 分列原生生成、真实发送、客户端显示；未生成不可用合成冒充 | [阶段性答案][验收18]（ADR 0079） |
+   | F11 partial 重复事件、终态补读、明确失败/未知发送、观察降级、failed/interrupted；阻塞更新后终态/Side close | 沿 F10 交付判据；Side 降级后 failed `run()` 抛错仍保留已观察片段，不虚构未取得 items 的恢复；容量超限沿既有规则、无 partial 专用兜底；Goal logical reply 同判据，管理卡成功不算答案交付。 | 故障/竞态注入＋原生及投递分层记录 | [阶段性答案][验收18] |
+   | F12 running `/status`；可观测完成并排空 usage，再新 Turn、快速 Turn、无新 usage | running 显示完整 native ID、已接受 steer 次数及同一 checklist；完成显示窗口已用 tokens/上限/百分比。下一轮 running 保留标注“上一轮完成时”，完成覆盖；快速完成也读原 handle 保留通知，无新 usage 则清旧值、显示暂不可用。inherit 路径零模型目录读取、零 Model/Effort/Speed override。 | 原生 usage/请求记录＋飞书状态 | [状态用量](design.md#状态查询与用量) |
 
-   再只开启 Progress Card：native accepted 后除 Lifecycle Reaction 外只出现一张运行卡，
-   顶部过程区展开；status 与
-   原生 checklist（`✓/→/○`）变化必须更新同一个 message ID，无 plan 时显示“Codex 尚未
-   生成”，observer unavailable 时显示“暂不可用”。卡片不生成耗时、百分比或 ETA，
-   不显示 reasoning、raw command/tool output、tool arguments 或 MCP server。最近进展和
-   最近操作必须各验证至少一条 Card 2.0 本地化事件日期和分钟；started 操作完成后时间切换为
-   exact completion 时间，checklist 不显示时间。命令须展示原生 action 的路径/查询，分类
-   未知、复合或对象字段为空时显示原命令预览，存在非零退出码时保留该值；不猜测命令意图。
-   文件修改和网页操作须展示原生对象信息，进展文字须保留普通路径、链接和代码片段，明确
-   凭据仍隐藏。验证操作单行和 120 字符限制、文件/多查询最多前三项、分页后详情不丢失。
-   最近进展最多四条，每条正文直接跟在时间分隔符 `·` 后，不额外显示 `•`。
-   MCP/dynamic tool 须显示 exact 工具名，动态文本中的 Markdown 控制字符只影响文本、
-   不注入标签。
-   成功 steer 后旧 checklist 在新
-   plan 到达前标记可能过期，之后整体替换。终态在同一卡片折叠过程并显示结果；有文件时
-   同卡保留文件分页/callback：无阶段性模块时 v4，有阶段性模块时 v5。分别使 initial、中间和终态 card update 失败，native
-   Turn 都必须继续。单次中间失败后，下一轮应更新原卡；失败期间出现多个 revision 时只
-   发送最新快照，成功后清零失败计数。连续三次中间失败即停止轮询，此后恢复服务，终态
-   仍应独立更新原卡且不新增回复；单次终态失败后应重试同一原卡，成功后只发送一次结束提醒。
-   终态连续失败时，最多尝试三次原卡更新、间隔 0.5 秒且整组不超过 5 秒，再回退标准投递。
-   终态或关闭应立即唤醒轮询等待，不等待剩余重试次数。initial 失败仍直接回退，均不产生
-   重试风暴。最后同时开启两项，确认两套 presenter
-   并存而不重复最终结果，并在 P2P、群主线和普通话题各验证一次。
-
-   阶段性答案按 [ADR 0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)
-   验收：普通会话、持久 fork 和 Side 开关 Progress 两种形态，初始无片段不渲染空模块；
-   出现多个 completed partial 后按原生顺序更新同一卡或逐条富文本，零完成 @、DONE 与
-   提前槽释放。终态卡保留始终展开的阶段性内容，final 自身复述不删改，不机械重发已交付
-   片段；partial-only 仅在确认片段交付后给出相应收尾。覆盖重复事件、终态补读、明确
-   失败与未知发送、观察降级、失败/中断，以及阻塞运行态更新后终态或 Side close 的竞态。
-   原生生成、实际飞书发送和客户端显示分别记录；未触发原生 partial 时不得以合成事件
-   通过冒充已验证生成能力。另验证 Side 降级后 failed `run()` 抛错仍保留已观察片段，
-   不虚构后续未取得 items 的答案恢复。容量超限继续按现有规则处理，不新增 partial
-   专用兜底；Goal logical reply 使用同一交付判据，不得把管理卡发送成功当作答案已交付。
-
-   running 时 `/status` 仍出现完整 native ID、已接受 steer 次数和同一 checklist。在可观测
-   Turn 完成、公开 usage 通知已排空后 `/status` 显示当前
-   窗口已用 tokens、窗口上限和百分比。再启动一个普通 Turn 时，running `/status` 保留
-   并标注“上一轮完成时”的快照；本轮完成后覆盖为新值，快速完成的 Turn 也读取原始
-   handle 保留的通知。没有可用的新 usage 时清除旧值并显示暂不可用。该继承路径不得读取模型
-   目录或向 SDK 传 Model/Effort/Speed override。
 3. 零参数 `/new` 在存在 enabled Project 时保留一个创建 form，并增加独立的只读目录加载
    form，不显示任务输入或快捷创建按钮。工作区路径与分支选择按 [专项验收](#受管-worktree-专项验收)核对。
    Project 使用现有单个静态下拉框，并展示 Registry 中全部 enabled 项；同 Scope 当前或
@@ -1684,33 +1619,21 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    disabled、重名或 stale 引用不得发送 Turn/steer，lazy 会话也不得创建 Thread；已有
    空闲 Thread 可先恢复以取得实际 cwd，校验失败后按正常 idle 策略释放订阅。
    引用消息历史里的 `$skill` 不得激活，当前消息的引用仍正常。
-7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，管理快照与任务回复分开。
-   `/goal` 静态卡显示当前状态，只有再次查询或点击刷新/控制时更新，不承载答案与文件。
-   同一 Binding 的普通 Prompt 仍 steer 当前 exact 物理 Turn；`/config`、`/compact` 仍
-   被拒绝。准备期间换轮必须拒绝旧目标，不重投或新增 Turn；启动、停止中、收尾、unknown
-   与无安全 route 时拒绝。仅暂停或清除 Goal 后当前物理 Turn 仍运行时，继续允许精确 steer。
-   Progress Card 开启时，一个 SDK logical stream 复用一张普通回复卡；关闭时复用富文本
-   和有文件完成卡。rollover 不新发卡，Activity 切到新物理 Turn，阶段性答案在同一逻辑流
-   内累计；至少两轮验证去重与旧轮迟到事件。最终 Result/Files 只取 exact 最终物理 Turn。
-   `/goal pause` 只暂停后续续跑，`/goal clear` 只清除 Goal，均不中断当前 Turn、不中断结果
-   交付。执行中的同流 resume 不重复建回复或通知 route；旧流已结束时 resume 才开始新回复。
-   `/stop` 暂停 Goal 并中断 exact 当前物理 Turn，再执行 terminal cleanup；已显式 clear
-   时仅停止当前执行。paused、blocked、usage/budget limited 不自动 clear。logical stream、
-   persisted Goal、exact final Turn 与 Thread idle 四项证据完整，Goal complete 且 final
-   Turn completed 时才自动 clear；本进程已确认显式 clear 时允许 Goal absent，但仍须
-   核验当前执行与 final Turn，不能丢弃答案或文件。
-   管理操作与展示分开验证：卡片更新失败保留确定成功/失败回执，不重做原生 mutation；
-   未确认终态不得发送完成提及。旧按钮用原生稳定标记和当前状态校验，跨重启不依赖旧卡
-   owner；不同 Goal 必须拒绝，同秒同 objective/budget 重建的有限歧义按 ADR 0084 接受。
-   模拟 clear false、响应丢失和清理后仍可读，保留 mutation unknown、关闭 admission、
-   零自动重试；只读 get absent 不能解除这一隔离。阻塞终态交付时不得启动新 Goal；
-   非 unknown slot 在有界 handoff 后释放，shutdown 对已终态 Goal 零 pause/cleanup。
-   另模拟纯观察失败：只有当前 Goal 被保留，其他 Binding 仍可执行；原 consumer handoff
-   结束后，下一条消息或 `/goal` 有界只读重检，确认 Goal 非 active、Thread idle 且无
-   inProgress Turn 后允许新对话，零自动 clear/pause。原生仍 active、读取失败或身份错误
-   时保留占用，旧 steer token 不改投；mutation unknown 不按观察失败释放。
-   重启后外部 active Goal 不自动接管，仍提示在原生 Codex 处理；thread-scoped clear
-   无 generation CAS，不能声称已原子防止外部客户端并发替换 Goal。
+7. Goal 验收先通过 zero-Turn live gate，再执行下表；管理与任务回复分别取证。
+
+   | 场景／注入 | 预期观察 | 证据类型 | 当前契约 |
+   | --- | --- | --- | --- |
+   | G01 `/goal <objective>`、查询/刷新/控制 | 管理卡静态显示当前状态，仅查询/按钮时更新，无答案/文件；任务回复独立。 | 原生 Goal＋真实飞书卡 | [Goal][验收20] |
+   | G02 普通 Prompt、准备期间 rollover，以及 starting/stopping/收尾/unknown/无安全 route | 仅 steer 捕获的 exact 物理 Turn，换轮拒绝、不重投/新建；不可用状态拒绝，`/config`/`/compact` 拒绝；仅 pause/clear 后当前 Turn 仍运行则仍可 exact steer。 | 原生 rollover＋准入竞态注入 | [Goal][验收20] |
+   | G03 Progress 开/关，至少两轮 rollover、重复及旧轮迟到事件 | 一个 logical stream：开启同一普通回复卡，关闭富文本/有文件完成卡；rollover 不新发卡，Activity 换轮、partial 累计且去重，Result/Files 仅 exact final physical Turn。 | 原生多轮＋飞书展示/迟到事件注入 | [Goal][验收20]、[回复][验收15] |
+   | G04 pause/clear、同流与旧流结束后 resume、`/stop`，含已显式 clear | pause 只暂停续跑、clear 只移除 Goal，当前 Turn 和交付继续；同流 resume 不重复回复/route，旧流结束才新回复；stop 暂停 Goal、interrupt exact 当前 Turn、cleanup，已 clear 则只停止当前执行。 | 原生控制＋回复/route 记录 | [Goal][验收20] |
+   | G05 paused/blocked/usage/budget limited 与 complete；已确认显式 clear | 前四类不自动 clear；logical stream、persisted Goal、exact final Turn、Thread idle 四证齐备，complete＋final completed 才自动 clear。已确认显式 clear 可 absent，仍核验当前执行/final Turn，不丢答案/文件。 | 原生四证与 Result/Files | [Goal][验收20] |
+   | G06 管理卡更新失败、旧按钮、跨重启、不同 Goal/同秒同 objective-budget 重建 | 确定回执保留，不重做 mutation；未确认终态零完成提及。旧按钮核对原生稳定标记/当前状态，不依赖旧 owner；不同 Goal 拒绝，同秒完全相同重建接受 ADR 0084 有限歧义。 | 故障注入＋重启/真实卡 | [Goal][验收20] |
+   | G07 clear false、响应丢失、清理后仍可读，再 get absent | 保留 mutation unknown、关闭 admission、零自动重试；只读 absent 不解除隔离。 | synthetic fault | [Goal][验收20] |
+   | G08 阻塞终态交付，handoff 与 shutdown | 交付期间不启动新 Goal；非 unknown slot 有界 handoff 后释放；已终态 Goal shutdown 零 pause/cleanup。 | handoff/shutdown 同步故障注入 | [Goal][验收20] |
+   | G09 纯观察失败；consumer handoff 后新消息或 `/goal` 重检 | 只保留当前 Goal，其他 Binding 可执行；有界只读确认非 active、Thread idle、无 inProgress 才可新对话，零自动 clear/pause；active/读取失败/身份错误仍占用，旧 steer token 不改投，mutation unknown 不走此释放。 | 观察故障/身份/并发注入 | [Goal][验收20] |
+   | G10 重启后外部 active Goal；外部客户端并发替换 | 不自动接管，提示在原生 Codex 处理；thread-scoped clear 无 generation CAS，不声称原子防替换。 | 重启原生状态核对；能力限制记录 | [Goal][验收20] |
+
 8. 长 Turn 中发第二条消息，结果必须被 steer 改变；native steer 失败时不得出现
    `OnIt` 或 steer count，必须明确提示本条未执行。故意使 `OnIt` 投递失败时，只在 native
    steer 已成功后收到“已接收调整”兜底，原 Turn pulse 不受影响。
@@ -1763,47 +1686,23 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
 17. 首次上线或 callback operator/Scope 路由边界变化时，由群内另一名真实参与者点击设置
     卡片的刷新操作，确认 callback operator 不受 Netizen allowlist/ACL 限制且响应不转为
     私聊；单账号自动化契约不能替代这项跨账号验收。
-18. 在一个 idle materialized 当前会话上验收 `/rename` 直接参数和无参数卡片，Codex
-    App/CLI 与 `/sessions`、`/status` 都应看到同一原生名称。打开 `/archive` 卡后先切换
-    会话，旧卡必须提示 active 已切换且零 mutation；新 current pointer 保持不变。另从
-    `/sessions` 的 exact 行打开归档确认卡，切换 current 后仍可归档该行且保留新 pointer。
-    归档当前会话时 pointer 才清空，Binding 配置保留，普通 `/sessions` 不显示它而
-    `/sessions archived` 显示。用卡片或 `/unarchive <短 ID>` 恢复并自动切换。Lazy 会话的
-    `/delete` 必须显示红色不可恢复二次确认并只删 Binding；确认前若它已物化则旧卡必须
-    stale。materialized `/delete` 必须显示原生 Thread、spawned descendants、Codex App/CLI
-    历史与 Binding 均永久删除的红色确认卡；`/delete` 确认前切换 current 必须零 mutation，
-    `/sessions` exact 行删除则不受 current 切换影响。两者均不以 Turn/Goal/Compaction
-    状态变化使确认失效，但 Binding/native Thread 身份变化必须零 mutation。正常确认
-    后仅根据原生成功响应删除 Binding/pointer；另对自建样本核查 root 与 descendants 已从
-    四个目录视图消失，检查不得变成生产删除的前置或失败收尾条件。
+18. 生命周期使用自建 disposable 样本；response loss/明确拒绝用 synthetic fault，
+    不在真实账号手工制造。目录核查只作独立验收，不加入生产删除前置或失败收尾。
 
-    `thread/delete` response loss 与明确拒绝由 synthetic fault 覆盖，不在真实账号手工制造；
-    `make check` 验证：仅原生成功响应提交 Binding 删除，明确 RPC 错误保留 Binding、清理
-    可能失效的活动投影后允许重新确认，传输/响应未知保留 Binding-local lifecycle-unknown。
-    not-found 不等同成功，任何失败都不能追加 list/read 对账或自动再次调用 delete。
-    同一 Scope 的其他 Binding 必须仍可 start/steer/lifecycle。archive 的响应不确定性同样只做
-    一次 active/archived 目录对账：exact ID 只在 archived 时提交，仍 active 时释放 reservation。
+    | 场景／注入 | 预期观察 | 证据类型 | 当前契约 |
+    | --- | --- | --- | --- |
+    | L01 idle materialized current 的 `/rename` 参数/无参数卡；打开 `/archive` 后切换 current | App/CLI、`/sessions`、`/status` 名称一致；旧 `/archive` 卡提示 active 已切换、零 mutation，新 pointer 不变。 | 原生 App/CLI＋飞书卡 | [生命周期][验收21] |
+    | L02 `/sessions` exact 行确认前切 current/替换 Turn，归档非当前/当前行 | 旧行确认仍有效，目标入 archived；非当前保留 pointer，当前才清空；配置保留，普通列表隐藏、archived 列表显示。原卡刷新，删去末页唯一项后夹取页码。 | disposable native＋飞书真实卡 | [列表控制][验收22] |
+    | L03 Lazy `/delete` 和 `/sessions` 非当前 Lazy 删除；确认前物化 | 红色不可恢复二次确认只删本地 Binding；第一次点击仅 exact 目标确认卡、零 mutation；物化使旧卡 stale，inactive 保留 pointer、current 清空。 | 本地行为＋飞书卡 | [列表控制][验收22] |
+    | L04 materialized `/delete` 与 `/sessions` exact 行；切 current、改变 Turn/Goal/Compaction 或 native identity | 第一次点击仅红色确认卡、零 mutation，完整列明 Thread、spawned descendants、App/CLI 历史及 Binding 永久删除；命令保持 current-only、切换即零 mutation，exact 行不受切换影响。运行状态变化不使确认失效，Binding/native 身份变化必须零 mutation；仅本次原生成功才删 Binding/pointer。 | disposable native＋卡片/身份竞态 | [删除][验收7]、[列表控制][验收22] |
+    | L05 `/sessions` 删除非当前/当前 materialized、末页唯一项；`/sessions archived` 独立两阶段 Delete | 非当前/archived 保留 pointer、current 清空，页码夹取；archived 不先 unarchive。active/archived 共用 native-first primitive/返回处理；自建 root/descendants 从四目录视图消失。 | disposable native 四视图＋飞书回调 | [删除][验收7] |
+    | L06 `thread/delete` 成功、明确 RPC 拒绝、not-found、传输/响应未知 | 仅成功响应提交删除；明确拒绝保留 Binding、清可能失效的活动投影后可重新确认；未知 Binding-local lifecycle-unknown，not-found 不是成功。任一失败零 list/read 对账/自动 delete，同 Scope 其他 Binding 仍可 start/steer/lifecycle。 | `make check` synthetic fault | [删除][验收7] |
+    | L07 archive 响应不确定 | 仅一次 active/archived 目录对账，exact ID 在 archived 才提交、仍 active 则释放 reservation。 | synthetic fault/有界目录记录 | [归档][验收7] |
+    | L08 running/stopping/turn-observation-unavailable/Goal/Compaction 上 Archive/Delete | 直接委托 App Server，不先 interrupt/pause/cleanup、恢复/读取 Turn、等 terminal 或证明 idle；归档入 archived、删除从四视图消失；原生成功后取消本地 observer。 | disposable native 各状态＋调用顺序 | [归档与删除][验收7] |
+    | L09 ephemeral/未持久化、App Server/存储不可达、compatibility gate 不可用 | 明确失败且保留 Binding，不伪造成新 Thread 状态。 | synthetic capability/故障＋原生拒绝 | [归档与删除][验收7] |
+    | L10 卡片或 `/unarchive <短 ID>`，含目标已 current、缺失/外部占用、unarchive 成功后后续失败/未知 | 正常恢复并自动切换；按 ADR 0082 单次 unarchive/resume 原生结果，零额外目录预检。已 current 不回退 catch-up anchor/revision；缺失/占用保留关联及原 current，部分成功如实反馈，未知仅隔离目标 Binding。 | disposable native＋故障/旧卡注入 | [归档恢复][验收21] |
+    | L11 `/archive`/`/delete` 带目标参数及列表 exact 删除 | 命令拒绝参数且 current-only；列表删除仅复核 exact Scope/Binding/native 身份并委托 App Server，无额外目录预检。 | 命令/回调行为 | [命令][验收12]、[列表控制][验收22] |
 
-    分别在 running、stopping、`turn-observation-unavailable`、Goal 和 Compaction 上发起
-    Archive/Delete；Netizen 必须直接委托 App Server，不先 interrupt、pause、terminal cleanup、
-    恢复/读取 Turn、等待 terminal 或证明 idle。归档只进入 archived catalog，删除从四视图
-    消失；原生成功后本地 observer 被取消。ephemeral、未持久化、App Server/存储不可达和
-    compatibility gate 不可用仍必须明确失败并保留 Binding，不能伪装成新的 Thread 状态。
-
-    另在 `/sessions` 中归档 materialized 非当前行，确认真实 active pointer 不变、目标移入
-    archived catalog、原卡刷新并在删除末页唯一项时夹取页码；再归档当前行，确认 pointer
-    为空。确认期间切换 active 或令目标替换 exact Turn 不使旧生命周期按钮 stale。再从
-    `/sessions` 分别删除 idle Lazy 与 materialized 非当前行：第一次点击只出现带 exact 目标
-    的红色确认卡，最终确认后 active pointer 保持不变；删除当前行时 pointer 清空。切换
-    active 或改变目标运行状态不使 materialized 确认失效，Lazy 物化或改变 exact native ID
-    必须使旧按钮零 mutation；删除末页唯一项后页码夹取。另从 `/sessions archived` 对 exact
-    archived 行完成独立二次确认 Delete，确认不先 unarchive、active pointer 不变且 spawned
-    descendants 随 root 从四视图消失。active 与 archived materialized delete 必须复用同一
-    native-first primitive 和原生返回处理。`/archive` 与 `/delete` 仍不接受目标参数且保持
-    current-only；归档列表恢复按 ADR 0082 的单次 unarchive/resume 原生返回处理，删除只复核
-    exact Scope/Binding/native 身份并交给 App Server，两者均不额外目录预检。恢复已是 current
-    的目标不能把 catch-up anchor/revision 回退到旧卡；目标缺失或外部占用时保留关联和原
-    current，已解除归档但后续失败须反馈部分结果，未知只隔离目标 Binding。
 19. 在已物化 Parent 上分别从 P2P、P2P 话题、普通群主线、普通群话题和话题模式群触发
     `/side`；从已有话题触发必须得到同 chat 的 sibling，不得留在或嵌套原话题。P2P 与
     P2P Side 话题无需 @，三类群入口及 Side 后续每条消息都必须 @。每个 Side 连续完成
@@ -1834,14 +1733,28 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     过期。若
     P2P 建话题返回 230071，记录为当前飞书 live gate 未通过并保持 Side unavailable，不能
     以单元测试替代。
-20. 在普通持久 Turn 中分别用 native Turn diff 和结构化 items 生成 Project 内普通文件、
-    Project 外普通文件、Codex 原生 generated-images 目录中的 PNG/JPEG/GIF/WebP 图片和
-    至少 18 个文件；native diff 还须覆盖 multi-hunk、非空新增/删除、纯 rename、binary、
-    copy/mode-only/空文件 metadata 与异常 hunk，确认完整 hunk 和纯 rename 的整轮、逐文件
-    `+N -M`，并确认图片/binary/其他 metadata-only/异常不显示伪造数字。另对 100、400
-    个带逐文件 `a/d` 的 synthetic manifest 发真实目标应用卡片，确认平台
-    完整 create/update。在源码 checkout、目标部署账号的 login 环境中，以目标应用配置和
-    专用测试群执行真实容量 probe；任一 count 非零即不通过：
+20. Files 按下表分别记录 native 证据、目标应用 API create/update 和真实客户端点击；
+    API ACK、合成 manifest 或 callback 不单独证明客户端、原生生成或完整容量验收。
+
+    | 场景／注入 | 预期观察 | 证据类型 | 当前契约 |
+    | --- | --- | --- | --- |
+    | X01 普通持久 Turn：native diff/structured items 生成 Project 内/外文件、generated-images 的 PNG/JPEG/GIF/WebP，至少 18 个；diff 含 multi-hunk、非空新增/删除、纯 rename、binary、copy/mode-only/空文件 metadata、异常 hunk | 完整 hunk 与纯 rename 的整轮/逐文件 `+N -M` 正确；图片/binary/其他 metadata-only/异常不造数字。 | 真实 native diff/items | [文件证据][验收23] |
+    | X02 100/400 个带逐文件 `a/d` 的 synthetic manifest，另造 401 个 | 100/400 真实目标应用完整 create/update，下方容量 probe 任一 count 非零即失败；401 本地明确拒绝、不截断，保留目标应用 96.9 KB 返回 230099/200800 的证据。 | synthetic 边界＋目标应用容量 probe | [文件容量][验收23] |
+    | X03 Progress 开/关 × 有/无 Files、partial | 关闭时无文件仅富文本/静态文本，有文件仅一张“最终回复＋本轮文件”完成卡；开启时均更新最初运行卡，Files manifest 无 partial 用 v4、有 partial 用 v5。 | 真实飞书展示/更新 | [回复呈现][验收15] |
+    | X04 Goal resumed exact final physical Turn completed 并创建临时文件，前轮也有文件 | 最终文件进同一逻辑回复卡，按 partial 选 v5/v4，不聚合 rollover 旧轮；live Goal phase 用成功 `fileChange` 验证累计行数，唯一 notification stream 的 latest aggregate diff 仅验证文件发现，旧 snapshot 不泄漏。 | 必须原生 Goal live phase＋飞书卡 | [Goal Files][验收23] |
+    | X05 Side exact completed Turn | structured items 进对应完成/进度卡并显示成功 patch 累计；不补 Side aggregate diff、旧 Side Turn 或无受支持 native 事实文件。 | 原生 Side＋飞书卡 | [Side Files][验收23] |
+    | X06 child/fileChange SDK 合同变更：已登录新建 child 写文件、parent 再修改；child 运行中/不可读 | 累计双方成功 patch、排除继承历史并保留原生 parent 与 Turn/item 归属，不能当净 diff；子任务未终态/不可读只省略总计、保留已知逐文件数字，completion 不等待。下方独立 child probe 无 live 条件须记未验证，不以 synthetic 替代。 | 独立真实 child probe（非常规 phases） | [子任务统计][验收23] |
+    | X07 文件列表/分页与 callback payload | Project 内相对路径、外脱敏逻辑位置；隐藏大小、按钮统一“发送”，每页 8 个完整翻页；正文无绝对路径/文件列表预览/diff/发送全部。v5 payload 每项明文 absolute path、已知统计成对 `a/d`；翻页保留整轮统计及 Activity/Partial Answer/Result。 | 卡片正文＋实际 payload | [文件卡][验收23] |
+    | X08 P2P 平面、群主线、已有话题发送普通文件/图片 | 平面卡成为锚点话题，记录真实 root/parent/thread；已有话题同 thread ID，能预览/下载实际文件。 | 三入口真实飞书点击/返回 | [发送][验收23] |
+    | X09 切另一 Binding；正常重启 Netizen/App Server 后操作旧 v5 卡 | 均可翻页/发送；重启仅从完整 callback manifest 恢复，不读 source card、Binding 或 completed Turn。 | 重启前后真实回调/读取记录 | [自包含文件卡][验收23] |
+    | X10 至少三页：第二→第一→第二并提交，再末页；同渲染 callback 重投、nonce 缺失/畸形 | 每次仅更新原卡、最后同值仍生效；重投只处理一次，当前版 nonce 异常仍按业务字段解码。普通 v4 与无 partial 的 v5 可用；v3 明确过期、不发文件/读 history，推广前其他旧 schema 与混合 Goal/答案测试卡不在兼容范围。 | 真实页码表单＋synthetic nonce/旧版 | [分页][验收23] |
+    | X11 重复发送；点击前删文件/改目录/同路径重绑其他普通文件/删原卡；翻页缺失条目 | 重复不多发；文件缺失/目录/删卡失败，重绑发点击时内容；失败保原卡、无文件落主聊天。最终回复逐字保留，缺失项留原页标不可用。 | 真实点击＋本地目标变化 | [发送][验收23] |
+    | X12 100/400 文件大卡真实 create/update；末页→中间→首页跳转；重启；单页/超容量 | 多页仅页码下拉＋一个“跳转”，单页无导航。真实 submit 同时保留完整 `value` manifest 和页码 `form_value`，可反复跳转，仅提交按钮含完整 manifest；同卡重启前后保留 Activity/Partial Answer/Result 及整轮/逐文件统计。记录实际序列化 bytes/平台返回，各页≤55,000 bytes，任一页容不下即明确省略 Files、不截断；无 live 条件记未验证。 | 必须真实表单点击/完整回调，不能仅合成或 API ACK | [分页容量][验收23] |
+    | X13 ordinary/Side/Goal 最终正文引用本地图片，含无 native 文件证据的既有图片；Progress 开/关、整卡更新 | 无 Files 保持原富文本；核对相对 cwd、图片渲染/放大、GFM 表格/删除线/任务列表及飞书标签。正文引用不增 Files、旧按钮可用、代码示例不上传；重复图仅上传一次，删图并重启后翻页保正文图，Files 按规则不可用。 | 三类执行＋真实客户端渲染/重启 | [正文图片][验收24]（ADR 0065） |
+    | X14 强制图片上传/结果卡发送失败；长回复、平铺与定时部分/未知投递 | 上传失败仅该位置；卡发送失败的富文本回退保已上传图及完整分段文字，不重传/重复提醒。长回复分段留原话题，平铺仅首段引用、完成提及仅首段；定时部分/未知不重发。此客户端 live gate 仍须真实目标应用验收，合成不算通过。 | 故障注入＋真实客户端/投递记录 | [正文图片][验收24]、[呈现][验收15] |
+    | X15 P2P 返回 230071；全部操作后核对持久状态 | 230071 记 Files live gate 未通过，不以 FakeChannel/主线发送替代；当前 schema 表、Binding、Turn settings、Task Feedback、Context Boundary 与 Side route 行数不变。 | 真实平台错误＋数据库前后对照 | [文件发送][验收23]、[数据契约][验收9] |
+
+    X02 容量 probe 在源码 checkout、目标部署账号 login 环境中，以目标应用配置和专用测试群执行：
 
     ```bash
     set -euo pipefail
@@ -1857,22 +1770,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     done
     ```
 
-    401 个必须在本地门禁中明确拒绝且不截断，并保留目标应用
-    96.9 KB 请求返回 230099/200800 的容量证据。Progress Card 关闭时，无文件 Turn 必须仍
-    只有富文本/静态文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
-    现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
-    包含自包含 manifest（无阶段性模块时 v4，有阶段性模块时 v5）。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
-    逻辑执行回复卡，manifest 同样按有无阶段性模块选择 v5/v4，而更早 rollover Turn 的文件不会被猜测
-    聚合；Side exact completed Turn 的 structured items 进入对应完成/进度卡，并显示
-    成功 patch 的累计行数；Side aggregate diff、先前 Side Turn 和未进入受支持 native
-    事实的文件不会被补齐。Goal live phase 必须让 resumed exact final physical Turn 创建
-    一个临时文件，从成功 `fileChange` 验证累计行数；同一唯一 Goal notification stream
-    的 latest aggregate diff 只验证文件发现，更早 physical Turn 的 snapshot 不得泄漏。
-    修改 child/fileChange SDK 合同时，在已登录环境另验证真实新建子任务：child 创建文件、
-    parent 随后修改，确认累计两者成功 patch、排除继承历史，并保留 child 的原生 parent
-    与 Turn/item 归属证据；不能把累计结果当作最终净 diff。子任务运行中或无法读取时只
-    省略总计，已知文件数字保留，completion 不等待子任务终态。没有 live 条件时明确报告
-    未验证，不能以 synthetic 代替。可在服务账号的已登录环境运行
+    X06 独立子任务探针可在服务账号的已登录环境运行：
     `timeout --signal=INT --kill-after=10s 900s .venv/bin/python scripts/probe_child_files.py --live`
     （macOS 用 `gtimeout`；可加 `--model <native-model>`）。该独立探针不包含在常规 SDK
     phases 中：它在唯一临时 Git 目录验证继承历史排除、真实 child→root 消息、父子 patch
@@ -1885,48 +1783,22 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     JSON 只记录身份、事件类别、计数和验证结果；任一步
     证据不足即失败，原生调用失去响应时仍需外层进程 timeout 兜底。
     强制终止进程可能阻止 finally 执行，不能据此声称配置已恢复。
-    Project 内文件显示相对路径，Project 外文件
-    显示脱敏逻辑位置；所有条目隐藏大小、按钮统一为“发送”，按 8 个一页完整翻页，可见正文
-    不出现绝对路径、文件列表预览、diff 正文或发送全部；v5 callback payload 则必须逐项携带明文
-    absolute path，并对已知统计携带成对 `a/d`，翻页后完整保留整轮统计与
-    Activity/Partial Answer/Result；普通回复的 v4 与不含 Partial Answer 的 v5 仍须可用。
-    升级前的混合 Goal/答案测试卡不在兼容与验收范围内。
-    依次在 P2P 平面消息、
-    群主线和已有话题点击普通文件或图片的“发送”：平面卡片必须出现以该卡片为锚点的话题，记录真实
-    root/parent/thread 返回；已有话题必须保持原 thread ID，飞书能正常预览/下载实际文件。
-    切换到另一 Binding 后旧卡仍能翻页和发送；正常重启 Netizen/App Server 后，再点击
-    重启前的 v5 卡，必须只从 callback 内的完整 Reply Card manifest 恢复，且不读取 source
-    card、Binding 或 completed Turn。页码表单至少使用三页文件，依次选择第二页、第一页、
-    再次选择第二页并提交，最后一次点击必须仍生效；再直接选择末页，确认每次都只更新原卡。
-    同一份已渲染 callback 的重复投递仍
-    只能处理一次。缺少或带畸形 nonce 的当前版本 payload 仍须只按业务字段解码；正式推广前
-    的其他旧测试 schema 不做兼容验收，升级前 v3 卡仍须明确提示已过期且不发送文件、不读取
-    history。
-    重复点击同一按钮不产生重复文件消息。再分别在点击前删除文件、改成目录、把同一上报
-    路径重新绑定到另一个普通文件和删除原卡片：前两类不可用目标应失败，重绑路径发送点击
-    时当前内容，删除卡片失败；所有失败均保持原卡且没有文件掉入主聊天。翻页还必须确认
-    最终回复区逐字保留、缺失条目在原页显示不可用。另准备 100 和 400 个文件的大卡片，
-    确认所有多页卡片都显示页码下拉框和一个“跳转”按钮，单页卡片不显示导航。
-    完成真实 create/update；在飞书实际选择末页、中间页和首页并
-    点击“跳转”，确认 submit callback 同时保留完整 `value` manifest 与所选页码的
-    `form_value`，每次更新后仍能再次跳转，且只在提交按钮中出现完整 manifest。重启前后
-    同卡必须保留 Activity/Partial Answer/Result、整轮与逐文件统计。不能只用合成回调证明
-    表单点击可用。记录实际序列化容量与平台返回，检查各页都不超过 55,000 bytes；
-    任一页无法完整容纳时应明确省略 Files，不截断。没有 live 条件时明确记录这部分
-    未验证，不能宣称真实表单兼容或容量验收通过。
-    正文图片预览另按 ADR 0065 验收：ordinary、Side 与 Goal 最终正文分别引用本地图片，
-    包含无 native 文件证据的已有图片；检查无 Files 时保持原富文本回复、相对 cwd、图片渲染与放大、
-    Progress Card 开关和整卡更新，以及 GFM 表格/删除线/任务列表和飞书标签的显示语义。
-    Files 不因正文引用增加条目，已有按钮保持可用；代码里的示例不上传。重复引用只上传一次，
-    删除本地图片并重启后翻页仍保留正文图，Files 按现有规则标不可用。
-    强制图片上传失败只影响该位置；强制结果卡发送失败时，富文本回退保留已上传的正文图与
-    完整分段文字，不重新上传或重复完成提醒。长回复仍逐段留在原话题，平铺回复仍仅首段引用，
-    完成提及只在首段；定时任务部分发送或未知投递不重发。这一客户端渲染
-    live gate 尚须在真实目标应用执行；本地合成测试不声明已经通过。
-    P2P 若返回 230071 必须记录为
-    本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
-    改变当前 schema 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
-    route 行数。
 
 CLI 中新增的消息不要求回填飞书；验证目标是共享原生后端和可接续性，不是两个 UI
 的逐条镜像。
+
+[验收2]: design.md#会话目录与分页
+[验收5]: design.md#管理动作与确认
+[验收7]: design.md#原生归档与删除
+[验收8]: design.md#project-删除与交接
+[验收9]: design.md#channel-数据库与结构校验
+[验收12]: design.md#命令注册与首次引导
+[验收13]: design.md#生命周期表情与终态投递
+[验收14]: design.md#activity-安全投影
+[验收15]: design.md#回复卡片呈现
+[验收18]: design.md#阶段性答案
+[验收20]: design.md#goal-物理-turn-与逻辑终态
+[验收21]: design.md#普通会话生命周期
+[验收22]: design.md#会话列表与生命周期控制
+[验收23]: design.md#本轮文件证据与发送
+[验收24]: design.md#最终正文中的本地图片
