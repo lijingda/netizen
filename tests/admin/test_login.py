@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from netizen_cli.admin.auth import AdminAuth, LoginRejected, SessionRejected
-from netizen_cli.admin.credentials import AdminCredentials
+from netizen_cli.admin.credentials import AdminCredentials, credential_path
 from netizen_cli.admin.feishu import DeviceChallenge, SlowDownError, UserProfile, UserTokens
 from netizen_cli.admin.login import AdminLogin
 from netizen_cli.admin.users import AdminIdentity, AdminUsers
@@ -40,7 +40,7 @@ class AdminLoginTest(unittest.IsolatedAsyncioTestCase):
         self.login = AdminLogin(self.auth, self.users, self.credentials, self.client,
                                 clock=lambda: self.now)
         self.addCleanup(self.login.close)
-        self.path = self.root / "credentials/admin-user-tokens.json"
+        self.path = credential_path(self.root, self.alice.identity)
 
     async def start(self):
         preauth = self.auth.issue_preauth(self.source)

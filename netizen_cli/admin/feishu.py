@@ -29,7 +29,6 @@ _DEVICE_URL = "https://accounts.feishu.cn/oauth/v1/device_authorization"
 _TOKEN_URL = "https://accounts.feishu.cn/oauth/v3/token"
 _TICKET_URL = "https://open.feishu.cn/open-apis/jssdk/ticket/get"
 _OPEN_ID = re.compile(r"ou_[A-Za-z0-9_-]{1,256}\Z")
-_MAX_RESPONSE_BYTES = 65_536
 
 
 class FeishuError(RuntimeError):
@@ -79,8 +78,8 @@ def _invalid_response() -> FeishuError:
     return FeishuError("upstream_format", "飞书返回的数据不完整或格式不正确。")
 
 
-def _string(value: object, *, maximum: int = 8192) -> str:
-    if (not isinstance(value, str) or not value or len(value) > maximum
+def _string(value: object, *, maximum: int | None = 8192) -> str:
+    if (not isinstance(value, str) or not value or (maximum is not None and len(value) > maximum)
             or any(ord(character) < 32 or ord(character) == 127 for character in value)):
         raise _invalid_response()
     return value
@@ -144,8 +143,6 @@ class FeishuClient:
                 response = await self._http.post(
                     url, timeout=self._timeout, follow_redirects=False, **kwargs,
                 )
-            if len(response.content) > _MAX_RESPONSE_BYTES:
-                raise _invalid_response()
             payload = response.json()
         except (httpx.HTTPError, TimeoutError):
             raise FeishuError("upstream_unavailable", "暂时无法连接飞书，请稍后重试。") from None
@@ -200,15 +197,15 @@ class FeishuClient:
     def _tokens(data: dict[str, Any]) -> UserTokens:
         if _string(data.get("token_type")).lower() != "bearer":
             raise _invalid_response()
-        access_token = _string(data.get("access_token"))
+        access_token = _string(data.get("access_token"), maximum=None)
         lifetime = _seconds(data.get("expires_in"))
         refresh_token = data.get("refresh_token")
         refresh_lifetime = None
         if refresh_token is not None:
-            refresh_token = _string(refresh_token)
+            refresh_token = _string(refresh_token, maximum=None)
             refresh_lifetime = _seconds(data.get("refresh_token_expires_in"))
         scope = data.get("scope", "")
-        if not isinstance(scope, str) or len(scope) > 8192:
+        if not isinstance(scope, str):
             raise _invalid_response()
         now = time.time()
         return UserTokens(
@@ -225,7 +222,9 @@ class FeishuClient:
         if self._sdk is None:
             self._sdk = (Client.builder().app_id(self.app_id).app_secret(self._app_secret)
                          .enable_set_token(True).timeout(self._timeout).build())
-        option = RequestOption.builder().user_access_token(_string(access_token)).build()
+        option = RequestOption.builder().user_access_token(
+            _string(access_token, maximum=None),
+        ).build()
         try:
             async with asyncio.timeout(self._timeout):
                 result = await self._sdk.authen.v1.user_info.aget(
@@ -260,7 +259,8 @@ class FeishuClient:
         # No retries: a lost response can already have consumed the one-use RT.
         status, data = await self._request(_TOKEN_URL, json={
             "client_id": self.app_id, "client_secret": self._app_secret,
-            "grant_type": "refresh_token", "refresh_token": _string(refresh_token),
+            "grant_type": "refresh_token",
+            "refresh_token": _string(refresh_token, maximum=None),
         })
         self._require_success(status, data)
         return self._tokens(data)
@@ -279,7 +279,8 @@ class FeishuClient:
         # The ordinary web component signs the URL without query or fragment.
         signed_url = urlunsplit(parsed._replace(query="", fragment=""))
         status, data = await self._request(
-            _TICKET_URL, headers={"Authorization": "Bearer " + _string(access_token)},
+            _TICKET_URL,
+            headers={"Authorization": "Bearer " + _string(access_token, maximum=None)},
         )
         self._require_success(status, data, api=True)
         ticket_data = data.get("data")

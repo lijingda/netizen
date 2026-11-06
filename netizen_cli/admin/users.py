@@ -95,7 +95,7 @@ def _private_parent(path: Path, *, create: bool) -> None:
 
 
 def read_private_json(
-    path: Path, *, missing_ok: bool = False, maximum: int = 1_048_576,
+    path: Path, *, missing_ok: bool = False, maximum: int | None = 1_048_576,
 ) -> dict[str, Any] | None:
     """Read one owned private regular file, without following its final symlink."""
     try:
@@ -111,12 +111,13 @@ def read_private_json(
         with os.fdopen(descriptor, "rb") as stream:
             before = os.fstat(stream.fileno())
             _private_metadata(before)
-            if before.st_size > maximum:
+            if maximum is not None and before.st_size > maximum:
                 raise PrivateJSONError()
-            content = stream.read(maximum + 1)
+            content = stream.read() if maximum is None else stream.read(maximum + 1)
             after = os.fstat(stream.fileno())
             _private_metadata(after)
-            if len(content) > maximum or _file_identity(before) != _file_identity(after):
+            if ((maximum is not None and len(content) > maximum)
+                    or _file_identity(before) != _file_identity(after)):
                 raise PrivateJSONError()
         value = json.loads(content, object_pairs_hook=_unique_object,
                            parse_constant=lambda _value: _reject_json_constant())
@@ -132,7 +133,7 @@ def _reject_json_constant() -> Any:
 
 
 def write_private_json(
-    path: Path, value: dict[str, Any], *, maximum: int = 1_048_576,
+    path: Path, value: dict[str, Any], *, maximum: int | None = 1_048_576,
 ) -> None:
     """Atomically replace private JSON; callers fail closed on uncertain commits."""
     temporary: Path | None = None
@@ -140,7 +141,7 @@ def write_private_json(
     try:
         content = (json.dumps(value, ensure_ascii=False, allow_nan=False,
                               separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
-        if len(content) > maximum:
+        if maximum is not None and len(content) > maximum:
             raise PrivateJSONError()
         _private_parent(path, create=True)
         try:
@@ -171,6 +172,23 @@ def write_private_json(
         if temporary is not None:
             with contextlib.suppress(OSError):
                 temporary.unlink()
+
+
+def delete_private_json(path: Path) -> None:
+    """Remove one owned private file; absence is already a successful cleanup."""
+    try:
+        _private_parent(path, create=False)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            _private_metadata(os.stat(path.name, dir_fd=directory, follow_symlinks=False))
+            os.unlink(path.name, dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise PrivateJSONError() from None
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,6 +13,7 @@ import fcntl
 import os
 from pathlib import Path
 import pwd
+import re
 import sqlite3
 import stat
 import tempfile
@@ -474,6 +475,26 @@ def purge_inventory(root: Path, *, protected_codex_home: Path | None = None) -> 
         except FileNotFoundError:
             continue
         paths.append(candidate)
+    credentials = root / "credentials"
+    if credentials.exists():
+        from .admin.credentials import credential_path
+        from .admin.users import AdminIdentity, PrivateJSONError, read_private_json
+
+        for candidate in sorted(credentials.iterdir()):
+            if not re.fullmatch(r"admin-user-[0-9a-f]{64}\.json", candidate.name):
+                continue
+            _file(candidate)
+            try:
+                value = read_private_json(candidate, maximum=None)
+                if (value is None or type(value.get("version")) is not int
+                        or value["version"] != 1):
+                    raise ValueError("unsupported user credential format")
+                identity = AdminIdentity(value.get("appId"), value.get("openId"))
+                if credential_path(root, identity) != candidate:
+                    raise ValueError("user credential identity does not match its path")
+            except (PrivateJSONError, ValueError) as error:
+                raise InstanceDataError(f"unrecognized user credential file: {candidate}") from error
+            paths.append(candidate)
     backups = root / "state" / "migration-backups"
     if backups.exists() or backups.is_symlink():
         _directory(backups)
