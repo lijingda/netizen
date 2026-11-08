@@ -9,11 +9,11 @@ from unittest.mock import patch
 
 import yaml
 
-from netizen_cli.admin.port_config import AdminPortConfigurationError, ConfigFileEditor, ConfigFileSnapshot
+from netizen_cli.admin.port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileEditor, ConfigFileSnapshot
 from netizen_cli.lark_app import encode_lark_app
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule, SessionPolicyService
 from netizen_cli.settings import Settings, SettingsError
-from netizen_cli.worktrees.settings import WorktreeSettings, WorktreeSettingsConflict, WorktreeSettingsError, WorktreeSettingsService
+from netizen_cli.worktrees.settings import WorktreeSettings, WorktreeSettingsError, WorktreeSettingsService
 
 
 class WorktreeSettingsTest(unittest.TestCase):
@@ -46,7 +46,7 @@ class WorktreeSettingsTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         self.assertEqual(self.service.root, settings.root)
         self.assertNotEqual(self.service.revision, before["revision"])
-        with self.assertRaises(WorktreeSettingsConflict):
+        with self.assertRaises(ConfigConflict):
             self.service.update(WorktreeSettings(), expected_revision=before["revision"])
         self.assertEqual(self.service.snapshot()[0], settings)
 
@@ -103,7 +103,7 @@ class WorktreeSettingsTest(unittest.TestCase):
     def test_uneditable_service_rejects_save(self):
         service = WorktreeSettingsService(default_root=self.root / "worktrees")
         self.assertFalse(service.editable)
-        with self.assertRaises(WorktreeSettingsError):
+        with self.assertRaises(ConfigUnavailable):
             service.update(WorktreeSettings(), expected_revision=service.revision)
 
     def test_invalid_values_are_not_silently_normalized(self):

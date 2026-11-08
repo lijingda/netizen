@@ -2,44 +2,19 @@
 
 from __future__ import annotations
 
-import threading
-import uuid
 from typing import Any
 
-from .admin.port_config import ConfigFileEditor
+from .admin.port_config import ConfigSection, ConfigFileEditor
 from .progress_card_settings import ProgressCardSettings
 
 
-class ProgressCardConfigError(ValueError):
-    pass
-
-
-class ProgressCardConfigConflict(ProgressCardConfigError):
-    pass
-
-
-class ProgressCardConfigService:
+class ProgressCardConfigService(ConfigSection[ProgressCardSettings]):
     def __init__(self, settings: ProgressCardSettings = ProgressCardSettings(), *,
                  config_editor: ConfigFileEditor | None = None) -> None:
-        self._snapshot = (settings, uuid.uuid4().hex)
-        self._editor = config_editor
-        # Readers use the last published snapshot without waiting for file I/O.
-        self._write_lock = threading.Lock()
-
-    @property
-    def current(self) -> ProgressCardSettings:
-        return self._snapshot[0]
+        super().__init__(settings, section="progressCard", editor=config_editor,
+                         conflict_message="progress card settings changed; refresh before saving")
 
     def view(self) -> dict[str, Any]:
-        settings, revision = self._snapshot
+        settings, revision = self.snapshot()
         return {"settings": settings.to_dict(), "revision": revision,
-                "editable": self._editor is not None}
-
-    def update(self, settings: ProgressCardSettings, *, expected_revision: str) -> None:
-        with self._write_lock:
-            if expected_revision != self._snapshot[1]:
-                raise ProgressCardConfigConflict("progress card settings changed; refresh before saving")
-            if self._editor is None:
-                raise ProgressCardConfigError("instance configuration is unavailable")
-            self._editor.update_section("progressCard", settings.to_dict())
-            self._snapshot = (settings, uuid.uuid4().hex)
+                "editable": self.editable}

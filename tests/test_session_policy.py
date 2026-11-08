@@ -9,12 +9,10 @@ from unittest.mock import patch
 import yaml
 
 from netizen_cli.admin.port_config import (
+    ConfigConflict,
     AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port,
 )
-from netizen_cli.sessions.policy import (
-    SessionAccessPolicy, SessionAccessRule, SessionPolicyConflict, SessionPolicyError,
-    SessionPolicyService,
-)
+from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule, SessionPolicyError, SessionPolicyService
 from netizen_cli.settings import Settings, SettingsError
 from netizen_cli.lark_app import encode_lark_app
 
@@ -60,7 +58,7 @@ class SessionPolicyTest(unittest.TestCase):
         self.assertFalse(self.service.allows_discovery("any"))
         self.assertFalse(self.service.allows_read_send("oc_private"))
         self.assertTrue(self.service.allows_read_send("new-chat"))
-        with self.assertRaises(SessionPolicyConflict):
+        with self.assertRaises(ConfigConflict):
             self.service.update(SessionAccessPolicy(), expected_revision=before["revision"])
         self.assertEqual(self.service.view()["readSend"], policy.read_send.to_dict())
         # The service owns a refreshed snapshot after each successful save.
@@ -112,6 +110,18 @@ class SessionPolicyTest(unittest.TestCase):
                       {"readSend": {"mode": "only", "chatIds": ["oc_a\n"]}}):
             with self.subTest(value=value), self.assertRaises(SessionPolicyError):
                 SessionAccessPolicy.from_mapping(value)
+
+    def test_chat_rule_validation_preserves_messages_and_raw_count_limit(self) -> None:
+        for value, message in (
+            ({"extra": 1}, "access rule must contain only mode and chatIds"),
+            ({"mode": False}, "mode must be a string"),
+            ({"chatIds": "x"}, "chatIds must be a list"),
+            ({"mode": "only", "chatIds": ["x\x00"]}, "chatIds must contain non-empty exact chat IDs"),
+            ({"mode": "only", "chatIds": ["x"] * 1001}, "chatIds must contain at most 1000 chat IDs"),
+        ):
+            with self.subTest(message=message), self.assertRaises(SessionPolicyError) as raised:
+                SessionAccessRule.from_mapping(value)
+            self.assertEqual(str(raised.exception), message)
 
     def test_settings_loads_saved_rules_with_default_all_and_rejects_invalid_rules(self) -> None:
         app_path = self.path.parent / "lark-app/config.json"

@@ -7,12 +7,9 @@ from unittest.mock import patch
 
 import yaml
 
-from netizen_cli.admin.port_config import AdminPortConfigurationError, ConfigFileEditor, ConfigFileSnapshot
+from netizen_cli.admin.port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileEditor, ConfigFileSnapshot
 from netizen_cli.lark_app import encode_lark_app
-from netizen_cli.question_notifications import (
-    QuestionNotificationConfigConflict, QuestionNotificationConfigError,
-    QuestionNotificationConfigService, QuestionNotificationSettings,
-)
+from netizen_cli.question_notifications import QuestionNotificationConfigService, QuestionNotificationSettings
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule, SessionPolicyService
 from netizen_cli.settings import Settings, SettingsError
 from netizen_cli.worktrees.settings import WorktreeSettings, WorktreeSettingsService
@@ -68,7 +65,7 @@ class QuestionNotificationConfigTest(unittest.TestCase):
         settings = QuestionNotificationSettings(mention_initiator=True)
         self.service.update(settings, expected_revision=old["revision"])
         current = self.service.view()
-        with self.assertRaises(QuestionNotificationConfigConflict):
+        with self.assertRaises(ConfigConflict):
             self.service.update(QuestionNotificationSettings(), expected_revision=old["revision"])
         manual = self.path.read_bytes() + b"# manual change\n"
         self.path.write_bytes(manual)
@@ -93,7 +90,7 @@ class QuestionNotificationConfigTest(unittest.TestCase):
         view = service.view()
         self.assertEqual(view["settings"], QuestionNotificationSettings().to_dict())
         self.assertFalse(view["editable"])
-        with self.assertRaises(QuestionNotificationConfigError):
+        with self.assertRaises(ConfigUnavailable):
             service.update(QuestionNotificationSettings(), expected_revision=view["revision"])
 
     def test_invalid_yaml_section_is_rejected_instead_of_defaulting(self):

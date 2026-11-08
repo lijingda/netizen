@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import threading
-import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from ..admin.port_config import ConfigFileEditor, ConfigFileSnapshot
+from ..chat_access import exact_chat_ids, parse_chat_rule
+from ..admin.port_config import ConfigSection, ConfigFileEditor, ConfigFileSnapshot
 
 
 class SessionPolicyError(ValueError):
-    pass
-
-
-class SessionPolicyConflict(SessionPolicyError):
     pass
 
 
@@ -28,13 +23,10 @@ class SessionAccessRule:
             raise SessionPolicyError("mode must be all, only, exclude, or disabled")
         if not isinstance(self.chat_ids, tuple) or len(self.chat_ids) > 1000:
             raise SessionPolicyError("chatIds must contain at most 1000 chat IDs")
-        if any(not isinstance(value, str) or not value or len(value) > 256
-               or value != value.strip() or any(ord(c) < 32 for c in value)
-               for value in self.chat_ids):
-            raise SessionPolicyError("chatIds must contain non-empty exact chat IDs")
+        chat_ids = exact_chat_ids(self.chat_ids, field="chatIds", error=SessionPolicyError)
         if self.mode in {"all", "disabled"} and self.chat_ids:
             raise SessionPolicyError("all and disabled modes do not accept chatIds")
-        object.__setattr__(self, "chat_ids", tuple(sorted(set(self.chat_ids))))
+        object.__setattr__(self, "chat_ids", chat_ids)
 
     def allows(self, chat_id: str) -> bool:
         return (self.mode == "all" or self.mode == "only" and chat_id in self.chat_ids
@@ -45,15 +37,11 @@ class SessionAccessRule:
 
     @classmethod
     def from_mapping(cls, value: object) -> SessionAccessRule:
-        if not isinstance(value, Mapping) or value.keys() - {"mode", "chatIds"}:
-            raise SessionPolicyError("access rule must contain only mode and chatIds")
-        raw_ids = value.get("chatIds", [])
-        if not isinstance(raw_ids, list):
-            raise SessionPolicyError("chatIds must be a list")
-        mode = value.get("mode", "all")
+        mode, chat_ids = parse_chat_rule(value, label="access rule",
+                                         field="chatIds", error=SessionPolicyError)
         if not isinstance(mode, str):
             raise SessionPolicyError("mode must be a string")
-        return cls(mode, tuple(raw_ids))
+        return cls(mode, chat_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +60,7 @@ class SessionAccessPolicy:
                    SessionAccessRule.from_mapping(value.get("readSend", {})))
 
 
-class SessionPolicyService:
+class SessionPolicyService(ConfigSection[SessionAccessPolicy]):
     """One shared current policy; saves reuse the existing instance YAML writer.
 
     The revision is process-local, like Admin action grants and tool cursors.
@@ -82,39 +70,16 @@ class SessionPolicyService:
     def __init__(self, policy: SessionAccessPolicy = SessionAccessPolicy(), *,
                  config_snapshot: ConfigFileSnapshot | None = None,
                  config_editor: ConfigFileEditor | None = None) -> None:
-        self._snapshot = (policy, uuid.uuid4().hex)
-        self._editor = config_editor or (ConfigFileEditor(config_snapshot) if config_snapshot else None)
-        # Readers use the last published snapshot without waiting for file I/O.
-        self._write_lock = threading.Lock()
-
-    @property
-    def revision(self) -> str:
-        return self._snapshot[1]
-
-    @property
-    def editable(self) -> bool:
-        return self._editor is not None
-
-    def snapshot(self) -> tuple[SessionAccessPolicy, str]:
-        """Capture immutable rules for one tool call and its discovery cursor."""
-        return self._snapshot
+        super().__init__(policy, section="sessionTools",
+                         editor=config_editor or (ConfigFileEditor(config_snapshot) if config_snapshot else None),
+                         conflict_message="session tool access changed; refresh before saving")
 
     def allows_discovery(self, chat_id: str) -> bool:
-        return self._snapshot[0].discovery.allows(chat_id)
+        return self.current.discovery.allows(chat_id)
 
     def allows_read_send(self, chat_id: str) -> bool:
-        return self._snapshot[0].read_send.allows(chat_id)
+        return self.current.read_send.allows(chat_id)
 
     def view(self) -> dict[str, Any]:
-        policy, revision = self._snapshot
+        policy, revision = self.snapshot()
         return {"revision": revision, **policy.to_dict()}
-
-    def update(self, policy: SessionAccessPolicy, *, expected_revision: str) -> None:
-        with self._write_lock:
-            if expected_revision != self._snapshot[1]:
-                raise SessionPolicyConflict("session tool access changed; refresh before saving")
-            if self._editor is None:
-                raise SessionPolicyError("instance configuration is unavailable")
-            self._editor.update_section("sessionTools", policy.to_dict())
-            # Invalidate old action grants/cursors even when a rule changes back.
-            self._snapshot = (policy, uuid.uuid4().hex)

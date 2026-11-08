@@ -1,21 +1,15 @@
 """Instance-owned managed Worktree settings in the existing instance YAML."""
 from __future__ import annotations
 
-import threading
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..admin.port_config import ConfigFileEditor, ConfigFileSnapshot
+from ..admin.port_config import ConfigSection, ConfigFileEditor, ConfigFileSnapshot
 
 
 class WorktreeSettingsError(ValueError):
-    pass
-
-
-class WorktreeSettingsConflict(WorktreeSettingsError):
     pass
 
 
@@ -47,47 +41,26 @@ class WorktreeSettings:
         return cls(Path(raw).expanduser() if raw else None, value.get("fetchBeforeCreate", False))
 
 
-class WorktreeSettingsService:
+class WorktreeSettingsService(ConfigSection[WorktreeSettings]):
     def __init__(self, settings: WorktreeSettings = WorktreeSettings(), *, default_root: Path,
                  config_snapshot: ConfigFileSnapshot | None = None,
                  config_editor: ConfigFileEditor | None = None) -> None:
         if not default_root.is_absolute():
             raise WorktreeSettingsError("default worktree root must be absolute")
-        self._snapshot = (settings, uuid.uuid4().hex)
         self._default_root = default_root
-        self._editor = config_editor or (ConfigFileEditor(config_snapshot) if config_snapshot else None)
-        # Readers use the last published snapshot without waiting for file I/O.
-        self._write_lock = threading.Lock()
-
-    @property
-    def revision(self) -> str:
-        return self._snapshot[1]
-
-    @property
-    def editable(self) -> bool:
-        return self._editor is not None
+        super().__init__(settings, section="worktrees",
+                         editor=config_editor or (ConfigFileEditor(config_snapshot) if config_snapshot else None),
+                         conflict_message="worktree settings changed; refresh before saving")
 
     @property
     def root(self) -> Path:
-        return self.resolve_root(self._snapshot[0])
+        return self.resolve_root(self.current)
 
     def resolve_root(self, settings: WorktreeSettings) -> Path:
         return settings.root or self._default_root
 
-    def snapshot(self) -> tuple[WorktreeSettings, str]:
-        return self._snapshot
-
     def view(self) -> dict[str, Any]:
-        settings, revision = self._snapshot
+        settings, revision = self.snapshot()
         return {"revision": revision, "root": str(settings.root) if settings.root else "",
                 "effectiveRoot": str(self.resolve_root(settings)),
                 "fetchBeforeCreate": settings.fetch_before_create, "editable": self.editable}
-
-    def update(self, settings: WorktreeSettings, *, expected_revision: str) -> None:
-        with self._write_lock:
-            if expected_revision != self._snapshot[1]:
-                raise WorktreeSettingsConflict("worktree settings changed; refresh before saving")
-            if self._editor is None:
-                raise WorktreeSettingsError("instance configuration is unavailable")
-            self._editor.update_section("worktrees", settings.to_dict())
-            self._snapshot = (settings, uuid.uuid4().hex)

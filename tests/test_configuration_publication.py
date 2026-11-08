@@ -9,15 +9,13 @@ from unittest.mock import patch
 
 import yaml
 
-from netizen_cli.admin.port_config import ConfigFileEditor, ConfigFileSnapshot, write_configuration
-from netizen_cli.progress_card_config import ProgressCardConfigConflict, ProgressCardConfigService
+from netizen_cli.admin.port_config import ConfigConflict, ConfigFileEditor, ConfigFileSnapshot, write_configuration
+from netizen_cli.group_access import GroupAccessRule, GroupAccessService
+from netizen_cli.question_notifications import QuestionNotificationSettings, QuestionNotificationConfigService
+from netizen_cli.progress_card_config import ProgressCardConfigService
 from netizen_cli.progress_card_settings import ProgressCardSettings
-from netizen_cli.sessions.policy import (
-    SessionAccessPolicy, SessionAccessRule, SessionPolicyConflict, SessionPolicyService,
-)
-from netizen_cli.worktrees.settings import (
-    WorktreeSettings, WorktreeSettingsConflict, WorktreeSettingsService,
-)
+from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule, SessionPolicyService
+from netizen_cli.worktrees.settings import WorktreeSettings, WorktreeSettingsService
 
 
 class ConfigurationPublicationTest(unittest.TestCase):
@@ -33,15 +31,21 @@ class ConfigurationPublicationTest(unittest.TestCase):
         progress = ProgressCardConfigService(config_editor=self.editor)
         worktrees = WorktreeSettingsService(default_root=self.root / "worktrees", config_editor=self.editor)
         policy = SessionPolicyService(config_editor=self.editor)
+        questions = QuestionNotificationConfigService(config_editor=self.editor)
+        groups = GroupAccessService(config_editor=self.editor)
         return (
+            ("questionNotifications", questions, QuestionNotificationSettings(True),
+             ConfigConflict, lambda: (questions.current, questions.view())),
+            ("groupAccess", groups, GroupAccessRule("only", ("chosen",)),
+             ConfigConflict, lambda: (groups.current, groups.view(), groups.snapshot())),
             ("progressCard", progress, ProgressCardSettings(organization="time", show_plan=False),
-             ProgressCardConfigConflict, lambda: (progress.current, progress.view())),
+             ConfigConflict, lambda: (progress.current, progress.view())),
             ("worktrees", worktrees, WorktreeSettings(self.root / "updated", True),
-             WorktreeSettingsConflict, lambda: (worktrees.snapshot()[0], worktrees.view(),
+             ConfigConflict, lambda: (worktrees.snapshot()[0], worktrees.view(),
                  worktrees.snapshot(), worktrees.root, worktrees.revision, worktrees.editable)),
             ("sessionTools", policy, SessionAccessPolicy(
                 SessionAccessRule("disabled"), SessionAccessRule("exclude", ("chosen",))),
-             SessionPolicyConflict, lambda: (policy.snapshot()[0], policy.view(), policy.snapshot(),
+             ConfigConflict, lambda: (policy.snapshot()[0], policy.view(), policy.snapshot(),
                  policy.revision, policy.allows_discovery("chosen"), policy.allows_read_send("chosen"),
                  policy.editable)),
         )
@@ -85,7 +89,7 @@ class ConfigurationPublicationTest(unittest.TestCase):
                         after = read()
                         self.assertEqual(after[0], settings)
                         self.assertNotEqual(after[1]["revision"], before[1]["revision"])
-                        if section == "progressCard":
+                        if section in {"progressCard", "questionNotifications"}:
                             expected_view = {"settings": settings.to_dict(), "editable": True}
                         elif section == "worktrees":
                             expected_view = {"root": str(settings.root), "effectiveRoot": str(settings.root),
@@ -93,7 +97,7 @@ class ConfigurationPublicationTest(unittest.TestCase):
                         else:
                             expected_view = settings.to_dict()
                         self.assertEqual(after[1], {**expected_view, "revision": after[1]["revision"]})
-                        if section != "progressCard":
+                        if section not in {"progressCard", "questionNotifications"}:
                             self.assertEqual(after[2], (settings, after[1]["revision"]))
                         self.assertEqual(yaml.safe_load(self.path.read_text())[section], settings.to_dict())
 
@@ -130,3 +134,14 @@ class ConfigurationPublicationTest(unittest.TestCase):
                     self.assertEqual(writer.call_count, 1)
                 self.assertEqual(read()[0], settings)
                 self.assertEqual(yaml.safe_load(self.path.read_text())[section], settings.to_dict())
+
+    def test_successful_unchanged_saves_always_invalidate_the_revision(self):
+        for section, service, _, conflict, read in self.cases():
+            with self.subTest(section=section):
+                value, view, *_ = read()
+                revision = view["revision"]
+                service.update(value, expected_revision=revision)
+                self.assertEqual(service.current, value)
+                self.assertNotEqual(service.revision, revision)
+                with self.assertRaises(conflict):
+                    service.update(value, expected_revision=revision)

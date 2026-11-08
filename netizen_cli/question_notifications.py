@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import threading
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from .admin.port_config import ConfigFileEditor
+from .admin.port_config import ConfigSection, ConfigFileEditor
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,37 +26,15 @@ class QuestionNotificationSettings:
         return cls(mention_initiator=value["mentionInitiator"])
 
 
-class QuestionNotificationConfigError(ValueError):
-    pass
-
-
-class QuestionNotificationConfigConflict(QuestionNotificationConfigError):
-    pass
-
-
-class QuestionNotificationConfigService:
+class QuestionNotificationConfigService(ConfigSection[QuestionNotificationSettings]):
     def __init__(
         self, settings: QuestionNotificationSettings = QuestionNotificationSettings(), *,
         config_editor: ConfigFileEditor | None = None,
     ) -> None:
-        self._snapshot = (settings, uuid.uuid4().hex)
-        self._editor = config_editor
-        self._write_lock = threading.Lock()
-
-    @property
-    def current(self) -> QuestionNotificationSettings:
-        return self._snapshot[0]
+        super().__init__(settings, section="questionNotifications", editor=config_editor,
+                         conflict_message="question notification settings changed")
 
     def view(self) -> dict[str, Any]:
-        settings, revision = self._snapshot
+        settings, revision = self.snapshot()
         return {"settings": settings.to_dict(), "revision": revision,
-                "editable": self._editor is not None}
-
-    def update(self, settings: QuestionNotificationSettings, *, expected_revision: str) -> None:
-        with self._write_lock:
-            if expected_revision != self._snapshot[1]:
-                raise QuestionNotificationConfigConflict("question notification settings changed")
-            if self._editor is None:
-                raise QuestionNotificationConfigError("instance configuration is unavailable")
-            self._editor.update_section("questionNotifications", settings.to_dict())
-            self._snapshot = (settings, uuid.uuid4().hex)
+                "editable": self.editable}

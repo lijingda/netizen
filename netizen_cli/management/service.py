@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal, NoReturn, TypeVar
 
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .project_files import ProjectFileService
@@ -105,6 +105,8 @@ from ..sessions.policy import SessionAccessPolicy, SessionPolicyService
 
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
 _SESSION_SUMMARY_READ_CONCURRENCY = 4
+_ConfigResult = TypeVar("_ConfigResult")
+_CONFIG_WRITE_SECONDS = 10.0
 _PROJECT_DELETE_SECONDS = 120.0
 _PROJECT_DELETE_STEP_SECONDS = 30.0
 logger = logging.getLogger(__name__)
@@ -859,15 +861,21 @@ class InstanceManagementService:
             self.worktrees = WorktreeService(self, settings=settings)
         return self.worktrees
 
+    async def submit_config_write(self, operation: Callable[..., _ConfigResult],
+                                  *args: object, **kwargs: object) -> _ConfigResult:
+        return await self._blocking_io.submit(
+            operation, *args, **kwargs,
+            deadline=asyncio.get_running_loop().time() + _CONFIG_WRITE_SECONDS,
+        )
+
     def progress_card_settings(self) -> dict[str, Any]:
         return self._progress_card_config.view()
 
     async def update_progress_card_settings(
         self, settings: ProgressCardSettings, *, expected_revision: str,
     ) -> dict[str, Any]:
-        await self._blocking_io.submit(
+        await self.submit_config_write(
             self._progress_card_config.update, settings, expected_revision=expected_revision,
-            deadline=asyncio.get_running_loop().time() + 10,
         )
         return self.progress_card_settings()
 
@@ -881,9 +889,8 @@ class InstanceManagementService:
     async def update_question_notification_settings(
         self, settings: QuestionNotificationSettings, *, expected_revision: str,
     ) -> dict[str, Any]:
-        await self._blocking_io.submit(
+        await self.submit_config_write(
             self._question_notification_config.update, settings, expected_revision=expected_revision,
-            deadline=asyncio.get_running_loop().time() + 10,
         )
         return self.question_notification_settings()
 
@@ -900,25 +907,22 @@ class InstanceManagementService:
     async def update_session_tool_access(
         self, service: SessionPolicyService, policy: SessionAccessPolicy, *, expected_revision: str,
     ) -> None:
-        await self._blocking_io.submit(
+        await self.submit_config_write(
             service.update, policy, expected_revision=expected_revision,
-            deadline=asyncio.get_running_loop().time() + 10,
         )
 
     async def update_group_access(
         self, service: GroupAccessService, rule: GroupAccessRule, *, expected_revision: str,
     ) -> None:
-        await self._blocking_io.submit(
+        await self.submit_config_write(
             service.update, rule, expected_revision=expected_revision,
-            deadline=asyncio.get_running_loop().time() + 10,
         )
 
     async def enable_group_access(
         self, service: GroupAccessService, chat_id: str,
     ) -> tuple[GroupAccessRule, bool]:
-        return await self._blocking_io.submit(
+        return await self.submit_config_write(
             service.enable_chat, chat_id,
-            deadline=asyncio.get_running_loop().time() + 10,
         )
 
     async def group_access_chats(self, chat_ids: Sequence[str]) -> dict[str, Any]:

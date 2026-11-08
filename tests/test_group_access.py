@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, patch
 
 import yaml
 
-from netizen_cli.admin.port_config import AdminPortConfigurationError, ConfigFileEditor, ConfigFileSnapshot
+from netizen_cli.admin.port_config import ConfigConflict, AdminPortConfigurationError, ConfigFileEditor, ConfigFileSnapshot
 from netizen_cli.admin.users import AdminIdentity, AdminUsers
-from netizen_cli.group_access import GroupAccessRule, GroupAccessService, GroupAccessError, GroupAccessConflict, GROUP_ACCESS_NOTICE
+from netizen_cli.group_access import GroupAccessRule, GroupAccessService, GroupAccessError, GROUP_ACCESS_NOTICE
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.lark_app import encode_lark_app
 from netizen_cli.settings import Settings, SettingsError
@@ -49,13 +49,25 @@ class GroupAccessRuleTest(unittest.TestCase):
             with self.subTest(value=str(value)[:100]), self.assertRaises(GroupAccessError):
                 GroupAccessRule.from_mapping(value)
 
+    def test_chat_rule_validation_preserves_field_prefixes(self):
+        for value, message in (
+            ({"extra": 1}, "groupAccess must contain only mode and chatIds"),
+            ({"mode": False}, "groupAccess.mode must be all or only"),
+            ({"chatIds": "x"}, "groupAccess.chatIds must be a list"),
+            ({"chatIds": ["x\x00"]}, "groupAccess.chatIds must contain non-empty exact chat IDs"),
+            ({"chatIds": [str(i) for i in range(1001)]}, "groupAccess.chatIds must contain at most 1000 chat IDs"),
+        ):
+            with self.subTest(message=message), self.assertRaises(GroupAccessError) as raised:
+                GroupAccessRule.from_mapping(value)
+            self.assertEqual(str(raised.exception), message)
+
     def test_snapshot_update_conflict_and_write_failures(self):
         old, revision = self.service.snapshot()
         rule = GroupAccessRule("only", ("oc_group",))
         self.service.update(rule, expected_revision=revision)
         self.assertTrue(old.allows("other", "group"))
         self.assertEqual(yaml.safe_load(self.path.read_text())["groupAccess"], rule.to_dict())
-        with self.assertRaises(GroupAccessConflict):
+        with self.assertRaises(ConfigConflict):
             self.service.update(GroupAccessRule(), expected_revision=revision)
         before = self.service.snapshot()
         with patch("netizen_cli.admin.port_config.os.replace", side_effect=OSError("read only")):
@@ -476,7 +488,7 @@ class EnableGroupChannelTest(unittest.IsolatedAsyncioTestCase):
             await self.app.handle_message(self.message())
         self.assertEqual(len(write_threads), 1)
         self.assertNotEqual(write_threads[0], event_loop_thread)
-        with self.assertRaises(GroupAccessConflict):
+        with self.assertRaises(ConfigConflict):
             service.update(GroupAccessRule(), expected_revision=before)
         old = service.snapshot()[1]
         service.update(GroupAccessRule("all", ("oc_admin_edit",)), expected_revision=old)

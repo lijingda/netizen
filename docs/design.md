@@ -2156,8 +2156,8 @@ MCP 连接；来源只能是可信 `_meta.threadId` 映射的普通 Binding，Pr
 
 ## 数据与配置
 
-实例内可编辑的过程卡、Worktree 与会话协作权限配置共用 `ConfigFileEditor` 和有界
-blocking-I/O executor 写入既有 YAML。每个配置服务仅串行化写操作，将配置与 revision
+实例内可编辑的过程卡、提问通知、Worktree、群聊准入与会话协作权限配置共用 `ConfigFileEditor`
+和有界 blocking-I/O executor 写入既有 YAML；共享的 `ConfigSection` 为各服务串行化写操作，将配置与 revision
 作为一个不可变快照发布；写入期间读取继续取得旧快照，不等待文件 I/O。持久化成功后
 一次替换整个快照，失败时不发布新值；同 revision 的竞争写入仍只有一次可成功。
 
