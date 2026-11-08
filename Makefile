@@ -2,8 +2,9 @@ PYTHON ?= .venv/bin/python
 
 .PHONY: check test lint typecheck
 
+# Buffer passing tests while preserving output from failed tests.
 test:
-	$(PYTHON) -m unittest discover -s tests -v
+	$(PYTHON) -m unittest discover -s tests -v -b
 
 # Correctness lint (pyflakes and dangling asyncio tasks); configured in pyproject.toml.
 lint:
