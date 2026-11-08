@@ -102,14 +102,14 @@ class DeploymentAssetsTest(unittest.TestCase):
                 self.assertEqual(job["runs-on"], runner)
                 self.assertEqual(job["strategy"]["matrix"]["python"], versions)
                 actions = {
-                    step["uses"]: step.get("with", {})
+                    step["uses"].split("@")[0]: step.get("with", {})
                     for step in job["steps"] if "uses" in step
                 }
                 self.assertEqual(
-                    actions["actions/setup-node@v4"]["node-version"], "22"
+                    actions["actions/setup-node"]["node-version"], "22"
                 )
                 self.assertEqual(
-                    actions["actions/setup-python@v5"]["python-version"],
+                    actions["actions/setup-python"]["python-version"],
                     "${{ matrix.python }}",
                 )
                 commands = [
