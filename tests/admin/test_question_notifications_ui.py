@@ -22,7 +22,7 @@ class QuestionNotificationsUiTest(unittest.TestCase):
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         scripts = "\n".join((static / name).read_text(encoding="utf-8") for name in (
-            "chat-picker.js", "question-notifications.js", "admin.js",
+            "chat-picker.js", "config-editor.js", "question-notifications.js", "admin.js",
         ))
         fixture = Path(__file__).with_name("question_notifications_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_QUESTION_NOTIFICATIONS_CONTROLLER\n")

@@ -17,6 +17,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, TypeVar
@@ -87,7 +88,7 @@ from .queries import (
     _updated_range_query,
 )
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
-from .port_config import AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
+from .port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
 from ..instance import instance_digest
 from ..chat_avatars import CHAT_AVATAR_IMAGE_SOURCES, avatar_url
 from ..settings import validate_access_host
@@ -168,16 +169,11 @@ from ..project_files import FileBrowseError
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 from ..defaults import DefaultConfigurationError
 from ..session_settings import SessionSettings, SessionSettingsError
-from ..group_access import GroupAccessRule, GroupAccessService, GroupAccessError, GroupAccessConflict
-from ..sessions.policy import (
-    SessionAccessPolicy, SessionPolicyConflict, SessionPolicyError, SessionPolicyService,
-)
+from ..group_access import GroupAccessRule, GroupAccessService
+from ..sessions.policy import SessionAccessPolicy, SessionPolicyService
 from ..worktrees.errors import WorktreeError
-from ..progress_card_config import ProgressCardConfigConflict, ProgressCardConfigError
 from ..progress_card_settings import ProgressCardSettings
-from ..question_notifications import (
-    QuestionNotificationConfigConflict, QuestionNotificationConfigError, QuestionNotificationSettings,
-)
+from ..question_notifications import QuestionNotificationSettings
 
 
 logger = logging.getLogger(__name__)
@@ -1256,110 +1252,94 @@ class AdminWebApplication:
         )
         return _json_response(200, {"requestId": context.request.request_id, "resource": resource})
 
+    def _config_action(self, context: _RequestContext, action: str, resource: str,
+                       editable: bool, preconditions: AdminActionPreconditions) -> dict[str, Any] | None:
+        return self._grant(context, action, AdminActionTarget(resource, "instance"), preconditions) if editable else None
+
+    async def _save_config(
+        self, context: _RequestContext, *, action: str, resource: str, fields: set[str],
+        prepare: Callable[[dict[str, Any], AdminActionPreconditions], Callable[[], Awaitable[T]]],
+        invalid: str | None = None, stale: tuple[str, str] | None = None,
+        unavailable: str = "", require_instance: bool = True,
+    ) -> T:
+        payload, grant = self._redeem(context, action, expected_resource=resource, allowed_extra=fields)
+        if require_instance and grant.target.target_id != "instance":
+            raise StaleActionGrant()
+        try:
+            operation = prepare(payload, _grant_preconditions(grant))
+        except ValueError as error:
+            if invalid is None:
+                raise
+            raise AdminWebError(400, invalid, str(error)) from None
+
+        async def apply() -> T:
+            try:
+                return await operation()
+            except ConfigConflict:
+                if stale is None:
+                    raise
+                raise AdminWebError(409, *stale) from None
+            except AdminPortConfigurationError:
+                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
+            except (ConfigUnavailable, OSError):
+                raise AdminWebError(503, "configuration_unavailable", unavailable) from None
+
+        return await self._mutation(context, action, "instance", apply())
+
     def _worktree_settings(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
         settings = self._worktree_service().settings_view()
-        actions = {}
-        if settings["editable"]:
-            actions["save"] = self._grant(
-                context, "worktrees.settings", AdminActionTarget("worktree-settings", "instance"),
-                _empty_preconditions(worktree_settings_revision=ExpectedValue.expect(settings["revision"])),
-            )
-        return _json_response(200, {**settings, "actions": actions, "requestId": context.request.request_id})
+        save = self._config_action(context, "worktrees.settings", "worktree-settings", settings["editable"],
+            _empty_preconditions(worktree_settings_revision=ExpectedValue.expect(settings["revision"])))
+        return _json_response(200, {**settings, "actions": {"save": save} if save else {}, "requestId": context.request.request_id})
 
     async def _worktree_save_settings(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
-        payload, grant = self._redeem(
-            context, "worktrees.settings", expected_resource="worktree-settings",
-            allowed_extra={"root", "fetchBeforeCreate"},
-        )
-        result = await self._mutation(context, "worktrees.settings", "instance",
-            self._worktree_service().update_settings(
+        result = await self._save_config(context, action="worktrees.settings", resource="worktree-settings",
+            fields={"root", "fetchBeforeCreate"}, require_instance=False,
+            prepare=lambda payload, conditions: partial(self._worktree_service().update_settings,
                 root="" if payload["root"] == "" else _required_text(payload, "root", maximum=4096),
                 fetch_before_create=_required_bool(payload, "fetchBeforeCreate"),
-                expected_revision=_expected_value(_grant_preconditions(grant).worktree_settings_revision, "Worktree settings revision"),
-            ),
-        )
+                expected_revision=_expected_value(conditions.worktree_settings_revision, "Worktree settings revision"),
+            ))
         return _json_response(200, {**result, "requestId": context.request.request_id})
 
     def _progress_card_settings(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
         view = self._management.progress_card_settings()
-        actions = {}
-        if view["editable"]:
-            actions["save"] = self._grant(
-                context, "progress-card.settings", AdminActionTarget("progress-card-settings", "instance"),
-                _empty_preconditions(progress_card_settings_revision=ExpectedValue.expect(view["revision"])),
-            )
-        return _json_response(200, {**view, "actions": actions, "requestId": context.request.request_id})
+        save = self._config_action(context, "progress-card.settings", "progress-card-settings", view["editable"],
+            _empty_preconditions(progress_card_settings_revision=ExpectedValue.expect(view["revision"])))
+        return _json_response(200, {**view, "actions": {"save": save} if save else {}, "requestId": context.request.request_id})
 
     async def _progress_card_save_settings(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
-        payload, grant = self._redeem(
-            context, "progress-card.settings", expected_resource="progress-card-settings",
-            allowed_extra={"settings"},
-        )
-        if grant.target.target_id != "instance":
-            raise StaleActionGrant()
-        try:
-            settings = ProgressCardSettings.from_dict(payload["settings"])
-        except ValueError as error:
-            raise AdminWebError(400, "invalid_progress_card_settings", str(error)) from None
-        revision = _expected_value(
-            _grant_preconditions(grant).progress_card_settings_revision, "progress card settings revision",
-        )
-
-        async def apply() -> dict[str, Any]:
-            try:
-                return await self._management.update_progress_card_settings(settings, expected_revision=revision)
-            except ProgressCardConfigConflict:
-                raise AdminWebError(409, "stale_progress_card_settings", "过程卡配置已被修改，请刷新后再保存。") from None
-            except AdminPortConfigurationError:
-                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
-            except (ProgressCardConfigError, OSError):
-                raise AdminWebError(503, "configuration_unavailable", "无法保存过程卡配置，当前配置未更新。") from None
-
-        await self._mutation(context, "progress-card.settings", "instance", apply())
+        await self._save_config(context, action="progress-card.settings", resource="progress-card-settings",
+            fields={"settings"}, invalid="invalid_progress_card_settings",
+            stale=("stale_progress_card_settings", "过程卡配置已被修改，请刷新后再保存。"),
+            unavailable="无法保存过程卡配置，当前配置未更新。",
+            prepare=lambda payload, conditions: partial(self._management.update_progress_card_settings,
+                ProgressCardSettings.from_dict(payload["settings"]),
+                expected_revision=_expected_value(conditions.progress_card_settings_revision, "progress card settings revision"),
+            ))
         return self._progress_card_settings(context)
 
     def _question_notification_settings(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
         view = self._management.question_notification_settings()
-        actions = {}
-        if view["editable"]:
-            actions["save"] = self._grant(
-                context, "question-notifications.settings", AdminActionTarget("question-notifications-settings", "instance"),
-                _empty_preconditions(question_notification_revision=ExpectedValue.expect(view["revision"])),
-            )
-        return _json_response(200, {**view, "actions": actions, "requestId": context.request.request_id})
+        save = self._config_action(context, "question-notifications.settings", "question-notifications-settings", view["editable"],
+            _empty_preconditions(question_notification_revision=ExpectedValue.expect(view["revision"])))
+        return _json_response(200, {**view, "actions": {"save": save} if save else {}, "requestId": context.request.request_id})
 
     async def _question_notification_save_settings(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
-        payload, grant = self._redeem(
-            context, "question-notifications.settings", expected_resource="question-notifications-settings",
-            allowed_extra={"settings"},
-        )
-        if grant.target.target_id != "instance":
-            raise StaleActionGrant()
-        try:
-            settings = QuestionNotificationSettings.from_dict(payload["settings"])
-        except ValueError as error:
-            raise AdminWebError(400, "invalid_question_notification_settings", str(error)) from None
-        revision = _expected_value(
-            _grant_preconditions(grant).question_notification_revision, "question notification revision",
-        )
-
-        async def apply() -> dict[str, Any]:
-            try:
-                return await self._management.update_question_notification_settings(settings, expected_revision=revision)
-            except QuestionNotificationConfigConflict:
-                raise AdminWebError(409, "stale_question_notification_settings", "提问通知配置已被修改，请刷新后再保存。") from None
-            except AdminPortConfigurationError:
-                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
-            except (QuestionNotificationConfigError, OSError):
-                raise AdminWebError(503, "configuration_unavailable", "无法保存提问通知配置，当前配置未更新。") from None
-
-        await self._mutation(context, "question-notifications.settings", "instance", apply())
+        await self._save_config(context, action="question-notifications.settings", resource="question-notifications-settings",
+            fields={"settings"}, invalid="invalid_question_notification_settings",
+            stale=("stale_question_notification_settings", "提问通知配置已被修改，请刷新后再保存。"),
+            unavailable="无法保存提问通知配置，当前配置未更新。",
+            prepare=lambda payload, conditions: partial(self._management.update_question_notification_settings,
+                QuestionNotificationSettings.from_dict(payload["settings"]),
+                expected_revision=_expected_value(conditions.question_notification_revision, "question notification revision"),
+            ))
         return self._question_notification_settings(context)
 
     async def _worktree_delete_preview(self, context: _RequestContext) -> Response:
@@ -2471,39 +2451,24 @@ class AdminWebApplication:
             raise AdminWebError(503, "unavailable", "群聊准入配置暂不可用。")
         view = service.view()
         chats = await self._management.group_access_chats(view["chatIds"])
-        return _json_response(200, {
-            **view, **chats,
-            "saveAction": self._grant(
-                context, "group-access.save", AdminActionTarget("group-access", "instance"),
-                _empty_preconditions(group_access_revision=ExpectedValue.expect(view["revision"])),
-            ) if service.editable else None,
+        return _json_response(200, {**view, **chats,
+            "saveAction": self._config_action(context, "group-access.save", "group-access", service.editable,
+                _empty_preconditions(group_access_revision=ExpectedValue.expect(view["revision"]))),
         })
 
     async def _save_group_access(self, context: _RequestContext) -> Response:
-        payload, grant = self._redeem(context, "group-access.save",
-            expected_resource="group-access", allowed_extra={"mode", "chatIds"})
-        if grant.target.target_id != "instance":
-            raise StaleActionGrant()
-        revision = _expected_value(_grant_preconditions(grant).group_access_revision, "group access")
-        service = self._group_access
-        if service is None:
-            raise AdminWebError(503, "unavailable", "群聊准入配置暂不可用。")
-        try:
+        def prepare(payload: dict[str, Any], conditions: AdminActionPreconditions) -> Callable[[], Awaitable[None]]:
+            revision = _expected_value(conditions.group_access_revision, "group access")
+            service = self._group_access
+            if service is None:
+                raise AdminWebError(503, "unavailable", "群聊准入配置暂不可用。")
             rule = GroupAccessRule.from_mapping({"mode": payload.get("mode"), "chatIds": payload.get("chatIds")})
-        except GroupAccessError as error:
-            raise AdminWebError(400, "invalid_group_access", str(error)) from None
+            return partial(self._management.update_group_access, service, rule, expected_revision=revision)
 
-        async def apply() -> None:
-            try:
-                await self._management.update_group_access(service, rule, expected_revision=revision)
-            except GroupAccessConflict:
-                raise AdminWebError(409, "stale_group_access", "群聊准入已被修改，请刷新后再保存。") from None
-            except AdminPortConfigurationError:
-                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
-            except (GroupAccessError, OSError):
-                raise AdminWebError(503, "configuration_unavailable", "无法保存群聊准入配置，当前规则未更新。") from None
-
-        await self._mutation(context, "group-access.save", "instance", apply())
+        await self._save_config(context, action="group-access.save", resource="group-access",
+            fields={"mode", "chatIds"}, prepare=prepare, invalid="invalid_group_access",
+            stale=("stale_group_access", "群聊准入已被修改，请刷新后再保存。"),
+            unavailable="无法保存群聊准入配置，当前规则未更新。")
         return await self._group_access_view(context)
 
     def _session_tool_access(self, context: _RequestContext) -> Response:
@@ -2512,41 +2477,26 @@ class AdminWebApplication:
         if service is None:
             raise AdminWebError(503, "unavailable", "跨会话工具权限暂不可用。")
         view = service.view()
-        return _json_response(200, {
-            **view,
-            "saveAction": self._grant(
-                context, "session-tool-access.save", AdminActionTarget("session-tool-access", "instance"),
-                _empty_preconditions(session_policy_revision=ExpectedValue.expect(view["revision"])),
-            ) if service.editable else None,
+        return _json_response(200, {**view,
+            "saveAction": self._config_action(context, "session-tool-access.save", "session-tool-access", service.editable,
+                _empty_preconditions(session_policy_revision=ExpectedValue.expect(view["revision"]))),
         })
 
     async def _save_session_tool_access(self, context: _RequestContext) -> Response:
-        payload, grant = self._redeem(context, "session-tool-access.save",
-            expected_resource="session-tool-access", allowed_extra={"discovery", "readSend"})
-        if grant.target.target_id != "instance":
-            raise StaleActionGrant()
-        revision = _expected_value(_grant_preconditions(grant).session_policy_revision, "session tool access")
-        service = self._session_policy
-        if service is None:
-            raise AdminWebError(503, "unavailable", "跨会话工具权限暂不可用。")
-        try:
+        def prepare(payload: dict[str, Any], conditions: AdminActionPreconditions) -> Callable[[], Awaitable[None]]:
+            revision = _expected_value(conditions.session_policy_revision, "session tool access")
+            service = self._session_policy
+            if service is None:
+                raise AdminWebError(503, "unavailable", "跨会话工具权限暂不可用。")
             policy = SessionAccessPolicy.from_mapping({
                 "discovery": payload.get("discovery"), "readSend": payload.get("readSend"),
             })
-        except SessionPolicyError as error:
-            raise AdminWebError(400, "invalid_session_tool_access", str(error)) from None
+            return partial(self._management.update_session_tool_access, service, policy, expected_revision=revision)
 
-        async def apply() -> None:
-            try:
-                await self._management.update_session_tool_access(service, policy, expected_revision=revision)
-            except SessionPolicyConflict:
-                raise AdminWebError(409, "stale_session_tool_access", "权限已被修改，请刷新后再保存。") from None
-            except AdminPortConfigurationError:
-                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
-            except (SessionPolicyError, OSError):
-                raise AdminWebError(503, "configuration_unavailable", "无法保存实例权限配置，当前权限未更新。") from None
-
-        await self._mutation(context, "session-tool-access.save", "instance", apply())
+        await self._save_config(context, action="session-tool-access.save", resource="session-tool-access",
+            fields={"discovery", "readSend"}, prepare=prepare, invalid="invalid_session_tool_access",
+            stale=("stale_session_tool_access", "权限已被修改，请刷新后再保存。"),
+            unavailable="无法保存实例权限配置，当前权限未更新。")
         return self._session_tool_access(context)
 
     async def _identity_call(self, context: _RequestContext, operation: Awaitable[T]) -> T:

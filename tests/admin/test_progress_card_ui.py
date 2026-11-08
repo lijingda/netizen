@@ -22,13 +22,13 @@ class ProgressCardUiTest(unittest.TestCase):
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         scripts = "\n".join((static / name).read_text(encoding="utf-8") for name in (
-            "chat-picker.js", "progress-card.js", "admin.js",
+            "chat-picker.js", "config-editor.js", "progress-card.js", "admin.js",
         ))
         fixture = Path(__file__).with_name("progress_card_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_PROGRESS_CARD_CONTROLLER\n")
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         script = "const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + before + scripts + after
-        for case in ("save_discard", "readonly", "conflict", "expiry", "read_failure", "late_refresh", "preview_order"):
+        for case in ("save_discard", "readonly", "conflict", "expiry", "read_failure", "refresh_failure", "late_refresh", "preview_order"):
             with self.subTest(case=case):
                 result = subprocess.run([node, "-", case], input=script, capture_output=True,
                                         text=True, timeout=10)

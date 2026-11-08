@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..admin.port_config import AdminPortConfigurationError
+from ..admin.port_config import AdminPortConfigurationError, ConfigConflict, ConfigUnavailable
 from ..bindings import BindingNotFound, ProjectConflict, ProjectNotFound, SideTopicQuery, SideTopicState
 from ..projects import ProjectError
 from .errors import WorktreeError
@@ -50,9 +50,8 @@ class WorktreeService:
                               expected_revision: str) -> dict[str, Any]:
         try:
             settings = WorktreeSettings.from_mapping({"root": root, "fetchBeforeCreate": fetch_before_create})
-            await self._io.submit(self._settings.update, settings, expected_revision=expected_revision,
-                                  deadline=asyncio.get_running_loop().time() + 10)
-        except WorktreeSettingsError as error:
+            await self._management.submit_config_write(self._settings.update, settings, expected_revision=expected_revision)
+        except (WorktreeSettingsError, ConfigConflict, ConfigUnavailable) as error:
             raise WorktreeError("conflict", str(error)) from error
         except AdminPortConfigurationError as error:
             raise WorktreeError("configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from error

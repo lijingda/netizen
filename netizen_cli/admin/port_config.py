@@ -7,8 +7,11 @@ import os
 import stat
 import tempfile
 import threading
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Generic, Protocol, TypeVar
 
 import yaml
 
@@ -65,6 +68,69 @@ class ConfigFileEditor:
                 raise AdminPortConfigurationError("configuration root must be a mapping")
             loaded[name] = value
             self._snapshot = write_configuration(self._snapshot, loaded)
+
+
+class ConfigUnavailable(ValueError):
+    pass
+
+
+class ConfigConflict(ValueError):
+    pass
+
+
+class _SectionValue(Protocol):
+    def to_dict(self) -> dict[str, Any]: ...
+
+
+SectionT = TypeVar("SectionT", bound=_SectionValue)
+
+
+class ConfigSection(Generic[SectionT]):
+    """Publish immutable snapshots after serialized writes to the existing YAML."""
+
+    def __init__(self, value: SectionT, *, section: str, editor: ConfigFileEditor | None,
+                 conflict_message: str) -> None:
+        self._snapshot = (value, uuid.uuid4().hex)
+        self._editor, self._section = editor, section
+        self._conflict_message = conflict_message
+        self._write_lock = threading.Lock()
+
+    def snapshot(self) -> tuple[SectionT, str]:
+        # Readers never wait for file I/O.
+        return self._snapshot
+
+    @property
+    def current(self) -> SectionT:
+        return self._snapshot[0]
+
+    @property
+    def revision(self) -> str:
+        return self._snapshot[1]
+
+    @property
+    def editable(self) -> bool:
+        return self._editor is not None
+
+    def update(self, value: SectionT, *, expected_revision: str) -> None:
+        with self._write_lock:
+            if expected_revision != self.revision:
+                raise ConfigConflict(self._conflict_message)
+            self._publish(value)
+
+    def modify(self, change: Callable[[SectionT], SectionT | None]) -> tuple[SectionT, bool]:
+        with self._write_lock:
+            value = change(self.current)
+            if value is None:
+                return self.current, False
+            self._publish(value)
+            return value, True
+
+    def _publish(self, value: SectionT) -> None:
+        if self._editor is None:
+            raise ConfigUnavailable("instance configuration is unavailable")
+        self._editor.update_section(self._section, value.to_dict())
+        # Every successful save invalidates grants/cursors, even if unchanged.
+        self._snapshot = (value, uuid.uuid4().hex)
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, ...]:

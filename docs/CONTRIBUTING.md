@@ -53,6 +53,7 @@ start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收
 | `netizen_cli/message_content.py`、`netizen_cli/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读，由消息准备组件复用。控制意图仍由 Channel 入口判定。 |
 | `netizen_cli/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
 | `netizen_cli/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
+| `netizen_cli/admin/port_config.py`、`netizen_cli/chat_access.py` | 前者统一既有 YAML 的原子写入和配置服务快照发布；后者共享群聊与会话权限规则的精确 chat ID 校验和映射解析。 |
 | `netizen_cli/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的安装信息与本实例重启编排。 |
 | `netizen_cli/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
 | `netizen_cli/deployment/` | 有界 Admin 重启记录、维护锁与独立重启 job。 |
