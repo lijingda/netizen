@@ -141,6 +141,21 @@ const cases = {
     await controller.load();
     assert.equal(field("fields").disabled, false);
   },
+  async refresh_failure() {
+    await controller.load();
+    change("commentary-limit", "8");
+    failure = true;
+    await assert.rejects(controller.load(), /配置已变化/);
+    assert.equal(field("progress-commentary-limit").value, 8, "a failed refresh retains the draft");
+    assert.equal(controller.dirty(), true);
+    assert.equal(field("fields").disabled, false, "a failed refresh releases the loading lock");
+    assert.equal(field("save").disabled, true, "a failed locked refresh invalidates its old grant");
+    await submit();
+    assert.equal(posts().length, 0);
+    failure = false;
+    await controller.load();
+    assert.equal(controller.dirty(), false);
+  },
   async late_refresh() {
     await controller.load();
     gate = deferred();

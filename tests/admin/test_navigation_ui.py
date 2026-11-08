@@ -32,6 +32,7 @@ class NavigationUiTest(unittest.TestCase):
         script = "const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + common + before
         script += (static / "chat-picker.js").read_text(encoding="utf-8")
         script += (static / "identity.js").read_text(encoding="utf-8")
+        script += (static / "config-editor.js").read_text(encoding="utf-8")
         script += (static / "worktrees.js").read_text(encoding="utf-8")
         script += (static / "session-access.js").read_text(encoding="utf-8")
         script += (static / "group-access.js").read_text(encoding="utf-8")

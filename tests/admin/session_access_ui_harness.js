@@ -47,6 +47,11 @@ function change(id, value, event = "change") { element(id).value = value; elemen
   assert.equal(editor.dirty(), true);
   assert.equal(element("unsaved").hidden, false);
   assert.equal(element("save").disabled, false);
+  failed = true;
+  await assert.rejects(editor.load(), /保存结果未确认/);
+  assert.equal(editor.dirty(), true, "a failed refresh retains the edited draft");
+  assert.equal(element("save").disabled, false, "an unlocked failed refresh preserves the existing grant");
+  failed = false;
   acceptDiscard = false;
   const before = calls.length;
   assert.equal(await editor.load(), false);

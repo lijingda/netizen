@@ -25,6 +25,7 @@ class SessionRenameUiTest(unittest.TestCase):
         program = ("const htmlTree = " + json.dumps(tree.root) + ";\n"
             + fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
             + before + (static / "chat-picker.js").read_text(encoding="utf-8")
+            + (static / "config-editor.js").read_text(encoding="utf-8")
             + (static / "progress-card.js").read_text(encoding="utf-8")
             + (static / "admin.js").read_text(encoding="utf-8") + after)
         for case in ("generate_edit_save", "failure_and_retry", "expired_grants_refresh_together",

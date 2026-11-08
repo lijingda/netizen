@@ -25,6 +25,6 @@ class SessionAccessUiTest(unittest.TestCase):
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_SESSION_ACCESS\n")
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run([node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
-            + dom + before + (static / "session-access.js").read_text(encoding="utf-8") + after,
+            + dom + before + (static / "config-editor.js").read_text(encoding="utf-8") + (static / "session-access.js").read_text(encoding="utf-8") + after,
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

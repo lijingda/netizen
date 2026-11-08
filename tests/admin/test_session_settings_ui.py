@@ -24,6 +24,7 @@ class SessionSettingsUiTest(unittest.TestCase):
         source = (static / "admin.js").read_text(encoding="utf-8")
         parts = [
             (static / "chat-picker.js").read_text(encoding="utf-8"),
+            (static / "config-editor.js").read_text(encoding="utf-8"),
             (static / "progress-card.js").read_text(encoding="utf-8"),
             source,
         ]
