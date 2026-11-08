@@ -6,8 +6,6 @@ import json
 import os
 import re
 import secrets
-import shutil
-import subprocess
 import tempfile
 import time
 import unittest
@@ -3101,29 +3099,14 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertIn("position: fixed", stylesheet)
 
     def test_time_range_javascript_behavior_across_timezones(self) -> None:
-        node = shutil.which("node")
-        if node is None:
-            self.skipTest("Node.js is unavailable for the Admin JavaScript behavior test")
-        from tests.admin.test_session_filter_ui import _HtmlTree
+        from tests.admin.ui_harness import harness_source, read_fixture, run_harness
 
-        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
-        tree = _HtmlTree()
-        tree.feed((static / "index.html").read_text(encoding="utf-8"))
-        fixture = Path(__file__).with_name("time_range_ui_harness.js")
-        before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_ADMIN_PAGE\n")
-        dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
-        harness = ("const htmlTree = " + json.dumps(tree.root) + ";\n"
-                   + dom + before + (static / "chat-picker.js").read_text(encoding="utf-8")
-                   + (static / "admin.js").read_text(encoding="utf-8") + after)
+        before, after = read_fixture("time_range_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
+        harness = harness_source("index.html", ("chat-picker.js", "admin.js"), before, after)
 
         def run(timezone: str) -> dict:
-            completed = subprocess.run(
-                [node], input=harness,
-                check=False,
-                capture_output=True,
-                text=True,
-                env={**os.environ, "TZ": timezone},
-                timeout=10,
+            completed = run_harness(
+                self, harness, timeout=10, env={**os.environ, "TZ": timezone},
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             return json.loads(completed.stdout)

@@ -1,36 +1,17 @@
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
 import unittest
 
-from tests.admin.test_session_filter_ui import _HtmlTree
+from tests.admin.ui_harness import CHAT_CONFIG_SCRIPTS, harness_source, read_fixture, run_harness
 
 
 class DefaultsUiTest(unittest.TestCase):
     def test_edit_preservation_ordering_exact_fallback_and_pagination(self) -> None:
-        node = shutil.which("node")
-        if node is None:
-            if os.environ.get("CI") == "true":
-                self.fail("Node.js is required for Admin JavaScript behavior tests")
-            self.skipTest("Node.js is required for Admin JavaScript behavior tests")
-        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
-        tree = _HtmlTree()
-        tree.feed((static / "index.html").read_text(encoding="utf-8"))
-        source = (static / "admin.js").read_text(encoding="utf-8")
-        parts = [
-            (static / "chat-picker.js").read_text(encoding="utf-8"),
-            (static / "config-editor.js").read_text(encoding="utf-8"),
-            (static / "progress-card.js").read_text(encoding="utf-8"),
-            source,
-        ]
-        fixture = Path(__file__).with_name("defaults_ui_harness.js")
-        before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_DEFAULTS_CONTROLLER\n")
-        dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
-        result = subprocess.run([node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
-                                 + dom + before + "\n".join(parts) + after,
-                                capture_output=True, text=True, timeout=30)
+        before, after = read_fixture("defaults_ui_harness.js", "// SHIPPED_DEFAULTS_CONTROLLER\n")
+        script = harness_source(
+            "index.html", (*CHAT_CONFIG_SCRIPTS, "progress-card.js", "admin.js"), before, after,
+        )
+        result = run_harness(
+            self, script, timeout=30,
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
