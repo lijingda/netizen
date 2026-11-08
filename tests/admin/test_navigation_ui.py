@@ -1,43 +1,22 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
 import unittest
 
-from tests.admin.test_session_filter_ui import _HtmlTree
+from tests.admin.ui_harness import CONFIG_SCRIPTS, harness_source, read_fixture, run_harness
 
 
 class NavigationUiTest(unittest.TestCase):
     def test_deep_links_history_applied_filters_and_cursor_pages(self) -> None:
-        node = shutil.which("node")
-        if node is None:
-            reason = "Node.js 22 is required for Admin JavaScript behavior tests"
-            if os.environ.get("CI") == "true":
-                self.fail(reason)
-            self.skipTest(reason)
-        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
-        tree = _HtmlTree()
-        tree.feed((static / "index.html").read_text(encoding="utf-8"))
-        fixtures = Path(__file__).parent
-        dom = (fixtures / "dom_harness.js").read_text(encoding="utf-8")
-        common = (fixtures / "side_sessions_ui_harness.js").read_text(encoding="utf-8").split(
-            "// SHIPPED_ADMIN_PAGE\n"
-        )[0]
-        before, after = (fixtures / "navigation_ui_harness.js").read_text(encoding="utf-8").split(
-            "// SHIPPED_ADMIN_PAGE\n"
+        before, after = read_fixture("navigation_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
+        common, _ = read_fixture("side_sessions_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
+        before = common + before
+        script = harness_source(
+            "index.html",
+            ("chat-picker.js", "identity.js", *CONFIG_SCRIPTS, "worktrees.js",
+             "session-access.js", "group-access.js", "progress-card.js", "admin.js"),
+            before, after,
         )
-        script = "const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + common + before
-        script += (static / "chat-picker.js").read_text(encoding="utf-8")
-        script += (static / "identity.js").read_text(encoding="utf-8")
-        script += (static / "config-editor.js").read_text(encoding="utf-8")
-        script += (static / "worktrees.js").read_text(encoding="utf-8")
-        script += (static / "session-access.js").read_text(encoding="utf-8")
-        script += (static / "group-access.js").read_text(encoding="utf-8")
-        script += (static / "progress-card.js").read_text(encoding="utf-8")
-        script += (static / "admin.js").read_text(encoding="utf-8") + after
         cases = [(url, None) for url in (
             "/projects",
             "/worktrees?cursor=stale&actionToken=secret",
@@ -61,6 +40,5 @@ class NavigationUiTest(unittest.TestCase):
             with self.subTest(initial_url=initial_url, auth_drawer=auth_drawer):
                 bootstrap = ("const initialSearch = ''; const initialUrl = " + json.dumps(initial_url)
                              + "; const authDrawer = " + json.dumps(auth_drawer) + ";\n")
-                result = subprocess.run([node], input=bootstrap + script, capture_output=True,
-                                        text=True, timeout=10)
+                result = run_harness(self, bootstrap + script, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

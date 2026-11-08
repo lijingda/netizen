@@ -1,38 +1,16 @@
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
 import unittest
 
-from tests.admin.test_session_filter_ui import _HtmlTree
+from tests.admin.ui_harness import CHAT_CONFIG_SCRIPTS, harness_source, read_fixture, run_harness
 
 
 class SessionSettingsUiTest(unittest.TestCase):
     def test_session_configuration_drawer_and_request_boundaries(self) -> None:
-        node = shutil.which("node")
-        if node is None:
-            reason = "Node.js is required for Admin JavaScript behavior tests"
-            if os.environ.get("CI") == "true":
-                self.fail(reason)
-            self.skipTest(reason)
-        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
-        tree = _HtmlTree()
-        tree.feed((static / "index.html").read_text(encoding="utf-8"))
-        source = (static / "admin.js").read_text(encoding="utf-8")
-        parts = [
-            (static / "chat-picker.js").read_text(encoding="utf-8"),
-            (static / "config-editor.js").read_text(encoding="utf-8"),
-            (static / "progress-card.js").read_text(encoding="utf-8"),
-            source,
-        ]
-        fixture = Path(__file__).with_name("session_settings_ui_harness.js")
-        before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_SESSION_SETTINGS_CONTROLLER\n")
-        dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
-        program = ("const htmlTree = " + json.dumps(tree.root) + ";\n"
-                   + dom + before + "\n".join(parts) + after)
+        before, after = read_fixture("session_settings_ui_harness.js", "// SHIPPED_SESSION_SETTINGS_CONTROLLER\n")
+        script = harness_source(
+            "index.html", (*CHAT_CONFIG_SCRIPTS, "progress-card.js", "admin.js"), before, after,
+        )
         for case in (
             "entry_and_complete_save",
             "progress_card_configuration",
@@ -48,8 +26,7 @@ class SessionSettingsUiTest(unittest.TestCase):
             "discard_confirmation",
         ):
             with self.subTest(case=case):
-                result = subprocess.run(
-                    [node, "-", case], input=program,
-                    capture_output=True, text=True, timeout=10,
+                result = run_harness(
+                    self, script, timeout=10, args=("-", case),
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
