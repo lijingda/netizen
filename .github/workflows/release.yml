@@ -42,12 +42,12 @@ jobs:
       main-gate-url: ${{ steps.main-gate.outputs.url }}
     steps:
       - name: Check out exact tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
       - name: Set up distribution builder
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Resolve exact release identity
@@ -63,7 +63,7 @@ jobs:
           echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$commit")" >> "$GITHUB_ENV"
       - name: Require successful main CI for the exact commit
         id: main-gate
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
         with:
@@ -93,7 +93,7 @@ jobs:
           python scripts/build_cli_distribution.py --output-dir dist
           --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
       - name: Preserve exact distribution bytes
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-candidate
           path: |
@@ -108,17 +108,17 @@ jobs:
     needs: build-artifact
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ inputs.tag }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Verify the verification code is the main-qualified commit
         env:
           RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
         run: test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate
           path: dist
@@ -163,13 +163,13 @@ jobs:
     outputs:
       release-id: ${{ steps.draft.outputs.release-id }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate
           path: dist
       - name: Create draft and upload the exact Python distributions
         id: draft
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           MANIFEST_SHA256: ${{ needs.build-artifact.outputs.manifest-sha256 }}
           MAIN_GATE_URL: ${{ needs.build-artifact.outputs.main-gate-url }}
@@ -233,12 +233,12 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate
           path: candidate
       - name: Recheck tag and copy only verified distributions for PyPI
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
@@ -280,7 +280,7 @@ jobs:
       contents: write
     steps:
       - name: Finalize the GitHub Release only after PyPI succeeded
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.prepare-release.outputs.release-id }}
           RELEASE_TAG: ${{ inputs.tag }}
