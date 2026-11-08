@@ -1,81 +1,107 @@
 # Netizen engineering guardrails
 
-Keep durable contributor rules here. Behavior, procedures, and compatibility
-evidence belong in the linked source documents; read the relevant sections and
-their cited ADRs before changing that boundary.
+Netizen is a Feishu/Lark Channel for Codex. Per instance, keep one long-lived Python
+service, one `FeishuChannel`, one Channel database, and one shared
+`AsyncCodex`. The Channel SDK owns messaging; the official `openai-codex`
+SDK owns native Threads, Turns, history, tools, configuration, and permissions.
+
+Follow the [Netizen/Codex responsibility boundary](docs/design.md#netizen-与-codex-的职责边界):
+Netizen owns SDK requests/results and its resources; Codex owns native execution.
+Do not add another runtime, long-lived service, scheduler, history model, or
+configuration layer.
+
+Keep durable contributor rules here. Behavior, procedures and compatibility
+evidence belong in linked sources; read relevant sections and cited ADRs before
+changing those boundaries. Keep feature behavior in design.md; add root navigation
+only for new durable contributor guardrails.
+The usage guides are not implementation guides.
 
 ## Task navigation
 
-- Start with [README](README.md), [CONTRIBUTING](docs/CONTRIBUTING.md), [overview](docs/design.md#工程概览),
-  and [vocabulary](CONTEXT.md). For usage consult [the skill](skills/netizen-user-guide/SKILL.md) and
-  [user guide](skills/netizen-user-guide/references/user-guide.md); they are not implementation guides.
-- Runtime: [identity](docs/design.md#scopebinding-与会话配置), [admission](docs/design.md#锁与输入准入),
-  [observation](docs/design.md#普通-turn-终态与观测恢复), [failures](docs/design.md#失败语义), [SDK adapters](docs/design.md#sdk-适配边界).
-  [Goal](docs/design.md#goal-物理-turn-与逻辑终态) retains exact physical-Turn admission across rollover;
-  Ordinary/Side/Goal steer and verified ordinary-resume rejections preserve separate cancellation and Goal receipt-identity protections.
-  [Side](docs/design.md#side-运行与关闭), [subscriptions](docs/design.md#普通会话订阅), and
-  [lifecycle/forks](docs/design.md#普通会话生命周期) preserve exact native results and Binding-local restore uncertainty;
-  [removal](docs/design.md#原生归档与删除) and background naming retain their separate failure/cleanup boundaries.
-- [Missing-current creation](docs/design.md#聊天默认配置与自动创建) uses chat defaults and the original message Scope;
-  keep `/new`, input admission and Project deletion independent of those rules.
-- [Collaboration](docs/design.md#普通会话协作): native Thread IDs, instance tool ranges and narrow ExternalMessage start/join;
-  preserve human/card/scheduled exact-Turn admission and [directory/read/wait pagination](docs/design.md#工具与可访问目录).
-- [Input preparation](docs/design.md#消息输入准备) owns provenance, mention catch-up, quotes and images.
-  [Attachments](docs/design.md#输入文件附件): complete publication, exact local ownership and manual deletion independent
-  of native acceptance; no receipt locks or inferred attachment history. [Questions](docs/design.md#原生问题卡片与回答)
-  use target-specific Binding/Side admission; preserve exact identity, context, display and file-evidence contracts.
-- [Presentation](docs/design.md#回复与活动展示): stable partial answers retain Goal rollover fragments.
-  [Progress settings](docs/design.md#过程卡展示设置): independent bounded windows, preserved segments, self-contained pagination;
-  resolve missing intent from instance fallback only at execution capture, preserve explicit historical values, never persist the fallback.
-  [Commands/cards](docs/design.md#飞书命令与控制卡片) own controls, forms and callbacks.
-- [SQLite](docs/design.md#channel-数据库与结构校验), [credentials](docs/design.md#飞书应用凭据), and
-  [native environment](docs/design.md#原生环境与能力配置) own data, schema, App source and configuration boundaries.
-- [Admin](docs/design.md#管理查询与操作): Feishu administrator identities and [runtime polling](docs/design.md#运行态投影与轮询).
-  [Project browsing](docs/design.md#project-文件查看): current-directory identity, bounded descriptor-relative reads, inert previews,
-  no download endpoint; keep it separate from exact-Turn Files. [Project deletion](docs/design.md#project-删除与交接)
-  preserves exact inventory, tombstones and lifecycle boundaries.
-- [Worktrees](docs/design.md#受管-worktree-与实际目录): independent ownership, actual cwd and optional cascade;
-  Git owns live filesystem facts; manage only resources created by the shared service, never external App/CLI worktrees.
-- [Schedules](docs/design.md#定时任务) own plans, dispatch, ordinary topics, MCP management and saved-plan manual runs.
-  [Existing-Binding inputs](docs/design.md#原会话目标) retain ordinary start/steer admission/feedback, input-receipt Runs,
-  and lifecycle suspension independent of manual enablement.
-- [CLI](docs/cli.md) and [deployment](docs/deployment.md): environment-scoped packages replace per-instance releases.
-  Routine Agent installation starts with README and setup output; use [relay guidance](docs/deployment.md#agent-驱动首次安装)
-  for alternatives/troubleshooting. Read relevant acceptance gates before deployment changes and
-  [multi-instance/Skills gates](docs/deployment.md#多实例与内置-skills-验收) with separate platform/live status before rollout.
-- [Runtime Agent guidance](docs/design.md#运行环境提示与使用指南的边界) stays separate from user guidance;
-  follow its description/body boundary and size budgets before adding execution hints.
-- [ADR index](docs/adr/README.md) owns status/amendment chains and [admission](docs/adr/README.md#何时写-adr).
-  Feature behavior belongs in design.md; add root navigation only for new durable contributor guardrails.
+### Getting started
+
+- Start with: [README](README.md), [CONTRIBUTING](docs/CONTRIBUTING.md), [overview](docs/design.md#工程概览), [vocabulary](CONTEXT.md).
+- Usage: [user skill](skills/netizen-user-guide/SKILL.md) and [user guide](skills/netizen-user-guide/references/user-guide.md).
+- Decisions: [status/amendments](docs/adr/README.md), [ADR criteria](docs/adr/README.md#何时写-adr).
+
+### Runtime and sessions
+
+- [Identity](docs/design.md#scopebinding-与会话配置): Scope, Binding and Thread relationships, plus session configuration.
+- [Admission](docs/design.md#锁与输入准入): locks and which Turn may accept an input.
+- [Observation](docs/design.md#普通-turn-终态与观测恢复): ordinary Turn terminals and bounded observation recovery.
+- [Failures](docs/design.md#失败语义): rejected inputs, uncertain effects and operation-specific recovery.
+- [SDK adapters](docs/design.md#sdk-适配边界): approved adapters, compatibility gates and removal conditions.
+- [Goal](docs/design.md#goal-物理-turn-与逻辑终态): physical Turns, logical completion and rollover.
+- [Side](docs/design.md#side-运行与关闭): temporary-topic execution, admission and closure.
+- [Subscriptions](docs/design.md#普通会话订阅): ordinary Thread subscription retention and release.
+- [Lifecycle/forks](docs/design.md#普通会话生命周期): naming, activation, restoration and persistent forks.
+- [Archive/delete](docs/design.md#原生归档与删除): native results, failure handling and cleanup.
+- [Auto-creation](docs/design.md#聊天默认配置与自动创建): chat defaults and creation when no current Binding exists.
+- [Collaboration](docs/design.md#普通会话协作): native Thread identity, access ranges and ExternalMessage delivery.
+- [Directory/history](docs/design.md#工具与可访问目录): session discovery, read/wait tools and cursor pagination.
+
+### Inputs and replies
+
+- [Input preparation](docs/design.md#消息输入准备): provenance, mention catch-up, quotes and images.
+- [Attachments](docs/design.md#输入文件附件): input file publication, exact ownership and manual deletion.
+- [Questions](docs/design.md#原生问题卡片与回答): native question cards, answer identity and Binding/Side admission.
+- [Presentation](docs/design.md#回复与活动展示): Activity, partial answers, Result and Files.
+- [Progress settings](docs/design.md#过程卡展示设置): bounded windows, segments, pagination and instance fallback settings.
+- [Commands/cards](docs/design.md#飞书命令与控制卡片): slash controls, configuration forms and callbacks.
+- [Runtime guidance](docs/design.md#运行环境提示与使用指南的边界): execution hints, user guidance separation and size budgets.
+
+### Management, data and operations
+
+- [SQLite](docs/design.md#channel-数据库与结构校验): what may be stored, and schema validation.
+- [Credentials](docs/design.md#飞书应用凭据): application credential source, App identity and repair.
+- [Native environment](docs/design.md#原生环境与能力配置): Codex configuration, capabilities and built-in Skill registration.
+- [Admin](docs/design.md#管理查询与操作): management operations and administrator identities.
+- [Runtime polling](docs/design.md#运行态投影与轮询): displayed runtime state and bounded status polling.
+- [Project browsing](docs/design.md#project-文件查看): current-directory file trees, bounded reads and previews.
+- [Project deletion](docs/design.md#project-删除与交接): inventory, tombstones and native lifecycle handoffs.
+- [Worktrees](docs/design.md#受管-worktree-与实际目录): resource ownership, actual working directories and optional deletion cascades.
+- [Schedules](docs/design.md#定时任务): plans, dispatch, ordinary topics, MCP and saved-plan manual runs.
+- [Existing-Binding inputs](docs/design.md#原会话目标): ordinary input delivery, Run receipts and lifecycle suspension.
+- Operations: [CLI](docs/cli.md) and [deployment](docs/deployment.md).
+- [Setup relay](docs/deployment.md#agent-驱动首次安装): Agent installation alternatives, verification URLs and troubleshooting.
+- [Multi-instance/Skills gates](docs/deployment.md#多实例与内置-skills-验收): platform acceptance and live Skills validation before rollout.
 
 ## Architecture
 
-- Netizen is a Feishu/Lark Channel for Codex. Per instance, keep one long-lived Python
-  service, one `FeishuChannel`, one Channel database, and one shared
-  `AsyncCodex`. The Channel SDK owns messaging; the official `openai-codex`
-  SDK owns native Threads, Turns, history, tools, configuration, and permissions.
-- Follow the [Netizen/Codex responsibility boundary](docs/design.md#netizen-与-codex-的职责边界):
-  Netizen owns SDK requests/results and its resources; Codex owns native execution.
-- The in-process Admin Web is a management-only adapter over that same
+- The in-process Admin Web is a management-only adapter over the shared
   application/runtime boundary (ADR 0031). It manages existing sessions but does
   not create ordinary Bindings; interactive session creation belongs to Feishu.
-  The one-shot Admin deployment process
-  for explicit instance restarts is the sole deployment exception
-  (ADR 0057/0059/0076); Admin cannot upgrade the shared program. The sole in-process Scheduler shares that boundary; Admin
+  The one-shot Admin deployment process for explicit instance restarts is the sole
+  deployment exception (ADR 0057/0059/0076). Admin cannot upgrade the shared program.
+- The sole in-process Scheduler uses the shared application/runtime boundary. Admin
   may maintain Scheduled Plans and request manual runs of their saved versions,
   but cannot submit arbitrary immediate Prompts (ADR 0061/0068).
-  Do not add another runtime, long-lived service, scheduler, history model, or
-  configuration layer.
+  A scheduled plan suspended because its target session's lifecycle changed keeps
+  its manual enablement unchanged.
+- Project browsing must use current-directory identity, bounded descriptor-relative
+  reads and inert previews, remain separate from exact-Turn Files, and expose no
+  download endpoint.
 - Preserve exact Scope/Binding-to-native-Thread identity. Existing running input
   steers the exact Turn; it is never queued or converted into another Turn.
   Only the verified session-tool entry uses native ExternalMessage start/join
-  (ADR 0081); it does not change ordinary input admission.
+  (ADR 0081); it does not change ordinary input admission. Human messages,
+  question-card answers and scheduled inputs retain their exact-Turn admission.
+  Collaboration tools use native Thread IDs and respect this instance's configured
+  access ranges.
+  Goal rollover never redirects a prepared input to another physical Turn.
   Unknown side effects fail closed at the documented operation-specific scope.
+  Question answers use the admission rules of the Binding or Side that the original
+  question card targets.
+- Keep `/new`, input admission and Project deletion independent of automatic
+  session creation.
 - Different Bindings may run concurrently in the same actual working directory.
-  Project identity/default cwd and the selected managed Worktree are separate;
-  materialized Thread cwd comes from Codex, never an implicit Project fallback.
+  Keep Project identity, its default cwd and the selected managed Worktree separate.
+  A materialized Thread gets its cwd from Codex, never an implicit Project fallback.
   Do not add a global semaphore, Project lock, workspace copy, per-Binding
   `CODEX_HOME`, or cross-Thread execution limit.
+- A worktree is not owned by any one session. Keep deletion cascades optional.
+  Manage only worktrees created by this instance's shared service, never external
+  App/CLI worktrees.
 - Channel SQLite may store only the metadata and narrow exceptions explicitly listed
   in the [current data contract](docs/design.md#channel-数据库与结构校验).
   Do not persist Git state or duplicate native cwd authority. Never store prompts
@@ -94,16 +120,6 @@ their cited ADRs before changing that boundary.
   synthetic, and live harnesses. Delete also requires disposable live coverage
   and exact native-response handling (ADR 0078), without catalog reconciliation.
   Model upgrades do not replace these gates.
-- Message-history access remains the narrow, public, typed, read-only
-  `lark-oapi` port using the same app credentials (ADR 0039). Preserve chat-main
-  versus thread-topic semantics, inert historical context, and its rollout gate.
-- Display is best effort and never changes native execution. Keep Reply Cards
-  within the closed Activity/Partial Answer/Result/Files set; Goal management cards are separate; never expose reasoning or raw
-  tool arguments/output. Files use exact Turn evidence, not workspace scans.
-  Partial Answers use the existing observation/consumption chain independently of
-  Progress Card, never signal completion, and never create database answer history.
-  Preserve Goal's four-proof completion and exact final-Turn Result/Files handoff contract,
-  including confirmed explicit clear while the current Turn completes (ADR 0084).
 - Every materialized persisted non-ephemeral Thread retains archive/delete
   controls. Delegate shutdown to App Server after reserving exact lifecycle
   intent and releasing Binding/Scope locks; do not pre-interrupt, cleanup, or
@@ -111,26 +127,46 @@ their cited ADRs before changing that boundary.
   unknown states (ADR 0037/0049); never fabricate a terminal.
 - Feishu app availability and chat membership govern Channel admission, with optional
   instance group access under [ADR 0092](docs/adr/0092-restrict-execution-to-enabled-group-chats-on-demand.md).
-  Direct chats and their topics remain unaffected. Instance Administrators are separate,
-  equal Admin Web authorities (in Feishu they only add the ADR 0092 `/enable` group command),
-  not multi-role RBAC or Project ACLs. Native Codex controls model, tools,
-  Skills, MCP, sandboxing, and environment policy except the documented Binding
+  Direct chats and their topics remain unaffected. Instance Administrators have
+  separate, equal Admin Web authority. In Feishu they only add the ADR 0092 `/enable`
+  group command; this does not introduce multi-role RBAC or Project ACLs.
+- Native Codex controls model, tools, Skills, MCP, sandboxing, and environment
+  policy except the documented Binding
   Model/Effort/Speed intent, non-login tool boundary, and dedicated temporary
-  Scheduler/session collaboration MCP server entries (ADR 0061/0081). These public process overrides must not
-  write user configuration, replace user MCP entries, or override developer/base
-  instructions. Fresh Threads use the public SDK's `auto_review` default;
+  Scheduler/session collaboration MCP server entries (ADR 0061/0081).
+  These public process overrides must not write user configuration, replace user
+  MCP entries, or override developer/base instructions. Fresh Threads use the public SDK's `auto_review` default;
   persistent forks retain native inherited permissions without client overrides.
+- Message-history access remains the narrow, public, typed, read-only
+  `lark-oapi` port using the same app credentials (ADR 0039). Preserve chat-main
+  versus thread-topic semantics, inert historical context, and its rollout gate.
+- Validate exact local ownership of input attachments. Keep manual deletion
+  independent of whether native execution accepted the input. Do not add attachment
+  receipt locks or infer attachment history.
+- Display is best effort and never changes native execution. Keep Reply Cards
+  within the closed Activity/Partial Answer/Result/Files set. Goal management cards
+  are separate. Never expose reasoning or raw tool arguments/output. Files use exact
+  Turn evidence, not workspace scans.
+  Partial Answers use the existing observation/consumption chain independently of
+  Progress Card, never signal completion, and never create database answer history.
+  Preserve Goal's four-proof completion and exact final-Turn Result/Files handoff contract,
+  including confirmed explicit clear while the current Turn completes (ADR 0084).
+- Resolve a missing progress setting from the instance fallback only when capturing
+  settings for execution; never persist the resolved fallback into a Binding,
+  default rule or plan. Preserve all historical progress settings as explicit choices.
 - Unsupported native capabilities remain explicit gaps. Keep product non-goals
   in [design.md](docs/design.md#目标与边界); do not simulate them with prompts or
   local state.
+- Keep runtime Agent guidance separate from user guidance. Follow its documented
+  description/body boundary and size budgets before adding execution hints.
 
 ## Deployment boundaries
 
 - Select one canonical root by `--root` > `NETIZEN_ROOT` > the effective user's
   `~/.netizen`; derive exact systemd user unit/LaunchAgent and maintenance job
-  names from that root (ADR 0074). Keep standard shared Codex state. No registry,
-  cross-instance manager, XDG profiles,
-  LaunchDaemon, root helper, persistent Netizen environment file, or PATH snapshot.
+  names from that root (ADR 0074). Keep standard shared Codex state. Do not add a registry,
+  cross-instance manager, XDG profiles, LaunchDaemon, root helper, persistent
+  Netizen environment file, or PATH snapshot.
   Reload the exported interactive-login-shell environment at each start; Codex
   tool shells must not replace it (ADR 0022/0023). Reassert the captured root
   after shell reload, validate derived paths before writes, and retain it for tools.
@@ -139,7 +175,7 @@ their cited ADRs before changing that boundary.
   format without adding a CLI installation/runtime dependency. Preserve exact-App
   repair versus whole-file deletion for rebinding and atomic credential writes.
 - Programs belong to the selected Python environment; instance roots contain data,
-  not release/venv/current trees. Explicit setup initializes new data, every actual
+  not release/venv/current trees. Explicit setup initializes new data. Every actual
   service start validates and migrates under the lifetime lock before Runtime admission
   (ADR 0076). Preserve v14 baseline and frozen migration steps/fixtures. Missing data
   never means a new instance. SQL failures before commit roll back; failures after
@@ -150,7 +186,7 @@ their cited ADRs before changing that boundary.
   the same initialized App Server before catalog/Thread access; fail startup if
   registration fails. Never install, snapshot, roll back, or uninstall global user
   Skills/Codex state. Preserve root ownership markers and unrelated content; never
-  recursively remove an instance root. No legacy-layout or global-Skill migration.
+  recursively remove an instance root. Do not add legacy-layout or global-Skill migration.
 - Bind each Admin independently. Only an absent port permits bounded allocation;
   retain the actual listener and atomically save its port before readiness. An
   explicit/persisted port never drifts. `/admin` reports this instance's live URLs;
@@ -158,17 +194,19 @@ their cited ADRs before changing that boundary.
 - The maintainer chooses formal release timing; nothing auto-releases on main or tag
   pushes. `netizen update` uses only its selected environment, rejects --root, records
   the running set, confirms stop before package replacement, validates with a new
-  process, then restores only that set. Stop failure aborts without compensation;
-  unknown installation state never triggers blind restart. No runtime version guard,
-  separate instance registry, cross-instance rollback, or hidden package-manager fallback.
+  process, then restores only that set. Stop failure aborts without compensation.
+  Unknown installation state never triggers blind restart. Do not add a runtime
+  version guard, separate instance registry, cross-instance rollback, or hidden
+  package-manager fallback.
   Service definitions are the inventory; finite package-layout adapters must fail closed.
 - Control is root-scoped, update is environment-scoped. Existing bindings never follow
   the calling venv. Explicit switching is remove (retain data) then target-environment
-  start; no rebind command. Removal displays exact scope; -y skips confirmation only.
-  --purge deletes only verified instance-owned files, never Projects, Worktree contents,
+  start; do not add a rebind command. Removal displays exact scope; `-y` skips confirmation only.
+  `--purge` deletes only verified instance-owned files, never Projects, Worktree contents,
   or a whole root.
-- Install the ordinary netizen-cli package with the user's package manager, then run
-  netizen setup and start. The package install does not configure or start services.
+- For routine Agent installation, start with README and setup output. Install the
+  ordinary netizen-cli package with the user's package manager, then run netizen
+  setup and start. The package install does not configure or start services.
   Public setup can perform initial browser setup and exact-App repair without a TTY
   (ADR 0062); Admin restart never performs browser authorization.
   Relay any verification URL to the user while retaining the same setup
@@ -200,4 +238,6 @@ their cited ADRs before changing that boundary.
   Formal Releases reuse successful CI for the exact main commit; package changes
   require isolated wheel/sdist validation. Synthetic tests do not replace platform/live
   acceptance; historical release-installer evidence does not certify the new CLI.
+- Read the relevant acceptance gates before deployment changes. Before rollout, read
+  the multi-instance/Skills gates and report platform and live validation separately.
 - Review the final diff and report checks, results, and material verification gaps.
