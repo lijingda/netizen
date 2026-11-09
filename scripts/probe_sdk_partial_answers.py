@@ -123,6 +123,8 @@ def isolated_config(root: Path, server: ResponsesServer) -> tuple[Path, dict[str
     for directory in (home, codex_home, cwd):
         directory.mkdir()
     (codex_home / "config.toml").write_text(
+        # Disposable probes must not synchronize the external plugin marketplace.
+        'features.plugins = false\n'
         'model = "gpt-5.4"\nmodel_provider = "native_probe"\n'
         'approval_policy = "never"\napprovals_reviewer = "user"\n'
         'model_auto_compact_token_limit = 1000000\n'
@@ -365,7 +367,7 @@ async def goal_rollover_case(root: Path) -> dict[str, Any]:
         provider.response_gates = {1: first_gate, 3: final_gate}
         cwd, env = isolated_config(root, provider)
         config_path = Path(env["CODEX_HOME"]) / "config.toml"
-        config_path.write_text(config_path.read_text() + "\n[features]\ngoals = true\n")
+        config_path.write_text("features.goals = true\n" + config_path.read_text())
         store = BindingStore(root / "channel.sqlite3")
         store.bootstrap_project(alias="goal-probe", cwd=str(cwd))
         binding = store.create_channel_binding(
@@ -491,7 +493,7 @@ async def goal_controls_case(root: Path) -> dict[str, Any]:
         provider.response_gates = {1: finish_gate, 2: stop_gate}
         cwd, env = isolated_config(root, provider)
         config_path = Path(env["CODEX_HOME"]) / "config.toml"
-        config_path.write_text(config_path.read_text() + "\n[features]\ngoals = true\n")
+        config_path.write_text("features.goals = true\n" + config_path.read_text())
         store = BindingStore(root / "channel.sqlite3")
         store.bootstrap_project(alias="goal-probe", cwd=str(cwd))
         binding = store.create_channel_binding(

@@ -36,7 +36,7 @@ async def probe(*, live: bool) -> dict[str, object]:
             home.mkdir()
             codex_home.mkdir()
             (codex_home / "config.toml").write_text(
-                'cli_auth_credentials_store = "file"\n', encoding="utf-8",
+                'features.plugins = false\ncli_auth_credentials_store = "file"\n', encoding="utf-8",
             )
             env.update(HOME=str(home), CODEX_HOME=str(codex_home))
         async with AsyncCodex(CodexConfig(

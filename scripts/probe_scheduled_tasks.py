@@ -20,7 +20,6 @@ import argparse
 import asyncio
 import copy
 import fcntl
-import hashlib
 import json
 import logging
 import os
@@ -61,7 +60,8 @@ from netizen_cli.schedules.scheduler import Scheduler  # noqa: E402
 from netizen_cli.schedules.service import ScheduleService  # noqa: E402
 from netizen_cli.session_settings import SessionSettings  # noqa: E402
 from netizen_cli.sdk_gap_adapter import AppServerThreadSubscriptionControl  # noqa: E402
-from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
+from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup, SUPPORTED_SDK_VERSION  # noqa: E402
+from scripts.source_evidence import source_evidence  # noqa: E402
 from scripts.probe_project_delete import _DeleteOnce  # noqa: E402
 from scripts.probe_python_sdk import (  # noqa: E402
     _confirm_interrupted_turn, _prove_thread_absent_from_all_catalogs,
@@ -1203,7 +1203,7 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
 
 
 async def probe(*, phase: str, model: str | None, timeout: float) -> dict[str, Any]:
-    _require(openai_codex.__version__ == "0.167.0", "sdk_pin_mismatch")
+    _require(openai_codex.__version__ == SUPPORTED_SDK_VERSION, "sdk_pin_mismatch")
     if phase == "worktree":
         async with asyncio.timeout(timeout):
             with tempfile.TemporaryDirectory(prefix="netizen-scheduled-worktree-probe-") as temporary:
@@ -1273,18 +1273,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=300, help="total async scenario deadline in seconds; cleanup is bounded separately")
     parser.add_argument("--output", type=Path, help="save the same sanitized JSON printed to stdout")
     return parser
-
-
-def source_evidence() -> dict[str, object]:
-    """Identify the checkout without exposing its path, remote or patch content."""
-    def git(*args: str) -> bytes:
-        return subprocess.run(["git", "-C", str(SOURCE_ROOT), *args],
-                              check=True, capture_output=True, timeout=10).stdout
-
-    patch = git("diff", "--binary", "HEAD", "--")
-    return {"source_commit": git("rev-parse", "HEAD").decode().strip(),
-            "source_dirty": bool(git("status", "--porcelain")),
-            "source_diff_sha256": hashlib.sha256(patch).hexdigest()}
 
 
 def write_result(result: dict[str, Any], output: Path | None) -> None:

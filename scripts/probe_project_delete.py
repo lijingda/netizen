@@ -45,7 +45,7 @@ from netizen_cli.sdk_gap_adapter import (  # noqa: E402
     AppServerThreadDeleteControl,
     AppServerThreadSubscriptionControl,
 )
-from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
+from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup, SUPPORTED_SDK_VERSION  # noqa: E402
 from scripts.probe_python_sdk import (  # noqa: E402
     _prove_thread_absent_from_all_catalogs,
     _public_final_response,
@@ -274,8 +274,8 @@ async def _scenario(
 
 
 async def probe(*, model: str | None = None) -> dict[str, Any]:
-    if openai_codex.__version__ != "0.167.0":
-        raise RuntimeError("this candidate probe requires pinned openai-codex==0.167.0")
+    if openai_codex.__version__ != SUPPORTED_SDK_VERSION:
+        raise RuntimeError(f"this candidate probe requires pinned openai-codex=={SUPPORTED_SDK_VERSION}")
     with tempfile.TemporaryDirectory(prefix="netizen-project-delete-probe-") as temporary:
         root = Path(temporary).resolve()
         # Native override keys split on dots without parsing quoted keys.

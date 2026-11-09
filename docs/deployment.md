@@ -208,6 +208,33 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
    低层 client、协议模型和 App Server 行为；高层源码未变不代表原生执行语义未变。
    现有 `facade_migration_requirements()` 仅检查预列候选名；空结果不能替代完整 API
    差异审查，也不能证明换名、新子资源、cleanup 或 Activity 等能力仍无公开替代。
+   用 `scripts/diff_codex_sdk.py --from <旧版本> --to <目标版本> --output <材料.md>
+   --json <材料.json>` 生成原始差异材料作为起点；它只静态解析 SDK wheel，不执行目标包，
+   不下载 CLI，不判断重要性。可用 `--from-wheel/--to-wheel` 或 `--from-dir/--to-dir`
+   离线比较；下载沿用调用者自己的 pip 配置。脚本失败、空结果或静态无差异都不替代审查，
+   结构不适用须人工对比并修正脚本；不要把“未发现”当作“无变化”。
+
+   App Server 源码按精确 tag 对比，使用协议方法名与配置键检索以下边界；路径会随版本变化，
+   不把某版文件位置当作长期契约。
+
+   | Netizen 边界 | 需追查的 App Server 请求/行为（检索锚点） | 关注点 |
+   | --- | --- | --- |
+   | 恢复与当前会话切换 | `thread/resume`、`excludeTurns`、`model_provider`、`model_providers` | cold/rejoin 的执行前校验、结构化拒绝是否发生在副作用之前、exact ID 与 cwd/权限/历史保留。 |
+   | 普通、Side、定时输入与协作来信 | `turn/start`、`turn/steer`、`expectedTurnId`、`ExternalMessage` | provider/策略/输入校验、拒绝形态、是否已投递、exact Turn 准入与完成竞态时序。 |
+   | 压缩 | `thread/compact/start`、`model_auto_compact_token_limit`、`model_providers.<id>.capabilities.remote_compaction` | 手动/自动与 local/remote 路径的执行前校验、拒绝、原 Turn 状态与配置/上下文保留。 |
+   | Goal 启动、继续与控制 | `thread/goal/set`、`thread/goal/get`、`thread/goal/clear`、`origin` | SDK helper 路由与原生校验的先后、拒绝能否证明未 mutation、持久状态、物理 Turn 换轮与逻辑终态时序。 |
+   | 持久 fork、Side 与命名 | `thread/fork`、`ephemeral`、`excludeTurns`、`thread/inject_items`、`thread/name/set` | 配置/权限与历史引用继承、零自身 Turn 持久化、拒绝形态与清理归属。 |
+   | 订阅释放与后台工具 | `thread/unsubscribe`、`thread/closed`、`thread/backgroundTerminals/list`、`thread/backgroundTerminals/clean` | unsubscribe ACK 与卸载延迟的区别、closing/rejoin 时序、后台登记与前台存活边界。 |
+   | 原生归档、恢复与删除 | `thread/archive`、`thread/unarchive`、`thread/delete` | shutdown/历史引用检查的顺序、明确拒绝是否已影响运行状态、成功响应丢失与状态保留、子任务级联。 |
+   | 观测、Activity、答案与 Files | `turn/completed`、`item/started`、`item/completed`、`turn/diff/updated`、`thread/tokenUsage/updated`、`thread/section/changed`、`thread/read` | 通知注册与归属、timestamp/phase/字段语义、先终态后 materialize 的时序、唯一消费与冷恢复保留。 |
+   | 原生历史与 Skills | `thread/turns/list`、`thread/items/list`、`skills/list`、`skills/extraRoots/set` | 分页/游标与拒绝、历史引用、进程级根与配置保留、注册和加载时序。 |
+
+   另列出生成模型与 App Server 新增的结构化错误和执行前校验，逐个核实是否能证明“未投递”。
+   能证明的按 [ADR 0093](adr/0093-reject-only-the-operation-on-native-provider-mismatch.md)
+   只拒绝本次操作，并更新设计/ADR 与针对性证据；不能证明的保持操作对应的未知结果规则
+   （[ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、
+   [ADR 0088](adr/0088-align-steer-failures-and-input-resume-rejections.md)）。不能只按错误名称
+   或文案推断无副作用，也不能把一个入口的未投递证明推广到其他入口。
 3. **逐项复核兼容债务。** 从当前实现、[适配边界](design.md#sdk-适配边界)及各自 ADR
    建立本次清单，覆盖 gap adapters、pinned cleanup/Activity，以及 SDK 限制造成的
    产品缺口和临时处理；不要只审查本次测试失败的模块。对每项记录“迁移/删除”“保留”
@@ -216,6 +243,9 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
    对应 shim/私有依赖并保留行为测试；仅有协议字段不算高层替代。观测恢复、压缩归属、
    Goal 重挂、fork/命名等待、订阅与进程清理等处理须核对原约束是否真的消失，不能仅
    因原生发布说明声称修复就删除。
+   同时复核 `scripts/diff_codex_sdk.py` 的静态解析锚点与
+   `scripts/run_upgrade_regression.py` 的注册表、参数、deadline、通过证据；这两个脚本本身
+   也是兼容债务。发现不适用时在本次升级中修正，或在报告中记录具体的人工替代与证据。
 4. **审查新增能力的价值与归属。** 对与 Netizen 有关的变化说明用户收益、当前缺口、
    公开能力层级、维护成本、职责边界和所需验证证据，并逐项决定本次接入、原生生效、
    延期或不适用。区分必须适配的契约变化与主动选择的产品扩展；不能因“可选”一律延期，
@@ -224,7 +254,9 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
    Codex 的模型、工具、权限与配置能力继续由 Codex 管理；不因升级自动增加 Netizen
    开关、配置副本或新私有 adapter。无须修改的项也给出依据。
 5. **按结论实施与验证。** 源码复核后再更新精确依赖、必要指纹和契约断言；完成
-   `make check`、[完整原生集合及专项门禁](#代码门禁与按需实时兼容性验证)。对新增或
+   `make check`，并以 `scripts/run_upgrade_regression.py --live` 运行
+   [已知回归集](#代码门禁与按需实时兼容性验证)；该脚本注册表是唯一清单，跳过须用
+   `--skip NAME=原因` 留下证据，不得把跳过计为通过。第 2–4 步发现的新增行为仍须补针对性验证。对新增或
    声称已修复但既有探针未覆盖的行为，补有界、disposable 的针对性验证；协议 shape、
    synthetic、真实原生执行、飞书客户端和平台部署分别报告，不能互相替代。保留首次
    失败、诊断与复验结果，无法验证的项明确标记，不能通过放宽断言或修改期望来制造
@@ -236,6 +268,9 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
    记录版本基线、官方来源/源码差异、逐项兼容债务决定、新能力取舍及依据、实际检查与
    未覆盖边界；无须改动、不接入或无可删除封装的项也说明原因。明确当前处于审查、实施
    还是验收阶段；讨论改变取舍时更新同一份报告，作为后续实施依据。
+   每个未覆盖项须标注处置：“发布前补验”或“接受的残留风险（附重新评估条件）”；
+   与[正式发布第 1 步](#发布步骤)的补齐验收、记录未完成范围一起核对，不能只列“未验证”
+   而不交代后续处置。
    单次版本分析、产品选择与待验收计划放审查报告；长期行为和决策同步设计、ADR 与
    用户手册；只有完成对应验证后，才把通用兼容性摘要写入
    [兼容性结论](#已验证的兼容性结论)。不能将候选计划写成已验证事实。单次日志、exact IDs
@@ -403,51 +438,61 @@ manifest 的本地往返与可读正文核对，不把合成投影冒充原生�
 已执行的版本、覆盖范围及未覆盖边界统一记录在
 [兼容性结论](#已验证的兼容性结论)；本节维护检查命令与变更触发条件。
 
-macOS 系统不自带 GNU `timeout`；只在执行 live probes 时先用
-`brew install coreutils` 提供 `gtimeout`。最终用户安装和日常服务运行不依赖 Homebrew
-coreutils。下面的块会按平台选择命令，并在缺失时明确失败：
+SDK 升级的已知回归集只在 `scripts/run_upgrade_regression.py` 的声明式注册表维护。
+先用 `--list` 查看本次清单、deadline、SIGINT 宽限及证据判定方式；完整执行入口为：
 
 ```bash
-set -euo pipefail
-
-case "$(uname -s)" in
-  Darwin) deadline=gtimeout ;;
-  Linux) deadline=timeout ;;
-  *) echo "unsupported live-probe platform" >&2; exit 1 ;;
-esac
-command -v "$deadline" >/dev/null || {
-  echo "missing $deadline (macOS: brew install coreutils)" >&2
-  exit 1
-}
-
-probe_cwd=$(mktemp -d "${TMPDIR:-/tmp}/netizen-live-probe.XXXXXX")
-test -d "$probe_cwd"
-trap 'rm -rf -- "$probe_cwd"' EXIT
-git -C "$probe_cwd" init --quiet
-
-for phase in models turn-settings smoke usage steer plan polling compact concurrency interrupt skills lifecycle side; do
-  "$deadline" --signal=INT --kill-after=10s 420s \
-    .venv/bin/python scripts/probe_python_sdk.py \
-    --cwd "$probe_cwd" --phase "$phase"
-done
-"$deadline" --signal=INT --kill-after=10s 420s \
-  .venv/bin/python scripts/probe_python_sdk.py \
-  --cwd "$probe_cwd" --phase release
-"$deadline" --signal=INT --kill-after=10s 660s \
-  .venv/bin/python scripts/probe_python_sdk.py \
-  --cwd "$probe_cwd" --phase config
-"$deadline" --signal=INT --kill-after=10s 660s \
-  .venv/bin/python scripts/probe_python_sdk.py \
-  --cwd "$probe_cwd" --phase goal
-"$deadline" --signal=INT --kill-after=10s 300s \
-  .venv/bin/python scripts/probe_python_sdk.py \
-  --cwd "$probe_cwd" --phase sandbox
+.venv/bin/python scripts/run_upgrade_regression.py --live
 ```
 
-整个块以任一 phase 非零即失败关闭，并为本轮显式创建、验证和最终删除独立的 disposable
-Git cwd；不要复用业务 Project。这里的 live commands 只在需要更新兼容性结论时执行，并且
-必须位于与服务相同的账号
-interactive login 环境。人工验证先
+脚本串行运行，以 Python 管理每步自有进程组的 deadline、SIGINT 与 SIGKILL，
+不依赖 GNU `timeout`/`gtimeout`。原生 phases 共用本次新建并在结束后删除的 disposable
+Git cwd；单步失败仍继续后续独立步骤。默认全集没有 `--live` 时，真实账号步骤记为
+`not_selected`，不计通过；用 `--only` 或 `--group` 显式选中未跳过的真实账号步骤却
+没有 `--live` 时是参数错误。没有执行任何步骤时非零退出。
+`--group isolated` 只运行隔离组；`--group` 可重复，`--only NAME[,NAME]` 与
+分组取交集；重复的 `--skip NAME=原因` 必须明确原因并进入证据。
+`--model` 可为依赖模型的定时步骤指定模型；省略时只从本次已通过的 `sdk-models` 输出
+`models.models` 中唯一 `is_default=true` 条目的 `model` slug 取得，同时记录它的 `id`
+与 `model`。若选择范围不含 `sdk-models`，需显式提供 `--model`；
+需要模型却未取得时是前置条件失败，不能静默跳过。
+
+默认证据目录是被 Git 忽略的
+`docs/research/compatibility/upgrade-regression-<SDK版本>-<UTC时间戳>/`，也可用
+`--output-dir` 指定新的或空的目录。保留逐步 stdout/stderr/JSON、`SUMMARY.json` 和
+可读汇总；其中区分 `passed`、`failed`、`skipped`、`not_selected`、`interrupted` 与
+`not_run`，明确标出只能依赖
+退出码的弱证据。汇总记录版本、平台、模型和源码身份；dirty 结果不能作为 exact commit
+证据；运行期间 commit 或 tracked diff 变化也醒目标出。SIGINT、SIGTERM、SIGHUP 都先
+让当前探针有界清理，再写汇总并停止后续步骤。正常退出后的进程组先等待该步宽限，
+仍有非僵尸成员时按 SIGINT → 宽限 → SIGKILL 有界终止；已终止的残留不单独使步骤失败，
+但将进程名和脱敏命令行记为 warning，并在 SUMMARY 醒目列出。SIGKILL 后仍存在非僵尸
+成员或无法确认结束时记失败；只有僵尸成员不算残留。超时、探针非零退出和证据失败仍记失败。
+隔离探针仅在自己的临时 Codex 配置里设置 `features.plugins=false`，阻止启动时同步外部
+插件市场；不更改用户配置，不在探针里替原生进程补清理。Linux/macOS 的成员状态通过
+`ps` 读取，清理仍只针对回归入口创建的进程组。
+结果只覆盖已知回归集，不判断新增行为的重要性，也不宣布整个升级完成。
+
+只重跑部分原生 phase 时优先使用 `run_upgrade_regression.py --live --only sdk-<phase>`，
+例如 `.venv/bin/python scripts/run_upgrade_regression.py --live --only sdk-smoke`，
+它自动创建并删除 disposable Git cwd。其他专项可用 `--only` 或本节各探针的单项命令。
+若直接运行 `probe_python_sdk.py`，`--cwd` 必须是本次新建的空 Git 目录，不得指向业务
+Project；例如下面只运行 smoke，并在退出时删除此次目录：
+
+```bash
+(
+  set -eu
+  probe_cwd="$(mktemp -d)"
+  trap 'rm -rf -- "$probe_cwd"' EXIT
+  git -C "$probe_cwd" init --quiet
+  timeout --signal=INT --kill-after=10s 420s .venv/bin/python \
+    scripts/probe_python_sdk.py --cwd "$probe_cwd" --phase smoke
+)
+```
+
+单项命令仍须加外部进程 deadline；macOS 可安装 coreutils 后把 `timeout` 换成
+`gtimeout`，最终用户安装及日常服务运行不依赖它。真实账号步骤必须位于与服务相同的
+账号 interactive login 环境。人工验证先
 正常登录 `ssh -t <deployment-host>` 再执行；自动化 remote command 必须显式采用该账号
 shell 的 login 模式（Bash 示例为 `/bin/bash -lic '<commands>'`）。普通
 `ssh <deployment-host> '<commands>'` 的
@@ -458,8 +503,8 @@ non-interactive shell 不等价：它可能缺少 profile 导出的代理/CA/PAT
 运行 `git diff --check`；内容寻址的安装快照没有 `.git`，不要在那里执行该命令。按需
 live probe 会创建原生 Thread，只在已登录的目标部署账号
 执行。每个 phase 会把 started/passed/failed 进度写到 stderr，并只把最终 JSON 写到
-stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都有界，外层
-`timeout` 是整个 phase 的最后兜底。
+stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都有界，回归入口的
+进程 deadline（单项命令用外部 `timeout`）是整个 phase 的最后兜底。
 
 `make check` 还固定验证公开 `AsyncTurnHandle.stream()` 的 exact
 `turn/diff/updated` latest aggregate 文件发现、公开 `ThreadItem.root` 的 completed
@@ -1144,7 +1189,8 @@ Publisher。流程使用 OIDC，不新增长期 PyPI token secret。GitHub 的 I
 ### 发布步骤
 
 1. 维护者明确决定发布并完成上述外部准备；按实际变更补齐 SDK、浏览器及两平台 live
-   验收，明确记录未完成范围。`scripts/release.py` 执行版本推导／指定、notes、版本 PR、
+   验收，明确记录未完成范围；SDK 升级审查中的未覆盖项逐个核对“发布前补验”或
+   “接受的残留风险（附重新评估条件）”，补验项完成后才进入发布。`scripts/release.py` 执行版本推导／指定、notes、版本 PR、
    exact main CI、受保护 annotated tag 与 workflow dispatch 的完整链，不自动响应 push
    或 tag 发布。两处包版本均已准备为目标版本时复用当前 main，仍等待该精确提交的成功
    CI；均为上一版本时才创建版本 PR，混合或其他版本在修改前拒绝。

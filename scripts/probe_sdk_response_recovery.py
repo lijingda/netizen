@@ -16,6 +16,7 @@ from dataclasses import asdict
 import importlib.metadata
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import signal
@@ -245,8 +246,12 @@ async def cold_permissions_case(root: Path) -> dict[str, Any]:
     read_marker, write_marker = "NATIVE-READ-ALLOWED", "NATIVE-WRITE-ALLOWED"
     denied_name, allowed_name = "denied.txt", "allowed.txt"
     denied_script = (
-        f"from pathlib import Path; print(Path('input.txt').read_text(), flush=True); "
-        f"Path({denied_name!r}).write_text('must-not-write')"
+        "import errno\nfrom pathlib import Path\n"
+        "print(Path('input.txt').read_text(), flush=True)\n"
+        "try:\n"
+        f"    Path({denied_name!r}).write_text('must-not-write')\n"
+        "except OSError as error:\n"
+        "    print('NATIVE-WRITE-DENIED:' + errno.errorcode.get(error.errno, 'UNKNOWN'), flush=True)\n"
     )
     allowed_script = (
         f"from pathlib import Path; Path({allowed_name!r}).write_text({write_marker!r}); "
@@ -284,7 +289,9 @@ async def cold_permissions_case(root: Path) -> dict[str, Any]:
             await run_turn(rpc, thread_id, "NATIVE-COLD-READ-AND-DENIED-WRITE")
             output = tool_output(provider, "denied-write")
             assert read_marker in output, "read-only command did not execute its allowed read: " + output
-            assert "PermissionError" in output, output
+            denied_errors = re.findall(r"(?m)^NATIVE-WRITE-DENIED:([A-Z0-9_]+)$", output)
+            assert len(denied_errors) == 1 and denied_errors[0] in {"EACCES", "EPERM", "EROFS"}, output
+            denied_errno = denied_errors[0]
             assert not (cwd / denied_name).exists(), "read-only sandbox allowed a write"
         async with native_server(cwd, env) as server:
             rpc = await server.connect()
@@ -304,6 +311,7 @@ async def cold_permissions_case(root: Path) -> dict[str, Any]:
             "started": permissions(started), "cold_resumed": permissions(resumed),
             "explicit_override": permissions(overridden), "independent_app_servers": 3,
             "actual_read_allowed": True, "actual_read_only_write_denied": True,
+            "denied_write_errno": denied_errno,
             "actual_override_write_allowed": True, "model_request_count": len(provider.requests),
             "network_grants_tested": False, "managed_policy_tested": False,
         }

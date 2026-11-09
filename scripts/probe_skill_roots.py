@@ -37,7 +37,7 @@ async def probe(source: Path) -> dict[str, object]:
         for path in (home, codex_home, project):
             path.mkdir()
         config_file = codex_home / "config.toml"
-        config_content = "# Native user configuration must remain unchanged.\n"
+        config_content = "# Native user configuration must remain unchanged.\nfeatures.plugins = false\n"
         config_file.write_text(config_content, encoding="utf-8")
         user_skill = codex_home / "skills" / "netizen-probe-user" / "SKILL.md"
         user_skill.parent.mkdir(parents=True)

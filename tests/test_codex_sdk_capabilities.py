@@ -25,11 +25,12 @@ from openai_codex.generated.v2_all import (
 )
 
 from netizen_cli.sdk_gap_adapter import facade_migration_requirements
+from netizen_cli.terminal_cleanup import SUPPORTED_SDK_VERSION
 
 
 class CodexSdkCapabilityContractTest(unittest.TestCase):
     def test_pinned_public_surface_supports_dynamic_turn_model_settings(self) -> None:
-        self.assertEqual(openai_codex.__version__, "0.167.0")
+        self.assertEqual(openai_codex.__version__, SUPPORTED_SDK_VERSION)
         self.assertTrue(callable(AsyncCodex.models))
         parameters = inspect.signature(AsyncThread.turn).parameters
         self.assertTrue({"model", "effort", "service_tier"}.issubset(parameters))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from importlib.metadata import version
 import unittest
 from pathlib import Path
 
@@ -82,7 +83,15 @@ class DeploymentAssetsTest(unittest.TestCase):
 
         for dependency in project["project"]["dependencies"]:
             self.assertIn(dependency.lower(), constraints)
-        self.assertIn("openai-codex-cli-bin==0.167.0", constraints)
+        from netizen_cli import terminal_cleanup, turn_plan_observer
+
+        sdk = version("openai-codex")
+        self.assertIn(f"openai-codex=={sdk}", project["project"]["dependencies"])
+        self.assertIn(f"openai-codex=={sdk}", constraints)
+        self.assertEqual(terminal_cleanup.SUPPORTED_SDK_VERSION, sdk)
+        self.assertEqual(turn_plan_observer.SUPPORTED_SDK_VERSION, sdk)
+        self.assertEqual(version("openai-codex-cli-bin"), sdk)
+        self.assertIn(f"openai-codex-cli-bin=={sdk}", constraints)
 
     def test_main_ci_runs_repository_gate_for_supported_python_versions(self) -> None:
         workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
