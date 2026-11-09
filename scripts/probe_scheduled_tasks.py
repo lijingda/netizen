@@ -1203,7 +1203,7 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
 
 
 async def probe(*, phase: str, model: str | None, timeout: float) -> dict[str, Any]:
-    _require(openai_codex.__version__ == "0.163.0", "sdk_pin_mismatch")
+    _require(openai_codex.__version__ == "0.167.0", "sdk_pin_mismatch")
     if phase == "worktree":
         async with asyncio.timeout(timeout):
             with tempfile.TemporaryDirectory(prefix="netizen-scheduled-worktree-probe-") as temporary:

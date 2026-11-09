@@ -90,6 +90,7 @@ The usage guides are not implementation guides.
   access ranges.
   Goal rollover never redirects a prepared input to another physical Turn.
   Unknown side effects fail closed at the documented operation-specific scope.
+  Structured native provider rejections prove non-delivery and reject only that operation (ADR 0093).
   Question answers use the admission rules of the Binding or Side that the original
   question card targets.
 - Keep `/new`, input admission and Project deletion independent of automatic

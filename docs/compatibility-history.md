@@ -7,6 +7,46 @@
 旧版本、mock provider、API ACK、浏览器 fixture 和真实客户端证据不可互相替代。
 不在这里记录私有主机坐标；原始私有证据继续留在忽略文件或运维系统。
 
+<a id="sdk-0167-20261109"></a>
+
+## 2026-11-08 至 2026-11-09：SDK 0.167.0 升级
+
+2026-11-08 的 `0.163.0` → `0.167.0` 升级完成精确 Python 包与 bundled App Server
+源码复核。高层 API 和私有消费代码未变；生成模型新增 `FileIdThreadItem`、
+`ModelProviderError`、item 时间戳和全局 `thread/section/changed` 通知，
+`ImageGenerationThreadItem` 成为 `ResultThreadItem` 的别名。现有窄适配没有公开等价替代。
+cleanup 与 Activity 保留原门禁，使用新版源码指纹
+`dbb5c2f9b2ec7c27f761ca787ea53f4427d59d25d33bc3fb43d842c27defee02`。
+
+审查探针发现新版在 resume、`turn/start`、steer、手动压缩与结果为 active 的 Goal set
+之前核对会话保存的模型提供方，不一致时返回结构化 `ModelProviderError` 且零模型请求；
+fork 不做此校验。旧 Runtime 会因此关闭整个实例准入，重启后再次触发。
+[ADR 0093](adr/0093-reject-only-the-operation-on-native-provider-mismatch.md) 将该结构化
+形态改为只拒绝本次操作；经 SDK helper 的 Goal set 和无结构化数据的配置读取失败仍按
+结果未知处理。附件形态的生成图片同时补上 Activity 与本轮文件投影。
+
+本机最终 `make check` 通过，执行 4,100 项测试（15 项条件跳过），包括编译、依赖一致性与
+SDK synthetic 门禁；PR CI 的 Linux CPython 3.11-3.14 与 macOS arm64 CPython 3.14 五个 job
+通过。以下运行均在干净提交 `7768700` 上执行。
+
+Linux x86_64 临时候选环境（CPython 3.11、默认模型 `gpt-6.1-sol`）全部 17 个真实账号原生
+phase 通过，facade inventory 无候选迁移。同一账号的只读额度、持久 fork、后台命名、
+child Files、只读 Skill roots 与 Skills 七阶段、调度五阶段（`gpt-6.1-sol`）及 Project
+删除两场景专项均通过；用户配置不变断言和自有资源清理按各探针执行。
+
+真实 bundled App Server 加 loopback mock provider：新增 provider 准入探针确认旧会话被拒且
+零模型请求、全局准入保持、新 Binding 完成、切回原 provider 后 exact Thread 继续以及用户
+配置不变；另有归档恢复 6 项、原生边界 7 项、阶段性答案 6 项、会话协作 8 项、取消 3 项、
+响应恢复 6 项、Admin 会话 2 项，以及历史分页、输入附件、定时 Worktree 与 cwd 探针通过。
+响应恢复的 `cold_permissions` 在本机 `0.163.0` 与 `0.167.0` 都因只读文件系统错误文案与
+期望不符而失败，与本次升级无关；该版本的冷恢复实际权限因此未验证。
+
+三种 provider 拒绝变体及 Side、Goal、压缩、恢复归档、改名、定时首轮等入口只由行为测试
+覆盖；真实组织 provider 策略、真实图片生成的附件形态、60 秒卸载后的跨 App Server 接管、
+解除归档时后代一并恢复、网络 grants、managed policy 与 Responses WebSocket 未独立验证。
+以上不包含真实飞书投递、客户端显示或 Linux/macOS 服务部署/ready 验收；本次没有发布、
+更新或重启已有实例。
+
 <a id="attachments-admin-20261103"></a>
 
 ## 2026-11-03：附件与 Admin（Codex SDK 0.163.0 / Channel SDK 1.4.0）

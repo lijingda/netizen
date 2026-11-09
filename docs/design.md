@@ -263,8 +263,16 @@ model、config 或 env override。
 普通消息（含 Skill 准备）与 Agent 跨会话入口也共用 ADR 0078 已验证的归档、不存在、
 关闭中拒绝分类：保留 Binding，只拒绝本次输入，不关闭其他会话准入。错误返回身份和
 其余未知 resume 结果仍沿用原有保护；不自动重建 Thread、清理绑定或重试。
-`thread.turn()` 若没有返回 handle，其副作用结果无法确认：服务立即关闭全部新
-admission 并要求重启，不能把 Binding 当 idle 再启动第二轮。
+[ADR 0093](adr/0093-reject-only-the-operation-on-native-provider-mismatch.md) 另将结构化
+provider 拒绝视为已验证未投递：仅公开 `InvalidRequestError`、code `-32600` 且字典
+`data` 能按生成的 `ModelProviderError` 校验时，resume、turn/start（含 ExternalMessage
+和定时首轮）、steer、compact 只拒绝本次操作。保留 Binding／Goal／原执行与上下文边界，
+不关闭全局 admission、不重试或新建替代 Thread；未启动 Turn 的订阅排期释放，Side
+保持 open/idle，compaction 释放本次预留，定时首轮以 `input_rejected` 释放交接。
+归档恢复仍如实报告已解除归档的部分结果；rename 释放 lifecycle 后透传原因。
+Goal set 经 SDK helper 仍按原 mutation unknown 处理，未结构化配置读取失败不在此分类中。
+除已验证拒绝外，`thread.turn()` 若没有返回 handle，其副作用结果无法确认：服务立即
+关闭全部新 admission 并要求重启，不能把 Binding 当 idle 再启动第二轮。
 
 没有 Binding 配置时 `thread.turn()` 不传 `model`、`effort` 或 `service_tier`，由共享
 标准 `CODEX_HOME` 的原生 Codex 默认值或既有 Thread 当前设置决定。有配置时，Netizen
@@ -945,8 +953,8 @@ shutdown 先禁止新 timer，取消并排空已有 timer，再关闭 Codex tran
 连接订阅；Lazy Binding 或本来未订阅是幂等成功，busy、后台 terminal 与状态未知都明确
 拒绝。`/status` 展示的也只是本 Netizen
 进程的瞬态订阅投影。`unsubscribed`、`notSubscribed` 或 `notLoaded` 不表示 Thread 被删除，
-也不表示 writer 立即释放：最后一个订阅者离开后，App Server 仍要求连续三十分钟没有订阅
-和活动才会卸载 Thread。
+也不表示 writer 立即释放：最后一个订阅者离开后何时卸载，由 Codex 的
+`thread_unload_delay_secs` 决定（0.167 默认 60 秒）；Netizen 不设置该值。
 
 ### Side 运行与关闭
 
@@ -1076,7 +1084,7 @@ Turn。不把普通 Turn 的消费者改为 Goal route，不为竞争结果未�
 shutdown 不会对 `starting/unknown/external-active` 发起第二套 cleanup；
 最终 transport close 后才取消并关闭残留 consumer。
 
-SDK `0.163.0` 仍有自动 interrupted continuation 的观测缺口：例如 PreCompact hook
+SDK `0.167.0` 仍有自动 interrupted continuation 的观测缺口：例如 PreCompact hook
 中止一次自动压缩后，App Server 可以继续 Goal，但 Python logical stream 会在第一次
 interrupted 后注销 route。新版本在连续三次无活动的中断后可将原生 Goal 置为 blocked，
 这不恢复已丢失的通知。Netizen 做上述公开历史失配防护和按需空闲重检，不保证此路径
@@ -1528,7 +1536,7 @@ Thread 或文件目录，不增加数据库历史。
 Turn/item 身份并去重；重复/迟到事件、补读和重试不能重复追加或改换归属。普通观察
 不可用后停止周期观察 I/O；Side 的 observer/cursor 降级及 4096 high-water 仍转入唯一
 `run()`，不为提前推送增加消费者或 ephemeral history 轮询。终态从可取得的权威 typed
-items 补齐已知遗漏。SDK `0.163.0` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
+items 补齐已知遗漏。SDK `0.167.0` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
 items；若先因 high-water 或 observer 异常降级，只能保留此前已观察片段，之后未观察且
 未返回 items 的片段不能补齐。Goal 只补读最终物理 Turn，不追补旧轮。
 
@@ -3316,7 +3324,7 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
 | Admin mutation response loss/cancellation | grant 已消费，只报告已知结果 | 不自动重试；native 操作按下列各自范围隔离 | [管理动作](#管理动作与确认) |
 | Project 删除部分失败/超时/取消 | 保留停用 Project 与完成/剩余项；未知限 exact Binding/Side | 不回滚已删对象、不在重启后续删，重新预览确认 | [Project 删除](#project-删除与交接) |
 | 引用回查或 sender 姓名不可解析 | 本条明确失败、不调用 Codex；回查非持久 | 不自动重试、不用“未知发送者”；群引用需 `im:message.group_msg`；roster 缺 `im:chat.members:read`、权限未随版本发布或仍缺名均拒绝，撤回/超时/身份变化按输入规则 | [引用](#引用读取与-sdk-内容适配)、[sender](#当前消息与来源投影) |
-| start/resume、Context Boundary 提交副作用未知 | 按对应规则保留占用、关闭进程级 admission；已验证 resume 明确拒绝只拒绝本次输入 | 保留 Binding，不新建替代 Thread/自动重放；直接 resume unknown 不套用 unarchive 的局部边界 | [身份](#scopebinding-与会话配置)、[生命周期](#普通会话生命周期)、[边界](#补充历史与上下文边界) |
+| start/resume、Context Boundary 提交副作用未知 | 按对应规则保留占用、关闭进程级 admission；已验证 resume 明确拒绝及结构化 provider 拒绝（ADR 0093）只拒绝本次操作 | 保留 Binding，不新建替代 Thread/自动重放；直接 resume unknown 不套用 unarchive 的局部边界 | [身份](#scopebinding-与会话配置)、[生命周期](#普通会话生命周期)、[边界](#补充历史与上下文边界) |
 | ordinary 权威观测暂不可得 | 一次≤5 秒/3 次 I/O 恢复；仍未知则 Binding-local `turn-observation-unavailable`、无周期 I/O | exact active/inProgress 恢复无时限轮询；可经 `/sessions` 重检、停止、归档/删除，lifecycle 不等观察恢复 | [普通终态](#普通-turn-终态与观测恢复) |
 | completion 请求窗口／read recovery | `handle.run()` 请求窗口通知保留与公开 read recovery 均有 synthetic 门禁 | 普通持久 Thread 用公开 read；Side 仅唯一 `handle.run()`、不加持久 recovery；[证据](deployment.md#代码门禁与按需实时兼容性验证) | [普通终态](#普通-turn-终态与观测恢复)、[Side](#side-运行与关闭) |
 | ordinary/Side/Goal 一般 steer 错误 | 原执行/观察保持、本次追加未确认，不改变 Side/Goal 状态或其他 Binding 准入 | 不重试/登记成功；取消仍全局关闭、Side closing/Goal unknown；Goal receipt 畸形或 physical Turn 不符同样 unknown/关闭 | [共享 steer 规则](#普通-turn-停止与压缩)（ADR 0088） |

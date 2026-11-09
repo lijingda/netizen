@@ -19,6 +19,7 @@ from .question_inputs import CardAnswerOrigin
 from ..cards.defaults import defaults_card
 from ..defaults import DefaultConfigurationError
 from ..runtime.contracts import (
+    ModelProviderRejected,
     ContextCursorCommit,
     RuntimeClosed,
     SideSessionClosing,
@@ -341,7 +342,7 @@ class PromptChannel(CompletionPresentationChannel):
         # cursor errors retain originals; manual deletion remains available.
         if attempted and not isinstance(error, (
             SteerRace, RuntimeClosed, ThreadStopping, ThreadCompacting,
-            ThreadArchived, ThreadResumeNotFound, ThreadOccupied,
+            ThreadArchived, ThreadResumeNotFound, ThreadOccupied, ModelProviderRejected,
             SkillReferenceError, ModelCatalogError, SkillCatalogError,
             SideSessionNotFound, SideSessionClosing, SideSessionConflict,
         )):

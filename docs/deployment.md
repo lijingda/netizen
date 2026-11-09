@@ -328,6 +328,20 @@ cwd 冷恢复及 Runtime 采用。定时 Worktree 探针隔离 HOME 和 CODEX_HO
 bundled App Server，验证正常恢复、已恢复、missing、writer 拒绝和原 Turn rejoin。
 它不操作既有用户会话，不替代真实模型 Goal 继续或飞书卡片端到端验收；结果须单独记录。
 
+Provider 准入分类（ADR 0093）或 SDK/App Server 升级时，运行隔离生产 Runtime 探针：
+
+```bash
+timeout --signal=INT --kill-after=5s 90s .venv/bin/python \
+  scripts/probe_model_provider_admission.py --timeout 60 \
+  --output /tmp/model-provider-admission.json
+```
+
+macOS 使用 `gtimeout`。它使用临时 HOME/CODEX_HOME/cwd、真实 bundled App Server 与
+同一 loopback mock URL 的两个 provider，验证旧会话被拒且零模型请求、全局准入保持、
+新 Binding 可完成、切回原 provider 后 exact Thread 可继续，并核对用户配置不变。
+不使用真实账号、不发送飞书消息；三种拒绝变体及 Side/Goal/compact 等入口另由行为测试
+覆盖，真实配置策略和客户端显示仍须独立验收。
+
 阶段性答案、命令大输出持久化、压缩或卸载边界变化时，可运行两个显式原生专项：
 `scripts/probe_sdk_partial_answers.py`（外部 150 秒 deadline）和
 `scripts/probe_sdk_native_boundaries.py`（外部 180 秒 deadline）。两者均可用 `--case`
@@ -549,7 +563,8 @@ Parent 已被单独删除时的孤立 Runtime Side；检查原生四视图消失
 并完成一个 Thread，确认 `thread/backgroundTerminals/list(limit=1)` 为空后取消当前连接
 订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
 同一 ID 接管、继续 Turn 并再次取消订阅；这证明 Binding 可以保留 ID/历史而无需常驻订阅。
-该 phase 不等待也不冒充 App Server 最后订阅者离开后的 30 分钟卸载宽限期。当前协议没有
+该 phase 不等待也不冒充最后订阅者离开后的卸载验证；何时卸载由 Codex 的
+`thread_unload_delay_secs` 决定（0.167 默认 60 秒），Netizen 不设置。当前协议没有
 稳定、无副作用的 live registered-terminal fixture，因此 list 非空、检查错误与 unsubscribe
 响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为本地代码门禁。
 
@@ -1096,6 +1111,7 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 
 | 能力 / 实际版本与环境 | 验证层级与记录 | 未覆盖 / 复验入口 |
 | --- | --- | --- |
+| SDK/Runtime、provider 准入；`0.167.0`，2026-11-09 Linux 候选 | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 准入及 mock 原生场景](compatibility-history.md#sdk-0167-20261109) | 冷恢复实际权限本机未验证；真实组织 provider 策略、图片附件形态的真实生成、卸载后接管、解除归档后代恢复、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | 历史分页、Goal 分离；`0.163.0`，2026-10-17/18 本机 | [本地门禁、mock 原生探针](compatibility-history.md#history-goal-20261017) | interrupted 续流缺口仍在；旧混合卡不承诺兼容；真实模型/客户端、十万会话压测与部署未验收；复验 history/Goal 专项 |
 | SDK/Runtime；`0.163.0`，2026-10-16 Linux 候选 | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除及 mock 28+1 场景](compatibility-history.md#sdk-0163-20261016) | 网络 grants、managed policy、Responses WebSocket、Code Mode 前台独立 wait、远端 Environment 最终 poll、飞书/平台 ready 及完整 CI 矩阵未覆盖；按受影响 phase 复验 |
 | 阶段性答案、Goal 两轮、SDK；`0.162.1`，2026-10-10 macOS arm64 | [17 个真实账号 phase、专项、mock 12 场景；飞书 API ACK 与初版有限人工确认](compatibility-history.md#sdk-01621-20261010) | 新版视觉/真实点击、Ultra Fast、压缩组合/revert 竞态、Lark Skill 与平台未验收；原生 Goal 与展示样例不是端到端；复验 partial/Goal/Skills 与客户端 |

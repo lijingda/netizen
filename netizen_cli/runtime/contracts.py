@@ -188,6 +188,14 @@ class ThreadResumeNotFound(ThreadLifecycleError):
     """Native resume explicitly found no restorable record for the exact ID."""
 
 
+class ModelProviderRejected(ThreadLifecycleError):
+    """App Server rejected one resume or input before submitting it (ADR 0093).
+
+    Its structured ``ModelProviderError`` proves that the request was not sent.
+    Only the attempted operation fails; the Binding and other admission remain.
+    """
+
+
 class ThreadResumeFailed(ThreadLifecycleError):
     """Native resume or its subsequent local activation is not confirmed."""
 

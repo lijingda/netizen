@@ -248,6 +248,31 @@ class TurnActivityProjectionTest(unittest.TestCase):
                 None,
             ),
             (
+                # App Server 0.167 stores generated images as attachments and
+                # reports them by fileId; the inline result is only a fallback.
+                {
+                    "type": "imageGeneration",
+                    "id": "image-generation-file",
+                    "fileId": "file-private-image",
+                    "status": "completed",
+                },
+                TurnActivityKind.IMAGE,
+                1,
+                None,
+            ),
+            (
+                {
+                    "type": "imageGeneration",
+                    "id": "image-generation-both",
+                    "fileId": "file-private-image",
+                    "result": "private result",
+                    "status": "completed",
+                },
+                TurnActivityKind.IMAGE,
+                1,
+                None,
+            ),
+            (
                 {
                     "type": "collabAgentToolCall",
                     "id": "collab-one",
@@ -313,6 +338,7 @@ class TurnActivityProjectionTest(unittest.TestCase):
             "private-server",
             "do-not-show",
             "private-thread",
+            "file-private-image",
         ):
             self.assertNotIn(forbidden, safe)
 

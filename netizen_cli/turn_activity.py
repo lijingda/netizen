@@ -16,6 +16,7 @@ from openai_codex.generated.v2_all import (
     EnteredReviewModeThreadItem,
     ExitedReviewModeThreadItem,
     FileChangeThreadItem,
+    FileIdThreadItem,
     FindInPageWebSearchAction,
     ImageGenerationThreadItem,
     ImageViewThreadItem,
@@ -209,6 +210,10 @@ class TurnActivityNotificationProjection:
             raise ValueError("activity projection requires an exact Turn ID")
         if not self.plan_updated and self.steps:
             raise ValueError("activity plan steps require a full plan replacement")
+
+
+_GENERATED_IMAGE_ITEM_TYPES = frozenset({ImageGenerationThreadItem, FileIdThreadItem})
+_IMAGE_ITEM_TYPES = _GENERATED_IMAGE_ITEM_TYPES | {ImageViewThreadItem}
 
 
 def project_turn_activity_notification(
@@ -523,8 +528,10 @@ def _project_item(
                 item, limit=progress_card_settings.operation_max_chars,
             ),
         )
-    if type(item) in {ImageViewThreadItem, ImageGenerationThreadItem}:
-        status = item.status if type(item) is ImageGenerationThreadItem else None
+    if type(item) in _IMAGE_ITEM_TYPES:
+        # Generated images arrive inline (``result``) or, once App Server has
+        # stored them as attachments, by ``fileId``. Both are one image step.
+        status = item.status if type(item) in _GENERATED_IMAGE_ITEM_TYPES else None
         return _status_event(
             item.id,
             TurnActivityKind.IMAGE,

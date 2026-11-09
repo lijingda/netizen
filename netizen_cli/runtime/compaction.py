@@ -11,6 +11,7 @@ from ..bindings import (
 )
 from ..error_messages import describe_error, native_turn_failure
 from .contracts import (
+    ModelProviderRejected,
     NativeThread,
     RuntimeClosed,
     ThreadOccupied,
@@ -26,6 +27,7 @@ from .contracts import (
 
 from . import limits
 from .native_values import (
+    _model_provider_rejection,
     _enum_value,
     _is_transient_thread_read_error,
     _thread_status_type,
@@ -93,7 +95,7 @@ class CompactionRuntime(TurnControlRuntime):
                     )
                 record = self._mark_thread_subscribed_locked(binding, thread)
                 self._schedule_subscription_release_locked(record)
-            except ThreadOccupied:
+            except (ThreadOccupied, ModelProviderRejected):
                 raise
             except asyncio.CancelledError:
                 self.close_admission()
@@ -150,6 +152,12 @@ class CompactionRuntime(TurnControlRuntime):
                 self.close_admission()
                 raise
             except Exception as error:
+                rejection = _model_provider_rejection(error)
+                if rejection is not None:
+                    receipt_attempted.set()
+                    self._compacting.pop(binding.id, None)
+                    self._schedule_known_subscription_locked(binding.id, thread.id)
+                    raise rejection from error
                 # The request is side-effectful and its response is only an
                 # acknowledgement.  A lost response cannot prove compaction
                 # did not start, so retain the Binding reservation and fail

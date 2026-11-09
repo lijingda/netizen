@@ -12,11 +12,18 @@ from openai_codex import (
     TransportClosedError,
     is_retryable_error,
 )
+from openai_codex.generated.v2_all import (
+    ModelProviderError,
+    ModelProviderMismatchModelProviderError,
+    ModelProviderNotConfiguredModelProviderError,
+)
+from pydantic import ValidationError
 
 from ..bindings import (
     ThreadBinding,
 )
 from .contracts import (
+    ModelProviderRejected,
     SteerRace,
     ThreadCatalogError,
     ContextWindowUsage,
@@ -47,6 +54,57 @@ def _resume_rejection(
     if error.message == f"thread {thread_id} already has an active writer":
         return "occupied"
     return None
+
+
+_PROVIDER_ID_DISPLAY_LIMIT = 80
+
+
+def _model_provider_rejection(error: BaseException) -> ModelProviderRejected | None:
+    """Classify App Server's structured pre-submission provider rejection.
+
+    App Server validates the provider before it submits a resume or input, and
+    reports the result as ``-32600`` with a ``ModelProviderError`` in
+    ``data`` (ADR 0093). Only that typed shape proves non-delivery: message
+    text, untyped configuration-load failures and other errors keep the
+    calling operation's unknown-outcome rules.
+    """
+
+    if not isinstance(error, InvalidRequestError) or error.code != -32600:
+        return None
+    data = error.data
+    if not isinstance(data, dict):
+        return None
+    try:
+        detail = ModelProviderError.model_validate(data).root
+    except ValidationError:
+        return None
+    saved = _provider_id(detail.model_provider)
+    if isinstance(detail, ModelProviderMismatchModelProviderError):
+        current = _provider_id(detail.current_model_provider)
+        reason = (
+            f"该会话使用模型提供方 {saved}，而当前 Codex 配置为 {current}"
+        )
+        recovery = f"可把 Codex 配置切回 {saved} 后重试，或新建会话"
+    elif isinstance(detail, ModelProviderNotConfiguredModelProviderError):
+        reason = f"该会话使用的模型提供方 {saved} 在当前 Codex 配置中不存在"
+        recovery = "可恢复该提供方配置后重试，或新建会话"
+    else:
+        required = _provider_id(detail.required_model_provider)
+        reason = f"Codex 组织策略要求模型提供方 {required}，与 {saved} 不符"
+        recovery = "请调整 Codex 配置后重试"
+    return ModelProviderRejected(
+        f"{reason}，Codex 拒绝执行本次操作，未发送给模型。"
+        f"{recovery}；其他会话不受影响。"
+    )
+
+
+def _provider_id(value: str) -> str:
+    """Bound a configured provider ID for user-visible explanations."""
+
+    text = "".join(character for character in value if character.isprintable()).strip()
+    if len(text) > _PROVIDER_ID_DISPLAY_LIMIT:
+        text = text[: _PROVIDER_ID_DISPLAY_LIMIT - 1] + "…"
+    return text or "（未命名）"
 
 
 def _enum_value(value: object) -> str | None:
@@ -128,7 +186,7 @@ def _accepted_execution_cwd(cwd: Path | None) -> Path:
 
 def _native_cwd(native_thread: object, thread_id: str) -> Path:
     cwd = getattr(native_thread, "cwd", None)
-    # Public 0.163.0 Thread.cwd is AbsolutePathBuf(RootModel[str]).
+    # Public 0.167.0 Thread.cwd is AbsolutePathBuf(RootModel[str]).
     cwd = getattr(cwd, "root", cwd)
     if (
         getattr(native_thread, "id", None) != thread_id

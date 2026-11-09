@@ -33,12 +33,17 @@ def file_change(
     )
 
 
-def image_generation(path: Path, *, status: str = "completed") -> ThreadItem:
+def image_generation(
+    path: Path, *, status: str = "completed", stored: bool = False,
+) -> ThreadItem:
+    # 0.167 App Server reports a generated image stored in its attachment
+    # store by fileId; the inline result remains the fallback form.
+    reference = {"fileId": "file-image"} if stored else {"result": "ok"}
     return ThreadItem.model_validate(
         {
             "type": "imageGeneration",
             "id": "image-generation",
-            "result": "ok",
+            **reference,
             "savedPath": str(path),
             "status": status,
         }
@@ -99,6 +104,22 @@ class TurnFilesTest(unittest.TestCase):
             [item.media_kind for item in files],
             ["file", "file", None, "image"],
         )
+
+    def test_attachment_backed_generated_image_uses_its_saved_path(self) -> None:
+        image = self.root / "output" / "stored.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+
+        files = extract_turn_files(
+            (
+                image_generation(image, stored=True),
+                image_generation(self.root / "pending.png", status="inProgress", stored=True),
+            ),
+            self.root,
+        )
+
+        self.assertEqual([item.display_path for item in files], ["output/stored.png"])
+        self.assertEqual([item.media_kind for item in files], ["image"])
 
     def test_only_supported_image_bytes_use_an_image_message(self) -> None:
         fake_png = self.root / "fake.png"

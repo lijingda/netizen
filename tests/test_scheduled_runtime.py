@@ -10,12 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from openai_codex import AsyncCodex, CodexConfig
+from openai_codex import AsyncCodex, CodexConfig, InvalidRequestError
 
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingNotFound, BindingStore, ProjectDisabled
 from netizen_cli.codex_runtime import (
-    ActiveState, CodexRuntime, RuntimeClosed, ScheduledInitialStartConflict,
+    ModelProviderRejected, ActiveState, CodexRuntime, RuntimeClosed, ScheduledInitialStartConflict,
     ScheduledTurnReadError, SkillReferenceError, SubmitDisposition, ThreadLifecycleState,
     ThreadLifecycleStateUnknown, TurnObservationUnavailable, TurnStartFailed,
 )
@@ -103,6 +103,24 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(1):
             while not predicate():
                 await asyncio.sleep(0)
+
+    async def test_provider_rejection_releases_initial_as_input_rejected(self):
+        run_id, binding = self.occurrence()
+        error = InvalidRequestError(-32600, "provider rejected", data={
+            "type": "modelProviderNotConfigured", "modelProvider": "missing",
+        })
+        with patch.object(FakeThread, "turn", side_effect=error) as turn:
+            with self.assertRaises(ModelProviderRejected):
+                await self.start(run_id, binding)
+        turn.assert_awaited_once()
+        run = self.store.schedules.get_run(run_id)
+        self.assertEqual(run.barrier, "released")
+        self.assertEqual(run.error_code, "input_rejected")
+        self.assertIsNone(run.initial_turn_id)
+        self.assertIsNotNone(self.store.get(binding.id).native_thread_id)
+        self.assertNotIn(binding.id, self.runtime._active)
+        self.assertEqual(self.codex.handles, [])
+        self.assertTrue(self.runtime._accepting)
 
     async def test_immediate_terminal_releases_before_receipt_delivery(self):
         run_id, binding = self.occurrence()
