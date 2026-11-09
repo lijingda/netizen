@@ -217,7 +217,10 @@ chmod 600 LOCAL_ENVIRONMENT.md
 
 升级 Codex SDK 或随附 App Server 时，先完成[SDK 升级审查](deployment.md#codex-sdk-升级审查)，
 逐项检查公开 API 替代、既有兼容债务和新增能力的用户价值、接入边界与成本。将讨论取舍
-维护在同一份审查报告中，作为实施依据；报告开头与审查结束回复都按“SDK/App Server
+维护在同一份审查报告中，作为实施依据；用 `scripts/diff_codex_sdk.py` 取得原始差异材料，
+以 `scripts/run_upgrade_regression.py` 注册表维护已知回归集，并在每次升级时复核这两个
+脚本是否仍适用。脚本不判断新增行为的重要性，跳过须留原因，不能替代针对性验证。
+报告开头与审查结束回复都按“SDK/App Server
 改动简介、改哪些、验证哪些、增加哪些”总结，并把实际结果和未验收项纳入变更说明。
 
 PR 与 main push 统一执行 `make check`。真实账号、App Server 与飞书 live phases 只按

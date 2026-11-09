@@ -88,10 +88,7 @@ print(json.dumps({"continue": (root / "allow-compaction").exists()}))
             "model_auto_compact_token_limit = 1000000",
             "model_auto_compact_token_limit = 200000\nmodel_post_turn_compact_threshold_percent = 0",
         )
-        config_path.write_text(config + '''
-[features]
-goals = true
-hooks = true
+        config_path.write_text("features.goals = true\nfeatures.hooks = true\n" + config + '''
 [[hooks.PreCompact]]
 matcher = "auto"
 [[hooks.PreCompact.hooks]]
@@ -333,7 +330,7 @@ async def cancellation_case(root: Path, *, code_mode: bool) -> dict[str, Any]:
         if code_mode:
             path = Path(env["CODEX_HOME"]) / "config.toml"
             # Deliberately omit code_mode_interrupt: this probes its new default.
-            path.write_text(path.read_text() + "\n[features]\ncode_mode = true\n")
+            path.write_text("features.code_mode = true\n" + path.read_text())
         async with native_server(cwd, env) as server:
             client = await server.connect()
             thread_id = await start_thread(client, cwd, dynamicTools=[{

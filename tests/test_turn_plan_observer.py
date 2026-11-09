@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import re
 import unittest
 from unittest.mock import patch
 
@@ -454,7 +455,7 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
         with patch.object(openai_codex, "__version__", "0.154.1"):
             with self.assertRaisesRegex(
                 TurnActivityObservationUnavailable,
-                "supports only openai-codex==0.167.0",
+                rf"supports only openai-codex=={re.escape(turn_plan_observer.SUPPORTED_SDK_VERSION)}",
             ):
                 PinnedTurnActivityObserver(self.codex)
         with patch.object(

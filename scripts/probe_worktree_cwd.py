@@ -28,7 +28,8 @@ from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup
 from probe_sdk_partial_answers import (
     isolated_config, message_events, mock_provider, response_events,
 )
-from scripts.probe_scheduled_tasks import _safe_traceback, source_evidence, write_result
+from scripts.source_evidence import source_evidence  # noqa: E402
+from scripts.probe_scheduled_tasks import _safe_traceback, write_result
 
 
 async def native_case(root: Path) -> dict[str, object]:
