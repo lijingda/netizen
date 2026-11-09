@@ -44,6 +44,7 @@ from ..sdk_gap_adapter import (
 
 from . import limits
 from .native_values import (
+    _model_provider_rejection,
     _resume_rejection,
 )
 from .state import (
@@ -400,6 +401,14 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
                         binding.native_thread_id, include_turns=False
                     )
                 except InvalidRequestError as error:
+                    provider_rejection = _model_provider_rejection(error)
+                    if provider_rejection is not None:
+                        outcome = "未切换当前会话。" if activate else "未完成会话恢复。"
+                        raise ThreadRestoreRejected(
+                            ("本次已解除归档，但" if unarchived else "")
+                            + outcome + str(provider_rejection) + "本地会话关联已保留。",
+                            unarchived=unarchived,
+                        ) from error
                     rejection = _resume_rejection(error, binding.native_thread_id)
                     if rejection is None:
                         raise

@@ -19,6 +19,7 @@ from ..domain import (
     ActiveState,
 )
 from .contracts import (
+    ModelProviderRejected,
     RuntimeClosed,
     ThreadStopping,
     ThreadOccupied,
@@ -53,6 +54,7 @@ from ..turn_patch_children import TaskPatchChildren
 
 from . import limits
 from .native_values import (
+    _model_provider_rejection,
     _enum_value,
     _native_cwd,
     _thread_status_type,
@@ -193,7 +195,7 @@ class SideRuntime(SubmissionRuntime):
                         )
                     if getattr(native_parent, "ephemeral", None) is not False:
                         raise RuntimeError("parent Thread persistence shape changed")
-                except (ThreadRunningConfiguration, ThreadOccupied):
+                except (ThreadRunningConfiguration, ThreadOccupied, ModelProviderRejected):
                     raise
                 except asyncio.CancelledError:
                     raise
@@ -534,6 +536,9 @@ class SideRuntime(SubmissionRuntime):
             try:
                 handle = await session.thread.turn(native_input, **turn_kwargs)
             except BaseException as error:
+                rejection = _model_provider_rejection(error)
+                if rejection is not None:
+                    raise rejection from error
                 session.state = SideSessionState.CLOSING
                 session.turn_start_state_unknown = True
                 session.revision += 1

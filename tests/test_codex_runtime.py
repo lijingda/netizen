@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from openai_codex import (
     CodexError,
+    ExternalMessage,
     ImageInput,
     InternalRpcError,
     InvalidRequestError,
@@ -83,6 +84,7 @@ from netizen_cli.codex_runtime import (
     ThreadLifecycleStateUnknown,
     ThreadNotMaterialized,
     ThreadOccupied,
+    ModelProviderRejected,
     ThreadReleaseError,
     ThreadRestoreRejected,
     ThreadRunningConfiguration,
@@ -160,6 +162,13 @@ async def suppress_current_reply(app, thread_id, physical_turn_id):
     return await ChannelApplication.suppress_reply(
         app, source_thread_id=thread_id, source_turn_id=physical_turn_id,
     )
+
+
+def provider_error() -> InvalidRequestError:
+    return InvalidRequestError(-32600, "provider rejected", data={
+        "type": "modelProviderMismatch", "modelProvider": "provider-a",
+        "currentModelProvider": "provider-b",
+    })
 
 
 class FakeTurnHandle:
@@ -1225,6 +1234,39 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(follow_up.thread_id, snapshot.thread_id)
         await self.finish_side_turn(follow_up)
+
+    async def test_provider_rejection_keeps_side_open_and_idle(self) -> None:
+        binding, record, snapshot = await self.open_side()
+        session = self.runtime._sides[record.id]
+        with patch.object(session.thread, "turn", side_effect=provider_error()) as turn:
+            with self.assertRaises(ModelProviderRejected):
+                await self.runtime.submit_side(
+                    side_id=record.id, input="blocked", owner_id="ou_owner", origin=object(),
+                )
+        turn.assert_awaited_once()
+        self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
+        self.assertIsNone(session.active)
+        self.assertFalse(session.turn_start_state_unknown)
+        self.assertEqual(self.store.get_side_topic(record.id).state, SideTopicState.OPEN)
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.codex.handles, [])
+        followup = await self.runtime.submit_side(
+            side_id=record.id, input="retry", owner_id="ou_owner", origin=object(),
+        )
+        self.assertEqual(followup.thread_id, snapshot.thread_id)
+        followup.release_receipt_attempt()
+        self.codex.handles[-1].complete()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_provider_rejection_on_side_parent_does_not_fork(self) -> None:
+        binding = self.materialized_binding()
+        self.codex.resume_errors.append(provider_error())
+        with self.assertRaises(ModelProviderRejected):
+            await self.open_side_for_binding(binding)
+        self.assertEqual(self.codex.fork_calls, [])
+        self.assertEqual(self.runtime._sides, {})
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-parent")
 
     async def test_occupied_parent_rejects_side_before_fork_without_closing_service(
         self,
@@ -3735,6 +3777,37 @@ class RestoreActivationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.thread_list_calls, [])
         self.assertEqual(self.codex.read_calls, [])
         self.assertEqual(self.codex.turn_calls, [])
+
+    async def test_provider_restore_rejection_reports_unarchive_outcome(self) -> None:
+        for unarchived in (False, True):
+            for activate in (False, True):
+                with self.subTest(unarchived=unarchived, activate=activate):
+                    native_id = f"native-{unarchived}-{activate}"
+                    target = self.binding(native_id, catch_up=True)
+                    other = self.binding()
+                    if not unarchived:
+                        self.codex.unarchive_errors.append(InvalidRequestError(
+                            -32600, f"no archived rollout found for thread id {native_id}",
+                        ))
+                    self.codex.resume_errors.append(provider_error())
+                    with self.assertRaises(ThreadRestoreRejected) as raised:
+                        if activate:
+                            await self.runtime.restore_as_current_exact(
+                                target.id, context_anchor=MessageContextAnchor("new", 200),
+                            )
+                        else:
+                            await self.runtime.restore_exact(target.id)
+                    self.assertEqual(raised.exception.unarchived, unarchived)
+                    self.assertEqual("本次已解除归档" in str(raised.exception), unarchived)
+                    self.assertIn("provider-a", str(raised.exception))
+                    self.assertIn("provider-b", str(raised.exception))
+                    self.assert_not_switched(target, other)
+                    self.assertIsNone(self.runtime.lifecycle_state(target.id))
+                    self.assertTrue(self.runtime._accepting)
+        self.assertEqual(len(self.codex.unarchive_calls), 4)
+        self.assertEqual(len(self.codex.resume_calls), 4)
+        self.assertEqual(self.codex.read_calls, [])
+        self.assertEqual(self.codex.thread_list_calls, [])
 
     async def test_verified_resume_rejections_keep_context_and_report_actual_phase(self) -> None:
         messages = (
@@ -9450,6 +9523,148 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "服务正在停止"):
             await self.submit(binding, "must not retry")
         self.assertEqual(len(self.codex.resume_calls), 1)
+
+    async def test_provider_resume_rejection_is_local_with_or_without_skills(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-existing")
+        self.runtime._skill_catalog = FakeSkillCatalog(fake_skills())
+        for skill_names in ((), ("code-review",)):
+            with self.subTest(skill_names=skill_names):
+                self.codex.resume_errors.append(provider_error())
+                with self.assertRaisesRegex(ModelProviderRejected, "provider-a.*provider-b"):
+                    await self.runtime.submit(
+                        binding=binding, cwd=self.cwd, input="blocked", owner_id="ou_user",
+                        origin=object(), skill_names=skill_names,
+                    )
+                self.assertEqual(self.store.get(binding.id).native_thread_id, "native-existing")
+                self.assertIsNone(self.runtime.thread_subscription_snapshot(binding.id))
+                self.assertNotIn(binding.id, self.runtime._active)
+                self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.codex.turn_inputs, [])
+        self.assertEqual(len(self.codex.resume_calls), 2)
+
+    async def test_provider_start_rejection_releases_subscription_without_committing_context(self) -> None:
+        self.runtime._thread_subscription_control = FakeThreadSubscriptionControl()
+        self.runtime._background_terminal_inspector = FakeBackgroundTerminalInspector()
+        self.runtime._ordinary_thread_idle_seconds = 600
+        binding = self.catch_up_binding()
+        seed_admission = await self.runtime.capture_submission_admission(binding.id)
+        seed = await self.submit(binding, "seed", admission=seed_admission,
+            context_commit=ContextCursorCommit(seed_admission.context_revision,
+                MessageContextAnchor("seed", 2000)))
+        await self.finish(self.codex.handles[-1], seed)
+        # Materialized cwd adoption precedes input admission; capture the
+        # already adopted Binding so this check isolates rejected input effects.
+        with patch("netizen_cli.runtime.state.AsyncThread",
+                   side_effect=lambda codex, thread_id: FakeThread(thread_id, codex)):
+            await self.runtime.native_thread_cwd(binding.id)
+        before = self.store.get(binding.id)
+        for external in (False, True):
+            with self.subTest(external=external):
+                admission = await self.runtime.capture_submission_admission(binding.id)
+                with patch.object(FakeThread, "turn", side_effect=provider_error()) as turn:
+                    with self.assertRaises(ModelProviderRejected):
+                        if external:
+                            await self.runtime.submit_external(
+                                binding=before, message=ExternalMessage(tool_name="send_message_to_thread", content="blocked"),
+                                owner_id="ou_user", origin=object(),
+                            )
+                        else:
+                            await self.submit(before, "blocked", admission=admission,
+                                context_commit=ContextCursorCommit(admission.context_revision,
+                                    MessageContextAnchor("unaccepted", 3000)))
+                turn.assert_awaited_once()
+                self.assertEqual(self.store.get(binding.id), before)
+                self.assertNotIn(binding.id, self.runtime._active)
+                record = self.runtime._subscriptions[binding.id]
+                self.assertEqual(record.state, ThreadSubscriptionState.RELEASE_PENDING)
+                self.assertIsNotNone(record.release_deadline)
+                self.assertTrue(self.runtime._accepting)
+        other = self.binding(FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT))
+        independent = await self.submit(other, "independent")
+        await self.finish(self.codex.handles[-1], independent)
+        self.assertEqual(len(self.codex.handles), 2)
+
+    async def test_provider_steer_rejection_keeps_exact_turn_and_context(self) -> None:
+        binding = self.catch_up_binding()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        first = await self.submit(binding, "seed", admission=admission,
+            context_commit=ContextCursorCommit(admission.context_revision,
+                MessageContextAnchor("seed", 2000)))
+        active = self.runtime._active[binding.id]
+        before = self.store.get(binding.id)
+        active.handle.steer_error = provider_error()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        with self.assertRaisesRegex(ModelProviderRejected, "未发送给模型"):
+            await self.submit(before, "blocked", admission=admission,
+                context_commit=ContextCursorCommit(admission.context_revision,
+                    MessageContextAnchor("unaccepted", 3000)))
+        self.assertIs(self.runtime._active[binding.id], active)
+        self.assertEqual(active.steer_count, 0)
+        self.assertEqual(self.store.get(binding.id), before)
+        self.assertTrue(self.runtime._accepting)
+        await self.finish(active.handle, first)
+
+    async def test_provider_compaction_rejection_releases_reservation(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "seed")
+        await self.finish(self.codex.handles[-1], first)
+        self.runtime._thread_subscription_control = FakeThreadSubscriptionControl()
+        self.runtime._background_terminal_inspector = FakeBackgroundTerminalInspector()
+        for stage in ("resume", "compact"):
+            with self.subTest(stage=stage):
+                if stage == "resume":
+                    self.codex.resume_errors.append(provider_error())
+                with patch.object(FakeThread, "compact", side_effect=provider_error()) as compact:
+                    with self.assertRaises(ModelProviderRejected):
+                        await self.runtime.compact(binding=self.store.get(binding.id),
+                            owner_id="ou_user", origin=object())
+                self.assertEqual(compact.await_count, int(stage == "compact"))
+                self.assertFalse(self.runtime.is_compacting(binding.id))
+                self.assertTrue(self.runtime._accepting)
+                if stage == "compact":
+                    self.assertEqual(self.runtime._subscriptions[binding.id].state,
+                        ThreadSubscriptionState.RELEASE_PENDING)
+        self.assertEqual(self.codex.compact_calls, [])
+
+    async def test_provider_goal_open_rejection_preserves_goal(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        for operation in ("start", "resume", "clear"):
+            with self.subTest(operation=operation):
+                control.persisted = None if operation == "start" else goal_snapshot(GoalStatus.PAUSED)
+                persisted = control.persisted
+                self.codex.resume_errors.append(provider_error())
+                with self.assertRaises(ModelProviderRejected):
+                    if operation == "start":
+                        await self.runtime.start_goal(binding=binding, cwd=self.cwd,
+                            objective="new goal", owner_id="ou_user", origin=object())
+                    elif operation == "resume":
+                        await self.runtime.resume_goal(binding=binding, owner_id="ou_user", origin=object())
+                    else:
+                        await self.runtime.clear_goal(binding)
+                self.assertIs(control.persisted, persisted)
+                self.assertIsNone(self.runtime.active_goal(binding.id))
+                self.assertTrue(self.runtime._accepting)
+        self.assertEqual(control.start_calls, [])
+        self.assertEqual(control.resume_calls, [])
+        self.assertEqual(control.clear_calls, [])
+
+    async def test_provider_rename_rejection_releases_lifecycle(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        before = self.store.get(binding.id)
+        self.codex.resume_errors.append(provider_error())
+        with self.assertRaises(ModelProviderRejected):
+            await self.runtime.rename_exact(binding.id, "new name")
+        self.assertEqual(self.store.get(binding.id), before)
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.codex.set_name_calls, [])
+        self.assertEqual(await self.runtime.rename_exact(binding.id, "new name"), "new name")
 
     async def test_verified_resume_rejections_are_local_with_or_without_skills(self) -> None:
         binding = self.binding()

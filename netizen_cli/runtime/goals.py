@@ -19,6 +19,7 @@ from ..domain import (
     GoalStatus,
 )
 from .contracts import (
+    ModelProviderRejected,
     NativeThread,
     RuntimeClosed,
     ThreadOccupied,
@@ -629,7 +630,7 @@ class GoalRuntime(TurnObservationRuntime):
             record = self._mark_thread_subscribed_locked(current, thread)
             self._schedule_subscription_release_locked(record)
             return thread
-        except (GoalNotMaterialized, ThreadOccupied):
+        except (GoalNotMaterialized, ThreadOccupied, ModelProviderRejected):
             raise
         except asyncio.CancelledError:
             self.close_admission()

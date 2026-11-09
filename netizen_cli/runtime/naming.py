@@ -18,6 +18,7 @@ from ..model_settings import ModelCatalogError, TurnModelSettings
 from .name_writes import ThreadNameWrites
 from .thread_naming import NamingJob, ThreadNameGenerationError
 from .contracts import (
+    ModelProviderRejected,
     NativeThread,
     RuntimeClosed,
     ThreadOccupied,
@@ -144,7 +145,7 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
                 thread = await self._lifecycle_thread_locked(binding)
                 mutation_attempted = True
                 await thread.set_name(normalized)
-            except ThreadOccupied:
+            except (ThreadOccupied, ModelProviderRejected):
                 self._finish_lifecycle_locked(operation)
                 raise
             except asyncio.CancelledError:

@@ -28,6 +28,7 @@ from ..domain import (
 )
 from ..model_settings import ModelCatalogError, TurnModelSettings
 from .contracts import (
+    ModelProviderRejected,
     NativeThread,
     NativeTurnHandle,
     RuntimeClosed,
@@ -48,6 +49,7 @@ from .contracts import (
 )
 
 from .native_values import (
+    _model_provider_rejection,
     _thread_creation_cwd,
     _accepted_execution_cwd,
 )
@@ -288,7 +290,7 @@ class SubmissionRuntime(CompactionRuntime):
                 binding=binding, creation_cwd=cwd, input=input, owner_id=owner_id,
                 origin=origin, skill_names=skill_names, initial=initial,
             )
-        except BaseException:
+        except BaseException as error:
             run = self._bindings.schedules.get_run(run_id)
             if run.binding_id == binding.id and run.barrier != "released":
                 if run.phase == "binding_ready":
@@ -297,6 +299,11 @@ class SubmissionRuntime(CompactionRuntime):
                         run_id, error_code="initial_start_rejected",
                     )
                 elif initial.begun and run.phase == "starting_turn":
+                    if isinstance(error, ModelProviderRejected):
+                        self._bindings.schedules.release(
+                            run_id, error_code="input_rejected",
+                        )
+                        raise
                     # A lost start response must never be retried. The ordinary
                     # mutation path independently closes global admission.
                     self._bindings.schedules.set_run(
@@ -559,14 +566,18 @@ class SubmissionRuntime(CompactionRuntime):
                 raise SteerRace("目标会话已切到后台，跨会话消息未发送。")
             assert execution_cwd is not None
             task_feedback = self._capture_task_feedback(binding.task_feedback)
-            handle = await self._start_native_turn_locked(
-                binding_id=binding.id,
-                thread=thread,
-                native_input=native_input,
-                resolved_settings=resolved_settings,
-                external_model=external_model,
-                external=external,
-            )
+            try:
+                handle = await self._start_native_turn_locked(
+                    binding_id=binding.id,
+                    thread=thread,
+                    native_input=native_input,
+                    resolved_settings=resolved_settings,
+                    external_model=external_model,
+                    external=external,
+                )
+            except ModelProviderRejected:
+                self._schedule_subscription_release_locked(subscription)
+                raise
 
             if active is not None and handle.id == active.handle.id:
                 # The returned handle has its own SDK notification cursor.
@@ -888,6 +899,9 @@ class SubmissionRuntime(CompactionRuntime):
             self.close_admission()
             raise
         except Exception as error:
+            rejection = _model_provider_rejection(error)
+            if rejection is not None:
+                raise rejection from error
             if external and isinstance(error, InvalidRequestError):
                 # An explicit native rejection proves non-delivery. Never
                 # retry it as steer/user input or close unrelated Bindings.

@@ -274,8 +274,8 @@ async def _scenario(
 
 
 async def probe(*, model: str | None = None) -> dict[str, Any]:
-    if openai_codex.__version__ != "0.163.0":
-        raise RuntimeError("this candidate probe requires pinned openai-codex==0.163.0")
+    if openai_codex.__version__ != "0.167.0":
+        raise RuntimeError("this candidate probe requires pinned openai-codex==0.167.0")
     with tempfile.TemporaryDirectory(prefix="netizen-project-delete-probe-") as temporary:
         root = Path(temporary).resolve()
         # Native override keys split on dots without parsing quoted keys.

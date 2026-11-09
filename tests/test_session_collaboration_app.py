@@ -20,7 +20,7 @@ from netizen_cli.domain import (
     FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind, SessionAgentOrigin,
 )
 from netizen_cli.runtime.contracts import (
-    GoalStateUnknown, NativeThreadMetadata, ScheduledInitialStartConflict, Submission, SubmitDisposition,
+    ModelProviderRejected, GoalStateUnknown, NativeThreadMetadata, ScheduledInitialStartConflict, Submission, SubmitDisposition,
     TurnObservationUnavailable, ThreadArchived,
 )
 from netizen_cli.sdk_gap_adapter import GoalControlError, GoalMutationStateUnknown
@@ -642,6 +642,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.target()
         for error in (
             InvalidRequestError(-32600, "external input rejected"),
+            ModelProviderRejected("模型提供方不匹配，未发送给模型。"),
             ProjectDisabled("test"),
             ScheduledInitialStartConflict("initial pending"),
             TurnObservationUnavailable("observation unavailable"),

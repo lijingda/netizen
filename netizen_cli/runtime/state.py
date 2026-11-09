@@ -82,6 +82,7 @@ from ..user_questions import (
 
 from . import limits
 from .native_values import (
+    _model_provider_rejection,
     _resume_rejection,
 )
 
@@ -488,13 +489,18 @@ class RuntimeState:
 
         A timeout, another invalid request, or the same text from a different
         operation is not proof that the requested operation had no side effects.
-        Restore shares the exact classifier, but retains its own phase outcomes
-        and Binding-local unknown boundary. Active-Turn recovery is independent.
+        A structured provider rejection (ADR 0093) is typed native evidence that
+        nothing was resumed. Restore shares the exact classifiers, but retains
+        its own phase outcomes and Binding-local unknown boundary. Active-Turn
+        recovery is independent.
         """
 
         try:
             return await self._codex.thread_resume(thread_id, include_turns=False)
         except InvalidRequestError as error:
+            provider_rejection = _model_provider_rejection(error)
+            if provider_rejection is not None:
+                raise provider_rejection from error
             rejection = _resume_rejection(error, thread_id)
             if rejection == "archived":
                 raise ThreadArchived(
@@ -534,6 +540,9 @@ class RuntimeState:
             self.close_admission()
             raise
         except InvalidRequestError as error:
+            provider_rejection = _model_provider_rejection(error)
+            if provider_rejection is not None:
+                raise provider_rejection from error
             raise SteerRace(race_message) from error
 
     def _guard_no_lifecycle_locked(self, binding_id: str) -> None:
