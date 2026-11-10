@@ -7,6 +7,47 @@
 旧版本、mock provider、API ACK、浏览器 fixture 和真实客户端证据不可互相替代。
 不在这里记录私有主机坐标；原始私有证据继续留在忽略文件或运维系统。
 
+## 2026-11-11：补齐明确删除拒绝后的空闲回收排期
+
+对 `3532fe7` 的独立审查发现：任务在删除在途时完成，或已有 idle timer 在删除占用
+期间到期，都会因 busy 跳过排期；明确拒绝后保留订阅却没有重新安排回收。修复在同一
+Binding 锁内释放 exact 删除 intent 后，仅对该会话调用既有排期检查，仍忙则跳过。
+未调整并发机制、成功或 unknown 分支，也不扫描其他会话。
+
+启用生产对应订阅 ports 的两项回归在旧代码上失败，修复后 Runtime 402 项全部通过；
+用 Event 控制计时器到期，确认拒绝后重新排期并实际 unsubscribe，运行中和删除结果未知
+时均不误释放。原生删除拒绝探针补齐 subscription control / terminal inspector，四场景
+通过并确认终态后正常排期；真实账号持久分支专项再次通过，自有 Thread 均清理、用户
+配置未变。这些专项运行于 `3532fe7` 上的 dirty 修复树；全量门禁及 exact PR head 的
+CI 结果另行记录，不能复用下节首版通过作为本次最终资格。
+
+<a id="delete-rejection-20261110"></a>
+
+## 2026-11-10：删除明确拒绝保留执行观测（SDK 0.167.0）
+
+补充升级审查复现：attached Thread 的前置删除拒绝不会停止来源任务，旧拒绝处理却
+撤掉本地观察者，导致后续结果丢失和停止入口失效。
+[ADR 0094](adr/0094-preserve-execution-observation-on-delete-rejection.md) 改为只释放
+删除 intent、保留原执行观测；Admin 同时复用飞书已有的安全原生错误解释器。
+
+本机 Linux x86_64 / CPython 3.11 的 Runtime 401 项测试通过，包含普通 Turn 的
+steer/stop、删除在途完成竞态、shutdown 后确认中断并再次对话、Goal 收尾和压缩观察。
+Admin HTTP 回归确认原生原因可见、敏感字段和 RPC data 不展示，未知结果仍返回原有 503。
+完整 `make check` 通过，含 ruff、mypy、编译、依赖与 SDK synthetic 门禁；Node.js 22
+下的全仓库 unittest 共 4,151 项通过（15 项条件跳过），用时 504.432 秒。
+
+新增 `probe_thread_delete_rejection.py`，登记到唯一升级回归清单；通过正式入口执行的
+四项隔离原生场景全部通过：attached 前置拒绝后普通完成、停止、Goal 完成并清理，
+以及持久分支历史引用在 shutdown 后拒绝，原观察者交付 interrupted 后同 Thread 新一轮
+completed。使用真实 bundled App Server 与 loopback mock provider，不使用真实模型账号。
+本次仅选择这一登记项，其余 48 项未选择，不算作本次通过。
+
+按受影响边界另运行真实账号 `probe_persistent_fork.py`：完整分支、零自身 Turn 冷恢复、
+历史引用拒绝及先分支后来源删除通过；两个自有 Thread 均已删除，用户配置字节未变。
+上述检查运行于基于 `ca7ba70` 的修复工作树，隔离探针如实标记 dirty，不作为 exact commit
+或正式发布资格。尚未验证 shutdown 后拒绝的真实 Goal 路径、所有原生拒绝原因、真实
+飞书客户端显示或服务部署；既有 Goal 终态证明与未知状态保护没有放宽。
+
 <a id="sdk-0167-20261109"></a>
 
 ## 2026-11-08 至 2026-11-09：SDK 0.167.0 升级

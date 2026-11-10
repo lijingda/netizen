@@ -1172,12 +1172,19 @@ Turn 终态的内部 discard 事件停止 Reaction/Progress/Goal presenter。int
 清理交接结束，旧 discard 不能越过生命周期边界清掉新活动；展示失败不改写已确认的原生
 或本地结果。成功后不自动选择其他 Binding。
 
-按 [ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)，Delete
-只有本次原生成功响应才提交 Binding Delete。明确 RPC 错误保留 Binding，反馈原生拒绝，
-清理可能已因原生 shutdown 失效的活动/订阅投影后释放 intent，允许用户重新确认；不能
-恢复旧 Activity 或伪造终态。超时、断连、取消或不可验证响应保留 Binding-local
-`lifecycle-unknown`，不关闭其他 Binding admission。所有失败都不自动 list/read 对账、
-重发 delete 或将 not-found 当作成功；响应丢失或本地提交失败留下的关联允许人工核查。
+按 [ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 与
+[ADR 0094](adr/0094-preserve-execution-observation-on-delete-rejection.md)，Delete
+只有本次原生成功响应才提交 Binding Delete。明确 RPC 错误保留 Binding，只释放本次
+intent，飞书与 Admin 均通过既有安全错误解释器反馈原生原因。保留原 Turn/Goal/Compaction
+观察者、handle 和订阅，不发送 discard、不主动停止或重建执行，也不按错误文案推断
+shutdown 是否发生。释放 intent 恢复仍存活 owner 的 Activity 观测，不重新登记已经
+完成的执行；在同一 Binding 锁内对该会话补一次既有空闲订阅排期检查，仍忙则跳过，
+已空闲则沿用原回收策略。它同时覆盖删除在途完成和原 timer 到期退出，不扫描其他
+会话、不新增删除对账或并发机制。原观察链继续确认运行或终态；不能确认时保留原有
+观测未知保护。用户后续对话、停止、重试删除仍走普通准入。超时、断连、取消或不可验证响应保留 Binding-local
+`lifecycle-unknown`，不关闭其他 Binding admission。所有失败都不为删除追加 list/read 对账、
+重发 delete 或将 not-found 当作成功；原执行观察链的读取与有界恢复继续按各自契约执行。
+响应丢失或本地提交失败留下的关联允许人工核查。
 原生分支历史引用可阻止删除来源，不把独立持久分支当 spawned descendant 级联、不复制
 或脱离历史，也不扩大 Project 删除清单。
 
@@ -3407,4 +3414,4 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
 | rename mutation 未确认 | 保留目标 lifecycle slot | 不声称回滚；后台自动命名按自身边界 | [生命周期](#普通会话生命周期) |
 | unarchive/resume | 按 ADR 0082 两条精确移动前拒绝及 resume 拒绝分类；未知只隔离目标 Binding | 报告部分结果，不重试/目录对账；原生成功、本地未确认保留已知订阅，不声称 current 回滚 | [归档恢复](#普通会话生命周期) |
 | archive 异常 | 一次有界 catalog 对账：archived 才提交、active 释放、无法确认仅隔离目标 | 不重发 mutation，取消不追加目录 I/O | [归档](#原生归档与删除) |
-| Delete 拒绝／未知 | 仅本次原生成功才删 Binding；明确拒绝清失效投影后可重新确认；未知 Binding-local slot、其他 Binding 可用 | 保留关联，不 list/read 对账/自动重试，不把 not-found 当成功 | [删除](#原生归档与删除) |
+| Delete 拒绝／未知 | 仅本次原生成功才删 Binding；明确拒绝保留原执行观测、释放删除 intent、补目标空闲排期检查并反馈原因；未知 Binding-local slot、其他 Binding 可用 | 保留关联，不追加删除 list/read 对账或自动重试，不把 not-found 当成功 | [删除](#原生归档与删除) |

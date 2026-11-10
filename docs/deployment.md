@@ -356,6 +356,23 @@ cwd 冷恢复及 Runtime 采用。定时 Worktree 探针隔离 HOME 和 CODEX_HO
 与其他检查配置不变的探针串行执行。未知删除结果不自动重试，保留输出的 exact ID
 供人工核查；飞书创建、选群和回调另行验收。
 
+删除明确拒绝的执行观测边界（ADR 0094）变更时，另运行隔离生产 Runtime 探针：
+
+```bash
+timeout --signal=INT --kill-after=5s 120s .venv/bin/python \
+  scripts/probe_thread_delete_rejection.py --timeout 100 \
+  --output /tmp/thread-delete-rejection.json
+```
+
+macOS 使用 `gtimeout`。它使用临时 HOME/CODEX_HOME/cwd、真实 bundled App Server 与
+loopback mock provider，覆盖 attached Thread 前置拒绝后的普通完成、停止和 Goal 收尾，
+以及持久分支历史引用在 shutdown 后拒绝时的普通 Turn 终态与同 Thread 后续对话。验证 Binding 保留、删除
+intent 释放、原观察者未取消、没有 discard，且终态后保留正常的订阅回收排期。
+普通 Netizen fork 不请求 `attachToSource`，
+该关系仅由探针通过原生协议构造；不使用真实账号、不发送飞书消息。完成竞态、删除
+在途 idle timer 到期、压缩与未知结果保护另由行为测试覆盖，不能据此声称验证了所有
+原生拒绝原因或 Goal shutdown 路径。
+
 归档恢复边界（ADR 0082）变更时，运行
 `.venv/bin/python scripts/probe_thread_restore.py --output /tmp/thread-restore.json`
 并设置外部 90 秒进程 deadline；可用 `--timeout` 调整默认 60 秒的内部总时限。专项使用
@@ -890,7 +907,7 @@ provider 和飞书替身；真实 MCP 参数、客户端布局/回调、目标�
 | 创建交接 | root/seed 响应阻塞时提前输入；默认配置先创建则 fork 冲突，fork 先提交则输入进入分支；每阶段失败、Project 删除和 shutdown | 提示等待完成后再发消息，失败只报告已知事实，已成功会话不会因回执失败被撤销 |
 | 普通恢复 | `activate_exact` 直接 resume，无 list/read 预检；未发新消息且列表缺席分支、Lazy、运行中 rejoin、明确拒绝、未知结果、本地提交失败和旧输入失效 | `/resume`、列表切换、Admin 同一语义；成功后反馈，拒绝保留 current，不卡在目录“未确认”状态 |
 | 归档恢复 | 无 list/read 预检；unarchive 同 ID 成功或两条精确移动前拒绝才继续单次 resume；missing/writer/closing/再次归档、部分成功、Binding-local unknown、本地提交前后失败；运行中保留执行 handle，已 current 保留 anchor/revision | 命令、归档卡和 Admin 共用结果分类；已恢复仍可切换，明确拒绝保留关联；部分成功如实提示，卡片失败不重发恢复 |
-| 普通删除 | 成功才删 Binding，RPC 拒绝保留并清理失效投影，传输未知局部隔离；零自动 list/read/retry；来源受分支历史引用限制 | 普通/归档/分支相同确认与反馈；不会把源会话删除解释为独立分支级联删除 |
+| 普通删除 | 成功才删 Binding，RPC 拒绝保留原执行观测并释放删除 intent，传输未知局部隔离；零额外删除 list/read 对账或自动重试；来源受分支历史引用限制 | 普通/归档/分支相同确认与反馈；不会把源会话删除解释为独立分支级联删除 |
 
 2026-10-16，SDK/App Server `0.162.1`、同步后的 `0.163.0`：六组生产 Runtime 隔离原生恢复
 场景与本地回归通过；不含真实模型、Goal 自动续跑、飞书回调延迟或部署。
@@ -1759,7 +1776,7 @@ Admin 矩阵须从另一台受信内网主机，经 `/admin` 给出的实际端�
     | L03 Lazy `/delete` 和 `/sessions` 非当前 Lazy 删除；确认前物化 | 红色不可恢复二次确认只删本地 Binding；第一次点击仅 exact 目标确认卡、零 mutation；物化使旧卡 stale，inactive 保留 pointer、current 清空。 | 本地行为＋飞书卡 | [列表控制][验收22] |
     | L04 materialized `/delete` 与 `/sessions` exact 行；切 current、改变 Turn/Goal/Compaction 或 native identity | 第一次点击仅红色确认卡、零 mutation，完整列明 Thread、spawned descendants、App/CLI 历史及 Binding 永久删除；命令保持 current-only、切换即零 mutation，exact 行不受切换影响。运行状态变化不使确认失效，Binding/native 身份变化必须零 mutation；仅本次原生成功才删 Binding/pointer。 | disposable native＋卡片/身份竞态 | [删除][验收7]、[列表控制][验收22] |
     | L05 `/sessions` 删除非当前/当前 materialized、末页唯一项；`/sessions archived` 独立两阶段 Delete | 非当前/archived 保留 pointer、current 清空，页码夹取；archived 不先 unarchive。active/archived 共用 native-first primitive/返回处理；自建 root/descendants 从四目录视图消失。 | disposable native 四视图＋飞书回调 | [删除][验收7] |
-    | L06 `thread/delete` 成功、明确 RPC 拒绝、not-found、传输/响应未知 | 仅成功响应提交删除；明确拒绝保留 Binding、清可能失效的活动投影后可重新确认；未知 Binding-local lifecycle-unknown，not-found 不是成功。任一失败零 list/read 对账/自动 delete，同 Scope 其他 Binding 仍可 start/steer/lifecycle。 | `make check` synthetic fault | [删除][验收7] |
+    | L06 `thread/delete` 成功、明确 RPC 拒绝、not-found、传输/响应未知 | 仅成功响应提交删除；明确拒绝保留 Binding 与原执行观测，释放删除 intent、补目标空闲排期检查并反馈原因；覆盖运行中、shutdown 后拒绝、完成竞态与 idle timer 到期；未知 Binding-local lifecycle-unknown，not-found 不是成功。任一失败零额外删除 list/read 对账/自动 delete，同 Scope 其他 Binding 仍可 start/steer/lifecycle。 | `make check` synthetic fault | [删除][验收7] |
     | L07 archive 响应不确定 | 仅一次 active/archived 目录对账，exact ID 在 archived 才提交、仍 active 则释放 reservation。 | synthetic fault/有界目录记录 | [归档][验收7] |
     | L08 running/stopping/turn-observation-unavailable/Goal/Compaction 上 Archive/Delete | 直接委托 App Server，不先 interrupt/pause/cleanup、恢复/读取 Turn、等 terminal 或证明 idle；归档入 archived、删除从四视图消失；原生成功后取消本地 observer。 | disposable native 各状态＋调用顺序 | [归档与删除][验收7] |
     | L09 ephemeral/未持久化、App Server/存储不可达、compatibility gate 不可用 | 明确失败且保留 Binding，不伪造成新 Thread 状态。 | synthetic capability/故障＋原生拒绝 | [归档与删除][验收7] |

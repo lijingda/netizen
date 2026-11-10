@@ -66,10 +66,11 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0040](0040-make-new-card-only-and-show-all-projects.md) | 把普通会话创建收口到 `/new` 卡片并展示全部 Project | 功能契约 | 有效 |  |
 | [0049](0049-bound-turn-observation-and-delegate-thread-removal.md) | 有界处理 Turn 观测故障，并委托 App Server 移除 Thread | 架构决策 | 有效 | 被 [0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 修订 |
 | [0073](0073-create-sessions-from-chat-defaults.md) | 根据聊天默认配置在原消息位置自动创建普通会话 | 架构决策 | 有效 |  |
-| [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) | 持久分支使用普通会话，恢复与删除以原生返回为准 | 架构决策 | 有效 | 被 [0082](0082-restore-archived-sessions-from-exact-native-results.md)、[0093](0093-reject-only-the-operation-on-native-provider-mismatch.md) 修订 |
+| [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) | 持久分支使用普通会话，恢复与删除以原生返回为准 | 架构决策 | 有效 | 被 [0082](0082-restore-archived-sessions-from-exact-native-results.md)、[0093](0093-reject-only-the-operation-on-native-provider-mismatch.md)、[0094](0094-preserve-execution-observation-on-delete-rejection.md) 修订 |
 | [0082](0082-restore-archived-sessions-from-exact-native-results.md) | 归档恢复直接使用精确原生结果 | 架构决策 | 有效 |  |
 | [0088](0088-align-steer-failures-and-input-resume-rejections.md) | 统一追加输入失败与普通消息的恢复拒绝 | 架构决策 | 有效 | 被 [0093](0093-reject-only-the-operation-on-native-provider-mismatch.md) 修订 |
 | [0093](0093-reject-only-the-operation-on-native-provider-mismatch.md) | 原生模型提供方拒绝只拒绝本次操作 | 架构决策 | 有效 |  |
+| [0094](0094-preserve-execution-observation-on-delete-rejection.md) | 删除明确拒绝时保留原执行观测 | 架构决策 | 有效 |  |
 
 ## Goal、Side 与会话命名
 

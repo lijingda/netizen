@@ -218,6 +218,16 @@ class UpgradeRegressionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.evidence_check(step, payload, "", "test-version")
 
+    def test_delete_rejection_requires_all_four_native_cases(self) -> None:
+        step = next(step for step in runner.REGISTRY if step.name == "thread-delete-rejection")
+        self.assertEqual(step.group, "isolated")
+        self.assertFalse(step.live)
+        cases = [{"passed": True} for _ in range(4)]
+        runner.evidence_check(step, {"cases": cases}, "", "test-version")
+        for incomplete in (cases[:-1], cases[:-1] + [{"passed": False}]):
+            with self.assertRaises(ValueError):
+                runner.evidence_check(step, {"cases": incomplete}, "", "test-version")
+
     def test_timeout_signals_only_owned_group_with_bounded_grace_and_fails_even_if_zero(self) -> None:
         with (patch.object(runner.subprocess, "Popen") as popen,
               patch.object(runner.os, "killpg", side_effect=no_group) as killpg):
