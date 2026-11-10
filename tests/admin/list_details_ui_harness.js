@@ -235,4 +235,72 @@ async function fetch(path, options = {}) {
   scheduleInput("detail-done").click();
   assert.equal(scheduleDetailId, null);
   assert.equal(scheduleInput("detail").open, false);
+
+  // Previews are clamped; only text the layout actually cuts off can expand.
+  const previewRow = document.createElement("tr");
+  sessionIdentityCell(previewRow, session);
+  const preview = previewRow.querySelector(".preview");
+  const previewBlock = preview.parentElement;
+  const previewToggle = previewRow.querySelector(".preview-toggle");
+  assert.equal(preview.textContent, session.nativePreview);
+  assert.equal(previewToggle.tagName, "button");
+  assert.equal(previewToggle.type, "button");
+  assert.equal(previewToggle.getAttribute("aria-controls"), preview.id);
+  assert(previewToggle.hidden, "a preview that has not been laid out must not offer expansion");
+  preview.clientHeight = 40; preview.scrollHeight = 40;
+  syncSessionPreviews([previewBlock]);
+  assert(previewToggle.hidden, "text that fits must not offer expansion");
+  assert.equal(preview.title, "");
+  preview.click();
+  assert.equal(previewToggle.getAttribute("aria-expanded"), "false");
+  preview.scrollHeight = 120;
+  syncSessionPreviews([previewBlock]);
+  assert(!previewToggle.hidden);
+  assert.equal(previewToggle.textContent, "展开");
+  assert.equal(preview.title, session.nativePreview);
+  previewToggle.click();
+  assert.equal(previewToggle.getAttribute("aria-expanded"), "true");
+  assert.equal(previewToggle.textContent, "收起");
+  assert.equal(previewBlock.getAttribute("data-expanded"), "");
+  assert.equal(preview.title, "");
+  preview.clientHeight = 120;
+  syncSessionPreviews([previewBlock]);
+  assert(!previewToggle.hidden, "an expanded preview always keeps its collapse control");
+  preview.clientHeight = 40;
+  preview.click();
+  assert.equal(previewToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(previewToggle.textContent, "展开");
+  assert.equal(previewBlock.getAttribute("data-expanded"), null);
+  assert(!previewToggle.hidden);
+  window.getSelection = () => "部分预览";
+  preview.click();
+  assert.equal(previewToggle.getAttribute("aria-expanded"), "false", "selecting text must not toggle the preview");
+  delete window.getSelection;
+
+  const observers = [];
+  globalThis.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; this.targets = []; this.connected = true; observers.push(this); }
+    observe(target) { this.targets.push(target); }
+    disconnect() { this.connected = false; }
+  };
+  const listed = { ...session, runtime: { primaryStatus: "idle", primaryStatusResolution: "local" } };
+  const previewPage = { items: [listed, { ...listed, bindingId: "binding-without-preview", nativePreview: null }], nextCursor: null };
+  state.sessions = previewPage;
+  renderSessions(previewPage);
+  assert.equal(observers.length, 1);
+  assert.equal(observers[0].targets.length, 1, "only rows with a preview are observed");
+  const observed = observers[0].targets[0];
+  const observedToggle = observed.parentElement.querySelector(".preview-toggle");
+  assert(document.querySelector("#sessions-body").contains(observed));
+  assert(observedToggle.hidden);
+  // Showing a hidden row or changing the column width reports a new size.
+  observed.clientHeight = 40; observed.scrollHeight = 80;
+  observers[0].callback([{ target: observed }]);
+  assert(!observedToggle.hidden);
+  state.sessions = { items: [listed], nextCursor: null };
+  renderSessions(state.sessions);
+  assert(!observers[0].connected, "re-rendering must release the previous page's observer");
+  assert.equal(observers.length, 2);
+  assert(observers[1].connected);
+  delete globalThis.ResizeObserver;
 })().catch((error) => { console.error(error); process.exitCode = 1; });

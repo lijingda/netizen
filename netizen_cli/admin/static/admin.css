@@ -198,7 +198,13 @@ tr:last-child td { border-bottom: 0; }
 .chat-link { color: var(--blue); font-weight: 700; text-decoration: none; }
 .chat-link:hover { text-decoration: underline; }
 .meta-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
-.preview { max-width: 380px; margin-top: 4px; color: var(--muted); line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-preview { max-width: 380px; margin-top: 4px; }
+.preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
+.session-preview[data-expandable] .preview { cursor: pointer; }
+.session-preview[data-expanded] .preview { display: block; -webkit-line-clamp: none; line-clamp: none; overflow: visible; cursor: pointer; }
+.preview-toggle { display: inline-block; margin-top: 2px; padding: 2px 0; border: 0; background: transparent; color: var(--blue); font-size: var(--font-xs); font-weight: 400; }
+.preview-toggle[hidden] { display: none; }
+.preview-toggle:hover { text-decoration: underline; }
 .runtime-subscription { color: var(--muted); }
 .badge { display: inline-block; border-radius: 999px; padding: 3px 7px; background: var(--neutral-soft); font-size: var(--font-xs); }
 .badge.on { background: var(--success-soft); color: var(--success); }
@@ -725,7 +731,9 @@ body.navigation-open { overflow: hidden; }
   .card-table td:last-child { padding-top: 10px; border-top: 1px solid var(--line); }
   .card-table .actions { width: 100%; gap: 8px; }
   .card-table .action { min-height: var(--control-min-height); }
-  .card-table .preview { white-space: normal; max-width: 100%; font-weight: 400; }
+  .card-table .session-preview { max-width: 100%; }
+  .card-table .preview { font-weight: 400; }
+  .card-table .preview-toggle { padding: 6px 0; }
   .card-table .list-empty { display: block; padding: 24px 16px; text-align: center; }
   .card-table .list-empty td { display: block; border: 0; }
   .card-table tbody > .session-group-row { display: block; padding: 0; border: 0; margin-bottom: 8px; }
