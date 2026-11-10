@@ -5111,7 +5111,17 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.thread_list_calls, [])
         self.assertEqual(self.codex.read_calls, [])
 
+    def enable_subscription_release(self):
+        subscription = FakeThreadSubscriptionControl()
+        inspector = FakeBackgroundTerminalInspector()
+        self.runtime._thread_subscription_control = subscription
+        self.runtime._background_terminal_inspector = inspector
+        self.runtime._ordinary_thread_idle_seconds = 3600
+        self.addAsyncCleanup(self.runtime.cancel_tasks)
+        return subscription, inspector
+
     async def test_delete_rejection_preserves_running_turn_for_steer_and_stop(self) -> None:
+        subscription_control, inspector = self.enable_subscription_release()
         binding = self.binding()
         submission = await self.submit(binding)
         submission.release_receipt_attempt()
@@ -5142,6 +5152,11 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(steered.turn_id, submission.turn_id)
         self.assertEqual(handle.steers, ["continue this exact turn"])
         self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(subscription.state, ThreadSubscriptionState.SUBSCRIBED)
+        self.assertIsNone(subscription.idle_task)
+        self.assertIsNone(subscription.release_deadline)
+        self.assertEqual(subscription_control.calls, [])
+        self.assertEqual(inspector.calls, [])
         self.assertEqual(await self.runtime.stop(binding.id), StopDisposition.REQUESTED)
         self.assertTrue(await self.runtime.wait_idle(timeout=2))
         self.assertEqual(handle.interrupt_count, 1)
@@ -5153,6 +5168,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime.active_turn(binding.id))
 
     async def test_delete_rejection_does_not_discard_completion_during_request(self) -> None:
+        subscription_control, inspector = self.enable_subscription_release()
         binding = self.binding()
         submission = await self.submit(binding)
         submission.release_receipt_attempt()
@@ -5195,6 +5211,99 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.outcomes[0].result.final_response, "finished while deletion was pending",
         )
         self.assertEqual(self.store.get(binding.id).native_thread_id, submission.thread_id)
+        subscription = self.runtime._subscriptions[binding.id]
+        self.assertEqual(subscription.state, ThreadSubscriptionState.RELEASE_PENDING)
+        self.assertIsNotNone(subscription.idle_task)
+        self.assertFalse(subscription.idle_task.done())
+        self.assertGreater(subscription.release_deadline, asyncio.get_running_loop().time())
+        self.assertEqual(subscription_control.calls, [])
+        self.assertEqual(inspector.calls, [])
+
+    async def test_delete_results_after_idle_timer_expiry_rearm_only_explicit_rejection(self) -> None:
+        subscription_control, inspector = self.enable_subscription_release()
+        for native_error, expected_error, rearm in (
+            (ThreadDeleteRejected("fork references history"), ThreadLifecycleError, True),
+            (RuntimeError("delete response lost"), ThreadLifecycleStateUnknown, False),
+        ):
+            with self.subTest(rearm=rearm):
+                entered, release = asyncio.Event(), asyncio.Event()
+                timer_expiries = [asyncio.Event(), asyncio.Event()]
+                timer_started = [asyncio.Event(), asyncio.Event()]
+                scheduled_delays = []
+                release_after_delay = self.runtime._release_subscription_after_delay
+                calls_before = list(subscription_control.calls)
+                inspections_before = list(inspector.calls)
+
+                async def controlled_idle_timer(record, generation, delay, scheduled_active):
+                    # Exercise the real expiry path, replacing only elapsed
+                    # time with an explicit event for each scheduled timer.
+                    index = len(scheduled_delays)
+                    scheduled_delays.append(delay)
+                    timer_started[index].set()
+                    await timer_expiries[index].wait()
+                    await release_after_delay(record, generation, 0, scheduled_active)
+
+                async def delayed_delete(thread_id: str) -> None:
+                    self.delete_control.calls.append(thread_id)
+                    entered.set()
+                    await release.wait()
+                    raise native_error
+
+                with (
+                    patch.object(self.runtime, "_release_subscription_after_delay",
+                                 side_effect=controlled_idle_timer),
+                    patch.object(self.delete_control, "delete", side_effect=delayed_delete),
+                ):
+                    binding = self.binding()
+                    submission = await self.submit(binding)
+                    await self.finish(self.codex.handles[-1], submission)
+                    record = self.runtime._subscriptions[binding.id]
+                    first_timer = record.idle_task
+                    self.assertIsNotNone(first_timer)
+                    await asyncio.wait_for(timer_started[0].wait(), timeout=2)
+                    deleting = asyncio.create_task(self.runtime.delete_exact(
+                        binding.id, expected_native_thread_id=submission.thread_id,
+                    ))
+                    try:
+                        await asyncio.wait_for(entered.wait(), timeout=2)
+                        timer_expiries[0].set()
+                        await asyncio.wait_for(first_timer, timeout=2)
+                        self.assertEqual(record.state, ThreadSubscriptionState.SUBSCRIBED)
+                        self.assertIsNone(record.idle_task)
+                        self.assertIsNone(record.release_deadline)
+                        self.assertEqual(subscription_control.calls, calls_before)
+                        self.assertEqual(inspector.calls, inspections_before)
+                    finally:
+                        release.set()
+                        with self.assertRaises(expected_error):
+                            await deleting
+
+                    if rearm:
+                        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+                        self.assertEqual(record.state, ThreadSubscriptionState.RELEASE_PENDING)
+                        second_timer = record.idle_task
+                        self.assertIsNotNone(second_timer)
+                        self.assertIsNot(second_timer, first_timer)
+                        await asyncio.wait_for(timer_started[1].wait(), timeout=2)
+                        self.assertEqual(scheduled_delays, [3600, 3600])
+                        timer_expiries[1].set()
+                        await asyncio.wait_for(second_timer, timeout=2)
+                        self.assertEqual(record.state, ThreadSubscriptionState.RELEASED)
+                        self.assertEqual(subscription_control.calls, calls_before + [submission.thread_id])
+                        self.assertEqual(inspector.calls, inspections_before + [submission.thread_id])
+                    else:
+                        self.assertEqual(
+                            self.runtime.lifecycle_state(binding.id).state,
+                            ThreadLifecycleState.UNKNOWN,
+                        )
+                        self.assertEqual(record.state, ThreadSubscriptionState.SUBSCRIBED)
+                        self.assertIsNone(record.idle_task)
+                        self.assertIsNone(record.release_deadline)
+                        self.assertEqual(scheduled_delays, [3600])
+                        self.assertEqual(subscription_control.calls, calls_before)
+                        self.assertEqual(inspector.calls, inspections_before)
+                        with self.assertRaises(ThreadLifecycleStateUnknown):
+                            await self.runtime.capture_submission_admission(binding.id)
 
     async def test_delete_rejection_after_native_shutdown_observes_terminal_and_resumes(self) -> None:
         binding = self.binding()

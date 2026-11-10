@@ -254,9 +254,15 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
             raise
         except ThreadDeleteRejected as error:
             # Rejection may precede or follow native shutdown. Leave execution
-            # state to its existing observers; releasing this reservation only
-            # re-enables activity for owners that have not already finished.
-            await self._release_lifecycle_reservation(operation)
+            # state to its existing observers. Completion or an idle timer may
+            # have skipped release while this reservation was busy.
+            async with self._lock(operation.binding_id):
+                if self._lifecycles.get(operation.binding_id) is operation:
+                    self._finish_lifecycle_locked(operation)
+                    self._schedule_known_subscription_locked(
+                        operation.binding_id,
+                        thread_id,
+                    )
             raise ThreadLifecycleError(
                 "Codex 未完成本次删除，会话已保留。"
             ) from error

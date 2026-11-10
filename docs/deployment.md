@@ -367,9 +367,11 @@ timeout --signal=INT --kill-after=5s 120s .venv/bin/python \
 macOS 使用 `gtimeout`。它使用临时 HOME/CODEX_HOME/cwd、真实 bundled App Server 与
 loopback mock provider，覆盖 attached Thread 前置拒绝后的普通完成、停止和 Goal 收尾，
 以及持久分支历史引用在 shutdown 后拒绝时的普通 Turn 终态与同 Thread 后续对话。验证 Binding 保留、删除
-intent 释放、原观察者未取消且没有 discard。普通 Netizen fork 不请求 `attachToSource`，
-该关系仅由探针通过原生协议构造；不使用真实账号、不发送飞书消息。完成竞态、压缩与
-未知结果保护另由行为测试覆盖，不能据此声称验证了所有原生拒绝原因或 Goal shutdown 路径。
+intent 释放、原观察者未取消、没有 discard，且终态后保留正常的订阅回收排期。
+普通 Netizen fork 不请求 `attachToSource`，
+该关系仅由探针通过原生协议构造；不使用真实账号、不发送飞书消息。完成竞态、删除
+在途 idle timer 到期、压缩与未知结果保护另由行为测试覆盖，不能据此声称验证了所有
+原生拒绝原因或 Goal shutdown 路径。
 
 归档恢复边界（ADR 0082）变更时，运行
 `.venv/bin/python scripts/probe_thread_restore.py --output /tmp/thread-restore.json`
@@ -1774,7 +1776,7 @@ Admin 矩阵须从另一台受信内网主机，经 `/admin` 给出的实际端�
     | L03 Lazy `/delete` 和 `/sessions` 非当前 Lazy 删除；确认前物化 | 红色不可恢复二次确认只删本地 Binding；第一次点击仅 exact 目标确认卡、零 mutation；物化使旧卡 stale，inactive 保留 pointer、current 清空。 | 本地行为＋飞书卡 | [列表控制][验收22] |
     | L04 materialized `/delete` 与 `/sessions` exact 行；切 current、改变 Turn/Goal/Compaction 或 native identity | 第一次点击仅红色确认卡、零 mutation，完整列明 Thread、spawned descendants、App/CLI 历史及 Binding 永久删除；命令保持 current-only、切换即零 mutation，exact 行不受切换影响。运行状态变化不使确认失效，Binding/native 身份变化必须零 mutation；仅本次原生成功才删 Binding/pointer。 | disposable native＋卡片/身份竞态 | [删除][验收7]、[列表控制][验收22] |
     | L05 `/sessions` 删除非当前/当前 materialized、末页唯一项；`/sessions archived` 独立两阶段 Delete | 非当前/archived 保留 pointer、current 清空，页码夹取；archived 不先 unarchive。active/archived 共用 native-first primitive/返回处理；自建 root/descendants 从四目录视图消失。 | disposable native 四视图＋飞书回调 | [删除][验收7] |
-    | L06 `thread/delete` 成功、明确 RPC 拒绝、not-found、传输/响应未知 | 仅成功响应提交删除；明确拒绝保留 Binding 与原执行观测，只释放删除 intent、反馈原因；覆盖运行中、shutdown 后拒绝与完成竞态；未知 Binding-local lifecycle-unknown，not-found 不是成功。任一失败零额外删除 list/read 对账/自动 delete，同 Scope 其他 Binding 仍可 start/steer/lifecycle。 | `make check` synthetic fault | [删除][验收7] |
+    | L06 `thread/delete` 成功、明确 RPC 拒绝、not-found、传输/响应未知 | 仅成功响应提交删除；明确拒绝保留 Binding 与原执行观测，释放删除 intent、补目标空闲排期检查并反馈原因；覆盖运行中、shutdown 后拒绝、完成竞态与 idle timer 到期；未知 Binding-local lifecycle-unknown，not-found 不是成功。任一失败零额外删除 list/read 对账/自动 delete，同 Scope 其他 Binding 仍可 start/steer/lifecycle。 | `make check` synthetic fault | [删除][验收7] |
     | L07 archive 响应不确定 | 仅一次 active/archived 目录对账，exact ID 在 archived 才提交、仍 active 则释放 reservation。 | synthetic fault/有界目录记录 | [归档][验收7] |
     | L08 running/stopping/turn-observation-unavailable/Goal/Compaction 上 Archive/Delete | 直接委托 App Server，不先 interrupt/pause/cleanup、恢复/读取 Turn、等 terminal 或证明 idle；归档入 archived、删除从四视图消失；原生成功后取消本地 observer。 | disposable native 各状态＋调用顺序 | [归档与删除][验收7] |
     | L09 ephemeral/未持久化、App Server/存储不可达、compatibility gate 不可用 | 明确失败且保留 Binding，不伪造成新 Thread 状态。 | synthetic capability/故障＋原生拒绝 | [归档与删除][验收7] |

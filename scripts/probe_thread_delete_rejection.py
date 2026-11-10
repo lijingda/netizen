@@ -28,10 +28,12 @@ from netizen_cli.bindings import BindingStore  # noqa: E402
 from netizen_cli.codex_runtime import CodexRuntime, ThreadLifecycleError  # noqa: E402
 from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
 from netizen_cli.runtime.contracts import (  # noqa: E402
-    GoalOutcome, StopDisposition, ThreadActivityDiscardedOutcome, TurnOutcome,
+    GoalOutcome, StopDisposition, ThreadActivityDiscardedOutcome,
+    ThreadSubscriptionState, TurnOutcome,
 )
 from netizen_cli.sdk_gap_adapter import (  # noqa: E402
     AppServerGoalControl, AppServerThreadDeleteControl,
+    AppServerThreadSubscriptionControl,
 )
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
 from scripts.probe_sdk_partial_answers import (  # noqa: E402
@@ -96,10 +98,13 @@ async def _case(root: Path, name: str) -> dict[str, Any]:
         try:
             async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
                 control = AppServerGoalControl(codex) if goal_case else None
+                cleanup = PinnedExperimentalTerminalCleanup(codex)
                 runtime = CodexRuntime(
                     codex=codex, bindings=store,
-                    terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
+                    terminal_cleanup=cleanup,
                     thread_delete_control=AppServerThreadDeleteControl(codex),
+                    thread_subscription_control=AppServerThreadSubscriptionControl(codex),
+                    background_terminal_inspector=cleanup,
                     goal_control=control, on_completion=capture,
                     poll_interval_seconds=0.01, automatic_thread_naming=False,
                 )
@@ -202,6 +207,10 @@ async def _case(root: Path, name: str) -> dict[str, Any]:
                         assert terminal == expected_terminal, terminal
                         if terminal == "completed":
                             assert outcome.result.final_response == "after-delete"
+                    subscription = runtime.thread_subscription_snapshot(binding.id)
+                    assert subscription is not None
+                    assert subscription.state is ThreadSubscriptionState.RELEASE_PENDING
+                    assert subscription.release_in_seconds is not None
                     if not attached:
                         # The retained subscription handle may refer to a
                         # shutdown runtime. Ordinary submission must resume
@@ -233,6 +242,7 @@ async def _case(root: Path, name: str) -> dict[str, Any]:
                         "rejection_before_shutdown": attached,
                         "binding_preserved": True, "lifecycle_released": True,
                         "observer_not_cancelled": True, "discard_events": 0,
+                        "idle_release_scheduled_after_terminal": True,
                         "exact_terminal_delivered": terminal,
                         "stop_result": stop_result.value if stop_result is not None else None,
                         "goal_finalization": "cleared" if goal_case else None,
