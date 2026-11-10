@@ -253,22 +253,12 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
             await self._mark_lifecycle_unknown(operation)
             raise
         except ThreadDeleteRejected as error:
-            # Native delete may shut down the Thread before rejecting its
-            # history removal. Keep the Binding, but never revive stale local
-            # Turn/Goal/Activity or subscription observations.
-            async with self._lock(operation.binding_id):
-                binding = self._require_reserved_lifecycle_binding_locked(operation)
-                discarded = self._discard_local_thread_activity_locked(
-                    binding.id,
-                    thread_id,
-                )
-            try:
-                await self._deliver_thread_activity_discarded(discarded)
-            finally:
-                await self._release_lifecycle_reservation(operation)
+            # Rejection may precede or follow native shutdown. Leave execution
+            # state to its existing observers; releasing this reservation only
+            # re-enables activity for owners that have not already finished.
+            await self._release_lifecycle_reservation(operation)
             raise ThreadLifecycleError(
-                "Codex 未完成本次删除，会话已保留；"
-                "原有运行活动可能已停止，请重新确认后再操作。"
+                "Codex 未完成本次删除，会话已保留。"
             ) from error
         except Exception as error:
             await self._mark_lifecycle_unknown(operation)

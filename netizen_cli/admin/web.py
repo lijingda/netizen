@@ -90,6 +90,7 @@ from .queries import (
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
 from ..instance import instance_digest
+from ..error_messages import describe_error
 from ..chat_avatars import CHAT_AVATAR_IMAGE_SOURCES, avatar_url
 from ..settings import validate_access_host
 from ..bindings import (
@@ -3580,13 +3581,14 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(503, "state_unknown", "结果未确认，请刷新对账。")
     if isinstance(error, MalformedActionGrant):
         return AdminWebError(400, "invalid_action", "操作凭据无效。")
+    if isinstance(error, ThreadLifecycleError):
+        return AdminWebError(409, "operation_rejected", describe_error(error))
     if isinstance(
         error,
         (
             ProjectError,
             SideCloseFailed,
             SideSessionNotFound,
-            ThreadLifecycleError,
             ThreadReleaseError,
         ),
     ):

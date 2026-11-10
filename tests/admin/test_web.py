@@ -17,6 +17,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from openai_codex.errors import InvalidRequestError
+
 from netizen_cli.admin.auth import AdminAuth
 from netizen_cli.admin.feishu import DeviceChallenge, UserProfile, UserTokens
 from netizen_cli.admin.login import AdminLogin
@@ -76,7 +78,9 @@ from netizen_cli.codex_runtime import (
     SideSessionState,
     StopDisposition,
     ThreadLifecycleSnapshot,
+    ThreadLifecycleError,
     ThreadLifecycleState,
+    ThreadLifecycleStateUnknown,
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
     ThreadOccupied,
@@ -110,7 +114,7 @@ from netizen_cli.management.service import _project_binding_status
 from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError
 from netizen_cli.management.updates import UpdateError
 from netizen_cli.projects import Project
-from netizen_cli.sdk_gap_adapter import GoalSnapshot
+from netizen_cli.sdk_gap_adapter import GoalSnapshot, ThreadDeleteRejected
 
 
 class FakeFeishuClient:
@@ -1640,6 +1644,49 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.management.defaults = None
         status, _, _ = await self.json_get("/api/v1/sessions/options", session)
         self.assertEqual(status, 503)
+
+    async def test_delete_rejection_shows_safe_native_reason_and_unknown_stays_unknown(self):
+        self.runner.open_admission()
+        session = await self.login()
+        reason = "cannot delete thread while attached thread child exists; delete the attached thread first"
+        rejected = ThreadLifecycleError("Codex 未完成本次删除，会话已保留。")
+        rejected.__cause__ = ThreadDeleteRejected("Codex 拒绝了本次 Thread 删除。")
+        rejected.__cause__.__cause__ = InvalidRequestError(
+            -32600, reason,
+            data={"request": "private-prompt"},
+        )
+        sensitive = ThreadLifecycleError("Codex 未完成本次删除，会话已保留。")
+        sensitive.__cause__ = InvalidRequestError(-32600, "API_KEY=private-credential")
+        unknown = ThreadLifecycleStateUnknown("删除结果未确认")
+        unknown.__cause__ = RuntimeError("private-transport-detail")
+        for error, expected_status, expected_code in (
+            (rejected, 409, "operation_rejected"),
+            (sensitive, 409, "operation_rejected"),
+            (unknown, 503, "state_unknown"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                status, _, page = await self.json_get("/api/v1/sessions?inventoryState=active", session)
+                self.assertEqual(status, 200, page)
+                item = next(item for item in page["items"] if item["bindingId"] == "binding-native")
+                with patch.object(self.management, "delete_exact_binding", AsyncMock(side_effect=error)) as delete:
+                    status, _, result = await self.json_post(
+                        "/api/v1/sessions/delete-materialized", session,
+                        _action_payload(item["actions"]["deleteMaterialized"]),
+                    )
+                self.assertEqual(status, expected_status, result)
+                self.assertEqual(result["code"], expected_code)
+                message = result["message"]
+                self.assertLessEqual(len(message), 500)
+                self.assertNotIn("private-", message)
+                if error is rejected:
+                    self.assertIn("会话已保留", message)
+                    self.assertIn(reason, message)
+                    self.assertIn("-32600", message)
+                elif error is sensitive:
+                    self.assertIn("敏感内容已隐藏", message)
+                else:
+                    self.assertIn("结果未确认", message)
+                delete.assert_awaited_once()
 
     async def test_all_session_and_side_mutation_routes_are_reachable(self) -> None:
         self.runner.open_admission()
