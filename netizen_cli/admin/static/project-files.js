@@ -5,7 +5,7 @@ window.NetizenProjectFiles = (() => {
   let browser;
   function open(project) {
     return browser.open({
-      rootId: "project", title: `${project.alias} · 查看文件`, eyebrow: "PROJECT FILES",
+      rootId: "project", title: `${project.alias} · 查看文件`, eyebrow: "Project 文件",
       emptyTitle: "浏览项目文件", description: "展开目录，选择文件查看内容。",
       roots: [{ id: "project", label: `Project · ${project.cwd}` }],
       url(operation, { rootId, identity, path }) {

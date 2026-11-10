@@ -64,7 +64,7 @@ assert.equal(rows()[1].getAttribute("aria-selected"), "true");
 rows()[2].click();
 assert.equal(pageSize.value, "50");
 assert.equal(inputs, 1); assert.equal(changes, 1);
-assert.equal(new URLSearchParams(new FormData(document.querySelector("#session-filter"))).get("pageSize"), "50");
+assert.equal(formQuery(document.querySelector("#session-filter")).get("pageSize"), "50");
 assert.equal(document.activeElement, pageSize);
 pageSize.click(); rows()[2].click();
 assert.equal(changes, 1, "same selection must not dispatch spurious changes");

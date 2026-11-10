@@ -34,7 +34,7 @@ async function fetch(path, options = {}) {
 }
 let discardConfirmed = true;
 let discardPrompts = 0;
-window.confirm = () => { discardPrompts += 1; return discardConfirmed; };
+confirmResponder = () => { discardPrompts += 1; return discardConfirmed; };
 let valid = true;
 document.querySelector("#project-editor").reportValidity = () => valid;
 const input = (name) => document.querySelector(`#project-${name}`);
@@ -72,14 +72,15 @@ function submit() { return input("editor").listeners.get("submit")[0]({ preventD
 
   discardConfirmed = false;
   for (const kind of ["cancel", "close"]) {
-    input(kind).click();
+    input(kind).click(); await flush();
     assert.equal(input("drawer").open, true);
     assert.equal(input("alias").value, "example");
   }
   assert.equal(input("drawer").dispatch("cancel").prevented, true);
+  await flush();
   assert.equal(input("drawer").open, true);
   discardConfirmed = true;
-  input("cancel").click();
+  input("cancel").click(); await flush();
   assert.equal(input("drawer").open, false);
   assert.equal(document.activeElement, input("new"));
 
@@ -106,8 +107,9 @@ function submit() { return input("editor").listeners.get("submit")[0]({ preventD
     valid = true;
     const pending = submit();
     await submit();
-    input("cancel").click();
+    input("cancel").click(); await flush();
     assert.equal(input("drawer").dispatch("cancel").prevented, true);
+  await flush();
     assert.equal(input("drawer").open, true);
     assert.equal(input("close").disabled, true);
     assert.equal(input("mode-create").disabled, true);
@@ -157,7 +159,7 @@ function submit() { return input("editor").listeners.get("submit")[0]({ preventD
       assert.equal(input("submit").disabled, true, "uncertain results remain blocked after read-only reconciliation");
       await submit();
       assert.equal(requests.length, before);
-      input("cancel").click();
+      input("cancel").click(); await flush();
     }
   }
 
@@ -180,7 +182,7 @@ function submit() { return input("editor").listeners.get("submit")[0]({ preventD
   let releaseRead;
   listRead = new Promise((resolve) => { releaseRead = resolve; });
   const checking = checkProjectResult();
-  input("cancel").click();
+  input("cancel").click(); await flush();
   open();
   input("alias").value = "new draft";
   releaseRead();

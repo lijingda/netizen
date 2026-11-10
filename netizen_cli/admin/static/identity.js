@@ -64,10 +64,17 @@ window.NetizenIdentity = (() => {
       const identity = document.createElement("div");
       identity.className = "person";
       person(identity, user);
+      if (user.openId === users.currentOpenId) {
+        const self = document.createElement("span"); self.className = "badge"; self.textContent = "你"; identity.append(self);
+      }
       row.append(identity);
-      const remove = actionButton("删除", () => { void removeUser(user); }, true);
+      const remove = actionButton("删除", () => removeUser(user), true);
       remove.disabled = expired || pending || users.users.length <= 1 || !user.removeAction;
-      if (users.users.length <= 1) remove.title = "至少保留一位管理员";
+      if (users.users.length <= 1) {
+        const reason = document.createElement("span"); reason.id = "admin-last-user-reason";
+        reason.className = "hint"; reason.textContent = "至少保留一位管理员";
+        remove.title = reason.textContent; remove.setAttribute("aria-describedby", reason.id); row.append(reason);
+      }
       row.append(remove);
       list.append(row);
     }
@@ -238,6 +245,7 @@ window.NetizenIdentity = (() => {
     node("admin-user-confirm").disabled = true;
     renderUsers();
     try {
+      setStatus("正在添加管理员…");
       await post("add", snapshot.addAction, { revision: snapshot.revision, ...target });
       closePanel();
       await loadUsers();
@@ -255,11 +263,13 @@ window.NetizenIdentity = (() => {
   async function removeUser(user) {
     if (expired || pending || !user.removeAction || users.users.length <= 1) return;
     const self = user.openId === users.currentOpenId;
-    if (!window.confirm(`确认删除管理员“${user.name || user.openId}”？${self ? "\n确认后你将退出 Admin。" : "\n该用户将立即失去此实例的管理权限。"}`)) return;
+    if (!(await window.NetizenConfirm.ask({ title: "删除管理员", danger: true, confirmLabel: "删除", body: `确认删除管理员“${user.name || user.openId}”？${self ? "\n确认后你将退出 Admin。" : "\n该用户将立即失去此实例的管理权限。"}` }))) return;
+    if (expired || pending) return;
     const revision = users.revision;
     pending = true;
     renderUsers();
     try {
+      setStatus("正在删除管理员…");
       const result = await post("remove", user.removeAction, { revision, openId: user.openId });
       if (self || result?.loggedOut) { expireAdminSession(); return; }
       await loadUsers();

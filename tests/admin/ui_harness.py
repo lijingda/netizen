@@ -58,6 +58,8 @@ def harness_source(
     else:
         html_tree = page
     dom = Path(__file__).with_name("dom_harness.js").read_text(encoding="utf-8")
+    if page == "index.html" and "admin-ui.js" not in scripts:
+        scripts = ("admin-ui.js", *scripts)
     shipped = "\n".join((static / name).read_text(encoding="utf-8") for name in scripts)
     return "const htmlTree = " + json.dumps(html_tree) + ";\n" + dom + before + shipped + after
 
@@ -77,6 +79,6 @@ def run_harness(
             test.fail(reason)
         test.skipTest(reason)
     return subprocess.run(
-        [node, *args], input=source, capture_output=True, text=True,
+        [node, "--max-old-space-size=256", *args], input=source, capture_output=True, text=True,
         timeout=timeout, env=env,
     )

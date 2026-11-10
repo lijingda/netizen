@@ -20,7 +20,9 @@ window.createConfigEditor = (options) => {
       render();
     },
     async load() {
-      if (editor.expired || editor.pending || !confirmDiscardChanges(editor.dirty())) return false;
+      const beforeConfirmation = generation;
+      if (editor.expired || editor.pending || (editor.dirty() && !(await confirmDiscardChanges(true)))) return false;
+      if (editor.expired || editor.pending || beforeConfirmation !== generation) return false;
       options.initialize?.();
       const version = ++generation;
       if (options.lockRead) { editor.loading = true; render(); }
@@ -70,9 +72,20 @@ window.createConfigEditor = (options) => {
     if (editor.blocked || !grant() || !editor.dirty() || options.invalid?.()) return;
     const fields = definition();
     const body = JSON.stringify(actionPayload(grant(), fields));
-    if (options.beforeSave && !options.beforeSave(fields)) return;
+    if (options.beforeSave) {
+      const returnFocus = document.activeElement;
+      editor.pending = true; render();
+      let accepted;
+      try { accepted = await options.beforeSave(fields); }
+      finally { editor.pending = false; render(); }
+      if (!accepted || editor.expired) {
+        if (!editor.expired && !returnFocus?.disabled) returnFocus?.focus();
+        return;
+      }
+    }
     clearGrant();
     editor.pending = true;
+    setStatus("正在保存配置…");
     generation += 1;
     render();
     try {

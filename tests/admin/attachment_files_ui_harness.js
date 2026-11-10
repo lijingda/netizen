@@ -6,7 +6,7 @@
   attachments.init({ browser, api, isExpired: () => expired });
   let approved = true;
   const confirmations = [];
-  window.confirm = (message) => { confirmations.push(message); return approved; };
+  confirmResponder = (message) => { confirmations.push(message); return approved; };
   const rootRoute = "/api/v1/attachment-files/root";
   const directoryRoute = "/api/v1/attachment-files/directory";
   const contentRoute = "/api/v1/attachment-files/content";
@@ -89,8 +89,8 @@
   const deleting = defer();
   overrides.set(`${deleteRoute}:`, () => deleting.promise);
   const deletion = trigger("delete");
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let i = 0; i < 30 && postCount() === uncertainPosts; i += 1) await Promise.resolve();
+  assert(postCount() > uncertainPosts, "confirmed deletion has reached the POST");
   const inFlightCount = postCount();
   assert.equal(input("delete").disabled, true);
   await trigger("delete");

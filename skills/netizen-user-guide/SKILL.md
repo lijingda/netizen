@@ -31,7 +31,7 @@ Netizen 通过官方 Codex SDK 将飞书接入原生 Codex。默认按当前 Net
 | 状态、账号额度、压缩、停止 | [状态与控制](references/status-and-control.md)：区分上下文用量和共享账号额度，说明客户端时区与停止限制 |
 | 定时创建、修改、暂停或立即运行任务 | [定时任务](references/scheduled-tasks.md)：执行目标、时间规则、计划与单次执行的区别 |
 | 持久分支、Side 或 Goal | [持久分支、Side 与 Goal](references/fork-side-goal.md)：并发、共享目录、失效与暂停/结束后果 |
-| Admin 入口、登录、集中管理或系统维护 | [Admin Web](references/admin.md)：管理权限、操作范围与重启影响 |
+| Admin 入口、登录、集中管理或服务与诊断 | [Admin Web](references/admin.md)：管理权限、操作范围与重启影响 |
 | Skills、MCP 未登录或 OAuth 过期、App/CLI 差异 | [原生能力与宿主差异](references/native-capabilities.md)：调用方式、原生 MCP 登录与凭证复用条件 |
 | 使用报错、任务失败或状态未知 | [常见问题](references/faq.md)，再按问题链接补读详细规则 |
 

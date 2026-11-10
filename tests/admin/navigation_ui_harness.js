@@ -36,7 +36,9 @@ let selectorConfigGate = null;
 let selectorConfigs = 0;
 let selectorRenders = 0;
 let selectorUnmounts = 0;
+let selectorOnSelect = null;
 let accessSaveGate = null;
+let scheduleListGate = null;
 let accessRules = { revision: "access-first", discovery: { mode: "all", chatIds: [] },
   readSend: { mode: "all", chatIds: [] } };
 document.head = document.querySelector("head");
@@ -44,9 +46,14 @@ const appendScript = document.head.append.bind(document.head);
 document.head.append = (script) => { appendScript(script); queueMicrotask(() => script.onload()); };
 window.webComponent = {
   async config() { selectorConfigs += 1; },
-  render() { selectorRenders += 1; return { unmount() { selectorUnmounts += 1; } }; },
+  render(_name, options) { selectorRenders += 1; selectorOnSelect = options.onSelect; return { unmount() { selectorUnmounts += 1; } }; },
 };
 const adminGrant = { actionToken: "fixture-selector", csrfToken: "fixture-csrf", target: {} };
+if (typeof navigationRace !== "undefined") {
+  ordinary.actions.configure = adminGrant;
+  Object.assign(ordinary.sessionSettings, { reaction_pulse_enabled: false, progress_card_enabled: false,
+    completion_mention_enabled: false, progress_card_settings: null });
+}
 const scheduledPlan = () => ({
   id: "plan-one", name: "计划首页", project_alias: "netizen", enabled: true,
   chat: { chatId: "oc_selected", chatLabel: "研发群", chatLabelResolved: true },
@@ -56,6 +63,11 @@ const scheduledPlan = () => ({
 });
 fetch = async (path, options = {}) => {
   const url = new URL(path, "https://admin");
+  if (url.pathname === "/api/v1/sessions/options" || (url.pathname === "/api/v1/schedules" && url.searchParams.get("mode") === "options")) {
+    requests.push({ path: url.pathname, query: url.searchParams, options });
+    return { ok: true, status: 200, json: async () => ({ models: [], context_mode_available: true,
+      session_settings: structuredClone(ordinary.sessionSettings) }) };
+  }
   if (url.pathname === "/api/v1/projects/delete-preview") {
     requests.push({ path: url.pathname, query: url.searchParams, options });
     const data = await projectDeletePreviewGate.promise;
@@ -63,7 +75,7 @@ fetch = async (path, options = {}) => {
   }
   if (!["/api/v1/projects", "/api/v1/schedules", "/api/v1/defaults", "/logout", "/api/v1/identity",
     "/api/v1/admin-users", "/api/v1/admin-users/selector-config", "/api/v1/worktrees", "/api/v1/worktrees/settings",
-    "/api/v1/group-access", "/api/v1/session-tool-access", "/api/v1/session-tool-access/save", "/api/v1/progress-card/settings"].includes(url.pathname)) return baseFetch(path, options);
+    "/api/v1/question-notifications/settings", "/api/v1/group-access", "/api/v1/session-tool-access", "/api/v1/session-tool-access/save", "/api/v1/progress-card/settings"].includes(url.pathname)) return baseFetch(path, options);
   requests.push({ path: url.pathname, query: url.searchParams, options });
   if (expireResponse) return { ok: false, status: 401, json: async () => ({}) };
   if (failPage) throw new Error("本页读取失败");
@@ -73,9 +85,9 @@ fetch = async (path, options = {}) => {
     items: [{ alias: next ? "第二页" : "首页", cwd: "/workspace/project", actions: {} }],
     nextCursor: next ? null : "projects-next", actions: { register: adminGrant, createDirectory: adminGrant },
   };
-  else if (url.pathname === "/api/v1/schedules") data = {
+  else if (url.pathname === "/api/v1/schedules") data = scheduleListGate ? await scheduleListGate.promise : {
     plans: [{ ...scheduledPlan(), name: next ? "计划第二页" : "计划首页" }],
-    next_cursor: next ? null : "plans-next", default_timezone: "Asia/Shanghai", actions: {},
+    next_cursor: next ? null : "plans-next", default_timezone: "Asia/Shanghai", actions: { create: adminGrant },
   };
   else if (url.pathname === "/api/v1/defaults") data = { items: [], has_more: false, actions: {} };
   else if (url.pathname === "/api/v1/worktrees") data = { items: [], nextCursor: null };
@@ -92,6 +104,7 @@ fetch = async (path, options = {}) => {
     if (selectorConfigGate) await selectorConfigGate.promise;
     data = { openId: "fixture-admin", appId: "fixture-app", signature: "fixture-signature" };
   }
+  else if (url.pathname === "/api/v1/question-notifications/settings") data = { settings: { mentionInitiator: false }, editable: true, revision: "notify-first", actions: { save: adminGrant } };
   else if (url.pathname === "/api/v1/group-access") data = {mode: "all", chatIds: [], chats: [], revision: "groups-first", saveAction: adminGrant};
   else if (url.pathname.startsWith("/api/v1/session-tool-access")) {
     if (options.method === "POST") {
@@ -112,6 +125,80 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(historyEntries.length, 1, "initial canonicalization replaces, not pushes");
   assert(!window.location.search.includes("cursor="));
   assert(!window.location.search.includes("actionToken="));
+  if (typeof navigationRace !== "undefined") {
+    const { page, navigation, accept } = navigationRace;
+    const waitFor = async (condition, message) => {
+      for (let attempt = 0; attempt < 2000; attempt += 1) {
+        if (condition()) return;
+        await Promise.resolve();
+      }
+      assert.fail(message);
+    };
+    const navigate = (tab) => document.querySelectorAll(".tab").find((link) => link.dataset.tab === tab
+      && (tab !== "sessions" || link.dataset.sessionTab === "ordinary")).click();
+    const tab = page === "ordinary" ? "sessions" : "schedules";
+    const path = page === "ordinary" ? "/api/v1/sessions" : "/api/v1/schedules";
+    const body = document.querySelector(page === "ordinary" ? "#sessions-body" : "#schedules-body");
+    const drawer = document.querySelector(page === "ordinary" ? "#session-settings-drawer" : "#schedule-drawer");
+    const field = document.querySelector(page === "ordinary" ? "#session-settings-reactions" : "#schedule-name");
+    const confirmation = document.querySelector("#admin-confirm");
+    // Keep a real predecessor even when exercising Forward and its cancellation.
+    for (let index = 0; index < (navigation === "forward" ? 2 : 1); index += 1) {
+      navigate("projects"); await flush();
+      navigate(tab); await flush();
+    }
+    if (navigation === "forward") { window.history.go(-2); await flush(); }
+    const source = { href: href(), position: historyPosition, entries: structuredClone(historyEntries), rows: body.textContent };
+    const gate = deferred();
+    if (page === "ordinary") {
+      ordinaryAnswer = () => gate.promise;
+      sessionMultiFilters.get("project").setValues(["docs"]);
+    } else {
+      scheduleListGate = gate;
+      scheduleFilters.get("project").setValues(["docs"]);
+    }
+    document.querySelector(page === "ordinary" ? "#session-filter" : "#schedule-filter").dispatch("submit");
+    await waitFor(() => requests.some((request) => request.path === path && request.query.get("project") === "docs"), "filtered read did not start");
+    if (page === "ordinary") body.querySelectorAll("button").find((button) => button.textContent === "配置").click();
+    else document.querySelector("#schedule-new").click();
+    await waitFor(() => drawer.open && !document.querySelector(page === "ordinary" ? "#session-settings-fields" : "#schedule-fields").disabled, "editor did not load");
+    await flush();
+    if (page === "ordinary") { field.checked = true; field.dispatch("change"); }
+    else { field.value = "未保存的计划"; field.dispatch("input"); }
+    confirmResponder = null;
+    if (navigation === "link") navigate("projects");
+    else window.history.go(navigation === "forward" ? 1 : -1);
+    await waitFor(() => confirmation.open, "navigation must ask before discarding the draft");
+    const during = { href: href(), position: historyPosition, entries: structuredClone(historyEntries) };
+    gate.resolve(page === "ordinary" ? { items: [{ ...structuredClone(ordinary), nativeTitle: "晚到会话" }], nextCursor: null }
+      : { plans: [{ ...scheduledPlan(), name: "晚到计划" }], next_cursor: null, actions: { create: adminGrant } });
+    await flush();
+    const afterResponse = { href: href(), position: historyPosition, entries: structuredClone(historyEntries) };
+    ordinaryAnswer = null; scheduleListGate = null;
+    document.querySelector(accept ? "#admin-confirm-submit" : "#admin-confirm-cancel").click();
+    await flush();
+    assert.equal(href(), accept ? "/projects" : source.href, "navigation must use the original target or source");
+    assert.equal(historyPosition, accept ? (navigation === "link" ? source.position + 1 : during.position) : source.position);
+    assert.equal(drawer.open, !accept, "cancellation retains the draft drawer; acceptance closes it");
+    assert.deepEqual(afterResponse, during, "a late list must not write history while confirmation is pending");
+    assert.equal(new Set(historyEntries.map((entry) => entry.state.netizenIndex)).size, historyEntries.length, "history indexes must remain unique");
+    const expectedEntries = structuredClone(source.entries);
+    if (accept && navigation === "link") expectedEntries.push({ href: "/projects", state: { netizenIndex: source.position + 1 } });
+    assert.deepEqual(historyEntries, expectedEntries, "navigation must preserve the existing history entries");
+    if (!accept) {
+      assert.equal(page === "ordinary" ? field.checked : field.value, page === "ordinary" ? true : "未保存的计划");
+      assert.equal(body.textContent, source.rows, "cancellation keeps the last applied list");
+      window.history.go(-1);
+      await waitFor(() => confirmation.open, "the next real Back must still be guarded");
+      document.querySelector("#admin-confirm-submit").click();
+      await flush();
+      assert.equal(href(), "/projects");
+      assert.equal(historyPosition, source.position - 1);
+      assert.equal(drawer.open, false);
+    }
+    assert(!requests.some((request) => request.options.method === "POST"), "navigation never submits a draft");
+    return;
+  }
   if (authDrawer) {
     if (authDrawer === "project") {
       document.querySelector("#project-new").click();
@@ -130,7 +217,8 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     assert.equal(drawer.open, false, "expired modal must release the page's login link");
     assert.equal(document.querySelector("#auth-expired").hidden, false);
     assert.notEqual(document.querySelector("#auth-expired").inert, true);
-    assert.match(document.querySelector("#status").textContent, /登录已过期/);
+    assert.equal(document.querySelector("#status").hidden, true);
+    assert.equal(document.querySelector("#auth-expired").hidden, false);
     assert.equal(requests.filter((request) => request.options.method === "POST").length, posts);
     return;
   }
@@ -143,146 +231,131 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     assert(!lastQuery("/api/v1/worktrees").has("cursor"));
     return;
   }
-  if (initialUrl === "/system") {
-    const admins = document.querySelector("#system-tab-admins");
-    const access = document.querySelector("#system-tab-access");
-    const groups = document.querySelector("#system-tab-groups");
-    const progress = document.querySelector("#system-tab-progress");
-    const badge = document.querySelector("#session-access-unsaved");
-    const mode = document.querySelector("#session-access-discovery-mode");
-    const chats = document.querySelector("#session-access-discovery-chats");
+  const standalone = ["/admins", "/group-access", "/session-tools", "/progress-card", "/question-notifications", "/attachments"];
+  if (initialUrl === "/system" || standalone.includes(initialUrl)) {
+    const expected = initialUrl === "/system" ? "admins" : initialUrl.slice(1);
+    assert.equal(state.tab, expected);
+    assert.equal(href(), `/${expected}`);
+    assert.equal(document.querySelector(`#${expected}`).hidden, false);
+    assert.equal(document.querySelector(`#nav-${expected}`).getAttribute("aria-current"), "page");
+    const readCount = (path) => requests.filter((request) => request.path === path && request.options.method !== "POST").length;
+    // Direct paths read only their own configuration. Attachments remain on demand.
+    const pageReads = { admins: "/api/v1/admin-users", "group-access": "/api/v1/group-access",
+      "session-tools": "/api/v1/session-tool-access", "progress-card": "/api/v1/progress-card/settings",
+      "question-notifications": "/api/v1/question-notifications/settings" };
+    for (const [page, path] of Object.entries(pageReads)) assert.equal(readCount(path), page === expected ? 1 : 0);
+    if (initialUrl !== "/system") return;
     const unload = () => {
       const event = { prevented: false, preventDefault() { this.prevented = true; } };
       for (const callback of windowEvents.get("beforeunload") || []) callback(event);
       return event.prevented;
     };
-    assert.equal(state.tab, "system");
-    assert.equal(document.querySelector("#system-admins").hidden, false);
-    assert.equal(document.querySelector("#system-access").hidden, true);
-    assert.equal(admins.getAttribute("aria-selected"), "true");
-    assert.equal(badge.hidden, true);
-    const beforeSwitch = requests.length;
-    const lastSystemTab = [...document.querySelectorAll("[data-system-tab]")].at(-1);
-    admins.dispatch("keydown", { key: "End" });
-    assert.equal(document.activeElement, lastSystemTab);
-    assert.equal(document.querySelector(`#system-${lastSystemTab.dataset.systemTab}`).hidden, false);
-    lastSystemTab.dispatch("keydown", { key: "ArrowRight" });
-    assert.equal(document.activeElement, admins);
-    admins.dispatch("keydown", { key: "ArrowLeft" });
-    assert.equal(document.activeElement, lastSystemTab);
-    progress.click();
-    progress.dispatch("keydown", { key: "ArrowLeft" });
-    assert.equal(document.activeElement, access);
-    assert.equal(access.getAttribute("tabindex"), "0");
-    assert.equal(admins.getAttribute("tabindex"), "-1");
-    assert.equal(document.querySelector("#system-admins").hidden, true);
-    assert.equal(document.querySelector("#system-access").hidden, false);
-    mode.value = "only"; mode.dispatch("change");
-    chats.value = "oc_draft"; chats.dispatch("input");
-    assert.equal(badge.hidden, false);
+    const mode = document.querySelector("#session-access-discovery-mode");
+    const chats = document.querySelector("#session-access-discovery-chats");
+    const marker = document.querySelector("#session-access-unsaved");
+    await selectTab("session-tools");
+    mode.value = "only"; mode.dispatch("change"); chats.value = "oc_draft"; chats.dispatch("input");
+    assert.equal(marker.hidden, false);
+    assert.equal(marker.parentElement.id, "nav-session-tools");
     assert.equal(unload(), true);
-    window.confirm = () => { throw new Error("sub-tabs must preserve drafts without a prompt"); };
-    access.dispatch("keydown", { key: "Home" });
-    assert.equal(document.activeElement, admins);
-    assert.equal(document.querySelector("#system-access").hidden, true);
-    assert.equal(badge.hidden, false, "hidden permission edits remain discoverable");
-    admins.dispatch("keydown", { key: "ArrowRight" });
-    assert.equal(document.activeElement, groups);
-    groups.dispatch("keydown", { key: "ArrowRight" });
-    assert.equal(document.activeElement, access);
-    access.dispatch("keydown", { key: "ArrowLeft" });
-    access.click();
-    assert.equal(chats.value, "oc_draft");
-    assert.equal(requests.length, beforeSwitch, "switches never load or save");
-    assert.equal(href(), "/system");
-
-    // A picker belonging to the hidden panel must close without discarding input.
-    document.querySelector("#session-access-discovery-picker .chat-picker-trigger").click();
-    await flush();
-    const pickerPanel = document.querySelector("#session-access-discovery-picker .chat-picker-popup");
-    assert.equal(pickerPanel.hidden, false);
-    admins.click();
-    assert.equal(pickerPanel.hidden, true);
-    assert.equal(chats.value, "oc_draft");
-    window.confirm = () => false;
-    const permissionReads = () => requests.filter((request) => request.path === "/api/v1/session-tool-access").length;
-    const reads = permissionReads();
-    assert.equal(await refresh("system"), false);
-    assert.equal(permissionReads(), reads);
+    const reads = readCount(pageReads["session-tools"]);
+    confirmResponder = () => { throw new Error("page navigation must retain inline drafts without a prompt"); };
+    document.querySelector("#session-access-discovery-picker .chat-picker-trigger").click(); await flush();
+    const picker = document.querySelector("#session-access-discovery-picker .chat-picker-popup");
+    assert.equal(picker.hidden, false);
     await selectTab("projects");
-    assert.equal(state.tab, "system", "hidden edits still guard navigation");
+    assert.equal(picker.hidden, true);
+    assert.equal(state.tab, "projects");
+    assert.equal(marker.hidden, false);
+    window.history.go(-1); await flush();
+    assert.equal(href(), "/session-tools");
+    assert.equal(chats.value, "oc_draft");
+    assert.equal(readCount(pageReads["session-tools"]), reads);
+    window.history.go(1); await flush();
+    assert.equal(href(), "/projects");
+    await selectTab("session-tools");
+    confirmResponder = () => false;
+    assert.equal(await refresh("session-tools"), false);
+    assert.equal(readCount(pageReads["session-tools"]), reads);
     document.querySelector("#logout").click(); await flush();
     assert(!requests.some((request) => request.path === "/logout"));
     assert.equal(chats.value, "oc_draft");
-    access.click();
-    document.querySelector("#session-access-cancel").click();
-    assert.equal(badge.hidden, true);
-    assert.equal(unload(), false);
-
-    mode.value = "disabled"; mode.dispatch("change");
+    // Saving after a round trip consumes the original grant, without a new read.
     accessSaveGate = deferred();
-    document.querySelector("#session-access-form").dispatch("submit");
-    await flush();
-    const beforePendingSwitch = requests.length;
-    admins.click(); access.click();
+    document.querySelector("#session-access-form").dispatch("submit"); await flush();
+    await selectTab("projects"); await selectTab("session-tools");
     assert.equal(document.querySelector("#session-access-save").disabled, true);
-    assert.equal(requests.length, beforePendingSwitch);
-    accessSaveGate.resolve(); accessSaveGate = null;
-    await flush();
-    assert.equal(badge.hidden, true);
-    assert.equal(unload(), false);
+    assert.equal(readCount(pageReads["session-tools"]), reads);
+    accessSaveGate.resolve(); accessSaveGate = null; await flush();
+    assert.equal(marker.hidden, true);
     const saved = requests.find((request) => request.path.endsWith("/session-tool-access/save"));
-    assert.deepEqual(JSON.parse(saved.options.body).discovery, { mode: "disabled", chatIds: [] });
+    assert.deepEqual(JSON.parse(saved.options.body).discovery, { mode: "only", chatIds: ["oc_draft"] });
     assert.equal(JSON.parse(saved.options.body).actionToken, adminGrant.actionToken);
 
-    groups.click();
-    const groupMode = document.querySelector("#group-access-mode");
-    groupMode.value = "only"; groupMode.dispatch("change");
-    assert.equal(document.querySelector("#group-access-unsaved").hidden, false);
-    const groupRequests = requests.length;
-    admins.click(); groups.click();
-    assert.equal(groupMode.value, "only", "sub-tabs retain the group admission draft");
-    assert.equal(requests.length, groupRequests);
-    assert.equal(unload(), true);
-    window.confirm = () => false;
-    await selectTab("projects");
-    assert.equal(state.tab, "system", "group admission draft guards navigation");
-    document.querySelector("#group-access-cancel").click();
-    assert.equal(unload(), false);
+    // Every other independent configuration has the same preservation contract.
+    const edits = [
+      ["group-access", "group-access-mode", "only", "group-access-unsaved", "group-access-cancel"],
+      ["progress-card", "global-card-progress-organization", "content", "global-card-unsaved", "global-card-cancel"],
+      ["question-notifications", "question-notifications-enabled", true, "question-notifications-unsaved", "question-notifications-cancel"],
+    ];
+    for (const [page, fieldId, value, markerId, cancelId] of edits) {
+      await selectTab(page);
+      const input = document.querySelector(`#${fieldId}`);
+      if (typeof value === "boolean") input.checked = value; else input.value = value;
+      input.dispatch("change");
+      const count = readCount(pageReads[page]);
+      assert.equal(document.querySelector(`#${markerId}`).hidden, false);
+      await selectTab("projects"); await selectTab(page);
+      assert.equal(readCount(pageReads[page]), count);
+      assert.equal(typeof value === "boolean" ? input.checked : input.value, value);
+      assert.equal(unload(), true);
+      await selectTab("projects");
+      document.querySelector("#logout").click(); await flush();
+      assert(!requests.some((request) => request.path === "/logout"));
+      document.querySelector(`#${cancelId}`).click();
+      assert.equal(unload(), false);
+      await selectTab(page);
+      assert.equal(readCount(pageReads[page]), count + 1, "clean pages load on entry");
+    }
+    // Explicit refresh is the only read that can replace an unsaved inline form.
+    await selectTab("session-tools"); mode.value = "disabled"; mode.dispatch("change");
+    confirmResponder = () => true;
+    assert.equal(await refresh("session-tools"), true);
+    assert.equal(mode.value, "only");
+    assert.equal(marker.hidden, true);
 
-    admins.click();
+    await selectTab("admins");
     document.querySelector("#admin-user-add").click(); await flush();
-    const beforeSelectorSwitch = requests.length;
-    access.click(); admins.click();
-    assert.equal(selectorUnmounts, 1, "the body-mounted SDK selector must unmount");
-    assert.equal(selectorRenders, 1);
+    selectorOnSelect({ type: "user", id: "ou_selected", entity: { id: "ou_selected", name: "保留的人员" } });
+    const late = selectorOnSelect;
+    const adminReads = readCount(pageReads.admins);
+    await selectTab("attachments");
+    assert.equal(selectorUnmounts, 1);
+    late({ type: "user", id: "ou_late", entity: { id: "ou_late", name: "晚到人员" } });
+    await selectTab("admins");
+    assert.equal(readCount(pageReads.admins), adminReads);
     assert.equal(document.querySelector("#admin-user-panel").hidden, false);
-    assert.equal(document.querySelector("#admin-selector-retry").hidden, false);
-    assert.equal(requests.length, beforeSelectorSwitch, "selector reload stays explicit");
-
-    progress.click();
-    const globalOrganization = document.querySelector("#global-card-progress-organization");
-    globalOrganization.value = "content"; globalOrganization.dispatch("change");
-    admins.click();
-    assert.equal(document.querySelector("#global-card-unsaved").hidden, false);
-    assert.equal(unload(), true);
-    window.confirm = () => false;
-    await selectTab("projects");
-    assert.equal(state.tab, "system", "hidden global edits also guard navigation");
-    document.querySelector("#logout").click(); await flush();
-    assert(!requests.some((request) => request.path === "/logout"));
-    assert.equal(await refresh("system"), false);
-    assert.equal(globalOrganization.value, "content");
-
-    access.click();
-    mode.value = "all"; mode.dispatch("change");
-    admins.click();
-    window.confirm = () => true;
-    await selectTab("projects");
-    assert.equal(state.tab, "projects");
-    assert.equal(badge.hidden, true);
-    assert.equal(document.querySelector("#global-card-unsaved").hidden, true);
-    assert.equal(unload(), false);
+    assert.equal(document.querySelector("#admin-user-confirm").disabled, false);
+    assert.match(document.querySelector("#admin-user-selection").textContent, /保留的人员/);
+    assert.equal(selectorRenders, 1, "selector reload stays explicit");
+    const nav = document.querySelector("#admin-navigation");
+    const menu = document.querySelector("#navigation-drawer");
+    const trigger = document.querySelector("#navigation-open");
+    trigger.focus(); trigger.click();
+    assert.equal(menu.open, true);
+    assert.equal(nav.parentElement.id, "navigation-drawer");
+    assert.equal(document.activeElement.id, "nav-admins");
+    assert.equal(trigger.getAttribute("aria-expanded"), "true");
+    const escape = menu.dispatch("cancel");
+    assert.equal(escape.prevented, true);
+    assert.equal(menu.open, false);
+    assert.equal(document.activeElement.id, "navigation-open");
+    assert.equal(nav.parentElement.id, "navigation-home");
+    trigger.click(); document.querySelector("#nav-attachments").click(); await flush();
+    assert.equal(menu.open, false);
+    assert.equal(state.tab, "attachments");
+    assert.equal(document.querySelector("#current-page-name").textContent, "文件附件");
+    assert.equal(nav.querySelectorAll(".tab").filter((link) => link.getAttribute("aria-current") === "page").length, 1);
     return;
   }
   if (initialUrl.startsWith("/sessions/ordinary") && !initialUrl.includes("project=")) {
@@ -295,7 +368,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     const presetKind = new URLSearchParams(window.location.search).get("updatedRange");
     if (!initialUrl.includes("updatedFrom=") || initialUrl.includes("updatedRange=last-3-months")) {
       assert.equal(presetKind, "last-3-months");
-      assert.match(root.querySelector("[data-time-range-summary]").textContent,
+      assert.match(root.querySelector("[data-time-range-trigger]").title.split("\n").slice(0, 2).join("\n"),
         /^最近 3 个月（至今） · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n\d{4}-\d{2}-\d{2} \d{2}:\d{2} ~ \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
     } else {
       assert.equal(presetKind, null, "custom bounds must not be guessed to be a preset");
@@ -337,7 +410,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
         assert.equal(before.get("createdRange"), "today");
         assert(!query.has("createdRange"));
         const created = document.querySelector("#session-filter").querySelector("[data-time-range]");
-        assert.match(created.querySelector("[data-time-range-summary]").textContent, /^今天 · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
+        assert.match(created.querySelector("[data-time-range-trigger]").title.split("\n").slice(0, 2).join("\n"), /^今天 · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
       }
       assert.deepEqual(before.getAll("inventoryState"), ["archived"]);
       if (initialUrl.includes("updatedRange=all")) {
@@ -355,7 +428,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
       assert.equal(query.get("createdFrom"), "2026-10-01T00:00:00Z");
       assert.equal(query.get("createdBefore"), "2026-10-08T00:00:00Z");
       assert(!query.has("createdRange"));
-      assert.match(document.querySelector("#side-filter").querySelector("[data-time-range-summary]").textContent,
+      assert.match(document.querySelector("#side-filter").querySelector("[data-time-range-trigger]").title.split("\n").slice(0, 2).join("\n"),
         /^最近 7 天 · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
     }
     return;
@@ -472,7 +545,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(lastQuery("/api/v1/sessions").get("sortBy"), "updatedAt");
   assert.match(document.querySelectorAll("[data-time-range]")
     .find((root) => root.dataset.timeRangeId === "session-updated")
-    .querySelector("[data-time-range-summary]").textContent, /^最近 3 个月（至今） · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
+    .querySelector("[data-time-range-trigger]").title.split("\n").slice(0, 2).join("\n"), /^最近 3 个月（至今） · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
   window.history.go(1); await flush();
   assert.equal(lastQuery("/api/v1/sessions").get("sortBy"), "createdAt");
   // Unlimited update bounds survive URL navigation; the marker never reaches the API.
@@ -501,20 +574,21 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(href(), projectUrl, "inactive late response can't change route");
 
   // Back navigation and logout retain dirty data on cancellation.
-  pendingScheduleDraft = { dirty: true };
-  window.confirm = () => false;
+  await openProjectEditor();
+  projectInput("alias").value = "dirty-project";
+  confirmResponder = () => false;
   const position = historyPosition;
   window.history.go(-1); await flush();
   assert.equal(historyPosition, position);
   assert.equal(href(), projectUrl);
   assert.equal(state.tab, "projects");
-  assert(pendingScheduleDraft.dirty);
+  assert(projectEditorHasChanges());
   document.querySelector("#logout").click(); await flush();
   assert(!requests.some((request) => request.path === "/logout"));
-  window.confirm = () => true;
+  confirmResponder = () => true;
   window.history.go(-1); await flush();
   assert.equal(state.tab, "sessions");
-  assert.equal(pendingScheduleDraft, null);
+  assert.equal(projectEditor, null);
   const projectsLink = document.querySelectorAll(".tab").find((node) => node.dataset.tab === "projects");
   const beforeModifiedClick = href();
   assert.equal(projectsLink.dispatch("click", { ctrlKey: true }).prevented, false);
@@ -534,7 +608,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.match(document.querySelector("#projects-body").textContent, /首页/);
 
   // Both normal navigation and History use the real Identity lifecycle hook.
-  await selectTab("system");
+  await selectTab("admins");
   document.querySelector("#admin-user-add").click(); await flush();
   const panel = document.querySelector("#admin-user-panel");
   assert.equal(panel.hidden, false);
@@ -543,24 +617,24 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(panel.hidden, false, "opening another tab doesn't leave this document");
   assert.equal(selectorUnmounts, 0);
   projectsLink.click(); await flush();
-  assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false, "navigation preserves the selected administrator draft");
   assert.equal(selectorUnmounts, 1);
 
   window.history.go(-1); await flush();
-  assert.equal(state.tab, "system");
-  document.querySelector("#admin-user-add").click(); await flush();
+  assert.equal(state.tab, "admins");
+  document.querySelector("#admin-selector-retry").click(); await flush();
   window.history.go(-1); await flush();
   assert.equal(state.tab, "projects");
-  assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false, "navigation preserves the selected administrator draft");
   assert.equal(selectorUnmounts, 2);
 
   window.history.go(1); await flush();
   selectorConfigGate = deferred();
-  document.querySelector("#admin-user-add").click(); await flush();
+  document.querySelector("#admin-selector-retry").click(); await flush();
   assert.equal(requests.at(-1).path, "/api/v1/admin-users/selector-config");
   const beforeLateConfig = { configs: selectorConfigs, renders: selectorRenders };
   window.history.go(-1); await flush();
-  assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false, "navigation preserves the selected administrator draft");
   selectorConfigGate.resolve(); selectorConfigGate = null;
   await flush();
   assert.equal(state.tab, "projects");
@@ -577,20 +651,20 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   document.querySelector("#project-new").click();
   document.querySelector("#project-alias").value = "draft";
   assert.equal(unload(), true);
-  window.confirm = () => false;
+  confirmResponder = () => false;
   await selectTab("worktrees");
   assert.equal(state.tab, "projects");
   assert.equal(document.querySelector("#project-drawer").open, true);
   document.querySelector("#logout").click(); await flush();
   assert(!requests.some((request) => request.path === "/logout"));
-  window.confirm = () => true;
+  confirmResponder = () => true;
   await selectTab("worktrees");
   assert.equal(document.querySelector("#project-drawer").open, false);
   assert.equal(unload(), false);
   document.querySelector("#worktree-configure").click(); await flush();
   document.querySelector("#worktree-root").value = "/draft/worktrees";
   assert.equal(unload(), true);
-  window.confirm = () => false;
+  confirmResponder = () => false;
   const worktreePosition = historyPosition;
   window.history.go(-1); await flush();
   assert.equal(historyPosition, worktreePosition);

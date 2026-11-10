@@ -8,7 +8,7 @@ let statusError = false;
 document.querySelector("#status").classList.toggle = (_name, value) => { statusError = value; };
 let confirmation = true;
 const confirmations = [];
-window.confirm = (message) => { confirmations.push(message); return confirmation; };
+confirmResponder = (message) => { confirmations.push(message); return confirmation; };
 const envelope = (mode) => ({
   csrfToken: `${mode}-csrf`, actionToken: `${mode}-once`,
   target: { resource: mode === "create" ? "schedule-registry" : "schedule", targetId: "plan-exact" },
@@ -16,6 +16,7 @@ const envelope = (mode) => ({
 let createGrant = envelope("create");
 let chatValidationGate = null;
 let scheduleOptionsGate = null;
+let sessionResponse = () => ({ items: [], nextCursor: null });
 const workspaceOptions = new Map(["project-one", "project-two"].map((project, index) => [project, {
   projectAlias: project, projectRevision: index + 1, isGit: true,
   items: [{ id: `wt-${project}`, cwd: `/managed/${project}`, branch: null, available: true }],
@@ -70,7 +71,7 @@ async function fixtureResponse(path, options = {}) {
     return { ok: true, plan: plans[0] };
   }
   gets.push(path);
-  if (path.startsWith("/api/v1/sessions?")) return { items: [], nextCursor: null };
+  if (path.startsWith("/api/v1/sessions?")) return sessionResponse(path);
   const query = new URL(path, "http://localhost").searchParams;
   if (path.startsWith("/api/v1/chats/validate?")) {
     if (chatValidationError) throw chatValidationError;
@@ -305,7 +306,7 @@ async function chooseScheduleTarget(value) {
   const emptyQuery = new URL(gets.filter((path) => path.startsWith("/api/v1/schedules?")).at(-1), "http://localhost").searchParams;
   assert.equal(emptyQuery.get("ended"), "true");
   assert.equal(emptyQuery.get("enabled"), "false");
-  assert(document.querySelector("#schedules-body").textContent.includes("没有符合筛选条件"));
+  assert(document.querySelector("#schedules-body").querySelector(".list-empty"));
   chooseFilter("ended", "false");
   clearFilter("enabled");
   plans = [fixturePlan()];
@@ -376,7 +377,7 @@ async function chooseScheduleTarget(value) {
   scheduleInput("new").focus();
   await openNewScheduleEditor();
   scheduleInput("name").value = "Discard this draft";
-  scheduleInput("drawer").dispatch("cancel");
+  scheduleInput("drawer").dispatch("cancel"); await flush();
   assert.equal(scheduleInput("drawer").open, false);
   assert.equal(posts.length, beforeCancel);
   assert.equal(document.activeElement, scheduleInput("new"));
@@ -460,7 +461,7 @@ async function chooseScheduleTarget(value) {
   const plan = state.schedules.plans[0];
   await changeSchedule(plan, "update");
   assert.deepEqual(posts.at(-1).body.definition, { enabled: false });
-  assert.equal(statusNode.textContent, "计划已暂停。");
+  assert.equal(statusNode.querySelector("span").textContent, "计划已暂停。");
   confirmation = false;
   const count = posts.length;
   await changeSchedule(state.schedules.plans[0], "delete");
@@ -521,8 +522,8 @@ async function chooseScheduleTarget(value) {
   const pendingSave = saveSchedule({ preventDefault() {} });
   await flush();
   const pendingCount = posts.length;
-  scheduleInput("drawer").dispatch("cancel");
-  closeScheduleEditor();
+  scheduleInput("drawer").dispatch("cancel"); await flush();
+  await closeScheduleEditor();
   assert.equal(scheduleInput("drawer").open, true);
   await saveSchedule({ preventDefault() {} });
   assert.equal(posts.length, pendingCount);
@@ -586,8 +587,8 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("auto-archive-field").hidden, true);
   assert.equal(scheduleInput("auto-archive").disabled, true);
   assert.equal(scheduleInput("target-note").hidden, false);
-  assert.equal(scheduleInput("select-session").hidden, false);
-  assert.match(scheduleInput("binding-summary").textContent, /Sessions/);
+  assert.equal(scheduleInput("session-picker").hidden, false);
+  assert.match(scheduleInput("binding-summary").textContent, /会话/);
   assert.equal(scheduleInput("binding").value, "");
   assert.equal(scheduleInput("preview").disabled, true);
   assert.equal(scheduleInput("effort").value, "high");
@@ -600,7 +601,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("session-settings").open, true);
   assert.equal(scheduleInput("project").required, true);
   assert.equal(scheduleInput("chat-target").hidden, false);
-  closeScheduleEditor();
+  await closeScheduleEditor();
 
   // Catalog failure or a retired model never replaces a persisted setting.
   const retired = fixturePlan();
@@ -774,7 +775,7 @@ async function chooseScheduleTarget(value) {
 
   // Manual execution stays available for paused/ended plans and displays its
   // source independently from enablement, due time, and execution status.
-  closeScheduleEditor();
+  await closeScheduleEditor();
   for (const scenario of [
     { enabled: true, ended: false }, { enabled: false, ended: false },
     { enabled: false, ended: true }, { enabled: true, ended: true },
@@ -841,7 +842,7 @@ async function chooseScheduleTarget(value) {
   respond = () => ({ ok: true, accepted: true, run_id: "accepted-before-refresh", run: null });
   await runSchedule(state.schedules.plans[0]);
   assert.match(statusNode.textContent, /已受理.*列表刷新失败/);
-  assert.equal(statusError, false);
+  assert.equal(statusError, true);
   assert.match(scheduleInput("run-receipt").textContent, /accepted-before-refresh/);
   assert.equal(scheduleInput("run-receipt").querySelector("a"), null);
 
@@ -888,100 +889,165 @@ async function chooseScheduleTarget(value) {
   assert.equal(statusError, true);
   assert.equal(scheduleInput("run-receipt").hidden, true);
 
-  // An existing-session plan is selected from Sessions, never from a second binding list.
+  // The drawer selects exact targets without leaving its draft or consuming the grant.
   respond = null;
+  const targetSession = { bindingId: "binding-inactive", shortId: "short-exact", nativeTitle: "<img src=x onerror=alert(1)>",
+    chatId: "oc_original", chatLabel: "<b>原群</b>", projectAlias: "project-one", topicId: "omt_exact",
+    pointerState: "inactive", catalogState: "archived", updatedAt: 1900000000 };
+  const lazySession = { ...targetSession, bindingId: "lazy-exact", nativeTitle: null, pointerState: "current", catalogState: "lazy" };
+  sessionResponse = (path) => {
+    const query = new URL(path, "http://localhost").searchParams;
+    return { items: [query.get("inventoryState") === "lazy" ? lazySession : targetSession],
+      nextCursor: query.has("cursor") ? null : "second-page" };
+  };
   await openScheduleEditor();
   await chooseScheduleTarget("binding");
+  assert.equal(state.tab, "schedules");
+  assert.equal(scheduleInput("drawer").open, true);
+  assert.equal(scheduleInput("session-picker").hidden, false);
   assert.equal(scheduleInput("project-field").hidden, true);
-  assert.equal(scheduleInput("chat-target").hidden, true);
   assert.equal(scheduleInput("session-settings").hidden, true);
-  assert.equal(scheduleInput("project").required, false);
-  assert.equal(scheduleInput("binding").value, "");
   assert.equal(scheduleInput("preview").disabled, true);
-  assert.equal(scheduleInput("select-session").hidden, false);
+  const sessionGets = () => gets.filter((path) => path.startsWith("/api/v1/sessions?"));
+  const query = new URL(sessionGets().at(-1), "http://localhost").searchParams;
+  assert.equal(query.get("inventoryState"), "active");
+  assert.equal(query.get("pageSize"), "20");
+  assert.equal(query.get("updatedFrom"), null);
+  assert.equal(query.get("updatedBefore"), null);
+  await closeScheduleEditor({ confirmed: true });
+  await openScheduleEditor(null, { targetSession, action: state.schedules.actions.create });
+  await chooseScheduleSession();
+  assert.equal(scheduleEditorHasChanges(), false, "a prefilled target starts clean");
+  scheduleInput("session-search").value = "Case Sensitive";
+  scheduleInput("session-project").value = "retired";
+  scheduleSessionChatPicker.setSelection({ chatId: "oc_picker", name: "研发群" });
+  const enter = scheduleInput("session-search").dispatch("keydown", { key: "Enter" });
+  await flush();
+  assert.equal(enter.prevented, true);
+  const searched = new URL(sessionGets().at(-1), "http://localhost").searchParams;
+  assert.equal(searched.get("searchTerm"), "Case Sensitive");
+  assert.equal(searched.get("project"), "retired");
+  assert.equal(searched.get("chatId"), "oc_picker");
+  assert.equal(scheduleEditorHasChanges(), false, "search filters are not saved form values");
+  scheduleInput("session-search").value = "unapplied draft";
+  scheduleInput("session-next").click(); await flush();
+  const next = new URL(sessionGets().at(-1), "http://localhost").searchParams;
+  assert.equal(next.get("cursor"), "second-page");
+  assert.equal(next.get("searchTerm"), "Case Sensitive", "paging keeps the applied search");
+  assert.match(scheduleInput("session-page").textContent, /第 2 页/);
+  scheduleInput("session-previous").click(); await flush();
+  assert.match(scheduleInput("session-page").textContent, /第 1 页/);
+  assert.equal(scheduleEditorHasChanges(), false);
+  scheduleInput("session-state").value = "lazy";
+  scheduleInput("session-state").dispatch("change");
+  scheduleInput("session-search-button").click(); await flush();
+  assert.equal(new URL(sessionGets().at(-1), "http://localhost").searchParams.get("searchTerm"), null);
+  assert.equal(scheduleInput("session-search").disabled, true);
+  assert.match(scheduleInput("session-results").textContent, /未开始.*尚未开始/);
+  scheduleInput("session-results").querySelector("button").click();
+  assert.equal(scheduleInput("binding").value, "lazy-exact");
+  assert.equal(scheduleEditorHasChanges(), true);
+  assert.equal(scheduleInput("session-picker").hidden, true);
+  assert.equal(scheduleInput("select-session").textContent, "更换");
+  confirmation = false;
+  await closeScheduleEditor();
+  assert.equal(scheduleInput("drawer").open, true, "selection participates in discard protection");
+  assert.equal(scheduleInput("binding").value, "lazy-exact");
+  confirmation = true;
+  const selectedValues = scheduleEditorValues();
+  await chooseScheduleSession();
+  assert.deepEqual(scheduleEditorValues(), selectedValues, "opening replacement does not clear the chosen target");
+  scheduleInput("session-state").value = "archived";
+  scheduleInput("session-state").dispatch("change");
+  await loadScheduleSessionPage();
+  assert.match(scheduleInput("session-results").textContent, /非当前.*已归档/);
   scheduleInput("name").value = "继续检查";
   scheduleInput("instructions").value = "检查刚才的问题";
   scheduleInput("kind").value = "weekly";
   scheduleInput("timezone").value = "America/New_York";
   scheduleInput("time").value = "11:35";
-  scheduleInput("at").value = "2030-11-03T01:30";
   scheduleInput("end-at").value = "2030-11-03T01:45";
-  scheduleInput("every").value = "17";
-  scheduleInput("enabled").checked = false;
   scheduleInput("weekdays").querySelectorAll("input")[2].checked = true;
-  scheduleSelectOptions(scheduleInput("offset"), [["-04:00", "第一次"], ["-05:00", "第二次"]], "-05:00");
-  scheduleSelectOptions(scheduleInput("end-offset"), [["-04:00", "第一次"], ["-05:00", "第二次"]], "-04:00");
-  scheduleInput("offset-field").hidden = false;
-  scheduleInput("end-offset-field").hidden = false;
-  const expectedDraft = captureScheduleDraft();
-  scheduleInput("select-session").click();
-  await flush();
-  assert.equal(state.tab, "sessions");
-  assert.equal(scheduleInput("drawer").open, false);
-  assert.equal(document.querySelector("#session-schedule-selection").hidden, false);
-  assert.deepEqual(pendingScheduleDraft, expectedDraft);
-  const targetSession = { bindingId: "binding-inactive", shortId: "short-exact", nativeTitle: "<img src=x onerror=alert(1)>",
-    chatId: "oc_original", chatLabel: "<b>原群</b>", projectAlias: "project-one", topicId: "omt_exact",
-    pointerState: "other", catalogState: "archived" };
-  const opener = document.createElement("button");
-  document.body.append(opener);
-  const position = structuredClone(state.sessionPage);
-  const oldGrant = state.schedules.actions.create;
-  createGrant = { ...envelope("create"), actionToken: "fresh-session-create-grant" };
-  const beforeTargetOpen = gets.length;
-  await openScheduleForSession(targetSession, opener);
-  assert.equal(gets[beforeTargetOpen], "/api/v1/schedules?mode=list");
-  assert.notDeepEqual(scheduleEditor.action, oldGrant);
-  assert.deepEqual(scheduleEditor.action, createGrant);
-  assert.deepEqual(captureScheduleDraft(), expectedDraft, "switching to Sessions must preserve every entered schedule field");
-  assert.equal(scheduleInput("end-details").open, true);
-  assert.equal(pendingScheduleDraft, null);
-  assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
-  assert.equal(scheduleInput("target-kind").disabled, true);
-  assert.equal(scheduleInput("binding").value, "binding-inactive");
-  assert.equal(scheduleInput("select-session").hidden, true);
-  assert.match(scheduleInput("binding-summary").textContent, /<img src=x onerror=alert\(1\)>/);
+  const beforeSelection = scheduleEditorValues();
+  const preservedGrant = structuredClone(scheduleEditor.action);
+  scheduleInput("session-results").querySelector("button").click();
+  assert.deepEqual(scheduleEditorValues(), { ...beforeSelection, binding: "binding-inactive" });
+  assert.deepEqual(scheduleEditor.action, preservedGrant);
   assert.match(scheduleInput("binding-summary").textContent, /自动暂停/);
   assert.match(scheduleInput("binding-summary").textContent, /omt_exact/);
   assert.equal(scheduleInput("binding-summary").querySelector("img"), null);
   assert.equal(scheduleInput("binding-summary").querySelector("input"), null);
-  assert.deepEqual(state.sessionPage, position);
   await previewSchedule();
   const bindingPreview = new URL(gets.at(-1), "http://localhost").searchParams;
   assert.equal(bindingPreview.get("target_kind"), "binding");
   assert.equal(bindingPreview.get("target_binding_id"), "binding-inactive");
   assert.equal(bindingPreview.get("chat_id"), null);
   assert.equal(bindingPreview.get("session_settings"), null);
-  const beforeBindingSave = gets.length;
   await saveSchedule({ preventDefault() {} });
   const bindingCreate = posts.at(-1).body.definition;
-  assert.equal(bindingCreate.target_kind, "binding");
   assert.equal(bindingCreate.target_binding_id, "binding-inactive");
   for (const name of ["session_settings", "project", "chat_id", "workspace", "expected_project_revision", "auto_archive"]) assert.equal(name in bindingCreate, false);
+  assert.equal(posts.at(-1).body.actionToken, preservedGrant.actionToken);
+  assert.equal(state.tab, "schedules");
+
+  // Late results are isolated from new searches, target selections, closure and reopening.
+  await openScheduleEditor();
+  await chooseScheduleTarget("binding");
+  const gates = [];
+  sessionResponse = () => new Promise((resolve, reject) => gates.push({ resolve, reject }));
+  scheduleInput("session-search").value = "older";
+  const oldRead = loadScheduleSessionPage();
+  scheduleInput("session-search").value = "newer";
+  const newRead = loadScheduleSessionPage();
+  gates[1].resolve({ items: [lazySession], nextCursor: "new-cursor" }); await newRead;
+  gates[0].resolve({ items: [targetSession], nextCursor: "old-cursor" }); await oldRead;
+  assert.match(scheduleInput("session-results").textContent, /未开始/);
+  assert.equal(scheduleEditor.picker.page.nextCursor, "new-cursor");
+  const failedRead = loadScheduleSessionPage();
+  gates[2].reject(new Error("目录暂不可用")); await failedRead;
+  assert.match(scheduleInput("session-status").textContent, /目录暂不可用/);
+  assert.match(scheduleInput("session-results").textContent, /未开始/);
+  assert.equal(scheduleEditor.picker.page.nextCursor, "new-cursor");
+  assert.equal(scheduleInput("session-retry").hidden, false);
+  scheduleInput("session-retry").click();
+  gates[3].resolve({ items: [targetSession], nextCursor: null }); await flush();
+  assert.equal(scheduleInput("session-retry").hidden, true);
+  const closedRead = loadScheduleSessionPage();
+  await closeScheduleEditor();
+  await openScheduleEditor();
+  gates[4].resolve({ items: [lazySession], nextCursor: null }); await closedRead;
+  assert.equal(scheduleInput("session-picker").hidden, true);
+  assert.equal(scheduleInput("session-results").children.length, 0);
+  assert.equal(scheduleInput("binding").value, "");
+  await closeScheduleEditor();
+  sessionResponse = () => ({ items: [], nextCursor: null });
+
+  // The Sessions row entry still prefills a target with a fresh create grant.
+  state.tab = "sessions";
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const position = structuredClone(state.sessionPage);
+  createGrant = { ...envelope("create"), actionToken: "fresh-session-create-grant" };
+  const beforeTargetOpen = gets.length;
+  await openScheduleForSession(targetSession, opener);
+  assert.equal(gets[beforeTargetOpen], "/api/v1/schedules?mode=list");
+  assert.deepEqual(scheduleEditor.action, createGrant);
+  assert.equal(scheduleInput("name").value, "");
+  assert.equal(scheduleInput("instructions").value, "");
+  assert.equal(scheduleInput("binding").value, "binding-inactive");
+  scheduleInput("name").value = "原会话计划";
+  scheduleInput("instructions").value = "继续检查";
+  await previewSchedule();
+  const beforeBindingSave = gets.length;
+  await saveSchedule({ preventDefault() {} });
   assert.equal(posts.at(-1).body.actionToken, "fresh-session-create-grant");
   assert.equal(gets.length, beforeBindingSave, "saving from Sessions must not reload or move its list");
   assert.equal(state.tab, "sessions");
   assert.deepEqual(state.sessionPage, position);
   assert.equal(document.activeElement, opener);
   assert.equal(document.querySelector("#session-schedule-saved").hidden, false);
-  document.querySelector("#session-schedule-view").click();
+  document.querySelector("#session-schedule-view").click(); await flush();
   assert.equal(state.tab, "schedules");
-
-  // Canceling a selection discards its page-local draft, including a later row click.
-  await openScheduleEditor();
-  scheduleInput("name").value = "必须丢弃的草稿";
-  scheduleInput("instructions").value = "discard me";
-  await chooseScheduleTarget("binding");
-  scheduleInput("select-session").click();
-  document.querySelector("#session-schedule-cancel").click();
-  assert.equal(pendingScheduleDraft, null);
-  assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
-  await openScheduleForSession(targetSession, opener);
-  assert.equal(scheduleInput("name").value, "");
-  assert.equal(scheduleInput("instructions").value, "");
-  closeScheduleEditor();
-  assert.equal(pendingScheduleDraft, null);
-  state.tab = "schedules";
 
   const boundPlan = { ...fixturePlan(), target_kind: "binding", target_binding_id: "binding-original",
     target_label: "已有问题", session_settings: null, workspace: null, blocked_reason: "target_inactive", enabled: true,
@@ -1089,7 +1155,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("chat-field").hidden, false);
   assert.equal(scheduleInput("group-picker").hidden, true);
   assert.equal(scheduleInput("chat").value, "oc_typed_group");
-  closeScheduleEditor();
+  await closeScheduleEditor();
 
   contextAvailable = null;
   await openScheduleEditor(fixturePlan());
@@ -1102,14 +1168,14 @@ async function chooseScheduleTarget(value) {
   await loadScheduleSessionOptions();
   assert.equal(scheduleInput("chat-kind").value, "p2p");
   assert.equal(scheduleInput("chat").value, "oc_other");
-  closeScheduleEditor();
+  await closeScheduleEditor();
   const p2pPlan = fixturePlan();
   p2pPlan.chat = { chatType: "p2p", chatMode: "group", chatLabel: "单聊" };
   await openScheduleEditor(p2pPlan);
   assert.equal(scheduleInput("chat-kind").value, "p2p");
   assert.equal(scheduleInput("chat-field").hidden, false);
   assert.equal(scheduleInput("context-field").hidden, true);
-  closeScheduleEditor();
+  await closeScheduleEditor();
 
   // Duplicate submissions are rejected before an outstanding group-validation read.
   contextAvailable = true;
@@ -1156,7 +1222,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("close").disabled, false);
   assert.equal(scheduleInput("save").disabled, false);
   assert.match(scheduleInput("form-error").textContent, /重新保存/);
-  closeScheduleEditor();
+  await closeScheduleEditor();
   // Inline validation rejects only applicable, locally knowable field errors.
   // It never sends a mutation or consumes the grant for a correctable draft.
   await openNewScheduleEditor();
@@ -1195,7 +1261,7 @@ async function chooseScheduleTarget(value) {
   await previewSchedule();
   assert.equal(document.activeElement, scheduleInput("chat"));
   assert.equal(scheduleInput("chat-error").parentElement, scheduleInput("chat-field"));
-  closeScheduleEditor();
+  await closeScheduleEditor();
 
   await openNewScheduleEditor();
   scheduleInput("kind").value = "interval";
@@ -1227,7 +1293,7 @@ async function chooseScheduleTarget(value) {
   delete scheduleInput("end-at").validity;
   scheduleInput("end-at").dispatch("input");
   assert.equal(scheduleInput("end-at").getAttribute("aria-describedby"), "schedule-timezone-note schedule-end-note");
-  closeScheduleEditor();
+  await closeScheduleEditor();
 
   // Broad server errors are not guessed into a field by parsing their message.
   await openNewScheduleEditor();
@@ -1247,7 +1313,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(document.activeElement, scheduleInput("group"));
   assert.equal(scheduleInput("group").getAttribute("aria-invalid"), "true");
   chatValidationError = null;
-  closeScheduleEditor();
+  await closeScheduleEditor();
 
   // Compare actual form values rather than a sticky "touched" flag. Opening,
   // async catalog hydration, previewing and reverting values are all clean.
@@ -1272,7 +1338,7 @@ async function chooseScheduleTarget(value) {
   const actionBeforeDiscard = scheduleEditor.action;
   for (const cancel of [() => scheduleInput("close").click(), () => scheduleInput("cancel").click(),
     () => scheduleInput("drawer").dispatch("cancel")]) {
-    cancel();
+    cancel(); await flush();
     assert.equal(scheduleInput("drawer").open, true);
     assert.equal(scheduleInput("name").value, "a changed name");
     assert.equal(scheduleEditor.action, actionBeforeDiscard);
@@ -1287,27 +1353,25 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleEditorHasChanges(), false);
   assert.equal(unload().prevented, false);
   const beforeRevertedClose = confirmations.length;
-  scheduleInput("drawer").dispatch("cancel");
+  scheduleInput("drawer").dispatch("cancel"); await flush();
   assert.equal(scheduleInput("drawer").open, false);
   assert.equal(confirmations.length, beforeRevertedClose);
 
-  // Choosing an exact session is an internal step, not abandoning the draft.
+  // Browsing targets stays inside the dirty editor and preserves its grant on cancellation.
   await openScheduleEditor();
   scheduleInput("name").value = "Preserved target-selection draft";
   await chooseScheduleTarget("binding");
   const beforeChoosing = confirmations.length;
-  chooseScheduleSession();
+  await chooseScheduleSession();
   assert.equal(confirmations.length, beforeChoosing);
-  assert.equal(scheduleInput("drawer").open, false);
+  assert.equal(scheduleInput("drawer").open, true);
   assert.equal(hasUnsavedEditors(), true);
   assert.equal(unload().prevented, true);
-  cancelScheduleSelection();
-  assert(pendingScheduleDraft, "declining discard keeps the pending selection and its draft");
-  await openScheduleForSession(targetSession, opener);
+  await closeScheduleEditor();
   assert.equal(scheduleInput("name").value, "Preserved target-selection draft");
   assert.equal(hasUnsavedEditors(), true);
   confirmation = true;
-  scheduleInput("cancel").click();
+  scheduleInput("cancel").click(); await flush();
   assert.equal(hasUnsavedEditors(), false);
   assert.equal(unload().prevented, false);
 
@@ -1322,18 +1386,13 @@ async function chooseScheduleTarget(value) {
   // handed-off draft need not wait for the shared drawer's model catalog.
   for (const finish of ["save", "cancel"]) {
     previewTimes = times;
-    await openScheduleEditor();
-    scheduleInput("name").value = "Draft handed off before catalog";
-    scheduleInput("instructions").value = "Use the original session settings";
-    await chooseScheduleTarget("binding");
-    chooseScheduleSession();
     scheduleOptionsGate = {};
-    const opening = openScheduleForSession(targetSession, opener);
+    const opening = openScheduleEditor(null, { targetSession, returnFocus: opener, action: createGrant });
     await flush();
+    scheduleInput("name").value = "Draft before catalog";
+    scheduleInput("instructions").value = "Use the original session settings";
     assert.equal(scheduleInput("drawer").open, true);
     assert.equal(scheduleInput("session-settings").hidden, true);
-    assert.equal(pendingScheduleDraft, null, "ownership transfers before options finish");
-    assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
     assert.equal(hasUnsavedEditors(), true, "the active editor still protects its draft");
     const postsBeforeFinish = posts.length;
     if (finish === "save") {
@@ -1348,11 +1407,11 @@ async function chooseScheduleTarget(value) {
       assert.equal(confirmations.length, beforeSaveConfirm);
     } else {
       confirmation = false;
-      scheduleInput("cancel").click();
+      scheduleInput("cancel").click(); await flush();
       assert.equal(scheduleInput("drawer").open, true);
       assert.equal(hasUnsavedEditors(), true);
       confirmation = true;
-      scheduleInput("cancel").click();
+      scheduleInput("cancel").click(); await flush();
       assert.equal(posts.length, postsBeforeFinish);
     }
     assert.equal(scheduleEditor, null);
@@ -1362,8 +1421,6 @@ async function chooseScheduleTarget(value) {
     scheduleOptionsGate = null;
     await opening;
     assert.equal(hasUnsavedEditors(), false);
-    assert.equal(pendingScheduleDraft, null);
-    assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
     assert.equal(scheduleInput("drawer").open, false);
   }
 
@@ -1427,7 +1484,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("effort").value, "high");
   assert.equal(scheduleInput("context").value, "catch-up");
   assert.equal(scheduleInput("worktree").value, "wt-project-one");
-  closeScheduleEditor();
+  await closeScheduleEditor();
   chatInfoError = null;
 
   // An options refresh can revoke a choice while final chat validation is pending.
@@ -1449,7 +1506,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(posts.length, pendingWorkspacePosts);
   assert.equal(scheduleInput("worktree").value, "wt-project-one");
   assert.equal(scheduleInput("save").disabled, true);
-  closeScheduleEditor();
+  await closeScheduleEditor();
   workspaceOptions.get("project-one").items[0].available = true;
 
   // Exact unavailable choices are retained and editable without replacing their workspace.
@@ -1502,7 +1559,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("worktree").value, "wt-deleted-exact");
   await previewSchedule();
   assert.equal(scheduleInput("save").disabled, false);
-  closeScheduleEditor();
+  await closeScheduleEditor();
   await openNewScheduleEditor();
   await changeScheduleProject();
   scheduleInput("workspace").value = "existing";
@@ -1512,7 +1569,7 @@ async function chooseScheduleTarget(value) {
   const rejectedPosts = posts.length;
   await saveSchedule({ preventDefault() {} });
   assert.equal(posts.length, rejectedPosts);
-  closeScheduleEditor();
+  await closeScheduleEditor();
   workspaceOptions.set("project-one", validOptions);
   workspaceErrors.clear();
 
@@ -1691,7 +1748,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("close").disabled, true);
   await saveSchedule({ preventDefault() {} });
   await previewSchedule();
-  scheduleInput("drawer").dispatch("cancel");
+  scheduleInput("drawer").dispatch("cancel"); await flush();
   assert.equal(scheduleInput("drawer").open, true);
   assert.equal(gets.filter(path => path.includes("mode=preview")).length, beforeAutoRead + 1);
   assert.equal(posts.length, beforeAutoPost);

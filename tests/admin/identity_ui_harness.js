@@ -6,7 +6,7 @@ function setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { 
 function clearTimeout(id) { timers.delete(id); }
 let confirmed = false;
 const confirmations = [];
-window.confirm = (text) => { confirmations.push(text); return confirmed; };
+confirmResponder = (text) => { confirmations.push(text); return confirmed; };
 let navigation = null;
 let reloads = 0;
 window.location = { pathname: "/system", search: "", assign(path) { navigation = path; }, reload() { reloads += 1; } };
@@ -272,7 +272,7 @@ answer = async (path, options) => {
   assert.match(confirmations.at(-1), /将退出 Admin/);
   assert.equal(state.authExpired, true);
   assert.equal(document.querySelector("#auth-expired").hidden, false);
-  assert.equal(document.querySelector("#system").inert, true);
+  assert.equal(document.querySelector("#admins").inert, true);
   assert.equal(navigation, null);
   assert.equal(updatePollTimer, null);
   assert.equal(timers.has(pendingPoll), false);

@@ -9,7 +9,7 @@ Object.defineProperty(document.querySelector("#sessions-body"), "rows", {
 window.prompt = () => { throw new Error("Configuration must use the drawer"); };
 let discardConfirmed = true;
 const discardPrompts = [];
-window.confirm = (message) => { discardPrompts.push(message); return discardConfirmed; };
+confirmResponder = (message) => { discardPrompts.push(message); return discardConfirmed; };
 const windowListeners = new Map();
 window.addEventListener = (name, callback) => windowListeners.set(name, callback);
 const baseSettings = {
@@ -134,10 +134,59 @@ function assertPageRetained(page) {
   assert.equal(query.get("project"), "netizen");
 }
 const cases = {
+  async localized_presentation() {
+    const runtimeCell = document.createElement("td");
+    for (const status of knownRuntimeStates) {
+      updateRuntimeCell(runtimeCell, { primaryStatus: status, primaryStatusResolution: "local" });
+      const label = runtimeCell.querySelector(".runtime-primary").textContent;
+      assert.match(label, /[\u4e00-\u9fff]/, `missing Chinese label for ${status}`);
+      assert.notEqual(label, status);
+      updateRuntimeCell(runtimeCell, { primaryStatus: status, primaryStatusResolution: "deferred" });
+      assert(runtimeCell.textContent.includes(label), "uncertainty retains the localized status");
+      assert.match(runtimeCell.textContent, /待确认/);
+    }
+    for (const status of knownSubscriptionStates) {
+      updateRuntimeCell(runtimeCell, { primaryStatus: "idle", primaryStatusResolution: "resolved", subscriptionState: status });
+      const label = runtimeCell.querySelector(".runtime-subscription").textContent.replace(/^订阅：/, "");
+      assert.match(label, /[\u4e00-\u9fff]/, `missing Chinese subscription label for ${status}`);
+      assert.notEqual(label, status);
+    }
+    updateRuntimeCell(runtimeCell, { primaryStatus: "future-status", primaryStatusResolution: "local", subscriptionState: "future-subscription" });
+    assert.equal(runtimeCell.querySelector(".runtime-primary").textContent, "future-status");
+    assert(runtimeCell.textContent.includes("future-subscription"));
+    updateRuntimeCell(runtimeCell, { primaryStatusResolution: "archived", subscriptionState: "subscribed" });
+    assert.equal(runtimeCell.querySelector(".runtime-primary").textContent, "—");
+    assert.equal(runtimeCell.querySelector(".runtime-subscription"), null);
+    assert.equal(catalogStateLabel("active"), document.querySelector("#session-inventory-state").querySelectorAll("option").find((option) => option.value === "active").textContent);
+    assert.equal(catalogStateLabel("lazy"), document.querySelector("#session-inventory-state").querySelectorAll("option").find((option) => option.value === "lazy").textContent);
+    assert.equal(catalogStateLabel("future-catalog"), "future-catalog");
+
+    const namedModels = structuredClone(catalog);
+    namedModels[0].efforts.find((item) => item.id === "high").display_name = "高强度";
+    const snapshot = structuredClone(baseSettings);
+    const summary = sessionConfigurationSummary(baseSettings, namedModels);
+    assert.match(summary, /补齐未读上下文.*model-one.*推理 高强度.*速度 Fast/);
+    assert.match(sessionConfigurationSummary(baseSettings, []), /推理 high.*速度 priority/);
+    assert.match(sessionConfigurationSummary({ ...baseSettings, turn_settings: null }), /继承 Codex/);
+    assert.match(sessionConfigurationSummary({ ...baseSettings, message_context_mode: "future-context" }), /future-context/);
+    assert(scheduleSessionSummary(baseSettings, namedModels).startsWith(summary));
+    assert.deepEqual(baseSettings, snapshot, "display never rewrites saved settings");
+    models = namedModels;
+    await loadSessions();
+    await openFromList();
+    assert.match(field("effort").textContent, /高强度/);
+    field("cancel").click(); await flush();
+    await loadSessions();
+    assert(document.querySelector("#sessions-body").textContent.includes(sessionConfigurationSummary(baseSettings, [])), "opening the catalog must not change list labels");
+    const row = document.createElement("tr");
+    defaultSettingsCell(row, baseSettings, null);
+    assert(row.textContent.includes(sessionConfigurationSummary(baseSettings, [])), "defaults always show stable IDs");
+    assert.equal(posts.length, 0);
+  },
   async entry_and_complete_save() {
     await loadSessions();
     assert.match(document.querySelector("#sessions-body").textContent,
-      /catch-up · model-one \/ high \/ priority/);
+      /补齐未读上下文.*model-one.*推理 high.*速度 priority/);
     const page = structuredClone(state.sessionPage);
     const session = state.sessions.items[0];
     const action = structuredClone(session.actions.configure);
@@ -183,7 +232,7 @@ const cases = {
     assert.match(statusNode.textContent, /已保存/);
     assert.equal(statusError, false);
     assert.match(document.querySelector("#sessions-body").textContent,
-      /current-only · model-two \/ high \/ default/);
+      /当前消息.*model-two.*推理 high.*速度 default/);
     assertPageRetained(page);
   },
   async progress_card_configuration() {
@@ -263,6 +312,38 @@ const cases = {
     assert.equal(field("progress-commentary-limit").value, 7, "saved explicit settings do not follow global changes");
     assert.equal(field("progress-source").hidden, true);
   },
+  async restore_global_progress() {
+    serverSessions[0].sessionSettings.progress_card_enabled = true;
+    await loadSessions();
+    assert.match(document.querySelector("#sessions-body").textContent, /过程卡：单独配置/);
+    await openFromList();
+    const original = structuredClone(sessionSettingsEditor.settings);
+    assert.equal(field("progress-reset").hidden, false);
+    field("progress-reset").click();
+    await flush();
+    assert.equal(field("progress-reset").hidden, true);
+    assert.equal(field("progress-source").hidden, false);
+    assert.equal(field("progress-commentary-limit").value, 7);
+    assert.equal(sessionSettingsEditor.settings.progress_card_settings, null);
+    assert.equal(sessionSettingsHasChanges(), true);
+    assert.deepEqual(serverSessions[0].sessionSettings, original);
+    discardConfirmed = false;
+    await closeSessionSettingsEditor();
+    assert.equal(field("drawer").open, true);
+    discardConfirmed = true;
+    await closeSessionSettingsEditor();
+    assert.deepEqual(serverSessions[0].sessionSettings, original, "discard preserves explicit server values");
+    await openFromList();
+    assert.equal(field("progress-reset").hidden, false);
+    field("progress-reset").click(); await flush();
+    change("model", "model-two");
+    await submit();
+    assert.equal(posts.at(-1).body.sessionSettings.progress_card_settings, null);
+    assert.match(document.querySelector("#sessions-body").textContent, /过程卡：跟随全局/);
+    await openFromList();
+    assert.equal(field("progress-reset").hidden, true);
+    assert.equal(sessionSettingsHasChanges(), false);
+  },
   async unavailable_global_preview() {
     globalFailure = true;
     await loadSessions();
@@ -298,7 +379,7 @@ const cases = {
     serverSessions[0].sessionSettings.turn_settings = null;
     serverSessions[0].sessionSettings.message_context_mode = "current-only";
     await loadSessions();
-    assert.match(document.querySelector("#sessions-body").textContent, /current-only · 继承 Codex/);
+    assert.match(document.querySelector("#sessions-body").textContent, /当前消息.*继承 Codex/);
     await openFromList();
     assert.equal(field("model").value, "");
     assert(field("effort").disabled);
@@ -331,7 +412,7 @@ const cases = {
     change("context", "catch-up");
     assert.equal(sessionSettingsEditor.settings.message_context_mode, "current-only");
     assert.equal(field("context").value, "current-only");
-    field("cancel").click();
+    field("cancel").click(); await flush();
     serverSessions[0].sessionSettings.message_context_mode = "catch-up";
     await loadSessions();
     await openFromList();
@@ -415,7 +496,7 @@ const cases = {
     const escaped = field("drawer").dispatch("cancel", { key: "Escape" });
     assert(escaped.prevented);
     field("close").click();
-    field("cancel").click();
+    field("cancel").click(); await flush();
     assert(field("drawer").open);
     change("progress", false);
     assert.deepEqual(sessionSettingsEditor.settings, draft);
@@ -437,7 +518,7 @@ const cases = {
     assert.equal(statusError, true);
     await submit();
     assert.equal(posts.length, 1);
-    field("cancel").click();
+    field("cancel").click(); await flush();
     assert.equal(document.activeElement, document.querySelector("#sessions [data-refresh]"));
     button.click();
     assert.equal(sessionSettingsEditor, null);
@@ -487,15 +568,15 @@ const cases = {
     assert.equal(document.activeElement, configureButton("binding-second"));
     await openFromList();
     change("reactions", false);
-    field("cancel").click();
+    field("cancel").click(); await flush();
     await openFromList();
     assert.equal(field("reactions").checked, baseSettings.reaction_pulse_enabled);
     assert.equal(posts.length, 0);
-    field("cancel").click();
+    field("cancel").click(); await flush();
     const closedGate = {};
     optionsGate = closedGate;
     await openFromList();
-    field("cancel").click();
+    field("cancel").click(); await flush();
     closedGate.reject("过期目录失败");
     await flush();
     assert.equal(sessionSettingsEditor, null);
@@ -546,22 +627,22 @@ const cases = {
     discardConfirmed = false;
     for (const cancel of [() => field("close").click(), () => field("cancel").click(),
       () => field("drawer").dispatch("cancel")]) {
-      cancel();
+      cancel(); await flush();
       assert.equal(field("drawer").open, true);
       assert.equal(field("progress").checked, true);
     }
-    assert.equal(confirmDiscardEditors(), false);
+    assert.equal(await confirmDiscardEditors(), false);
     assert(sessionSettingsEditor.action, "declining discard does not consume the action");
     change("progress", false);
     assert.equal(hasUnsavedEditors(), false, "restoring the initial value clears dirty state");
     const beforeCleanClose = discardPrompts.length;
-    assert.equal(confirmDiscardEditors(), true);
+    assert.equal(await confirmDiscardEditors(), true);
     assert.equal(discardPrompts.length, beforeCleanClose);
     assert.equal(field("drawer").open, false);
     await openFromList();
     change("reactions", false);
     discardConfirmed = true;
-    field("drawer").dispatch("cancel");
+    field("drawer").dispatch("cancel"); await flush();
     assert.equal(field("drawer").open, false);
     assert.equal(hasUnsavedEditors(), false);
     assert.equal(posts.length, 0);

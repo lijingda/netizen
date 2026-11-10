@@ -81,14 +81,14 @@ fetch = async (path, options = {}) => {
   assert.equal(state.sessionPage, previous);
   assert.equal(state.sessions, previousRows);
   assert.equal(window.location.search, previousUrl);
-  assert.match(statusNode.textContent, /上次成功/);
+  assert.match(document.querySelector(state.sessionTab === "temporary" ? "#sides-error" : "#sessions-error").textContent, /上次成功/);
   ordinaryAnswer = async () => ({ items: [], nextCursor: null });
   await refresh("sessions");
-  assert.equal(document.querySelector("#sessions-empty").hidden, false);
+  assert(document.querySelector("#sessions-body").querySelector(".list-empty"));
   ordinaryAnswer = async () => { throw new Error("new project unavailable"); };
   await openProjectSessions("netizen");
   assert.equal(state.sessions, null);
-  assert.equal(document.querySelector("#sessions-empty").hidden, true, "failed navigation cannot claim no matches");
+  assert.equal(document.querySelector("#sessions-body").querySelector(".list-empty"), null, "failed navigation cannot claim no matches");
   ordinaryAnswer = null;
 
   // Group only the current page, retaining existing rows/actions and pending label targets.

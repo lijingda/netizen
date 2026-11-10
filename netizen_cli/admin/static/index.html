@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/admin.css">
   <link rel="stylesheet" href="/static/chat-picker.css">
   <link rel="stylesheet" href="/static/content-preview.css">
+  <script src="/static/admin-ui.js" defer></script>
   <script src="/static/chat-picker.js" defer></script>
   <script src="/static/identity.js" defer></script>
   <script src="/static/config-editor.js" defer></script>
@@ -32,36 +33,57 @@
       </div>
     </div>
     <div class="identity-toolbar"><div id="current-user" class="person" aria-label="当前管理员"></div><button id="logout" class="quiet">退出登录</button></div>
+    <div class="mobile-navigation"><strong id="current-page-name">Project</strong><button id="navigation-open" class="quiet" type="button" aria-haspopup="dialog" aria-controls="navigation-drawer" aria-expanded="false">菜单</button></div>
   </header>
 
   <div id="auth-expired" class="auth-expired" role="alert" hidden><span>登录已过期，请重新登录。</span><a href="/login">重新登录</a></div>
 
-  <nav class="tabs" aria-label="管理模块">
-    <a class="tab active" data-tab="projects" href="/projects" aria-current="page">Projects</a>
-    <a class="tab" data-tab="worktrees" href="/worktrees">worktree</a>
-    <a class="tab" data-tab="sessions" href="/sessions/ordinary">Sessions</a>
-    <a class="tab" data-tab="schedules" href="/schedules">定时任务</a>
-    <a class="tab" data-tab="defaults" href="/defaults">默认会话配置</a>
-    <a class="tab" data-tab="updates" href="/maintenance">系统维护</a>
-    <a class="tab" data-tab="system" href="/system">系统管理</a>
+  <div class="admin-shell">
+  <aside id="navigation-home" class="side-navigation">
+  <nav id="admin-navigation" class="tabs" aria-label="管理页面">
+    <div class="nav-group"><h2>会话</h2>
+      <a id="nav-ordinary" class="tab" data-tab="sessions" data-session-tab="ordinary" href="/sessions/ordinary">普通会话</a>
+      <a id="nav-temporary" class="tab" data-tab="sessions" data-session-tab="temporary" href="/sessions/temporary">临时会话</a>
+      <a id="nav-schedules" class="tab" data-tab="schedules" href="/schedules">定时任务</a>
+    </div>
+    <div class="nav-group"><h2>资源</h2>
+      <a id="nav-projects" class="tab" data-tab="projects" href="/projects">Project</a>
+      <a id="nav-worktrees" class="tab" data-tab="worktrees" href="/worktrees">worktree</a>
+      <a id="nav-attachments" class="tab" data-tab="attachments" href="/attachments">文件附件</a>
+    </div>
+    <div class="nav-group"><h2>默认配置</h2>
+      <a id="nav-defaults" class="tab" data-tab="defaults" href="/defaults">会话默认配置</a>
+      <a id="nav-progress-card" class="tab" data-tab="progress-card" href="/progress-card">全局过程卡<span id="global-card-unsaved" class="tab-unsaved" hidden>未保存</span></a>
+      <a id="nav-question-notifications" class="tab" data-tab="question-notifications" href="/question-notifications">提问通知<span id="question-notifications-unsaved" class="tab-unsaved" hidden>未保存</span></a>
+    </div>
+    <div class="nav-group"><h2>访问控制</h2>
+      <a id="nav-admins" class="tab" data-tab="admins" href="/admins">管理员</a>
+      <a id="nav-group-access" class="tab" data-tab="group-access" href="/group-access">群聊准入<span id="group-access-unsaved" class="tab-unsaved" hidden>未保存</span></a>
+      <a id="nav-session-tools" class="tab" data-tab="session-tools" href="/session-tools">跨会话工具权限<span id="session-access-unsaved" class="tab-unsaved" hidden>未保存</span></a>
+    </div>
+    <div class="nav-group"><h2>运维</h2>
+      <a id="nav-updates" class="tab" data-tab="updates" href="/maintenance">服务与诊断</a>
+    </div>
   </nav>
+  </aside>
 
   <main>
-    <p id="status" class="status" role="status" aria-live="polite"></p>
+    <p id="status" class="status operation-status" hidden role="status" aria-live="polite"></p>
 
     <section id="projects" class="panel active" aria-labelledby="projects-heading">
       <div class="section-head">
-        <div><p class="eyebrow">WORKSPACES</p><h2 id="projects-heading">Projects</h2></div>
-        <div class="actions"><button id="project-new" class="action" disabled>添加 Project</button><button class="refresh" data-refresh="projects">刷新</button></div>
+        <div><h2 id="projects-heading">Project</h2><time id="projects-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div>
+        <div class="actions"><button id="project-new" class="action primary" disabled>添加 Project</button><button class="refresh" data-refresh="projects">刷新</button></div>
       </div>
       <section id="project-delete-result" class="project-delete-result" aria-live="polite" aria-atomic="true" hidden>
         <p id="project-delete-message"></p>
         <ul id="project-delete-remaining"></ul>
       </section>
-      <div class="table-wrap"><table><thead><tr>
-        <th>Project</th><th>路径</th><th>状态</th><th>会话</th><th>最近激活</th><th>操作</th>
+      <div id="projects-error" class="list-error" role="status" aria-live="polite" hidden></div>
+      <div class="table-wrap card-table"><table><thead><tr>
+        <th data-card-title="">Project</th><th>路径</th><th data-card-status="">状态</th><th>会话</th><th>最近激活</th><th>操作</th>
       </tr></thead><tbody id="projects-body"></tbody></table></div>
-      <nav class="pagination" aria-label="Projects 分页">
+      <nav class="pagination" aria-label="Project 分页">
         <button id="projects-previous" class="next" disabled>上一页</button>
         <span id="projects-page" aria-live="polite">第 1 页</span>
         <button id="projects-next" class="next" disabled>下一页</button>
@@ -71,7 +93,7 @@
     <dialog id="project-delete-dialog" class="project-delete-dialog" aria-labelledby="project-delete-title" aria-describedby="project-delete-warning">
       <div class="project-delete-shell">
         <div class="project-delete-head">
-          <div><p class="eyebrow">删除 PROJECT</p><h3 id="project-delete-title"></h3></div>
+          <div><p class="eyebrow">删除 Project</p><h3 id="project-delete-title"></h3></div>
           <button id="project-delete-close" class="drawer-close" type="button" aria-label="关闭删除确认">×</button>
         </div>
         <div class="project-delete-body">
@@ -84,7 +106,7 @@
               <div><dt>定时计划</dt><dd id="project-delete-plans"></dd></div>
               <div><dt>交接或未决的定时执行</dt><dd id="project-delete-runs"></dd></div>
             </dl>
-            <p class="hint">包含所有归档会话，不受 Sessions 页面筛选影响。临时会话将结束并移除；定时计划删除后，后续会话清理失败也不会恢复计划。</p>
+            <p class="hint">包含所有归档会话，不受会话页面筛选影响。临时会话将结束并移除；定时计划删除后，后续会话清理失败也不会恢复计划。</p>
             <div class="project-delete-preserved"><strong>原项目代码目录保留</strong><code id="project-delete-cwd"></code></div>
           </div>
           <section id="project-delete-worktree-option" class="project-delete-worktree-option" hidden>
@@ -95,13 +117,13 @@
           <p class="hint project-delete-outcome">全部删除确认成功后才移除 Project 登记；部分失败时保留 Project 和剩余项，已删除的内容不会恢复。</p>
           <p id="project-delete-note" class="status" role="status" aria-live="polite"></p>
         </div>
-        <div class="project-delete-footer"><button id="project-delete-cancel" class="drawer-cancel" type="button" autofocus>取消</button><button id="project-delete-confirm" class="action danger" type="button" disabled>删除 Project 及关联会话</button></div>
+        <div class="project-delete-footer"><button id="project-delete-cancel" class="drawer-cancel" type="button" autofocus>取消</button><button id="project-delete-confirm" class="action danger primary" type="button" disabled>删除 Project 及关联会话</button></div>
       </div>
     </dialog>
 
     <dialog id="project-drawer" class="editor-drawer" aria-labelledby="project-editor-title">
       <form id="project-editor" class="card-form drawer-form workspace-form" hidden>
-        <div class="drawer-head"><div><p class="eyebrow">PROJECT</p><h3 id="project-editor-title">添加 Project</h3></div><button id="project-close" class="drawer-close" type="button" aria-label="关闭添加 Project 表单">×</button></div>
+        <div class="drawer-head"><div><h3 id="project-editor-title">添加 Project</h3></div><button id="project-close" class="drawer-close" type="button" aria-label="关闭添加 Project 表单">×</button></div>
         <div class="drawer-body">
           <div class="workspace-fields">
             <div>
@@ -126,7 +148,7 @@
       <div class="file-browser-shell">
         <header class="file-browser-head">
           <button id="file-browser-back" class="file-browser-back" type="button" hidden>‹ 返回目录</button>
-          <div><p class="eyebrow"><span id="file-browser-eyebrow">FILES</span> <span id="file-browser-permission" class="file-browser-readonly">只读</span></p><h3 id="file-browser-title">查看文件</h3></div>
+          <div><p class="eyebrow"><span id="file-browser-eyebrow">文件</span> <span id="file-browser-permission" class="file-browser-readonly">只读</span></p><h3 id="file-browser-title">查看文件</h3></div>
           <button id="file-browser-refresh" type="button">刷新</button>
           <button id="file-browser-close" class="drawer-close" type="button" aria-label="关闭文件查看">×</button>
         </header>
@@ -152,7 +174,7 @@
           </aside>
           <section class="file-browser-viewer" aria-label="文件内容">
             <div class="file-browser-file-head"><strong id="file-browser-filename">选择文件查看</strong><span id="file-browser-meta"></span></div>
-            <div id="file-browser-actions" class="file-browser-actions" hidden><button id="file-browser-delete" type="button">删除附件</button><span id="file-browser-action-note" role="status" aria-live="polite"></span></div>
+            <div id="file-browser-actions" class="file-browser-actions" hidden><button id="file-browser-delete" class="action compact danger" type="button">删除附件</button><span id="file-browser-action-note" role="status" aria-live="polite"></span></div>
             <div id="file-browser-tools" class="file-browser-tools" hidden>
               <form id="file-browser-search-form" class="file-browser-search"><label for="file-browser-search" class="file-browser-sr-only">查找文本</label><input id="file-browser-search" type="search" placeholder="查找文本" autocomplete="off"><button type="submit">查找下一个</button></form>
               <form id="file-browser-line-form" class="file-browser-line"><label for="file-browser-line">行</label><input id="file-browser-line" type="number" min="1" value="1" aria-label="跳转行号"><button type="submit">跳转</button></form>
@@ -176,16 +198,17 @@
     </dialog>
 
     <section id="worktrees" class="panel" aria-labelledby="worktrees-heading" hidden>
-      <div class="section-head"><div><p class="eyebrow">managed worktree</p><h2 id="worktrees-heading">worktree</h2></div><div class="actions"><button id="worktree-new" class="action">新建 worktree</button><button id="worktree-configure" class="refresh">创建配置</button><button class="refresh" data-refresh="worktrees">刷新</button></div></div>
-      <p class="hint">仅管理本实例创建的 worktree。多个会话可共享文件和分支；列表按需查询，不扫描未提交内容，也不能证明没有外部客户端使用。</p>
+      <div class="section-head"><div><h2 id="worktrees-heading">worktree</h2><time id="worktrees-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"><button id="worktree-new" class="action primary">新建 worktree</button><button id="worktree-configure" class="refresh">创建配置</button><button class="refresh" data-refresh="worktrees">刷新</button></div></div>
+      <p class="hint">管理本实例创建的 worktree，多个会话可共享其文件和分支。</p><details class="panel-explanation"><summary>说明</summary><p>仅管理本实例创建的 worktree。多个会话可共享文件和分支；列表按需查询，不扫描未提交内容，也不能证明没有外部客户端使用。</p></details>
       <p id="worktree-result" class="status" role="status" aria-live="polite"></p>
-      <div class="table-wrap"><table><thead><tr><th>Project / 标识</th><th>工作目录</th><th>当前状态</th><th>分支 / HEAD</th><th>关联会话</th><th>操作</th></tr></thead><tbody id="worktrees-body"></tbody></table></div>
+      <div id="worktrees-error" class="list-error" role="status" aria-live="polite" hidden></div>
+      <div class="table-wrap card-table"><table><thead><tr><th data-card-title="">Project / 标识</th><th>工作目录</th><th data-card-status="">当前状态</th><th>分支 / HEAD</th><th>关联会话</th><th>操作</th></tr></thead><tbody id="worktrees-body"></tbody></table></div>
       <nav class="pagination" aria-label="worktree 分页"><button id="worktrees-previous" class="next" disabled>上一页</button><span id="worktrees-page" aria-live="polite">第 1 页</span><button id="worktrees-next" class="next" disabled>下一页</button></nav>
     </section>
 
     <dialog id="worktree-create-drawer" class="editor-drawer" aria-labelledby="worktree-create-title">
       <form id="worktree-create" class="card-form drawer-form workspace-form" hidden>
-        <div class="drawer-head"><div><p class="eyebrow">worktree</p><h3 id="worktree-create-title">新建 worktree</h3></div><button id="worktree-create-close" class="drawer-close" type="button" aria-label="关闭新建 worktree 表单">×</button></div>
+        <div class="drawer-head"><div><h3 id="worktree-create-title">新建 worktree</h3></div><button id="worktree-create-close" class="drawer-close" type="button" aria-label="关闭新建 worktree 表单">×</button></div>
         <div class="drawer-body">
           <div class="workspace-fields">
             <label>Project<select id="worktree-project" required><option value="">选择 Project</option></select></label>
@@ -194,10 +217,10 @@
             <label id="worktree-existing-label" hidden>本地分支<input id="worktree-existing" maxlength="256" placeholder="填写本地分支名"></label>
             <label id="worktree-new-label" hidden>新分支名称<input id="worktree-new-branch" maxlength="1024"></label>
           </div>
-          <p id="worktree-create-note" class="hint">只检出已提交内容，不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。</p>
+          <p id="worktree-create-note" class="hint">仅检出已提交内容，创建后可在飞书 /new 中选择。</p><details class="panel-explanation"><summary>说明</summary><p>只检出已提交内容，不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。</p></details>
           <h4>当前创建配置</h4>
           <p id="worktree-create-config" class="target-summary hint"></p>
-          <p class="hint">使用本实例已保存的配置；可在 worktree 页的“创建配置”中修改。</p>
+          <p class="hint">使用本实例的创建配置。</p><details class="panel-explanation"><summary>说明</summary><p>使用本实例已保存的配置；可在 worktree 页的“创建配置”中修改。</p></details>
           <p id="worktree-create-status" class="status" role="status" aria-live="polite"></p>
           <button id="worktree-create-check" class="drawer-cancel" type="button" hidden>刷新列表核对</button>
         </div>
@@ -207,9 +230,9 @@
 
     <dialog id="worktree-settings-drawer" class="editor-drawer" aria-labelledby="worktree-settings-title">
       <form id="worktree-settings" class="card-form drawer-form workspace-form" hidden>
-        <div class="drawer-head"><div><p class="eyebrow">worktree settings</p><h3 id="worktree-settings-title">worktree 创建配置</h3></div><button id="worktree-settings-close" class="drawer-close" type="button" aria-label="关闭 worktree 创建配置">×</button></div>
+        <div class="drawer-head"><div><h3 id="worktree-settings-title">worktree 创建配置</h3></div><button id="worktree-settings-close" class="drawer-close" type="button" aria-label="关闭 worktree 创建配置">×</button></div>
         <div class="drawer-body">
-          <p class="hint">用于本实例后续创建，包括 Admin、飞书和 Agent 入口。已有 worktree 仍按原路径管理；不修改 Codex App 配置。</p>
+          <p class="hint">修改本实例后续新建 worktree 的配置。</p><details class="panel-explanation"><summary>说明</summary><p>用于本实例后续创建，包括 Admin、飞书和 Agent 入口。已有 worktree 仍按原路径管理；不修改 Codex App 配置。</p></details>
           <div class="workspace-fields">
             <label>新建根目录（留空使用实例默认目录）<input id="worktree-root" maxlength="4096" aria-describedby="worktree-effective-root"></label>
             <p id="worktree-effective-root" class="hint"></p>
@@ -224,81 +247,81 @@
 
     <section id="sessions" class="panel" aria-labelledby="sessions-heading" hidden>
       <div class="section-head">
-        <div><p class="eyebrow">CONVERSATIONS</p><h2 id="sessions-heading">Sessions</h2></div>
+        <div><h2 id="sessions-heading">会话</h2></div>
         <div class="session-refresh"><time id="sessions-refreshed-at" class="hint" aria-live="polite" hidden></time><button class="refresh" data-refresh="sessions">刷新</button></div>
       </div>
-      <div class="session-tabs" role="tablist" aria-label="会话类型">
-        <button id="session-tab-ordinary" class="session-tab" role="tab" aria-selected="true" aria-controls="sessions-ordinary" tabindex="0" data-session-tab="ordinary">普通会话</button>
-        <button id="session-tab-temporary" class="session-tab" role="tab" aria-selected="false" aria-controls="sessions-temporary" tabindex="-1" data-session-tab="temporary">临时会话</button>
-      </div>
-      <div id="sessions-ordinary" role="tabpanel" aria-labelledby="session-tab-ordinary">
-      <form id="session-filter" class="filter-bar">
+      <div id="sessions-ordinary" aria-label="普通会话">
+      <form id="session-filter" class="filter-bar session-filter-bar">
         <label>会话搜索<input id="session-search" name="searchTerm" type="search" placeholder="名称、标题或预览" aria-describedby="session-search-help"></label>
+        <label>会话状态
+          <select id="session-inventory-state" name="inventoryState"><option value="active" selected>未归档</option><option value="archived">已归档</option><option value="lazy">未开始</option></select>
+        </label>
         <fieldset class="multi-filter" data-session-multi="project"><legend>Project</legend></fieldset>
         <div id="session-chat-picker"></div>
         <input id="session-chat-filter" name="chatId" type="hidden">
-        <fieldset class="multi-filter" data-session-multi="scopeKind"><legend>Scope</legend></fieldset>
-        <label>会话状态
-          <select id="session-inventory-state" name="inventoryState"><option value="active" selected>未归档</option><option value="archived">已归档</option><option value="lazy">Lazy（尚未开始）</option></select>
-        </label>
-        <fieldset class="multi-filter" data-session-multi="current"><legend>当前指针</legend></fieldset>
-        <fieldset class="time-range-filter" data-time-range data-time-range-id="session-created">
-          <legend>创建时间</legend>
-        </fieldset>
-        <fieldset class="time-range-filter" data-time-range data-time-range-id="session-updated" data-time-range-field="updated" data-time-range-default="last-3-months">
-          <legend>更新时间</legend>
-        </fieldset>
-        <label>每页
-          <select id="session-page-size" name="pageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select>
-        </label>
+        <button type="button" id="session-more-filters" class="refresh" aria-expanded="false" aria-controls="session-advanced-filters">更多筛选（0）</button>
         <button type="submit">筛选</button>
         <button type="button" id="session-filter-reset" class="refresh">重置</button>
+        <div id="session-advanced-filters" class="advanced-filters" hidden>
+          <fieldset class="multi-filter" data-session-multi="scopeKind"><legend>Scope</legend></fieldset>
+          <fieldset class="multi-filter" data-session-multi="current"><legend>当前指针</legend></fieldset>
+          <fieldset class="time-range-filter" data-time-range data-time-range-id="session-created">
+          <legend>创建时间</legend>
+        </fieldset>
+          <fieldset class="time-range-filter" data-time-range data-time-range-id="session-updated" data-time-range-field="updated" data-time-range-default="last-3-months">
+          <legend>更新时间</legend>
+        </fieldset>
+        </div>
       </form>
-      <p id="session-search-help" class="hint">搜索名称、标题和预览中的连续文本，英文区分大小写；与当前时间、归档等筛选共同生效。Lazy 不支持搜索。</p>
+      <div id="session-filter-chips" class="filter-chips" aria-label="已应用筛选"></div>
+      <p id="session-search-help" class="hint">搜索会话名称、标题和预览。</p><details class="panel-explanation"><summary>说明</summary><p>搜索名称、标题和预览中的连续文本，英文区分大小写；与当前时间、归档等筛选共同生效。未开始的会话不支持搜索。</p></details>
       <div class="session-layout">
         <label>布局 <select id="session-layout" data-session-layout="session" aria-label="普通会话布局"><option value="compact">紧凑</option><option value="project">本页按项目分组</option><option value="chat">本页按聊天分组</option></select></label>
         <div id="session-group-actions" class="session-group-actions" role="group" aria-label="普通会话分组操作" hidden><button id="session-groups-expand" type="button" disabled>全部展开</button><button id="session-groups-collapse" type="button" disabled>全部折叠</button></div>
-        <span id="session-group-note" class="hint" data-session-group-note="session" hidden>仅组织当前页，组内保持当前排序；同一分组可能出现在其他页。</span>
+        <span id="session-group-note" class="hint" data-session-group-note="session" hidden>仅分组当前页，保留组内排序。</span>
       </div>
-      <p id="sessions-empty" class="hint" hidden>当前筛选范围内没有会话，可调整关键词、时间或归档等条件。</p>
-      <p id="sessions-lazy-notice" class="hint" hidden>Lazy 会话尚未在 Codex 创建，按 Netizen 登记时间排序；创建时间和更新时间筛选不适用。</p>
+      <div id="sessions-lazy-notice" hidden><p class="hint">未开始的会话按登记时间排序。</p><details class="panel-explanation"><summary>说明</summary><p>未开始的会话尚未在 Codex 创建，按 Netizen 登记时间排序；创建时间和更新时间筛选不适用。</p></details></div>
       <p id="sessions-identity-notice" class="hint" hidden>按指定会话 ID 筛选；未找到时可切换会话状态。</p>
-      <div id="session-schedule-selection" class="selection-notice" hidden>
-        <p>请选择执行此定时任务的会话。已填写的内容暂存在当前页面，刷新页面将丢失。</p>
-        <button id="session-schedule-cancel" class="refresh" type="button">取消选择</button>
-      </div>
       <div id="session-schedule-saved" class="selection-notice" hidden role="status">
         <p>定时任务已创建。</p><button id="session-schedule-view" class="refresh" type="button">查看定时任务</button>
       </div>
-      <div class="table-wrap"><table><thead><tr>
-        <th>飞书位置</th><th>类型</th><th>Session</th><th>会话状态</th><th>运行态</th><th>Project</th><th>配置</th>
+      <div id="sessions-error" class="list-error" role="status" aria-live="polite" hidden></div>
+      <div class="table-wrap card-table"><table><thead><tr>
+        <th>位置</th><th data-card-title="">会话</th><th data-card-status="">状态</th><th>Project</th><th>配置</th>
         <th aria-sort="none"><button type="button" class="session-sort" data-session-sort="session" data-sort-by="createdAt" aria-label="按创建时间由近及远排序" title="Codex 会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示"><span class="sort-label">创建时间</span><span class="sort-indicator" aria-hidden="true">↕</span></button></th>
         <th aria-sort="descending"><button type="button" class="session-sort" data-session-sort="session" data-sort-by="updatedAt" aria-label="按最近更新由远及近排序（当前由近及远）" title="Codex 会话最近更新时间；按浏览器本地时区显示">最近更新<span class="sort-indicator" aria-hidden="true">↓</span></button></th><th>操作</th>
       </tr></thead><tbody id="sessions-body"></tbody></table></div>
-      <nav class="pagination" aria-label="Sessions 分页">
+      <nav class="pagination" aria-label="会话分页">
         <button id="sessions-previous" class="next" disabled>上一页</button>
         <span id="sessions-page" aria-live="polite">第 1 页</span>
         <button id="sessions-next" class="next" disabled>下一页</button>
+        <label>每页
+          <select id="session-page-size" name="pageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select>
+        </label>
       </nav>
       </div>
-      <div id="sessions-temporary" role="tabpanel" aria-labelledby="session-tab-temporary" hidden>
-        <form id="side-filter" class="filter-bar">
+      <div id="sessions-temporary" aria-label="临时会话" hidden>
+        <form id="side-filter" class="filter-bar session-filter-bar">
           <fieldset class="multi-filter" data-side-multi="project"><legend>Project</legend></fieldset>
           <div id="side-chat-picker"></div>
           <input id="side-chat-filter" name="chatId" type="hidden">
           <fieldset class="multi-filter" data-side-multi="state"><legend>会话状态</legend></fieldset>
-          <fieldset class="time-range-filter" data-time-range data-time-range-id="side-created"><legend>创建时间</legend></fieldset>
-          <label>每页<select id="side-page-size" name="pageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></label>
+          <button type="button" id="side-more-filters" class="refresh" aria-expanded="false" aria-controls="side-advanced-filters">更多筛选（0）</button>
           <button type="submit">筛选</button>
           <button type="button" id="side-filter-reset" class="refresh">重置</button>
-        </form>
+        <div id="side-advanced-filters" class="advanced-filters" hidden>
+          <fieldset class="time-range-filter" data-time-range data-time-range-id="side-created"><legend>创建时间</legend></fieldset>
+        </div>
+      </form>
+      <div id="side-filter-chips" class="filter-chips" aria-label="已应用筛选"></div>
         <div class="session-layout">
           <label>布局 <select id="side-layout" data-session-layout="side" aria-label="临时会话布局"><option value="compact">紧凑</option><option value="project">本页按项目分组</option><option value="chat">本页按聊天分组</option></select></label>
           <div id="side-group-actions" class="session-group-actions" role="group" aria-label="临时会话分组操作" hidden><button id="side-groups-expand" type="button" disabled>全部展开</button><button id="side-groups-collapse" type="button" disabled>全部折叠</button></div>
-          <span id="side-group-note" class="hint" data-session-group-note="side" hidden>仅组织当前页，组内保持当前排序；同一分组可能出现在其他页。</span>
+          <span id="side-group-note" class="hint" data-session-group-note="side" hidden>仅分组当前页，保留组内排序。</span>
         </div>
-        <div class="table-wrap"><table><thead><tr>
-          <th>飞书位置</th><th>来源会话</th><th>会话状态</th><th>运行态</th><th>Project</th>
+        <div id="sides-error" class="list-error" role="status" aria-live="polite" hidden></div>
+      <div class="table-wrap card-table"><table><thead><tr>
+          <th>位置</th><th data-card-title="">来源会话</th><th data-card-status="">状态</th><th>Project</th>
           <th aria-sort="none"><button type="button" class="session-sort" data-session-sort="side" data-sort-by="createdAt" aria-label="按创建时间由近及远排序" title="临时会话创建时间；按浏览器本地时区显示">创建时间<span class="sort-indicator" aria-hidden="true">↕</span></button></th>
           <th aria-sort="descending"><button type="button" class="session-sort" data-session-sort="side" data-sort-by="updatedAt" aria-label="按最近更新由远及近排序（当前由近及远）" title="临时会话自身输入、任务完成或状态变化的更新时间，不是来源会话的时间或逐字输出时间；按浏览器本地时区显示">最近更新<span class="sort-indicator" aria-hidden="true">↓</span></button></th><th>操作</th>
         </tr></thead><tbody id="sides-body"></tbody></table></div>
@@ -306,6 +329,7 @@
           <button id="sides-previous" class="next" disabled>上一页</button>
           <span id="sides-page" aria-live="polite">第 1 页</span>
           <button id="sides-next" class="next" disabled>下一页</button>
+        <label>每页<select id="side-page-size" name="pageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></label>
         </nav>
       </div>
     </section>
@@ -347,7 +371,7 @@
 
     <dialog id="session-settings-drawer" class="editor-drawer" aria-labelledby="session-settings-title" aria-describedby="session-settings-identity">
       <form id="session-settings-editor" class="card-form drawer-form" hidden>
-        <div class="drawer-head"><div><p class="eyebrow">SESSION SETTINGS</p><h3 id="session-settings-title">配置 Session</h3></div><button id="session-settings-close" class="drawer-close" type="button" aria-label="关闭会话配置表单">×</button></div>
+        <div class="drawer-head"><div><h3 id="session-settings-title">配置会话</h3></div><button id="session-settings-close" class="drawer-close" type="button" aria-label="关闭会话配置表单">×</button></div>
         <div class="drawer-body">
           <p id="session-settings-identity" class="meta-line"></p>
           <p class="session-settings-help">只影响之后由 Netizen 启动的任务。选择继承 Codex 时，沿用 Codex 的原生配置。</p>
@@ -366,6 +390,7 @@
               <label><input id="session-settings-progress" type="checkbox">进度卡片</label>
               <label><input id="session-settings-completion-mention" type="checkbox">结束时 @ 提醒</label>
             </div>
+            <button id="session-settings-progress-reset" class="progress-reset" type="button" hidden>恢复跟随全局</button>
             <div id="session-settings-progress-settings" class="progress-settings" hidden>
               <p id="session-settings-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局过程卡配置。修改细项后将保存为独立配置。</p>
               <label>过程卡组织方式<select id="session-settings-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
@@ -392,29 +417,31 @@
 
     <section id="defaults" class="panel" aria-labelledby="defaults-heading" hidden>
       <div class="section-head">
-        <div><p class="eyebrow">SESSION DEFAULTS</p><h2 id="defaults-heading">默认会话配置</h2></div>
+        <div><h2 id="defaults-heading">会话默认配置</h2><time id="defaults-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div>
         <button class="refresh" data-refresh="defaults">刷新</button>
       </div>
-      <p class="defaults-help">用于当前位置没有会话时自动创建会话。优先使用指定聊天配置；未配置时，按顺序匹配群名规则。</p>
+      <p class="defaults-help">设置没有当前会话时自动创建会话所用的默认值。</p><details class="panel-explanation"><summary>说明</summary><p>用于当前位置没有会话时自动创建会话。优先使用指定聊天配置；未配置时，按顺序匹配群名规则。</p></details>
       <div class="defaults-toolbar">
         <div class="defaults-tabs" role="tablist" aria-label="默认配置匹配方式">
           <button id="defaults-tab-chat" class="defaults-tab" role="tab" aria-selected="true" aria-controls="defaults-panel-chat" tabindex="0" data-defaults-tab="chat">指定聊天</button>
           <button id="defaults-tab-group_name" class="defaults-tab" role="tab" aria-selected="false" aria-controls="defaults-panel-group_name" tabindex="-1" data-defaults-tab="group_name">群名匹配</button>
         </div>
-        <button id="defaults-new" class="action" disabled>添加聊天配置</button>
+        <button id="defaults-new" class="action primary" disabled>添加聊天配置</button>
       </div>
       <div id="defaults-panel-chat" role="tabpanel" aria-labelledby="defaults-tab-chat" tabindex="0">
-        <div class="table-wrap"><table><thead><tr><th>聊天</th><th>Project</th><th>会话配置</th><th>操作</th></tr></thead><tbody id="defaults-chat-body"></tbody></table></div>
+        <div id="defaults-chat-error" class="list-error" role="status" aria-live="polite" hidden></div>
+      <div class="table-wrap card-table"><table><thead><tr><th data-card-title="">聊天</th><th>Project</th><th>会话配置</th><th>操作</th></tr></thead><tbody id="defaults-chat-body"></tbody></table></div>
         <nav id="defaults-pagination" class="pagination" aria-label="指定聊天配置分页" hidden><button id="defaults-previous" class="next" disabled>上一页</button><span id="defaults-page" aria-live="polite"></span><button id="defaults-next" class="next" disabled>下一页</button></nav>
       </div>
       <div id="defaults-panel-group_name" role="tabpanel" aria-labelledby="defaults-tab-group_name" tabindex="0" hidden>
         <p class="defaults-order-help">从上到下采用第一条命中规则，通过上移、下移调整优先级。</p>
-        <div class="table-wrap"><table><thead><tr><th>优先级</th><th>群名包含</th><th>Project</th><th>会话配置</th><th>操作</th></tr></thead><tbody id="defaults-rules-body"></tbody></table></div>
+        <div id="defaults-rules-error" class="list-error" role="status" aria-live="polite" hidden></div>
+      <div class="table-wrap card-table"><table><thead><tr><th>优先级</th><th data-card-title="">群名包含</th><th>Project</th><th>会话配置</th><th>操作</th></tr></thead><tbody id="defaults-rules-body"></tbody></table></div>
       </div>
     </section>
     <dialog id="defaults-drawer" class="editor-drawer" aria-labelledby="defaults-editor-title">
       <form id="defaults-editor" class="card-form drawer-form" hidden>
-        <div class="drawer-head"><div><p class="eyebrow">SESSION DEFAULTS</p><h3 id="defaults-editor-title"></h3></div><button id="defaults-close" class="drawer-close" type="button" aria-label="关闭默认配置表单">×</button></div>
+        <div class="drawer-head"><div><h3 id="defaults-editor-title"></h3></div><button id="defaults-close" class="drawer-close" type="button" aria-label="关闭默认配置表单">×</button></div>
         <div class="drawer-body">
           <fieldset id="defaults-fields">
             <h4>适用对象</h4>
@@ -438,11 +465,12 @@
               <label id="defaults-workspace-ref-field" hidden>起点提交 / 分支<input id="defaults-workspace-ref" maxlength="256" placeholder="留空使用创建时 Project 的 HEAD"></label>
             </div>
             <p id="defaults-workspace-help" class="defaults-field-help" role="status"></p>
+            <details class="panel-explanation"><summary>工作目录说明</summary><p>使用已有 worktree 时，新会话共享其文件和分支；删除或失效后保留此配置，自动创建会话时明确报错。选择新建时，每个自动创建的新会话新建 detached worktree，后续消息复用；引用留空使用创建时 Project 的 HEAD，保存配置不创建目录。</p></details>
             <div class="schedule-form-grid">
               <label>模型<select id="defaults-model"><option value="">继承 Codex</option></select></label>
               <label>推理强度<select id="defaults-effort" disabled></select></label>
               <label>速度<select id="defaults-tier" disabled></select></label>
-              <label id="defaults-context-field">上下文<select id="defaults-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
+              <label id="defaults-context-field">消息上下文<select id="defaults-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
             </div>
             <h4>任务反馈</h4>
             <div class="defaults-feedback">
@@ -450,6 +478,7 @@
               <label><input id="defaults-progress" type="checkbox">进度卡片</label>
               <label><input id="defaults-completion-mention" type="checkbox">结束时 @ 提醒</label>
             </div>
+            <button id="defaults-progress-reset" class="progress-reset" type="button" hidden>恢复跟随全局</button>
             <div id="defaults-progress-settings" class="progress-settings" hidden>
               <p id="defaults-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局过程卡配置。修改细项后将保存为独立配置。</p>
               <label>过程卡组织方式<select id="defaults-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
@@ -475,10 +504,10 @@
     </dialog>
     <section id="schedules" class="panel" aria-labelledby="schedules-heading" hidden>
       <div class="section-head">
-        <div><p class="eyebrow">SCHEDULED TASKS</p><h2 id="schedules-heading">定时任务</h2></div>
-        <div class="actions"><button id="schedule-new" class="action">创建计划</button><button class="refresh" data-refresh="schedules">刷新</button></div>
+        <div><h2 id="schedules-heading">定时任务</h2><time id="schedules-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div>
+        <div class="actions"><button id="schedule-new" class="action primary">创建计划</button><button class="refresh" data-refresh="schedules">刷新</button></div>
       </div>
-      <p class="schedule-help">可在独立新话题执行，或定时向指定原会话提交输入。立即运行使用已保存的计划，不改变定时安排；手动暂停或已结束的计划也可以运行一次，原会话须处于当前且可用。</p>
+      <p class="schedule-help">定时在新话题执行，或在指定原会话继续任务。</p><details class="panel-explanation"><summary>说明</summary><p>可在独立新话题执行，或定时向指定原会话提交输入。立即运行使用已保存的计划，不改变定时安排；手动暂停或已结束的计划也可以运行一次，原会话须处于当前且可用。</p></details>
       <p id="schedule-run-receipt" class="meta-line" role="status" hidden></p>
       <form id="schedule-filter" class="filter-bar">
         <fieldset class="multi-filter" data-schedule-filter="project"><legend>Project</legend></fieldset>
@@ -489,8 +518,9 @@
         <input id="schedule-filter-ended" name="ended" type="hidden" value="false">
         <button type="submit">筛选</button>
       </form>
-      <p class="meta-line">未结束包含仍有触发机会的计划，以及最后一次正在启动、执行或结果待确认的计划。暂停不会停止本次执行。</p>
-      <div class="table-wrap"><table><thead><tr><th>计划</th><th>Project</th><th>目标会话</th><th>时间安排</th><th>计划状态</th><th>执行情况</th><th>操作</th></tr></thead><tbody id="schedules-body"></tbody></table></div>
+      <p class="meta-line">暂停计划不会停止本次执行。</p><details class="panel-explanation"><summary>说明</summary><p>未结束包含仍有触发机会的计划，以及最后一次正在启动、执行或结果待确认的计划。暂停不会停止本次执行。</p></details>
+      <div id="schedules-error" class="list-error" role="status" aria-live="polite" hidden></div>
+      <div class="table-wrap card-table"><table><thead><tr><th data-card-title="">计划</th><th>Project</th><th>目标会话</th><th>时间安排</th><th data-card-status="">计划状态</th><th>执行情况</th><th>操作</th></tr></thead><tbody id="schedules-body"></tbody></table></div>
       <nav class="pagination" aria-label="定时任务分页">
         <button id="schedules-previous" class="next" disabled>上一页</button>
         <span id="schedules-page" aria-live="polite">第 1 页</span>
@@ -499,7 +529,7 @@
     </section>
     <dialog id="schedule-detail" class="editor-drawer" hidden aria-labelledby="schedule-detail-title">
       <div class="card-form drawer-form">
-        <div class="drawer-head"><div><p class="eyebrow">SCHEDULED TASK</p><h3 id="schedule-detail-title">计划详情</h3></div><button id="schedule-detail-close" type="button" class="drawer-close" aria-label="关闭计划详情">×</button></div>
+        <div class="drawer-head"><div><h3 id="schedule-detail-title">计划详情</h3></div><button id="schedule-detail-close" type="button" class="drawer-close" aria-label="关闭计划详情">×</button></div>
         <div class="drawer-body">
           <p id="schedule-detail-note" role="status"></p>
           <button id="schedule-detail-retry" class="action" type="button" hidden>重试加载详情</button>
@@ -520,11 +550,11 @@
               <ol id="schedule-detail-preview"></ol>
             </section>
             <section aria-labelledby="schedule-detail-runs-title">
-              <h4 id="schedule-detail-runs-title">最近触发记录</h4>
-              <p class="meta-line">执行状态以普通会话为准；停止和继续任务请使用话题或 Sessions 中的现有能力。</p>
+              <div class="section-head"><h4 id="schedule-detail-runs-title">最近触发记录</h4><time id="schedule-runs-refreshed-at" class="hint" hidden></time></div>
+              <p class="meta-line">执行状态以普通会话为准；停止和继续任务请使用话题或会话中的现有能力。</p>
               <p id="schedule-runs-note" role="status"></p>
               <button id="schedule-runs-retry" class="action" type="button" hidden>重试加载记录</button>
-              <div class="table-wrap"><table><thead><tr><th>触发时间</th><th>触发来源</th><th>调度状态</th><th>执行入口</th></tr></thead><tbody id="schedule-runs-body"></tbody></table></div>
+              <div class="table-wrap card-table"><table><thead><tr><th data-card-title="">触发时间</th><th>触发来源</th><th data-card-status="">调度状态</th><th>执行入口</th></tr></thead><tbody id="schedule-runs-body"></tbody></table></div>
               <div class="pagination" aria-label="触发记录分页"><button id="schedule-runs-prev" class="action" type="button" disabled>上一页</button><span id="schedule-runs-page" aria-live="polite">第 1 页</span><button id="schedule-runs-next" class="action" type="button" disabled>下一页</button></div>
             </section>
           </div>
@@ -534,7 +564,7 @@
     </dialog>
     <dialog id="schedule-drawer" class="editor-drawer" aria-labelledby="schedule-editor-title">
       <form id="schedule-editor" class="card-form" novalidate hidden>
-        <div class="schedule-editor-head"><div><p class="eyebrow">SCHEDULED TASK</p><h3 id="schedule-editor-title">创建计划</h3></div><button id="schedule-close" type="button" aria-label="关闭计划表单">×</button></div>
+        <div class="schedule-editor-head"><div><h3 id="schedule-editor-title">创建计划</h3></div><button id="schedule-close" type="button" aria-label="关闭计划表单">×</button></div>
         <fieldset id="schedule-fields">
           <div class="schedule-editor-body">
             <section class="schedule-editor-section" aria-labelledby="schedule-content-title">
@@ -555,7 +585,27 @@
                 <div id="schedule-binding-field" class="schedule-binding-target" hidden>
                   <input id="schedule-binding" type="hidden">
                   <p id="schedule-binding-summary" class="target-summary"></p>
-                  <button id="schedule-select-session" type="button">前往 Sessions 选择会话</button>
+                  <button id="schedule-select-session" type="button">选择会话</button>
+                  <div id="schedule-session-picker" class="schedule-session-picker" hidden>
+                    <div id="schedule-session-filters" class="schedule-section-fields">
+                      <label>会话搜索<input id="schedule-session-search" type="search" maxlength="512" placeholder="搜索名称、标题或预览"></label>
+                      <div class="schedule-form-grid">
+                        <label>会话状态<select id="schedule-session-state"><option value="active">未归档</option><option value="archived">已归档</option><option value="lazy">未开始</option></select></label>
+                        <label>Project<select id="schedule-session-project"><option value="">全部</option></select></label>
+                      </div>
+                      <div id="schedule-session-chat-picker"></div>
+                      <button id="schedule-session-search-button" type="button">筛选</button>
+                    </div>
+                    <p id="schedule-session-help" class="hint">不限更新时间。搜索匹配名称、标题或预览中的连续文字，英文区分大小写。</p>
+                    <p id="schedule-session-status" class="hint" role="status" aria-live="polite"></p>
+                    <button id="schedule-session-retry" type="button" hidden>重试</button>
+                    <ul id="schedule-session-results" class="schedule-session-results" aria-label="可选会话"></ul>
+                    <div class="pagination">
+                      <button id="schedule-session-previous" type="button" disabled>上一页</button>
+                      <span id="schedule-session-page">第 1 页</span>
+                      <button id="schedule-session-next" type="button" disabled>下一页</button>
+                    </div>
+                  </div>
                 </div>
                 <label id="schedule-project-field">Project<select id="schedule-project" required><option value="">选择 Project</option></select></label>
                 <div id="schedule-workspace-fields" class="schedule-section-fields">
@@ -563,6 +613,7 @@
                   <label id="schedule-worktree-field" hidden>受管 worktree<select id="schedule-worktree"></select></label>
                   <label id="schedule-workspace-ref-field" hidden>起点提交 / 分支<input id="schedule-workspace-ref" maxlength="256" placeholder="留空使用执行时 Project 的 HEAD"></label>
                   <p id="schedule-workspace-help" class="schedule-field-help" role="status"></p>
+                  <details class="panel-explanation"><summary>工作目录说明</summary><p>使用已有 worktree 时，各次执行共享其文件和分支；资源不可用时保留计划并跳过执行。选择新建时，每次执行新建 detached worktree，该次会话的后续消息复用；引用留空使用执行时 Project 的 HEAD，预览和保存不创建目录。</p></details>
                 </div>
                 <div id="schedule-chat-target" class="chat-target">
                   <label>聊天类型<select id="schedule-chat-kind"><option value="group">群聊</option><option value="p2p">单聊</option><option value="unknown" hidden>类型待确认</option></select></label>
@@ -573,8 +624,8 @@
                   <p id="schedule-chat-id-help" class="defaults-field-help" hidden>请填写聊天 ID，不是用户 ID；单聊请选择与本机器人的聊天。<a href="https://open.feishu.cn/document/server-docs/group/chat/chat-id-description" target="_blank" rel="noopener noreferrer">如何获取聊天 ID</a></p>
                 </div>
                 <div id="schedule-target-note" class="schedule-field-help" hidden>
-                  <p>沿用原会话的 Project、实际工作目录、模型、上下文和反馈；空闲时启动新一轮，忙碌时追加当前任务。</p>
-                  <p>切走或归档后自动暂停，恢复后继续；删除原会话也会删除计划。目标创建后不可更换。</p>
+                  <p>沿用原会话的上下文和配置继续任务。</p><details class="panel-explanation"><summary>说明</summary><p>沿用原会话的 Project、实际工作目录、模型、上下文和反馈；空闲时启动新一轮，忙碌时追加当前任务。</p></details>
+                  <p>删除原会话也会删除计划。</p><details class="panel-explanation"><summary>说明</summary><p>切走或归档后自动暂停，恢复后继续；删除原会话也会删除计划。目标创建后不可更换。</p></details>
                 </div>
               </div>
             </section>
@@ -600,7 +651,7 @@
                       <label>截止日期与时间<input id="schedule-end-at" type="datetime-local" step="60" aria-describedby="schedule-timezone-note schedule-end-note"></label>
                       <label id="schedule-end-offset-field" hidden>选择截止时间的哪一次<select id="schedule-end-offset"></select></label>
                     </div>
-                    <p id="schedule-end-note" class="schedule-field-help">留空则不设截止时间，截止时刻仍可触发；折叠不会清除已填时间。</p>
+                    <p id="schedule-end-note" class="schedule-field-help">截止时刻仍可触发，留空则不设截止时间。</p><details class="panel-explanation"><summary>说明</summary><p>留空则不设截止时间，截止时刻仍可触发；折叠不会清除已填时间。</p></details>
                   </details>
                 </fieldset>
                 <div class="schedule-preview-panel">
@@ -615,16 +666,16 @@
               <p id="schedule-auto-archive-help" class="schedule-field-help">首轮正常结束且结果送达后归档，恢复使用 /sessions archived。</p>
             </section>
             <details id="schedule-session-settings" class="schedule-editor-section schedule-session-settings" open>
-              <summary>会话配置<span id="schedule-session-summary">继承 Codex · 当前消息</span></summary>
+              <summary>会话配置<span id="schedule-session-summary">当前消息 · 继承 Codex</span></summary>
               <div class="schedule-section-fields">
                 <p id="schedule-session-note" role="status" aria-live="polite"></p>
                 <div class="schedule-form-grid">
                   <label>模型<select id="schedule-model"><option value="">继承 Codex</option></select></label>
-                  <label>思考强度<select id="schedule-effort" disabled></select></label>
+                  <label>推理强度<select id="schedule-effort" disabled></select></label>
                   <label>速度<select id="schedule-tier" disabled></select></label>
                   <label id="schedule-context-field">消息上下文<select id="schedule-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
                 </div>
-                <label class="schedule-checkbox"><input id="schedule-reactions" type="checkbox">任务表情反馈</label>
+                <label class="schedule-checkbox"><input id="schedule-reactions" type="checkbox">表情反馈</label>
                 <label class="schedule-checkbox"><input id="schedule-progress" type="checkbox">进度卡片</label>
                 <label class="schedule-checkbox"><input id="schedule-completion-mention" type="checkbox">结束时 @ 提醒（自动首轮除外）</label>
               </div>
@@ -634,57 +685,51 @@
         </fieldset>
       </form>
     </dialog>
-    <section id="system" class="panel" aria-labelledby="system-heading" hidden>
-      <div class="section-head"><div><p class="eyebrow">SYSTEM</p><h2 id="system-heading">系统管理</h2></div><button class="refresh" data-refresh="system">刷新</button></div>
-      <div class="session-tabs system-tabs" role="tablist" aria-label="系统管理">
-        <button id="system-tab-admins" class="session-tab" role="tab" data-system-tab="admins" aria-selected="true" aria-controls="system-admins" tabindex="0">管理员</button>
-        <button id="system-tab-groups" class="session-tab" role="tab" data-system-tab="groups" aria-selected="false" aria-controls="system-groups" tabindex="-1">群聊准入<span id="group-access-unsaved" class="tab-unsaved" hidden>未保存</span></button>
-        <button id="system-tab-access" class="session-tab" role="tab" data-system-tab="access" aria-selected="false" aria-controls="system-access" tabindex="-1">跨会话工具权限<span id="session-access-unsaved" class="tab-unsaved" hidden>未保存</span></button>
-        <button id="system-tab-progress" class="session-tab" role="tab" data-system-tab="progress" aria-selected="false" aria-controls="system-progress" tabindex="-1">过程卡<span id="global-card-unsaved" class="tab-unsaved" hidden>未保存</span></button>
-        <button id="system-tab-notifications" class="session-tab" role="tab" data-system-tab="notifications" aria-selected="false" aria-controls="system-notifications" tabindex="-1">提问通知<span id="question-notifications-unsaved" class="tab-unsaved" hidden>未保存</span></button>
-        <button id="system-tab-attachments" class="session-tab" role="tab" data-system-tab="attachments" aria-selected="false" aria-controls="system-attachments" tabindex="-1">文件附件</button>
-      </div>
-      <div id="system-attachments" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-attachments" hidden>
-        <h3>文件附件</h3>
-        <p class="defaults-help">查看本实例从飞书保存的输入原件。这里不包含项目文件和会话输出文件；删除附件可能影响正在执行或后续任务的读取，需要时可重新发送文件。</p>
-        <button id="attachment-files-open" class="action" type="button">浏览附件</button>
-      </div>
-      <div id="system-admins" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-admins">
-        <div class="section-head"><h3>管理员</h3><button id="admin-user-add" class="action" aria-expanded="false" aria-controls="admin-user-panel" disabled>添加管理员</button></div>
-        <p class="defaults-help">管理员拥有本实例的管理权限。至少保留一位管理员。</p>
+    <section id="attachments" class="panel" aria-labelledby="attachments-heading" hidden>
+      <div class="section-head"><div><h2 id="attachments-heading">文件附件</h2><time id="attachments-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"></div></div>
+      <div id="attachments-error" class="list-error" role="status" hidden></div>
+        <p class="defaults-help">查看或删除输入附件；删除可能影响正在执行或后续任务的读取。</p><details class="panel-explanation"><summary>说明</summary><p>查看本实例从飞书保存的输入原件。这里不包含项目文件和会话输出文件；删除附件可能影响正在执行或后续任务的读取，需要时可重新发送文件。</p></details>
+        <button id="attachment-files-open" class="action primary" type="button">浏览附件</button>
+    </section>
+    <section id="admins" class="panel" aria-labelledby="admins-heading" hidden>
+      <div class="section-head"><div><h2 id="admins-heading">管理员</h2><time id="admins-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"><button id="admin-user-add" class="action primary" aria-expanded="false" aria-controls="admin-user-panel" disabled>添加管理员</button><button class="refresh" data-refresh="admins">刷新</button></div></div>
+      <div id="admins-error" class="list-error" role="status" hidden></div>
+        <p class="defaults-help">管理本实例的管理员名单，至少保留一人。</p><details class="panel-explanation"><summary>说明</summary><p>管理员拥有本实例的管理权限。至少保留一位管理员。</p></details>
         <section id="admin-user-panel" class="identity-panel" aria-labelledby="admin-user-title" hidden>
           <div class="section-head"><h3 id="admin-user-title">添加管理员</h3><button id="admin-user-close" class="refresh" type="button" aria-label="关闭添加管理员">×</button></div>
           <p>搜索并选择要授予本实例管理权限的人员。</p>
           <div id="admin-selector"></div>
           <div id="admin-user-selection" class="person" hidden></div>
           <p id="admin-selector-status" class="status" role="status" aria-live="polite"></p>
-          <div class="identity-panel-actions"><button id="admin-selector-retry" class="refresh" hidden>重试加载</button><button id="admin-selector-reload" class="refresh" hidden>重新加载页面</button><button id="admin-user-confirm" class="action" disabled>确认添加</button></div>
+          <div class="identity-panel-actions"><button id="admin-selector-retry" class="refresh" hidden>重试加载</button><button id="admin-selector-reload" class="refresh" hidden>重新加载页面</button><button id="admin-user-confirm" class="action primary" disabled>确认添加</button></div>
         </section>
         <ul id="admin-users" class="admin-users" aria-label="管理员名单"></ul>
-      </div>
-      <div id="system-groups" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-groups" hidden>
-        <h3>群聊准入</h3>
+    </section>
+    <section id="group-access" class="panel" aria-labelledby="group-access-heading" hidden>
+      <div class="section-head"><div><h2 id="group-access-heading">群聊准入</h2><time id="group-access-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"><button class="refresh" data-refresh="group-access">刷新</button></div></div>
+      <div id="group-access-error" class="list-error" role="status" hidden></div>
         <h4 id="group-access-current" role="status">正在读取当前模式…</h4>
-        <p id="group-access-risk">群成员共享服务账号的工具与文件权限，可按需限制为已启用的群聊。</p>
-        <p>单聊及单聊话题不受此设置影响。一个群的设置适用于该群全部话题。</p>
-        <p>实例管理员可在群里 @机器人并发送 /enable 启用该群。</p>
+        <p id="group-access-risk" class="hint">群成员共享服务账号的工具与文件权限，可按需限制为已启用的群聊。</p>
+        <details class="panel-explanation"><summary>说明</summary><p class="hint">单聊及单聊话题不受此设置影响。一个群的设置适用于该群全部话题。</p>
+        <p class="hint">实例管理员可在群里 @机器人并发送 /enable 启用该群。</p></details>
         <form id="group-access-form" class="card-form session-access-form">
           <fieldset id="group-access-fields" disabled>
             <label>允许执行的群聊<select id="group-access-mode"><option value="all">全部群聊</option><option value="only">仅已启用的群聊</option></select></label>
             <div id="group-access-picker"></div>
             <label>已启用的群聊 ID，每行一个<textarea id="group-access-chats" rows="5" maxlength="257000" placeholder="oc_…"></textarea></label>
             <ul id="group-access-selected" aria-label="已选择的群聊"></ul>
-            <p>最多 1000 个群；“全部群聊”模式会保留名单，切换回来时继续使用。</p>
+            <p class="hint">最多 1000 个群；“全部群聊”模式会保留名单，切换回来时继续使用。</p>
           </fieldset>
           <div class="session-access-footer">
             <p id="group-access-note" class="defaults-field-help" role="status"></p>
-            <div class="actions"><button id="group-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="group-access-save" class="action" type="submit" disabled>保存配置</button></div>
+            <div class="actions"><button id="group-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="group-access-save" class="action primary" type="submit" disabled>保存配置</button></div>
           </div>
         </form>
-      </div>
-      <div id="system-access" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-access" hidden>
-        <h3 id="session-access-heading">跨会话工具权限</h3>
-        <p class="defaults-help">仅控制 Agent 对本实例普通会话的跨会话访问。所有来源聊天共用规则，范围按目标聊天匹配，包含其中的主会话与话题。两组权限互不依赖。</p>
+    </section>
+    <section id="session-tools" class="panel" aria-labelledby="session-tools-heading" hidden>
+      <div class="section-head"><div><h2 id="session-tools-heading">跨会话工具权限</h2><time id="session-tools-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"><button class="refresh" data-refresh="session-tools">刷新</button></div></div>
+      <div id="session-tools-error" class="list-error" role="status" hidden></div>
+        <p class="defaults-help">设置 Agent 发现、读取和发送本实例会话的范围。</p><details class="panel-explanation"><summary>说明</summary><p>仅控制 Agent 对本实例普通会话的跨会话访问。所有来源聊天共用规则，范围按目标聊天匹配，包含其中的主会话与话题。两组权限互不依赖。</p></details>
         <form id="session-access-form" class="card-form session-access-form">
           <fieldset id="session-access-fields" disabled>
             <div class="session-access-grid">
@@ -709,21 +754,22 @@
                 <p class="session-access-rule-note">在当前聊天创建话题并启动任务，也受此范围限制。关闭发现后仍可凭完整 Codex 会话 ID 操作。</p>
               </section>
             </div>
-            <aside id="session-access-chat-help" class="session-access-help" aria-labelledby="session-access-help-heading">
-              <h4 id="session-access-help-heading">聊天名单说明</h4>
+            <details id="session-access-chat-help" class="session-access-help panel-explanation">
+              <summary>聊天名单说明</summary>
               <p>可选择群聊加入名单，或填写聊天 ID。单聊也用聊天 ID，不是用户 ID；可在会话列表的“会话标识”中复制。</p>
               <p>名单为空时，“仅指定聊天”不允许任何目标，“排除指定聊天”允许全部目标。</p>
-            </aside>
+            </details>
           </fieldset>
           <div class="session-access-footer">
             <p id="session-access-note" class="defaults-field-help" role="status"></p>
-            <div class="actions"><button id="session-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="session-access-save" class="action" type="submit" disabled>保存权限</button></div>
+            <div class="actions"><button id="session-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="session-access-save" class="action primary" type="submit" disabled>保存权限</button></div>
           </div>
         </form>
-      </div>
-      <div id="system-notifications" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-notifications" hidden>
-        <h3>提问通知</h3>
-        <p class="defaults-help">设置 Agent 提问时的 @ 提醒，与过程卡及结束提醒开关独立，不影响问题卡显示和回答。</p>
+    </section>
+    <section id="question-notifications" class="panel" aria-labelledby="question-notifications-heading" hidden>
+      <div class="section-head"><div><h2 id="question-notifications-heading">提问通知</h2><time id="question-notifications-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"><button class="refresh" data-refresh="question-notifications">刷新</button></div></div>
+      <div id="question-notifications-error" class="list-error" role="status" hidden></div>
+        <p class="defaults-help">设置 Agent 提问时是否 @ 发起人。</p><details class="panel-explanation"><summary>说明</summary><p>设置 Agent 提问时的 @ 提醒，与过程卡及结束提醒开关独立，不影响问题卡显示和回答。</p></details>
         <form id="question-notifications-form" class="card-form question-notifications-form">
           <fieldset id="question-notifications-fields" disabled>
             <label class="question-notifications-option">
@@ -740,13 +786,14 @@
           </fieldset>
           <div class="session-access-footer">
             <p id="question-notifications-note" class="defaults-field-help" role="status"></p>
-            <div class="actions"><button id="question-notifications-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="question-notifications-save" class="action" type="submit" disabled>保存配置</button></div>
+            <div class="actions"><button id="question-notifications-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="question-notifications-save" class="action primary" type="submit" disabled>保存配置</button></div>
           </div>
         </form>
-      </div>
-      <div id="system-progress" class="system-tab-panel" role="tabpanel" aria-labelledby="system-tab-progress" hidden>
-        <h3>全局过程卡配置</h3>
-        <p class="defaults-help">仅在本实例的会话未单独配置过程卡时使用，不覆盖会话及聊天默认配置中已有的过程卡设置。</p>
+    </section>
+    <section id="progress-card" class="panel" aria-labelledby="progress-card-heading" hidden>
+      <div class="section-head"><div><h2 id="progress-card-heading">全局过程卡</h2><time id="progress-card-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"><button class="refresh" data-refresh="progress-card">刷新</button></div></div>
+      <div id="progress-card-error" class="list-error" role="status" hidden></div>
+        <p class="defaults-help">设置未单独配置的会话所使用的过程卡样式。</p><details class="panel-explanation"><summary>说明</summary><p>仅在本实例的会话未单独配置过程卡时使用，不覆盖会话及聊天默认配置中已有的过程卡设置。</p></details>
         <form id="global-card-form" class="card-form global-card-form">
           <fieldset id="global-card-fields" disabled>
             <div id="global-card-progress-settings" class="progress-settings" hidden>
@@ -768,14 +815,14 @@
           </fieldset>
           <div class="session-access-footer">
             <p id="global-card-note" class="defaults-field-help" role="status"></p>
-            <div class="actions"><button id="global-card-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="global-card-save" class="action" type="submit" disabled>保存配置</button></div>
+            <div class="actions"><button id="global-card-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="global-card-save" class="action primary" type="submit" disabled>保存配置</button></div>
           </div>
         </form>
-      </div>
     </section>
     <section id="updates" class="panel" aria-labelledby="updates-heading" hidden>
+      <div id="updates-error" class="list-error" role="status" hidden></div>
       <div class="section-head">
-        <div><p class="eyebrow">NETIZEN</p><h2 id="updates-heading">系统维护</h2></div>
+        <div><h2 id="updates-heading">服务与诊断</h2><time id="updates-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div>
         <button id="updates-refresh" class="refresh" data-refresh="updates">刷新维护状态</button>
       </div>
       <div class="update-versions">
@@ -784,7 +831,7 @@
       <p id="update-message"></p>
       <section class="instance-diagnostics" aria-labelledby="diagnostics-heading">
         <div class="diagnostics-head"><h3 id="diagnostics-heading">当前实例诊断</h3><p id="diagnostics-checked-at">尚未检查</p></div>
-        <p class="diagnostics-help">与 doctor --root 使用相同的只读服务检查，不包含飞书权限、模型连通性或数据库完整性检查。</p>
+        <p class="diagnostics-help">查看当前实例的服务状态。</p><details class="panel-explanation"><summary>说明</summary><p>与 doctor --root 使用相同的只读服务检查，不包含飞书权限、模型连通性或数据库完整性检查。</p></details>
         <p id="diagnostics-message" role="status" aria-live="polite">进入页面或手动刷新时检查，不自动轮询。</p>
         <dl class="diagnostics-status">
           <div><dt>服务注册</dt><dd id="diagnostics-bound">尚未检查</dd></div>
@@ -809,7 +856,7 @@
       </div>
       <section class="service-restart" aria-labelledby="restart-heading">
         <h3 id="restart-heading">服务重启</h3>
-        <p>使用本实例绑定的 Python 环境中当前安装的程序，重新启动 Netizen 及其 Codex 运行环境。不更新软件包、不切换环境，也不重启其他实例。</p>
+        <p>重启本实例的 Netizen 与 Codex 运行环境。</p><details class="panel-explanation"><summary>说明</summary><p>使用本实例绑定的 Python 环境中当前安装的程序，重新启动 Netizen 及其 Codex 运行环境。不更新软件包、不切换环境，也不重启其他实例。</p></details>
         <p id="restart-warning" class="update-warning">重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。重启后不会自动续跑，管理页需要重新登录。</p>
         <button id="service-restart" class="refresh" aria-describedby="restart-warning restart-message" disabled>重启服务</button>
         <p id="restart-message" class="update-warning"></p>
@@ -817,6 +864,8 @@
       <p class="update-help"><a href="https://github.com/lijingda/netizen/blob/main/docs/deployment.md" target="_blank" rel="noopener noreferrer">部署与恢复说明</a></p>
     </section>
   </main>
+  </div>
+  <dialog id="navigation-drawer" class="navigation-drawer" aria-label="管理页面菜单"><div class="navigation-head"><strong>管理页面</strong><button id="navigation-close" class="refresh" type="button">关闭菜单</button></div></dialog>
 
   <template id="time-range-template">
     <input type="hidden" name="createdFrom" data-time-range-from>

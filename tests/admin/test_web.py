@@ -1220,6 +1220,8 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         for path in (
             "/projects", "/sessions/ordinary", "/sessions/temporary", "/schedules",
             "/defaults", "/maintenance", "/system", "/worktrees", "/",
+            "/attachments", "/progress-card", "/question-notifications",
+            "/admins", "/group-access", "/session-tools",
         ):
             target = path + "?project=netizen&project=demo&sortBy=updatedAt&sortDirection=asc"
             with self.subTest(path=path):
@@ -1236,10 +1238,30 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(dict(headers)["content-type"], "text/html; charset=utf-8")
                 self.assertEqual(body, original)
 
+    async def test_page_scripts_are_served_and_require_authentication(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        cookie = [("Cookie", f"netizen_admin_session={session}")]
+        status, _, page = await self.request("GET", "/admins", headers=cookie)
+        self.assertEqual(status, 200)
+        parser = _AdminAssetParser()
+        parser.feed(page.decode())
+        self.assertTrue(parser.scripts)
+        for path in parser.scripts:
+            with self.subTest(path=path):
+                self.assertIsNotNone(path)
+                status, _, _ = await self.request("GET", path)
+                self.assertEqual(status, 401)
+                status, headers, body = await self.request("GET", path, headers=cookie)
+                self.assertEqual(status, 200)
+                self.assertEqual(dict(headers)["content-type"], "text/javascript; charset=utf-8")
+                self.assertTrue(body)
+
     async def test_login_preserves_legacy_binding_and_encoded_query_targets(self) -> None:
         self.runner.open_admission()
         for target in (
-            "/?binding_id=binding-1",
+            "/?binding_id=binding-1", "/system", "/admins", "/attachments",
+            "/progress-card", "/question-notifications", "/group-access", "/session-tools",
             "/sessions/ordinary?project=R%26D&project=%E7%A0%94%E7%A9%B6&sortDirection=asc",
         ):
             with self.subTest(target=target):
@@ -2983,7 +3005,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         parser = _AdminAssetParser()
         parser.feed(html)
 
-        self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js",
+        self.assertEqual(parser.scripts, ["/static/admin-ui.js", "/static/chat-picker.js", "/static/identity.js",
                                           "/static/config-editor.js", "/static/session-access.js", "/static/group-access.js", "/static/progress-card.js", "/static/question-notifications.js", "/static/worktrees.js",
                                           "/static/content-preview.js", "/static/file-browser.js", "/static/project-files.js",
                                           "/static/attachment-files.js", "/static/admin.js"])
@@ -3025,16 +3047,6 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertNotIn("if (runtime.turn)", javascript)
         self.assertNotIn("if (runtime.goal)", javascript)
         self.assertIn("sessionLocationCell", javascript)
-        self.assertIn(
-            'confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized"',
-            javascript,
-        )
-        self.assertIn(
-            'window.confirm("永久删除这个尚未开始的会话？") && mutate("/api/v1/sessions/delete-lazy"',
-            javascript,
-        )
-        self.assertIn("派生会话", javascript)
-        self.assertNotIn("delete-session-confirmation", html)
         self.assertIn('link.rel = "noopener noreferrer"', javascript)
         self.assertIn("await refresh(state.tab)", javascript)
         self.assertIn('state.tab === "sessions"', javascript)

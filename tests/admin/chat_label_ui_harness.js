@@ -54,7 +54,7 @@ const labelResponse = (...items) => ({ requestId: "names", items });
     const totalBefore = requests.length;
     await advanceTime(60000);
     assert.equal(requests.length, totalBefore, "pending names must not poll or retry");
-    assert.equal(statusNode.textContent, "已更新。");
+    assert.equal(document.querySelector("#sessions-error").hidden, true);
     slow.resolve(labelResponse(resolvedLabel(base.chatId, "<img src=x> 用户", "p2p")));
     await flush();
     assert.equal(body.children[0], rows[0]);
@@ -75,13 +75,13 @@ const labelResponse = (...items) => ({ requestId: "names", items });
     assert.equal(state[`${kind}Page`], page);
     assert.equal(state[`${kind}RefreshedAt`], refreshedAt);
     assert.equal(document.querySelector("#sessions-refreshed-at").textContent, freshness);
-    assert.equal(statusNode.textContent, "已更新。");
+    assert.equal(document.querySelector("#sessions-error").hidden, true);
 
     // Failures only fall back in the cells; the next explicit refresh retries.
     chatLabelAnswer = async () => { throw new Error("names unavailable"); };
     await refresh("sessions"); await flush();
     assert(!body.textContent.includes("名称加载中"));
-    assert.equal(statusNode.textContent, "已更新。");
+    assert.equal(document.querySelector("#sessions-error").hidden, true);
     const afterFailure = requests.length;
     await advanceTime(60000);
     assert.equal(requests.length, afterFailure);
@@ -94,7 +94,7 @@ const labelResponse = (...items) => ({ requestId: "names", items });
       const cell = body.children[0].querySelector(".session-location");
       assert(!cell.textContent.includes("名称加载中"));
       assert.equal(cell.querySelector(".chat-link").href, base.topicOpenUrl || state[key].items[0].chatOpenUrl);
-      assert.equal(statusNode.textContent, "已更新。");
+      assert.equal(document.querySelector("#sessions-error").hidden, true);
     }
 
     // Failed replacement reads retain old facts, but must clear invalidated
@@ -182,5 +182,6 @@ const labelResponse = (...items) => ({ requestId: "names", items });
   expired.resolve(labelResponse(resolvedLabel(ordinary.chatId, "登录过期后的名称")));
   await flush();
   assert.equal(document.querySelector("#sessions-body").textContent, frozen);
-  assert.equal(statusNode.textContent, "登录已过期，请重新登录。");
+  assert.equal(statusNode.hidden, true);
+  assert.equal(document.querySelector("#auth-expired").hidden, false);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

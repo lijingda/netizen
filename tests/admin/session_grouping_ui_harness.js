@@ -108,7 +108,7 @@ async function checkCollapse() {
     all(config, "collapse");
     await refresh("sessions"); await flush();
     assert(rows(config).every((row) => row.hidden), "refresh retains collapsed groups");
-    if (config.kind === "session") assert.equal(document.querySelector("#sessions-empty").hidden, true);
+    if (config.kind === "session") assert.equal(!document.querySelector("#sessions-body").querySelector(".list-empty"), true);
     assert.equal(headings(config).length, 2, "a fully collapsed page still has its group headings");
 
     const pageTwo = [items[0], sample(config, "c", { chatId: "chat-c", projectAlias: "new" })];

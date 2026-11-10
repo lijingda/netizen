@@ -1,6 +1,6 @@
 let confirm = true;
 window.location = { pathname: "/projects", search: "", assign() {} };
-window.confirm = () => confirm;
+confirmResponder = () => confirm;
 window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, suspendSelector() {}, expire() {} };
 const timers = new Map();
 let nextTimer = 0;
@@ -94,14 +94,17 @@ const cases = {
     assert.equal(controller.dirty(), true);
   },
   async navigation() {
-    await selectTab("system");
-    selectSystemTab("notifications");
-    assert.equal(document.querySelector("#system-notifications").hidden, false);
+    await selectTab("question-notifications");
+    assert.equal(document.querySelector("#question-notifications").hidden, false);
     change(true); confirm = false;
     await selectTab("projects");
-    assert.equal(state.tab, "system");
-    confirm = true; await selectTab("projects");
     assert.equal(state.tab, "projects");
+    assert.equal(controller.dirty(), true);
+    await selectTab("question-notifications");
+    assert.equal(field("enabled").checked, true);
+    assert.equal(await refresh("question-notifications"), false);
+    confirm = true;
+    await refresh("question-notifications");
     assert.equal(controller.dirty(), false);
   },
 };

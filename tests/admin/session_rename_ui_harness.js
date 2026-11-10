@@ -2,7 +2,7 @@ window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
 window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 window.prompt = () => { throw new Error("Rename must use a dialog"); };
-window.confirm = () => true;
+confirmResponder = () => true;
 Object.defineProperty(document.querySelector("#sessions-body"), "rows", {
   get() { return this.querySelectorAll("tr"); },
 });
@@ -168,7 +168,7 @@ const cases = {
     submit(); await flush();
     assert(field("dialog").open);
     assert.equal(field("name").value, "manual name");
-    assert.match(field("status").textContent, /刷新 Sessions 后核对/);
+    assert.match(field("status").textContent, /刷新会话后核对/);
     field("generate").click();
     submit(); assert.equal(posts.length, 1);
     field("close").click(); assert(!field("dialog").open);
@@ -192,7 +192,7 @@ const cases = {
   async navigation_closes_generation() {
     open(); generateGate = {};
     field("generate").click();
-    assert(confirmDiscardEditors());
+    assert(await confirmDiscardEditors());
     assert(!field("dialog").open);
     generateGate.reject("late failure"); await flush();
     assert.equal(sessionRenameEditor, null);

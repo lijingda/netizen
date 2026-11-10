@@ -24,11 +24,17 @@ class Element {
   append(...nodes) {
     for (const node of nodes) {
       if (node.tagName === "fragment") this.append(...node.children);
-      else { node.parentElement = this; this.children.push(node); }
+      else { if (node.parentElement) node.remove(); node.parentElement = this; this.children.push(node); }
     }
   }
-  replaceChildren(...nodes) { this.children = []; this.text = ""; this.append(...nodes); }
+  remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this); this.parentElement = null; }
+  replaceChildren(...nodes) { for (const child of this.children) child.parentElement = null; this.children = []; this.text = ""; this.append(...nodes); }
   get textContent() { return (this.text || "") + this.children.map((node) => node.textContent).join(""); }
+  get childNodes() {
+    if (!this.text) return this.children;
+    const text = new Element("#text"); text.text = this.text;
+    return [text, ...this.children];
+  }
   set textContent(value) { this.children = []; this.text = value; }
   setAttribute(key, value) {
     this.attrs[key] = value;
@@ -37,7 +43,7 @@ class Element {
   getAttribute(key) { return this.attrs[key] ?? null; }
   removeAttribute(key) { delete this.attrs[key]; }
   contains(target) { return target === this || this.children.some((child) => child.contains(target)); }
-  getBoundingClientRect() { return { left: 20, width: 240 }; }
+  getBoundingClientRect() { return { left: 20, top: 20, right: 260, bottom: 60, width: 240, height: 40 }; }
   matches(selector) {
     if (selector.startsWith("#")) return this.id === selector.slice(1);
     if (selector.startsWith(".")) return this.className.split(/\s+/).includes(selector.slice(1));
@@ -66,10 +72,11 @@ class Element {
   }
   dispatch(name, props = {}) {
     const event = { target: this, prevented: false,
-      preventDefault() { this.prevented = true; }, ...props };
+      preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; }, ...props };
     for (let node = this; node; node = node.parentElement) {
       event.currentTarget = node;
       for (const callback of node.listeners.get(name) || []) callback(event);
+      if (event.stopped) break;
     }
     return event;
   }
@@ -92,7 +99,14 @@ class Element {
     result.append(...this.children.map((child) => child.cloneNode(true)));
     return result;
   }
-  showModal() { this.open = true; this.returnFocus = document.activeElement; }
+  showModal() {
+    this.open = true; this.returnFocus = document.activeElement;
+    if (this.id === "admin-confirm" && confirmResponder) queueMicrotask(() => {
+      if (!this.open) return;
+      const accepted = confirmResponder(this.textContent);
+      document.querySelector(accepted ? "#admin-confirm-submit" : "#admin-confirm-cancel").click();
+    });
+  }
   close() { this.open = false; this.returnFocus?.focus(); }
   reset() {
     for (const input of this.querySelectorAll("input, select")) {
@@ -102,6 +116,16 @@ class Element {
     }
   }
 }
+// Node's object diff can expand the whole cyclic DOM graph for a reference
+// mismatch. Fail with bounded identity labels instead of formatting that graph.
+const equalValue = assert.equal;
+assert.equal = (actual, expected, message) => {
+  if (actual !== expected && (actual instanceof Element || expected instanceof Element)) {
+    const label = (node) => node instanceof Element ? `${node.tagName}#${node.id || ""}` : String(node);
+    assert.fail(message || `DOM identity mismatch: ${label(actual)} !== ${label(expected)}`);
+  }
+  equalValue(actual, expected, message);
+};
 class HTMLTemplateElement extends Element {}
 function inflate(node) {
   if (typeof node === "string") {
@@ -117,11 +141,14 @@ function inflate(node) {
     .find((option) => "selected" in option.attrs)?.value || result.children[0]?.value;
   return result;
 }
+// Existing operation scenarios drive the shipped confirmation through its buttons.
+// Component scenarios set null and exercise each interaction explicitly.
+let confirmResponder = () => true;
 const document = inflate(htmlTree);
 document.createElement = (tag) => new Element(tag);
 document.createTextNode = (text) => { const node = new Element("text"); node.text = text; return node; };
 document.body = document.querySelector("body");
-const window = { innerWidth: 1200, addEventListener() {},
+const window = { innerWidth: 1200, innerHeight: 800, addEventListener() {},
   matchMedia: () => ({ matches: false, addEventListener() {} }) };
 window.history = {
   state: null,

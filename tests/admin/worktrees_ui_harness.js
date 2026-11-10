@@ -1,3 +1,4 @@
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 const requests = [];
 const confirmations = [];
 let confirmation = true;
@@ -9,7 +10,7 @@ let creationResult;
 let settingsResult;
 let settingsSave;
 let creationOptionsResults = new Map();
-window.confirm = (text) => { confirmations.push(text); return confirmation; };
+confirmResponder = (text) => { confirmations.push(text); return confirmation; };
 const grant = (kind) => ({ csrfToken: `${kind}-csrf`, actionToken: `${kind}-once`, target: { resource: "worktree", targetId: "one" } });
 const row = (state = "ready") => ({ id: "one", projectAlias: "demo", root: "/worktrees/one", cwd: "/worktrees/one/sub",
   state, branch: null, head: "abc123", orphaned: state === "missing", associatedSessionCount: 2,
@@ -116,6 +117,7 @@ async function api(path, options = {}) {
   assert.equal(input("create-drawer").open, true);
   assert.equal(input("settings").hidden, true);
   const cancelled = input("create-drawer").dispatch("cancel");
+  await flush();
   assert.equal(cancelled.prevented, true);
   assert.equal(input("create-drawer").open, true);
   confirmation = true;
@@ -133,7 +135,7 @@ async function api(path, options = {}) {
   assert.equal(input("create-cancel").disabled, true);
   assert.equal(input("create-submit").disabled, true);
   assert.match(input("create-submit").textContent, /正在创建/);
-  assert.equal(controller.discard(), false, "navigation cannot abandon an in-flight mutation");
+  assert.equal(await controller.discard(), false, "navigation cannot abandon an in-flight mutation");
   assert.equal(input("create-drawer").dispatch("cancel").prevented, true);
   assert.equal(input("create-drawer").open, true);
   await trigger("worktree-create", "submit");
