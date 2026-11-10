@@ -2,7 +2,7 @@ let redirected = null;
 let confirmation = true;
 const confirmations = [];
 window.location = { pathname: "/maintenance", search: "", assign(value) { redirected = value; } };
-window.confirm = (message) => { confirmations.push(message); return confirmation; };
+confirmResponder = (message) => { confirmations.push(message); return confirmation; };
 window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 let now = 1000;
@@ -223,7 +223,8 @@ const restartOperation = (phase, id = "new-restart") => ({
   assert.equal(updateReading, false);
   completeDiagnostics(response({ message: "expired" }, 401));
   assert.equal(await expiredRefresh, false);
-  assert.match(document.querySelector("#status").textContent, /登录已过期/);
+  assert.equal(document.querySelector("#status").hidden, true);
+    assert.equal(document.querySelector("#auth-expired").hidden, false);
   assert.equal(state.authExpired, true);
   assert.equal(document.querySelector("#auth-expired").hidden, false);
   // Model a fresh login for the independent restart-poll expiry case below.

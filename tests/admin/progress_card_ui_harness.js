@@ -1,6 +1,6 @@
 let confirm = true;
 window.location = { pathname: "/projects", search: "", assign() {} };
-window.confirm = () => confirm;
+confirmResponder = () => confirm;
 window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 let nextTimer = 0;
 const timers = new Map();

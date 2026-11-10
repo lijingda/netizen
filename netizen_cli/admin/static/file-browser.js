@@ -205,6 +205,7 @@ window.NetizenFileBrowser = {
     const preparation = new AbortController();
     view.requests["delete-options"] = preparation;
     view.deleting = true;
+    let cancelled = false;
     view.deleteNote = "";
     view.deleteError = false;
     renderActions(view);
@@ -213,6 +214,7 @@ window.NetizenFileBrowser = {
         signal: preparation.signal,
         isCurrent: () => active(view) && view.identity === identity && view.selectedFile === file,
       });
+      cancelled = !result && active(view) && view.identity === identity && view.selectedFile === file;
       if (!result || !active(view) || view.identity !== identity) return;
       const parent = parentPath(file.path);
       let returned = false;
@@ -259,7 +261,10 @@ window.NetizenFileBrowser = {
     } finally {
       if (view.requests["delete-options"] === preparation) delete view.requests["delete-options"];
       view.deleting = false;
-      if (active(view)) renderActions(view);
+      if (active(view)) {
+        renderActions(view);
+        if (cancelled && !node("delete").disabled) node("delete").focus();
+      }
     }
   }
   const MAX_TREE_ENTRIES = 10000;

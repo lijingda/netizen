@@ -6,7 +6,7 @@ const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 const mutations = [];
 const confirmations = [];
 let accepted = false;
-window.confirm = (message) => { confirmations.push(message); return accepted; };
+confirmResponder = (message) => { confirmations.push(message); return accepted; };
 window.prompt = () => "new-name";
 const session = {
   bindingId: "binding-full-12345678901234567890", nativeThreadId: "thread-full-12345678901234567890",
@@ -88,7 +88,7 @@ async function fetch(path, options = {}) {
   assert.match(threadInput.getAttribute("aria-label"), /Codex 会话 ID.*跨会话工具.*完整值/);
   const lazyRow = document.createElement("tr");
   sessionIdentityCell(lazyRow, { ...session, nativeThreadId: null, topicId: null, nativeTitle: null, catalogState: "lazy" });
-  assert.equal(lazyRow.querySelector("strong").textContent, "Lazy Session");
+  assert.equal(lazyRow.querySelector("strong").textContent, "未开始的会话");
   assert.equal(lazyRow.querySelectorAll("input").length, 2);
   assert.match(lazyRow.textContent, /Codex 会话 ID 尚未生成/);
 
@@ -96,28 +96,35 @@ async function fetch(path, options = {}) {
     session.actions[action] = { actionToken: action };
   }
   const actions = document.createElement("div");
+  document.body.append(actions);
   wireSessionActions(actions, session);
   assert.deepEqual(actions.children.filter((child) => child.tagName === "button").map((button) => button.textContent),
-    ["配置", "停止", "设为当前", "归档", "恢复", "恢复并设为当前"]);
-  const more = actions.querySelector("details");
-  assert(!more.open);
+    ["配置", "停止", "设为当前"]);
+  const more = actions.querySelector(".row-menu-popover");
+  const moreButton = actions.querySelector(".row-menu").querySelector("button");
+  assert(more.hidden);
   assert.deepEqual(more.querySelectorAll("button").map((button) => button.textContent),
-    ["创建定时任务", "重命名", "删除 Lazy", "删除", "释放订阅"]);
+    ["创建定时任务", "重命名", "释放订阅", "归档", "恢复", "恢复并设为当前", "删除未开始的会话", "删除"]);
   const button = (label) => actions.querySelectorAll("button").find((item) => item.textContent === label);
   button("配置").click();
   await flush();
   assert.equal(sessionSettingsEditor.session.bindingId, session.bindingId);
   assert.equal(sessionSettingsInput("drawer").open, true);
-  closeSessionSettingsEditor();
+  await closeSessionSettingsEditor();
   button("创建定时任务").click();
   await flush();
   assert.equal(scheduleEditor.targetSession, session);
   assert.equal(scheduleInput("drawer").open, true);
-  closeScheduleEditor();
+  await closeScheduleEditor();
   button("删除").click(); await flush();
   assert.equal(mutations.length, 0);
   assert.match(confirmations.at(-1), /不可恢复|无法恢复/);
+  button("删除未开始的会话").click(); await flush();
+  assert.equal(mutations.length, 0, "cancelling an unstarted session deletion sends no request");
   accepted = true;
+  button("删除未开始的会话").click(); await flush();
+  assert.equal(mutations.at(-1).path, "/api/v1/sessions/delete-lazy");
+  assert.equal(mutations.at(-1).body.actionToken, session.actions.deleteLazy.actionToken);
   button("删除").click(); await flush();
   assert.equal(mutations.at(-1).path, "/api/v1/sessions/delete-materialized");
   assert.equal(mutations.at(-1).body.actionToken, session.actions.deleteMaterialized.actionToken);
@@ -133,13 +140,13 @@ async function fetch(path, options = {}) {
   assert.equal(mutations.length, beforeArchive + 1);
   assert.equal(mutations.at(-1).path, "/api/v1/sessions/archive");
   assert.equal(mutations.at(-1).body.actionToken, session.actions.archive.actionToken);
-  more.open = true;
+  moreButton.click();
   more.dispatch("keydown", { key: "Escape" });
-  assert.equal(more.open, false);
-  assert.equal(document.activeElement, more.querySelector("summary"));
+  assert.equal(more.hidden, true);
+  assert.equal(document.activeElement, moreButton);
   const unprivileged = document.createElement("div");
   wireSessionActions(unprivileged, { ...session, actions: {} });
-  assert.deepEqual(unprivileged.querySelectorAll("button").map((item) => item.textContent), ["创建定时任务"]);
+  assert.deepEqual(unprivileged.querySelectorAll("button").filter((item) => item.getAttribute("role") === "menuitem").map((item) => item.textContent), ["创建定时任务"]);
 
   const opener = document.createElement("button");
   opener.isConnected = true;
@@ -204,9 +211,10 @@ async function fetch(path, options = {}) {
   respond = async (query) => query.get("mode") === "view" ? view("second") : { runs: [], next_cursor: null };
   await showSchedule("second", opener);
   oldRuns.resolve(runPage("STALE")); await pending;
-  assert.equal(scheduleInput("runs-body").children.length, 0, "reopening exact same plan still rejects old page response");
+  assert(scheduleInput("runs-body").querySelector(".list-empty"), "reopening exact same plan still rejects old page response");
+  assert.doesNotMatch(scheduleInput("runs-body").textContent, /STALE/);
   assert.equal(scheduleInput("runs-page").textContent, "第 1 页");
-  assert.equal(scheduleInput("runs-note").textContent, "暂无触发记录。");
+  assert.match(scheduleInput("runs-body").textContent, /暂无触发记录/);
 
   const staleView = deferred();
   respond = () => staleView.promise;

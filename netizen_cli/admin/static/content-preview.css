@@ -14,7 +14,7 @@ body.file-browser-open, body.session-answer-open { overflow: hidden; }
 .file-browser-roots { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 22px; font-size: 12px; }
 .file-browser-roots label { color: var(--muted); }
 .file-browser-roots select { flex: 1; min-width: 120px; max-width: 100%; font-size: 12px; }
-.file-browser-drawer button:not(.drawer-close) { border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; background: var(--paper); color: var(--ink); font-size: 12px; line-height: 18px; }
+.file-browser-drawer button:not(.drawer-close) { border: 1px solid var(--line); border-radius: 6px; min-height: var(--control-compact-height); padding: var(--control-compact-padding); background: var(--paper); color: var(--ink); font-size: var(--font-sm); line-height: 18px; }
 .file-browser-drawer button:hover:not(:disabled) { background: var(--wash); }
 .file-browser-drawer button:focus-visible, .file-browser-drawer a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .file-browser-drawer button[aria-pressed="true"] { border-color: #bbcff5; color: var(--blue); background: var(--blue-soft); }
@@ -179,3 +179,6 @@ body.file-browser-open, body.session-answer-open { overflow: hidden; }
   .session-answer-details { padding: 9px 16px; }
   .session-answer-identity { font-size: 11px; }
 }
+
+.file-browser-drawer #file-browser-delete { border-color: var(--danger-line); }
+.file-browser-drawer #file-browser-delete:hover:not(:disabled) { background: var(--danger-soft); }

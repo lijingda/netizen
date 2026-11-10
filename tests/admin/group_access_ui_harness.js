@@ -12,7 +12,7 @@ const statuses = [];
 let remote = { mode: "all", chatIds: ["oc_retained"], revision: "first",
   chats: [{chatId: "oc_retained", name: "保留群"}],
   saveAction: { actionToken: "first" } };
-window.confirm = (message) => { confirmations.push(message); return acceptSwitch; };
+confirmResponder = (message) => { confirmations.push(message); return acceptSwitch; };
 window.createChatPicker = (_root, options) => {
   selected = options.onChange;
   return { setDisabled() {}, close() {}, reset() {} };
@@ -52,9 +52,14 @@ const visibleIds = () => element("chats").value.split(/\s+/).filter(Boolean).sor
   assert.deepEqual(visibleIds(), ["oc_manual", "oc_retained", "oc_selected"]);
   acceptSwitch = false;
   const before = calls.length;
+  const save = element("save");
+  const focusSave = save.focus.bind(save);
+  save.focus = () => { if (!save.disabled) focusSave(); };
+  save.focus();
   element("form").dispatch("submit");
   await flush();
   assert.equal(calls.length, before, "canceling confirmation must not consume a grant");
+  assert.equal(document.activeElement, save, "cancel restores focus after the form is enabled");
   acceptDiscard = false;
   assert.equal(await editor.load(), false);
   acceptSwitch = true;

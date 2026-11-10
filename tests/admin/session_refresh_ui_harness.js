@@ -48,7 +48,8 @@
       await advanceTime(1000);
       if (failure) {
         // The shared mutation handler refreshes and rethrows to its caller.
-        await assert.rejects(stop.listeners.get("click")[0](), /会话状态已变化/);
+        await stop.listeners.get("click")[0]();
+        assert.match(statusNode.textContent, /会话状态已变化/);
       } else stop.click();
       await flush();
       const action = requests.findLast((request) => request.path.endsWith("/stop"));
@@ -72,7 +73,7 @@
     refreshButton.click(); await flush();
     assert.equal(body.textContent, visible);
     assert.equal(freshness.textContent, timestamp);
-    assert.equal(statusNode.textContent, readFailure + " 当前仍显示上次成功读取的结果。");
+    assert.equal(document.querySelector(kind === "side" ? "#sides-error" : "#sessions-error").textContent, readFailure + " 当前仍显示上次成功读取的结果。重试");
     const afterFailure = requests.length;
     await advanceTime(60000);
     assert.equal(requests.length, afterFailure);
@@ -80,7 +81,7 @@
     else ordinaryAnswer = answer;
     refreshButton.click(); await flush();
     assert.notEqual(freshness.textContent, timestamp);
-    assert.equal(statusNode.textContent, "已更新。");
+    assert.equal(document.querySelector(kind === "side" ? "#sides-error" : "#sessions-error").hidden, true);
   }
 
   // One-shot list reads still render unavailable/archived/local runtime facts
@@ -89,10 +90,10 @@
   for (const [catalogState, resolution, primaryStatus, label] of [
     ["active", "unavailable", null, "状态暂不可用"],
     ["active", "deferred", null, "状态待确认"],
-    ["active", "unavailable", "running", "running（待确认）"],
+    ["active", "unavailable", "running", "运行中（待确认）"],
     ["archived", "archived", null, "—"],
-    ["archived", "local", "lifecycle-unknown", "lifecycle-unknown"],
-    ["unknown", "local", "running", "running"],
+    ["archived", "local", "lifecycle-unknown", "生命周期结果未知"],
+    ["unknown", "local", "running", "运行中"],
   ]) {
     ordinaryAnswer = async () => ({ items: [{ ...ordinary, catalogState,
       runtime: { ...ordinary.runtime, primaryStatus, primaryStatusResolution: resolution } }], nextCursor: null });
@@ -113,7 +114,7 @@
     sideAnswer = async () => ({ items: [{ ...side, sessionState, runtime }], nextCursor: null });
     await refresh("sessions");
     const body = document.querySelector("#sides-body");
-    assert.equal(body.querySelector(".side-session-state").textContent, stateLabel);
+    assert.equal(body.querySelector(".side-session-state").querySelector(".badge").textContent, stateLabel);
     assert.equal(body.querySelector(".runtime-state").textContent, label);
   }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

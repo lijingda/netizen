@@ -1,5 +1,5 @@
 window.location = { search: initialSearch, assign() {} };
-window.confirm = () => true;
+confirmResponder = () => true;
 window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 let now = 0;
@@ -13,7 +13,7 @@ const performance = { now: () => now };
 Date.now = () => Date.UTC(2026, 9, 12, 8) + now;
 const requests = [];
 const confirmations = [];
-window.confirm = (message) => { confirmations.push(message); return true; };
+confirmResponder = (message) => { confirmations.push(message); return true; };
 const ordinary = {
   bindingId: "binding-parent", shortId: "parent", chatId: "oc_parent", chatLabel: "研发群",
   chatLabelResolved: true, chatMode: "group", chatOpenUrl: "https://applink.feishu.cn/chat",
@@ -108,7 +108,7 @@ async function advanceTime(duration) {
   assert.equal(state.tab, "projects");
   assert.equal(state.sessionTab, "ordinary");
   assert(!document.querySelectorAll(".tab").some((tab) => tab.dataset.tab === "side-topics"));
-  selectTab("sessions");
+  await selectTab("sessions");
   await flush();
   const ordinaryQuery = requests.findLast((request) => request.path === "/api/v1/sessions").query;
   assert.deepEqual(ordinaryQuery.getAll("inventoryState"), ["active"]);
@@ -123,10 +123,34 @@ async function advanceTime(duration) {
   assert.equal(sideQuery().get("pageSize"), "20");
   for (const key of ["inventoryState", "scopeKind", "current", "parentBindingId", "topicId", "rootMessageId"]) assert(!sideQuery().has(key));
   const row = () => document.querySelector("#sides-body").children[0];
-  assert.equal(row().children.length, 8);
+  assert.equal(row().children.length, 7);
+  const sideChips = document.querySelector("#side-filter-chips");
+  assert.equal(sideChips.children.length, 0);
+  sideMultiFilters.get("project").setValues(["netizen"]);
+  sideMultiFilters.get("state").setValues(["closed"]);
+  const sideDates = document.querySelector("#side-filter").querySelector("[data-time-range]");
+  timeRangeControllers.get(sideDates).setBounds("2026-10-01T00:00:00Z", "2026-10-12T23:59:00Z");
+  document.querySelector("#side-filter").dispatch("submit"); await flush();
+  assert.equal(document.querySelector("#side-more-filters").textContent, "更多筛选（1）");
+  sideMultiFilters.get("project").setValues(["docs"]);
+  sideMultiFilters.get("state").setValues(["failed"]);
+  [...sideChips.children].find((button) => button.dataset.filterKey === "created").click(); await flush();
+  assert.equal(sideQuery().has("createdFrom"), false);
+  assert.deepEqual(sideQuery().getAll("state"), ["closed"]);
+  assert.deepEqual(sideMultiFilters.get("state").values(), ["failed"]);
+  const sideSize = document.querySelector("#side-page-size");
+  sideSize.value = "50"; sideSize.dispatch("change"); await flush();
+  assert.equal(sideQuery().get("pageSize"), "50");
+  assert.deepEqual(sideQuery().getAll("project"), ["netizen"]);
+  assert.deepEqual(sideMultiFilters.get("project").values(), ["docs"]);
+  [...sideChips.children].find((button) => button.dataset.filterKey === "state").click(); await flush();
+  assert.deepEqual(sideQuery().getAll("state"), ["creating", "open"]);
+  assert.deepEqual(sideMultiFilters.get("state").values(), ["creating", "open"]);
+  assert.equal(document.querySelector("#side-more-filters").textContent, "更多筛选（0）");
+  await resetSideFilters();
   assert.equal(row().children[0].querySelector("a").href, side.topicOpenUrl);
   assert(!row().children[0].textContent.includes(side.chatId));
-  assert.equal(row().children[1].children[0].textContent, "普通会话标题");
+  assert.equal(row().children[1].querySelector("span").textContent, "普通会话标题");
   assert(row().querySelector("details").textContent.includes("Side side-a"));
   assert.equal(row().querySelector(".runtime-state").textContent, "运行中");
   const parentLink = row().querySelector(".actions").querySelector("a");
@@ -212,9 +236,9 @@ async function advanceTime(duration) {
   listItems = [{ ...side, parentSession: { bindingId: side.parentBindingId, available: false, title: null },
     projectAlias: null, runtime: null, sessionState: "closed", state: "closed", actions: {}, chatLabelResolved: false }];
   await refresh("sessions");
-  assert.equal(row().children[1].children[0].textContent, "原会话已删除");
+  assert.equal(row().children[1].querySelector("span").textContent, "原会话已删除");
   assert.equal(row().querySelector(".runtime-state").textContent, "—");
-  assert.equal(row().children[4].textContent, "原项目已不可用");
+  assert.equal(row().children[3].textContent, "原项目已不可用");
   assert.equal(buttons().length, 0);
   assert(!row().querySelector(".actions").querySelector("a"));
   const beforeIdle = requests.length;
@@ -222,7 +246,7 @@ async function advanceTime(duration) {
   assert.equal(requests.length, beforeIdle);
 
   // Explicit schedule selection forces ordinary even after temporary was selected.
-  selectTab("sessions", "ordinary"); await flush();
+  await selectTab("sessions", "ordinary"); await flush();
   assert.equal(state.sessionTab, "ordinary");
   assert.equal(document.querySelector("#sessions-ordinary").hidden, false);
   await checkAtomicSessionLists();
@@ -247,8 +271,8 @@ async function advanceTime(duration) {
   assert.equal(lazyCreated.querySelector(".sort-label").textContent, "登记时间");
   assert.equal(document.querySelector("#sessions-lazy-notice").hidden, false);
   const lazyRow = document.querySelector("#sessions-body").children[0];
-  assert.equal(lazyRow.children[7].textContent, sessionDateLabel(registeredAt));
-  assert.equal(lazyRow.children[8].textContent, "尚未开始");
+  assert.equal(lazyRow.children[5].textContent, sessionDateLabel(registeredAt));
+  assert.equal(lazyRow.children[6].textContent, "尚未开始");
   const beforeSort = requests.length;
   await sortSessionPage("session", "updatedAt");
   assert.equal(requests.length, beforeSort, "Lazy cannot claim to sort unknown native update times");
@@ -295,7 +319,7 @@ async function checkAtomicSessionLists() {
     filter.reject(new Error("filter unavailable")); await applying;
     assert.deepEqual(snapshot(), saved);
     assert.equal(chat.value, "oc_edited_during_request");
-    assert.match(statusNode.textContent, /上次成功/);
+    assert.match(document.querySelector(state.sessionTab === "temporary" ? "#sides-error" : "#sessions-error").textContent, /上次成功/);
     size.value = "100";
     answerWith(async () => { throw new Error("page size unavailable"); });
     size.dispatch("change"); await flush();
@@ -369,8 +393,8 @@ async function checkSessionSorting() {
     assert.equal(freshness.hidden, false);
     assert.match(freshness.textContent, /^更新于 \d{2}:\d{2}:\d{2}$/);
 
-    const createdCell = row().children[kind === "side" ? 5 : 7];
-    const updatedCell = row().children[kind === "side" ? 6 : 8];
+    const createdCell = row().children[kind === "side" ? 4 : 5];
+    const updatedCell = row().children[kind === "side" ? 5 : 6];
     assert.equal(createdCell.textContent, kind === "side" ? sessionDateLabel(side.createdAt) : nativeSessionDateLabel(ordinary.createdAt));
     assert.equal(updatedCell.textContent, kind === "side" ? sessionDateLabel(side.updatedAt) : sessionUpdatedAtLabel(ordinary));
 

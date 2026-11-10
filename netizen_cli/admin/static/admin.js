@@ -3,7 +3,6 @@
 const state = {
   tab: "projects",
   sessionTab: "ordinary",
-  systemTab: "admins",
   projects: null,
   sessions: null,
   sides: null,
@@ -17,9 +16,23 @@ const state = {
 
 const statusNode = document.querySelector("#status");
 
-function setStatus(message, isError = false) {
-  statusNode.textContent = message || "";
+let statusTimer = null;
+function setStatus(message, isError = false, { pending = false } = {}) {
+  clearTimeout(statusTimer);
+  statusTimer = null;
+  if (state.authExpired) message = "";
+  statusNode.replaceChildren();
+  statusNode.hidden = !message;
   statusNode.classList.toggle("error", isError);
+  if (!message) return;
+  const text = document.createElement("span"); text.textContent = message;
+  const close = document.createElement("button"); close.type = "button"; close.className = "status-close";
+  close.setAttribute("aria-label", "关闭操作提示");
+  close.addEventListener("click", () => setStatus(""));
+  statusNode.append(text, close);
+  if (!isError && !pending && !/正在|未确认|未知|待确认|(?:请|需|需要).*?(?:核对|核查|刷新)|刷新失败/.test(message)) {
+    statusTimer = setTimeout(() => setStatus(""), 5000);
+  }
 }
 
 async function api(path, options = {}) {
@@ -59,8 +72,11 @@ function expireAdminSession() {
   stopUpdatePolling();
   closeSessionRenameEditor({ expired: true });
   closeProjectDeleteDialog();
+  window.NetizenConfirm.cancel();
+  window.NetizenMenu.close();
   window.NetizenSelect?.close();
   // Release these modal drawers so the page's login link remains reachable.
+  closeNavigationMenu();
   // Inputs stay in memory, but expired actions can never be submitted again.
   for (const dialog of document.querySelectorAll("#project-drawer, #worktree-create-drawer, #worktree-settings-drawer")) {
     if (dialog.open) dialog.close();
@@ -78,7 +94,7 @@ function expireAdminSession() {
   window.NetizenWorktrees?.expire();
   window.NetizenProjectFiles?.expire();
   closeLatestAnswer();
-  setStatus("登录已过期，请重新登录。", true);
+  setStatus("");
 }
 
 const updateTerminalPhases = new Set([
@@ -321,13 +337,14 @@ async function restartService() {
       || updatePollExpired || updateDisconnected) return;
   const envelope = state.updates?.actions?.restart;
   if (!envelope || !state.updates.restartSupported || !state.updates.restartAvailable) return;
-  if (!window.confirm(
-    "确认重启服务？将使用绑定环境中当前安装的程序，不更新软件包。\n\n"
+  if (!(await window.NetizenConfirm.ask({ title: "重启服务", body: "确认重启服务？将使用绑定环境中当前安装的程序，不更新软件包。\n\n"
       + `实例：${document.querySelector("#instance-root")?.textContent || "当前实例"}\n\n`
       + "重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。"
       + "重启后不会自动续跑，管理页需要重新登录。",
-  )) return;
+  }))) return;
+  if (state.authExpired) return;
   updateSubmitting = true;
+  setStatus("正在提交服务重启…");
   updateExpectedTarget = envelope.target;
   updatePriorOperationId = state.updates.operation?.operationId || null;
   updatePollStarted = Date.now();
@@ -379,7 +396,9 @@ async function mutate(path, envelope, extra = {}) {
     });
     const refreshed = await refresh(state.tab);
     if (refreshed) {
-      setStatus(result?.message || "操作完成，已按服务端事实刷新。");
+      setStatus(result?.message || "操作完成。");
+    } else {
+      setStatus(`${result?.message || "操作完成。"} 列表刷新失败，请手动刷新核对。`, true);
     }
     return result;
   } catch (error) {
@@ -403,9 +422,17 @@ function cell(row, text, className = "") {
 function actionButton(label, handler, danger = false) {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = danger ? "action danger" : "action";
+  button.className = danger ? "action compact danger" : "action compact";
   button.textContent = label;
-  button.addEventListener("click", handler);
+  button.addEventListener("click", async (event) => {
+    if (button.disabled || button.actionPending) return;
+    button.actionPending = true;
+    try {
+      const result = handler(event);
+      if (result?.then) { button.disabled = true; await result; }
+    } catch { /* Operations report their own result; never replay them. */ }
+    finally { button.actionPending = false; if (!state.authExpired) button.disabled = false; }
+  });
   return button;
 }
 
@@ -458,10 +485,11 @@ function renderProjectEditorControls() {
   projectInput("check").disabled = Boolean(busy || projectEditor.checking);
 }
 
-function openProjectEditor() {
+async function openProjectEditor() {
   if (state.authExpired || projectEditor?.saving
       || !(state.projects?.actions?.register || state.projects?.actions?.createDirectory)) return;
-  if (projectEditor && !closeProjectEditor()) return;
+  if (projectEditor && projectEditorHasChanges() && !(await closeProjectEditor())) return;
+  if (projectEditor) closeProjectEditor({ confirmed: true });
   projectEditor = { mode: "register", paths: { register: "", createDirectory: "" },
     actions: { ...state.projects.actions }, returnFocus: document.activeElement, saving: false, attempted: false };
   projectInput("alias").value = "";
@@ -479,10 +507,10 @@ function openProjectEditor() {
   projectInput("alias").focus();
 }
 
-function closeProjectEditor({ saved = false, confirmed = false } = {}) {
+async function closeProjectEditor({ saved = false, confirmed = false } = {}) {
   if (!projectEditor) return true;
   if (projectEditor.saving) return false;
-  if (!saved && !confirmed && !confirmDiscardChanges(projectEditorHasChanges())) return false;
+  if (!saved && !confirmed && (projectEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
   const returnFocus = projectEditor.returnFocus;
   projectEditor = null;
   projectInput("editor").hidden = true;
@@ -518,7 +546,7 @@ async function checkProjectResult() {
     } else {
       projectInput("note").textContent = refreshed === false
         ? "列表未更新，请再次刷新核对。"
-        : "已刷新 Projects 列表；请关闭表单核对 Alias 与路径。未重复提交操作。";
+        : "已刷新 Project 列表；请关闭表单核对 Alias 与路径。未重复提交操作。";
     }
   } catch (error) {
     if (projectEditor === editor && !state.authExpired) projectInput("note").textContent = `列表读取失败：${error.message}`;
@@ -540,6 +568,7 @@ async function saveProject(event) {
   editor.attempted = true;
   projectInput("note").textContent = editor.mode === "register" ? "正在登记 Project…" : "正在创建 Project…";
   renderProjectEditorControls();
+  setStatus(projectInput("note").textContent);
   let result;
   try {
     result = await api(editor.mode === "register" ? "/api/v1/projects/register" : "/api/v1/projects/create-directory", {
@@ -552,7 +581,7 @@ async function saveProject(event) {
     editor.uncertain = !error.status || error.status >= 500;
     projectInput("note").textContent = !editor.uncertain
       ? `${error.message} 输入已保留，请刷新后修改并重新提交。`
-      : "操作结果未确认，请刷新 Projects 列表核对；不要重复提交。";
+      : "操作结果未确认，请刷新 Project 列表核对；不要重复提交。";
     projectInput("note").classList.toggle("error", true);
     projectInput("check").hidden = false;
     projectInput("check").textContent = editor.uncertain ? "刷新列表核对" : "刷新后继续填写";
@@ -576,11 +605,11 @@ async function saveProject(event) {
 }
 
 function confirmMaterializedDelete(session) {
-  const name = session.nativeTitle || "未命名 Session";
-  return window.confirm(
-    `确认永久删除这个会话？\n\n会话：${name}\nScope：${session.scopeKey}\nNetizen 会话编号：${session.shortId}`
-    + "\n\nCodex 会话、派生会话、Codex App/CLI 历史和 Netizen 中的会话记录都会永久消失，无法恢复。",
-  );
+  const name = session.nativeTitle || "未命名会话";
+  return window.NetizenConfirm.ask({ title: "永久删除会话", danger: true, confirmLabel: "永久删除",
+    body: "Codex 会话、派生会话、Codex App/CLI 历史和 Netizen 中的会话记录都会永久消失，无法恢复。",
+    details: [`会话：${name}`, `Scope：${session.scopeKey}`, `Netizen 会话编号：${session.shortId}`],
+  });
 }
 
 function badge(value, active = false, warning = false) {
@@ -649,7 +678,7 @@ async function refreshProjectDeletePreview() {
     if (projectDeleteDialog !== view || state.authExpired) return;
     view.preview = preview;
     view.envelope = preview.actions.previewDelete;
-    projectDeleteInput("sessions").textContent = `${preview.sessionCount}（Lazy ${preview.lazySessionCount}，已创建 ${preview.materializedSessionCount}）`;
+    projectDeleteInput("sessions").textContent = `${preview.sessionCount}（未开始 ${preview.lazySessionCount}，已创建 ${preview.materializedSessionCount}）`;
     projectDeleteInput("sides").textContent = String(preview.sideCount);
     projectDeleteInput("plans").textContent = String(preview.scheduledPlanCount || 0);
     projectDeleteInput("runs").textContent = String(preview.scheduledRunCount || 0);
@@ -704,6 +733,7 @@ function confirmProjectDelete(project, envelope) {
 }
 
 async function deleteProject(project) {
+  if (window.NetizenConfirm.busy()) return;
   const envelope = project.actions.previewDelete;
   if (!envelope || pendingProjectDeletes.has(project.alias) || projectDeleteDialog || state.authExpired) return;
   const returnFocus = document.activeElement;
@@ -726,21 +756,21 @@ async function deleteProject(project) {
       return;
     }
     submitted = true;
-    showProjectDeleteResult(`正在删除 Project「${project.alias}」及关联 Sessions，请等待服务端确认…`);
+    showProjectDeleteResult(`正在删除 Project「${project.alias}」及关联会话，请等待服务端确认…`);
     const result = await api("/api/v1/projects/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(preview.actions.delete)),
     });
     if (result.deleted === true) {
-      message = `Project「${result.projectAlias}」及关联 Sessions 已删除，已删除 ${result.deletedSessionCount} 个 Session。磁盘代码目录保留。`;
+      message = `Project「${result.projectAlias}」及关联会话已删除，已删除 ${result.deletedSessionCount} 个会话。磁盘代码目录保留。`;
     } else {
       isError = true;
       message = `Project「${result.projectAlias}」仍保留，删除尚未全部完成。`
-        + `\n已删除 ${result.deletedSessionCount} 个 Session；剩余 ${result.remainingSessionCount} 个 Session、${result.remainingSideCount} 个 Side。`
+        + `\n已删除 ${result.deletedSessionCount} 个会话；剩余 ${result.remainingSessionCount} 个会话、${result.remainingSideCount} 个 Side。`
         + (result.message ? `\n${result.message}` : "");
       details = (result.remainingSessions || []).map((session) =>
-        `Session ${session.shortId} · Scope ${session.scopeKey} · Netizen 会话编号 ${session.bindingId}`);
+        `会话 ${session.shortId} · Scope ${session.scopeKey} · Netizen 会话编号 ${session.bindingId}`);
       if (result.failedBindingId) details.push(`未确认删除的会话：${result.failedBindingId}`);
       if (result.failedSideId) details.push(`未确认收尾的 Side：${result.failedSideId}`);
     }
@@ -759,11 +789,11 @@ async function deleteProject(project) {
   } catch (error) {
     isError = true;
     if (submitted && (error.status == null || error.status >= 500)) {
-      message = `Project「${project.alias}」的删除结果未确认，服务端可能仍在处理。请手动刷新 Projects 查看事实；不要重复提交删除。`;
+      message = `Project「${project.alias}」的删除结果未确认，服务端可能仍在处理。请手动刷新 Project 查看事实；不要重复提交删除。`;
     } else {
       message = submitted
         ? `Project「${project.alias}」的删除请求未完成。${error.message}`
-        : `无法读取 Project「${project.alias}」的删除范围，未提交删除。${error.status ? error.message : "请检查连接后刷新 Projects。"}`;
+        : `无法读取 Project「${project.alias}」的删除范围，未提交删除。${error.status ? error.message : "请检查连接后刷新 Project。"}`;
     }
   } finally {
     pendingProjectDeletes.delete(project.alias);
@@ -787,10 +817,16 @@ async function loadProjects(cursor = undefined) {
   const page = resolveCursorPage(state.projectPage || firstSessionPage(), cursor);
   const query = new URLSearchParams({ pageSize: "25" });
   if (page.cursor) query.set("cursor", page.cursor);
-  const data = await api(`/api/v1/projects?${query}`);
+  let data;
+  try { data = await api(`/api/v1/projects?${query}`); }
+  catch (error) {
+    if (request === state.projectListRequest && !state.authExpired) window.NetizenList.error("projects", error.message, () => loadProjects(cursor).catch(() => {}));
+    throw error;
+  }
   if (request !== state.projectListRequest) return false;
   state.projects = data;
   state.projectPage = { ...page, nextCursor: data.nextCursor };
+  window.NetizenMenu.close();
   const body = document.querySelector("#projects-body");
   body.replaceChildren();
   for (const project of data.items) {
@@ -800,12 +836,12 @@ async function loadProjects(cursor = undefined) {
     cell(row, project.cwd, "id");
     const status = document.createElement("td");
     status.append(badge(
-      project.deleting ? "正在删除" : project.enabled ? "Enabled" : "Disabled",
+      project.deleting ? "正在删除" : project.enabled ? "已启用" : "已停用",
       !project.deleting && project.enabled,
       project.deleting,
     ));
     row.append(status);
-    cell(row, `${project.bindingCount}（Lazy ${project.lazyBindingCount}）`);
+    cell(row, `${project.bindingCount}（未开始 ${project.lazyBindingCount}）`);
     cell(row, project.lastActivatedAt);
     const actions = actionsCell(row);
     if (!project.deleting) actions.append(actionButton("查看会话", () => openProjectSessions(project.alias)));
@@ -814,7 +850,6 @@ async function loadProjects(cursor = undefined) {
       actions.append(actionButton(
         project.enabled ? "停用" : "启用",
         () => mutate("/api/v1/projects/set-enabled", project.actions.setEnabled, { enabled: !project.enabled }),
-        project.enabled,
       ));
     }
     if (project.actions.previewDelete) {
@@ -834,14 +869,17 @@ async function loadProjects(cursor = undefined) {
     const empty = document.createElement("td");
     empty.colSpan = 6;
     const message = document.createElement("p");
-    message.textContent = "本页没有 Project。可登记已有目录，或创建空目录。";
+    row.className = "list-empty";
+    message.textContent = state.projectPage.number === 1 ? "还没有 Project，可添加一个工作目录。" : "本页没有 Project，可返回上一页。";
     const add = actionButton("添加 Project", openProjectEditor);
+    add.className = "action primary";
     add.setAttribute("data-project-add", "");
     empty.append(message, add);
     row.append(empty);
     body.append(row);
   }
   renderProjectEditorControls();
+  window.NetizenList.success("projects");
   renderCursorPagination("projects", state.projectPage, data.items.length);
   return true;
 }
@@ -1327,6 +1365,7 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
       query.set("updatedRange", "all"); // URL intent only; never sent to the API.
     }
   }
+  if (["session-filter", "side-filter"].includes(form.id)) query.set("pageSize", document.querySelector(`#${form.id.replace("-filter", "")}-page-size`).value);
   if (!query.has("pageSize")) query.set("pageSize", defaultPageSize);
   return query;
 }
@@ -1484,6 +1523,17 @@ function timeRangeSummary(from, before, kind = "custom", now = new Date()) {
   return `${heading ? `${heading}\n` : ""}${startLabel} ~ ${endLabel}`;
 }
 
+function compactTimeRange(from, before, kind = "custom") {
+  if (!from && !before) return "全部时间";
+  if (kind !== "custom" && timeRangePresetLabels[kind]) return timeRangePresetLabels[kind];
+  const date = (value, end = false) => {
+    if (!value) return end ? "不限终点" : "不限起点";
+    const parsed = new Date(new Date(value).getTime() - (end ? 1 : 0));
+    return Number.isNaN(parsed.getTime()) ? value : localMinuteValue(parsed).slice(0, 10);
+  };
+  return `${date(from)} 至 ${date(before, true)}`;
+}
+
 function presetTimeRange(kind, now = new Date(), openEnded = false) {
   if (kind === "all") return allTimeRange();
   let from;
@@ -1619,15 +1669,7 @@ function initializeTimeRangeFilter(root) {
     fromNode.value = applied.from;
     beforeNode.value = applied.before;
     applied.summary = timeRangeSummary(applied.from, applied.before, applied.kind);
-    const [heading, bounds] = applied.summary.split("\n");
-    if (bounds) {
-      const name = document.createElement("span");
-      name.textContent = `${heading}\n`;
-      const dates = document.createElement("span");
-      dates.className = "time-range-dates";
-      dates.textContent = bounds;
-      summary.replaceChildren(name, dates);
-    } else summary.textContent = applied.summary;
+    summary.textContent = compactTimeRange(applied.from, applied.before, applied.kind);
     const dates = [applied.from, applied.before || new Date()].filter(Boolean)
       .map((value) => new Date(value)).filter((value) => !Number.isNaN(value.getTime()));
     trigger.title = `${applied.summary}\n${zoneDescription(dates)}`;
@@ -1843,13 +1885,33 @@ for (const root of document.querySelectorAll("[data-time-range]")) {
   timeRangeControllers.set(root, initializeTimeRangeFilter(root));
 }
 
+const runtimeLabels = Object.freeze({
+  running: "运行中", stopping: "停止中", "turn-observation-unavailable": "任务观测不可用",
+  "goal-starting": "Goal 启动中", "goal-running": "Goal 运行中", "goal-pausing": "Goal 暂停中",
+  "externally-active-goal": "外部活跃 Goal", "goal-unknown": "Goal 状态未知",
+  renaming: "重命名中", archiving: "归档中", unarchiving: "恢复归档中", deleting: "删除中",
+  "lifecycle-unknown": "生命周期结果未知", compacting: "压缩上下文中", idle: "空闲",
+  "goal-active": "Goal 进行中", "goal-paused": "Goal 已暂停", "goal-blocked": "Goal 受阻",
+  "goal-usageLimited": "Goal 用量受限", "goal-budgetLimited": "Goal 预算受限", "goal-complete": "Goal 已完成",
+});
+
+function localizedLabel(labels, value) {
+  return Object.hasOwn(labels, value) ? labels[value] : value;
+}
+
+function subscriptionStateLabel(value) {
+  return localizedLabel({ subscribed: "已订阅", "release-pending": "等待释放", releasing: "释放中",
+    released: "已释放", "release-unknown": "释放结果未知" }, value);
+}
+
 function runtimeLabel(runtime) {
   if (runtime.primaryStatusResolution === "archived") return "—";
   if (runtime.primaryStatus != null) {
+    const label = localizedLabel(runtimeLabels, runtime.primaryStatus);
     return runtime.primaryStatusResolution === "unavailable"
       || runtime.primaryStatusResolution === "deferred"
-      ? `${runtime.primaryStatus}（待确认）`
-      : runtime.primaryStatus;
+      ? `${label}（待确认）`
+      : label;
   }
   return runtime.primaryStatusResolution === "deferred"
     ? "状态待确认"
@@ -1859,9 +1921,9 @@ function runtimeLabel(runtime) {
 function updateRuntimeCell(target, runtime) {
   const archived = runtime.primaryStatusResolution === "archived";
   const label = runtimeLabel(runtime);
-  const title = archived ? "已归档，不查询运行态" : "";
+  const title = archived ? "已归档，不查询运行态" : label;
   const subscriptionLabel = !archived && runtime.subscriptionState
-    ? `订阅：${runtime.subscriptionState}` : "";
+    ? `订阅：${subscriptionStateLabel(runtime.subscriptionState)}` : "";
   const previous = target.querySelector(".runtime-primary");
   if (
     previous?.textContent === label
@@ -1897,13 +1959,13 @@ function pointerStateLabel(value) {
 }
 
 function catalogStateLabel(value) {
-  return {
-    active: "Active",
+  return localizedLabel({
+    active: "未归档",
     archived: "已归档",
-    lazy: "Lazy",
+    lazy: "未开始",
     unknown: "状态未确认",
     missing: "Codex 会话缺失",
-  }[value] || value;
+  }, value);
 }
 
 function shortIdentity(value) {
@@ -1925,6 +1987,7 @@ function sessionLocationCell(row, session, { showIdentity = true } = {}) {
   const mode = document.createElement("div");
   mode.className = "meta-line";
   mode.append(badge(chatModeLabel(session.chatMode, session.scopeKind)));
+  if (showIdentity) mode.append(badge(session.sessionType === "topic" ? "话题" : "消息"));
   td.append(link, mode);
   updateSessionLocationCell(td, session, { showIdentity });
   row.append(td);
@@ -1948,7 +2011,7 @@ function sessionIdentityCell(row, session) {
   const td = document.createElement("td");
   const title = document.createElement("strong");
   title.textContent = session.nativeTitle
-    || (session.catalogState === "lazy" ? "Lazy Session" : "未命名 Session");
+    || (session.catalogState === "lazy" ? "未开始的会话" : "未命名会话");
   td.append(title);
   if (session.nativePreview) {
     const preview = document.createElement("div");
@@ -2063,6 +2126,86 @@ function sessionFilterPage(kind = "session", { resetSort = false } = {}) {
   return firstSessionPage(query.toString());
 }
 
+function appliedSessionConditions(kind, query) {
+  const labels = { searchTerm: "搜索", inventoryState: "会话状态", project: "Project", chatId: "群聊",
+    scopeKind: "Scope", current: "当前指针", identity: "会话 ID", topicId: "话题 ID", state: "会话状态" };
+  const conditions = [];
+  for (const [key, label] of Object.entries(labels)) {
+    const values = query.getAll(key);
+    if (!values.length || (key === "inventoryState" && values[0] === "active")
+      || (key === "state" && [...values].sort().join(",") === "creating,open")) continue;
+    const names = values.map((value) => key === "inventoryState" ? catalogStateLabel(value)
+      : key === "current" ? value === "true" ? "当前" : "非当前"
+        : key === "scopeKind" ? ({ direct: "单聊", group: "群聊", topic: "话题" }[value] || value)
+          : key === "state" ? value === "all" ? "全部" : sideStateLabel(value) : value);
+    conditions.push({ key, label: `${label}：${names.join("、")}`, advanced: ["scopeKind", "current"].includes(key) });
+  }
+  for (const field of kind === "side" ? ["created"] : ["created", "updated"]) {
+    const from = query.get(`${field}From`) || "", before = query.get(`${field}Before`) || "";
+    const preset = query.get(`${field}Range`) || "custom";
+    if (field === "created" && !from && !before) continue;
+    if (field === "updated" && (query.get("inventoryState") === "lazy" || (preset === "last-3-months" && !before))) continue;
+    conditions.push({ key: field, label: `${field === "created" ? "创建时间" : "更新时间"}：${compactTimeRange(from, before, preset)}`,
+      title: timeRangeSummary(from, before, preset), advanced: true });
+  }
+  return conditions;
+}
+
+function renderAppliedSessionFilters(kind) {
+  const query = new URLSearchParams(state[`${kind}Page`].query || "");
+  const conditions = appliedSessionConditions(kind, query);
+  const chips = document.querySelector(`#${kind}-filter-chips`);
+  chips.replaceChildren();
+  for (const condition of conditions) {
+    const button = document.createElement("button"); button.type = "button"; button.className = "filter-chip";
+    button.dataset.filterKey = condition.key;
+    button.textContent = `${condition.label} ×`;
+    button.title = condition.title || condition.label;
+    button.setAttribute("aria-label", `移除${condition.label}`);
+    button.addEventListener("click", () => removeSessionCondition(kind, condition.key));
+    chips.append(button);
+  }
+  chips.hidden = !conditions.length;
+  document.querySelector(`#${kind}-more-filters`).textContent = `更多筛选（${conditions.filter((item) => item.advanced).length}）`;
+}
+
+function removeSessionCondition(kind, key) {
+  if (state.authExpired) return;
+  const query = new URLSearchParams(state[`${kind}Page`].query);
+  const defaults = pageQuery("sessions", kind === "side" ? "temporary" : "ordinary");
+  const fields = ["created", "updated"].includes(key) ? [`${key}From`, `${key}Before`, `${key}Range`] : [key];
+  for (const field of fields) {
+    query.delete(field);
+    for (const value of defaults.getAll(field)) query.append(field, value);
+  }
+  // Reset only the removed field's draft. Other unsubmitted inputs stay intact.
+  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+  if (filters.has(key)) filters.get(key).reset();
+  else if (["created", "updated"].includes(key)) {
+    const root = [...document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")]
+      .find((root) => (root.dataset.timeRangeField || "created") === key);
+    timeRangeControllers.get(root).setBounds(query.get(`${key}From`) || "", query.get(`${key}Before`) || "", query.get(`${key}Range`) || "all");
+  } else if (key === "chatId") {
+    (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
+    document.querySelector(`#${kind}-chat-filter`).value = "";
+  } else if (key === "searchTerm") document.querySelector("#session-search").value = "";
+  else if (key === "inventoryState") {
+    document.querySelector("#session-inventory-state").value = "active";
+    updateSessionDateFilters();
+    // Leaving lazy restores the default date query without submitting date drafts.
+    if (!query.has("updatedFrom") && !query.has("updatedBefore") && !query.has("updatedRange")) {
+      query.set("updatedFrom", defaults.get("updatedFrom")); query.set("updatedRange", "last-3-months");
+    }
+  }
+  return refresh("sessions", firstSessionPage(query.toString()));
+}
+
+function resizeSessionPage(kind) {
+  const query = new URLSearchParams(state[`${kind}Page`].query || pageQuery("sessions", kind === "side" ? "temporary" : "ordinary"));
+  query.set("pageSize", document.querySelector(`#${kind}-page-size`).value);
+  return refresh("sessions", firstSessionPage(query.toString()));
+}
+
 function renderSessionSort(kind) {
   const sort = sessionSort(kind);
   const applied = new URLSearchParams(state[`${kind}Page`]?.query || "");
@@ -2096,14 +2239,7 @@ function updateSessionDateFilters() {
 
 function renderSessionFreshness() {
   const kind = state.sessionTab === "temporary" ? "side" : "session";
-  const updatedAt = state[`${kind}RefreshedAt`];
-  const node = document.querySelector("#sessions-refreshed-at");
-  node.hidden = updatedAt == null;
-  if (updatedAt == null) return;
-  const date = new Date(updatedAt);
-  node.dateTime = date.toISOString();
-  node.textContent = `更新于 ${date.toLocaleTimeString("zh-CN", { hour12: false })}`;
-  node.title = `${date.toLocaleString("zh-CN", { hour12: false })} 读取；列表不会自动刷新`;
+  window.NetizenList.freshness("sessions", state[`${kind}RefreshedAt`] ?? null);
 }
 
 async function sortSessionPage(kind, by) {
@@ -2128,6 +2264,7 @@ function renderSessionPagination(kind = "session") {
 function resetSessionFilters(kind = "session") {
   const form = document.querySelector(`#${kind}-filter`);
   form.reset();
+  document.querySelector(`#${kind}-page-size`).value = "20";
   if (kind === "session") updateSessionDateFilters();
   (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
   const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
@@ -2203,7 +2340,6 @@ async function loadSessionPage(kind, page, render) {
   const request = state.sessionListRequest;
   const isCurrent = () => request === state.sessionListRequest;
   const name = kind === "side" ? "sides" : "sessions";
-  setStatus("正在读取服务端事实…");
   try {
     const query = page.query == null
       ? formQuery(document.querySelector(`#${kind}-filter`), "20")
@@ -2222,7 +2358,9 @@ async function loadSessionPage(kind, page, render) {
     state[name] = data;
     state[`${kind}Page`] = { ...candidate, nextCursor: data.nextCursor };
     state[`${kind}RefreshedAt`] = Date.now();
+    window.NetizenList.error(name, "");
     render(data);
+    renderAppliedSessionFilters(kind);
     renderSessionPagination(kind);
     renderSessionSort(kind);
     renderSessionFreshness();
@@ -2230,11 +2368,11 @@ async function loadSessionPage(kind, page, render) {
       timeRangeControllers.get(root)?.refreshSummary();
     }
     syncPageUrl();
-    setStatus("已更新。");
+    window.NetizenList.error(name, "");
     void loadSessionChatLabels(kind, data, state[`${kind}Page`], request);
     return true;
   } catch (error) {
-    if (isCurrent()) setStatus(error.message + (state[name] ? " 当前仍显示上次成功读取的结果。" : ""), true);
+    if (isCurrent() && !state.authExpired) window.NetizenList.error(name, error.message + (state[name] ? " 当前仍显示上次成功读取的结果。" : ""), () => loadSessionPage(kind, page, render));
     return false;
   }
 }
@@ -2309,6 +2447,10 @@ function applySessionLayout(kind) {
     groups.get(key).push(item);
   }
   body.replaceChildren();
+  if (state[name] && !items.length && document.querySelector(`#${name}-error`).hidden) {
+    window.NetizenList.empty(body, kind === "side" ? 7 : 8,
+      `当前范围内没有${kind === "side" ? "临时" : "普通"}会话，可调整或重置筛选。`, "重置", () => resetSessionFilters(kind));
+  }
   for (const [key, groupItems] of groups) {
     const groupRows = groupItems.map((item) => rows.get(item[identity])).filter(Boolean);
     const expanded = !grouped || !view[layout].has(key);
@@ -2316,7 +2458,7 @@ function applySessionLayout(kind) {
       const heading = document.createElement("tr");
       heading.className = "session-group-row";
       const label = document.createElement("th");
-      label.setAttribute("colspan", kind === "side" ? "8" : "10");
+      label.setAttribute("colspan", kind === "side" ? "7" : "8");
       const button = document.createElement("button");
       button.type = "button";
       button.className = "session-group-toggle";
@@ -2348,6 +2490,7 @@ function applySessionLayout(kind) {
       body.append(row);
     }
   }
+  window.NetizenList.labelRows(body);
   updateSessionGroupLabels(kind);
   updateSessionGroupControls(kind);
 }
@@ -2356,16 +2499,13 @@ function renderSessions(data) {
   const query = new URLSearchParams(state.sessionPage.query || "");
   document.querySelector("#sessions-lazy-notice").hidden = query.get("inventoryState") !== "lazy";
   document.querySelector("#sessions-identity-notice").hidden = !query.has("identity");
-  document.querySelector("#sessions-empty").hidden = data.items.length > 0;
+  window.NetizenMenu.close();
   const body = document.querySelector("#sessions-body");
   body.replaceChildren();
   for (const session of data.items) {
     const row = document.createElement("tr");
     row.dataset.bindingId = session.bindingId;
     sessionLocationCell(row, session);
-    const type = document.createElement("td");
-    type.append(badge(session.sessionType === "topic" ? "话题" : "消息"));
-    row.append(type);
     sessionIdentityCell(row, session);
     const sessionState = document.createElement("td");
     sessionState.append(badge(
@@ -2378,15 +2518,13 @@ function renderSessions(data) {
       session.catalogState === "missing",
     ));
     row.append(sessionState);
-    const runtime = document.createElement("td");
+    const runtime = document.createElement("div");
     runtime.className = "runtime-state";
     updateRuntimeCell(runtime, session.runtime);
-    row.append(runtime);
+    sessionState.append(runtime);
     cell(row, session.projectAlias);
     const settings = session.sessionSettings;
-    const turnSettings = settings.turn_settings;
-    const model = turnSettings ? `${turnSettings.model_id} / ${turnSettings.effort_id} / ${turnSettings.service_tier_id}` : "继承 Codex";
-    cell(row, `${settings.message_context_mode} · ${model}`);
+    cell(row, [sessionConfigurationSummary(settings), progressCardSourceLabel(settings)].filter(Boolean).join(" · "));
     cell(row, session.catalogState === "lazy" ? sessionDateLabel(session.registeredAt) : nativeSessionDateLabel(session.createdAt), "session-time");
     cell(row, sessionUpdatedAtLabel(session), "session-time");
     const actions = actionsCell(row);
@@ -2524,20 +2662,7 @@ async function refreshLatestAnswer() {
 
 function wireSessionActions(actions, session) {
   const a = session.actions;
-  const more = document.createElement("details");
-  more.className = "session-more";
-  const summary = document.createElement("summary");
-  summary.textContent = "更多";
-  summary.setAttribute("aria-label", `更多操作 · ${session.shortId}`);
   const secondary = document.createElement("div");
-  secondary.className = "session-more-items";
-  more.append(summary, secondary);
-  more.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || !more.open) return;
-    event.preventDefault();
-    more.open = false;
-    summary.focus();
-  });
   const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
   secondary.append(schedule);
   if (session.canReadLatestAnswer) secondary.append(actionButton("查看最近回答", () => openLatestAnswer(session)));
@@ -2545,19 +2670,21 @@ function wireSessionActions(actions, session) {
     const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
     actions.append(button);
   }
-  if (a.stop) actions.append(actionButton("停止", () => window.confirm("停止这个会话的当前运行？") && mutate("/api/v1/sessions/stop", a.stop), true));
+  if (a.stop) actions.append(actionButton("停止", async () => await window.NetizenConfirm.ask({ body: "停止这个会话的当前运行？", danger: false }) && mutate("/api/v1/sessions/stop", a.stop)));
   if (a.activate) actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
   if (a.rename) {
     const button = actionButton("重命名", () => openSessionRenameEditor(session, button));
     secondary.append(button);
   }
-  if (a.archive) actions.append(actionButton("归档", () => window.confirm("确认归档？") && mutate("/api/v1/sessions/archive", a.archive), true));
+  if (a.archive) actions.append(actionButton("归档", async () => await window.NetizenConfirm.ask({ body: "确认归档？", danger: false }) && mutate("/api/v1/sessions/archive", a.archive)));
   if (a.unarchive) actions.append(actionButton("恢复", () => mutate("/api/v1/sessions/unarchive", a.unarchive, { actionKind: a.unarchive.actionKind })));
   if (a.unarchiveCurrent) actions.append(actionButton("恢复并设为当前", () => mutate("/api/v1/sessions/unarchive", a.unarchiveCurrent, { actionKind: a.unarchiveCurrent.actionKind })));
-  if (a.deleteLazy) secondary.append(actionButton("删除 Lazy", () => window.confirm("永久删除这个尚未开始的会话？") && mutate("/api/v1/sessions/delete-lazy", a.deleteLazy), true));
-  if (a.deleteMaterialized) secondary.append(actionButton("删除", () => confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized", a.deleteMaterialized), true));
-  if (a.release) secondary.append(actionButton("释放订阅", () => window.confirm("释放本进程订阅？历史不会删除。") && mutate("/api/v1/sessions/release", a.release)));
-  actions.append(more);
+  if (a.deleteLazy) secondary.append(actionButton("删除未开始的会话", async () => await window.NetizenConfirm.ask({ body: "永久删除这个尚未开始的会话？", danger: true }) && mutate("/api/v1/sessions/delete-lazy", a.deleteLazy), true));
+  if (a.deleteMaterialized) secondary.append(actionButton("删除", async () => await confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized", a.deleteMaterialized), true));
+  if (a.release) secondary.append(actionButton("释放订阅", async () => await window.NetizenConfirm.ask({ body: "释放本进程订阅？历史不会删除。", danger: false }) && mutate("/api/v1/sessions/release", a.release)));
+  const primary = [...actions.children];
+  for (const button of primary.slice(3)) secondary.append(button);
+  actions.append(window.NetizenMenu.create([...secondary.children], `更多操作 · ${session.shortId}`));
 }
 
 async function loadSides(page = state.sidePage) {
@@ -2566,6 +2693,7 @@ async function loadSides(page = state.sidePage) {
 }
 
 function renderSides(data) {
+  window.NetizenMenu.close();
   const body = document.querySelector("#sides-body");
   body.replaceChildren();
   for (const side of data.items) {
@@ -2592,23 +2720,25 @@ function renderSides(data) {
     stateCell.className = "side-session-state";
     updateSideStateCell(stateCell, side);
     row.append(stateCell);
-    const runtime = cell(row, sideRuntimeLabel(side.runtime, side.sessionState));
+    const runtime = document.createElement("div");
+    runtime.textContent = sideRuntimeLabel(side.runtime, side.sessionState);
     runtime.className = "runtime-state";
+    stateCell.append(runtime);
     cell(row, side.projectAlias || "原项目已不可用");
     cell(row, sessionDateLabel(side.createdAt), "session-time");
     cell(row, sessionDateLabel(side.updatedAt), "session-time");
     const actions = actionsCell(row);
     if (parent?.available) {
       const link = document.createElement("a");
-      link.className = "action";
+      link.className = "action compact";
       link.textContent = "查看来源会话";
       link.href = `/sessions/ordinary?identity=${encodeURIComponent(parent.bindingId)}&updatedRange=all`;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       actions.append(link);
     }
-    if (side.actions.stop) actions.append(actionButton("停止", () => window.confirm("停止此临时会话的当前任务？之后仍可继续交流。") && mutate("/api/v1/side-topics/stop", side.actions.stop), true));
-    if (side.actions.close) actions.append(actionButton("结束临时会话", () => window.confirm("结束此临时会话？结束后无法恢复。") && mutate("/api/v1/side-topics/close", side.actions.close), true));
+    if (side.actions.stop) actions.append(actionButton("停止", async () => await window.NetizenConfirm.ask({ body: "停止此临时会话的当前任务？之后仍可继续交流。", danger: false }) && mutate("/api/v1/side-topics/stop", side.actions.stop)));
+    if (side.actions.close) actions.append(actionButton("结束临时会话", async () => await window.NetizenConfirm.ask({ body: "结束此临时会话？结束后无法恢复。", danger: true }) && mutate("/api/v1/side-topics/close", side.actions.close), true));
     body.append(row);
   }
   applySessionLayout("side");
@@ -2642,8 +2772,7 @@ function sideRuntimeLabel(runtime, sessionState = runtime?.sessionState) {
   if (!runtime) return ["closed", "expired", "failed"].includes(sessionState) ? "—" : "状态待确认";
   if (runtime.state === "closing") return "结束中";
   const value = runtime.turnState || runtime.state;
-  return { idle: "空闲", open: "空闲", running: "运行中", stopping: "停止中",
-    unknown: "状态待确认", creating: "创建中" }[value] || value;
+  return localizedLabel({ ...runtimeLabels, open: "空闲", unknown: "状态待确认", creating: "创建中" }, value);
 }
 
 function rowByIdentity(selector, key, value) {
@@ -2673,6 +2802,7 @@ function renderSessionRenameEditor() {
 }
 
 function openSessionRenameEditor(session, returnFocus) {
+  returnFocus = returnFocus?.menuTrigger || returnFocus;
   if (sessionRenameEditor?.saving || !session.actions.rename || state.authExpired) return;
   closeSessionRenameEditor();
   sessionRenameEditor = { session, returnFocus,
@@ -2710,7 +2840,7 @@ async function generateSessionName() {
       const current = page.items.find((item) => item.bindingId === editor.session.bindingId
         && item.scopeKey === editor.session.scopeKey && item.nativeThreadId === editor.session.nativeThreadId);
       if (!current?.actions.generateName || !current.actions.rename) {
-        throw new Error("会话状态已变化，请关闭表单并刷新 Sessions。");
+        throw new Error("会话状态已变化，请关闭表单并刷新会话。");
       }
       Object.assign(actions, { generateName: current.actions.generateName, rename: current.actions.rename });
     }
@@ -2746,6 +2876,7 @@ async function saveSessionName(event) {
   editor.saving = true;
   editor.error = "";
   renderSessionRenameEditor();
+  setStatus("正在保存会话名称…");
   try {
     await api("/api/v1/sessions/rename", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -2753,7 +2884,8 @@ async function saveSessionName(event) {
     });
   } catch (error) {
     if (sessionRenameEditor !== editor) return;
-    editor.error = `${error.message} 请关闭表单，刷新 Sessions 后核对名称。`;
+    editor.error = `${error.message} 请关闭表单，刷新会话后核对名称。`;
+    setStatus(editor.error, true);
     editor.saving = false;
     renderSessionRenameEditor();
     return;
@@ -2767,7 +2899,7 @@ async function saveSessionName(event) {
       const row = rowByIdentity("#sessions-body", "bindingId", editor.session.bindingId);
       Array.from(row?.querySelectorAll("button") || []).find((button) => button.textContent === "重命名")?.focus();
     }
-  } else setStatus("会话名称已保存，但 Sessions 列表刷新失败，请手动刷新。", true);
+  } else setStatus("会话名称已保存，但会话列表刷新失败，请手动刷新。", true);
 }
 
 let sessionSettingsEditor = null;
@@ -2823,9 +2955,11 @@ async function loadSessionSettingsOptions() {
   }
 }
 
-function openSessionSettingsEditor(session, returnFocus) {
+async function openSessionSettingsEditor(session, returnFocus) {
+  returnFocus = returnFocus?.menuTrigger || returnFocus;
   if (sessionSettingsEditor?.saving || !session.actions.configure) return;
-  if (sessionSettingsEditor && !closeSessionSettingsEditor()) return;
+  if (sessionSettingsEditor && sessionSettingsHasChanges() && !(await closeSessionSettingsEditor())) return;
+  if (sessionSettingsEditor) closeSessionSettingsEditor({ confirmed: true });
   const base = structuredClone(session.sessionSettings);
   const privateChat = session.scopeKind === "direct" || session.chatMode === "p2p";
   sessionSettingsEditor = { session, returnFocus, settings: structuredClone(base), base,
@@ -2833,7 +2967,7 @@ function openSessionSettingsEditor(session, returnFocus) {
     privateChat, contextAvailable: !privateChat && base.message_context_mode === "catch-up",
     loading: true, saving: false, optionsSerial: 0 };
   sessionSettingsInput("editor").hidden = false;
-  sessionSettingsInput("identity").textContent = `${session.nativeTitle || "未命名 Session"} · Netizen 会话编号：${session.shortId} · ${session.projectAlias}`;
+  sessionSettingsInput("identity").textContent = `${session.nativeTitle || "未命名会话"} · Netizen 会话编号：${session.shortId} · ${session.projectAlias}`;
   renderSessionSettingsEditor();
   if (!sessionSettingsInput("drawer").open) sessionSettingsInput("drawer").showModal();
   document.body.classList.toggle("session-settings-drawer-open", true);
@@ -2846,11 +2980,11 @@ function openSessionSettingsEditor(session, returnFocus) {
   });
 }
 
-function closeSessionSettingsEditor({ saved = false, confirmed = false } = {}) {
+async function closeSessionSettingsEditor({ saved = false, confirmed = false } = {}) {
   const editor = sessionSettingsEditor;
   if (!editor) return true;
   if (editor.saving) return false;
-  if (!saved && !confirmed && !confirmDiscardChanges(sessionSettingsHasChanges())) return false;
+  if (!saved && !confirmed && (sessionSettingsHasChanges() && !(await confirmDiscardChanges(true)))) return false;
   sessionSettingsEditor = null;
   sessionSettingsInput("editor").hidden = true;
   sessionSettingsInput("drawer").close();
@@ -2894,7 +3028,7 @@ async function saveSessionSettings(event) {
     result = await api("/api/v1/sessions/configure", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(action, { sessionSettings: structuredClone(editor.settings) })) });
   } catch (error) {
-    editor.error = `${error.message} 请关闭表单，刷新 Sessions 后重新打开配置。`;
+    editor.error = `${error.message} 请关闭表单，刷新会话后重新打开配置。`;
     setStatus(editor.error, true);
     editor.saving = false;
     renderSessionSettingsEditor();
@@ -2909,7 +3043,7 @@ async function saveSessionSettings(event) {
       Array.from(row?.querySelectorAll("button") || []).find((button) => button.textContent === "配置")?.focus();
     }
   } else {
-    setStatus("会话配置已保存，但 Sessions 列表刷新失败，请手动刷新。", true);
+    setStatus("会话配置已保存，但会话列表刷新失败，请手动刷新。", true);
   }
 }
 
@@ -3076,15 +3210,15 @@ function renderWorkspacePolicy(input, editor, { project, loading = false, schedu
   else if (options?.isGit === false) notes.push("该 Project 不是 Git 仓库，只支持项目目录。");
   else if (!project) notes.push("先选择 Project，再选择 worktree 使用方式。");
   if (workspace.mode === "existing") {
-    notes.push(scheduled ? "各次执行共享所选 worktree 的文件和分支；资源不可用时保留计划并跳过执行。"
-      : "新会话共享所选 worktree 的文件和分支；删除或失效后保留此配置，自动创建会话时明确报错。");
+    notes.push(scheduled ? "各次执行共享所选 worktree 的文件和分支。"
+      : "新会话共享所选 worktree 的文件和分支。");
     if (!loading && !workspacePolicyAvailable(workspace, options, project)) {
       notes.push("所选 worktree 当前不可用，请重新选择；不会切回项目目录。");
     }
   } else if (workspace.mode === "new") {
     notes.push(scheduled
-      ? "每次执行新建 detached worktree；该次会话的后续消息复用。留空使用执行时 Project 的 HEAD，预览和保存不创建目录。"
-      : "每个自动创建的新会话新建 detached worktree；后续消息复用。留空使用创建时 Project 的 HEAD，保存配置不创建目录。");
+      ? "每次执行新建 worktree，该次会话的后续消息复用。"
+      : "每个新会话新建 worktree，后续消息复用。");
     if (!loading && !available) notes.push("当前无法使用新建 worktree 方式，请检查 Project。");
   } else notes.push(scheduled ? "每次执行创建的会话使用 Project 的项目目录。" : "新会话使用 Project 的项目目录。");
   input("workspace-help").textContent = notes.join(" ");
@@ -3276,9 +3410,10 @@ async function loadDefaultOptions(resolveChat = false) {
   }
 }
 
-function openDefaultEditor(kind, record = null) {
+async function openDefaultEditor(kind, record = null) {
   if (defaultsBusy || defaultsNeedsRefresh || !state.defaults) return;
-  if (defaultsEditor && !closeDefaultEditor()) return;
+  if (defaultsEditor && defaultEditorHasChanges() && !(await closeDefaultEditor())) return;
+  if (defaultsEditor) closeDefaultEditor({ confirmed: true });
   defaultsEditor = { kind, record, action: record ? record.actions.save : state.defaults[kind].actions.create,
     returnFocus: document.activeElement,
     settings: structuredClone(record?.session_settings || defaultScheduleSessionSettings()),
@@ -3312,9 +3447,9 @@ function openDefaultEditor(kind, record = null) {
   });
 }
 
-function closeDefaultEditor({ saved = false, confirmed = false } = {}) {
+async function closeDefaultEditor({ saved = false, confirmed = false } = {}) {
   if (defaultsBusy) return false;
-  if (!saved && !confirmed && !confirmDiscardChanges(defaultEditorHasChanges())) return false;
+  if (!saved && !confirmed && (defaultEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
   chatTargetControllers.get("defaults")?.close();
   defaultsEditor = null;
   defaultsInput("editor").hidden = true;
@@ -3349,6 +3484,7 @@ async function defaultMutation(mode, action, extra = {}) {
   const returnFocus = defaultsEditor?.returnFocus || document.activeElement;
   defaultsListSerial += 1;
   defaultsBusy = true;
+  setStatus("正在执行…");
   renderDefaultSettings();
   try {
     await api(`/api/v1/defaults/${mode}`, { method: "POST", headers: { "Content-Type": "application/json" },
@@ -3405,9 +3541,10 @@ async function saveDefault(event) {
 }
 
 async function deleteDefault(record) {
-  if (defaultsBusy || defaultsNeedsRefresh || !window.confirm(record.kind === "chat"
+  if (defaultsBusy || defaultsNeedsRefresh || !(await window.NetizenConfirm.ask({ title: "删除默认配置", danger: true, confirmLabel: "删除", body: record.kind === "chat"
     ? `删除 ${record.chat_id} 的精确配置？删除后可能重新命中群名规则，已有会话不受影响。`
-    : `删除群名规则“${record.keyword}”？已有会话不受影响。`)) return;
+    : `删除群名规则“${record.keyword}”？已有会话不受影响。` }))) return;
+  if (state.authExpired || defaultsBusy || defaultsNeedsRefresh) return;
   const action = record.actions.delete;
   record.actions.delete = null;
   await defaultMutation("delete", action);
@@ -3428,13 +3565,17 @@ async function moveDefaultRule(index, delta) {
 function defaultListButton(label, callback, { id = "", disabled = false, primary = false, danger = false } = {}) {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = `action${primary ? "" : " secondary"}${danger ? " danger" : ""}`;
+  button.className = `action${primary ? " primary" : " compact"}${danger ? " danger" : ""}`;
   button.textContent = label;
   button.setAttribute("data-default-action", label);
   button.dataset.defaultId = id;
   button.dataset.unavailable = String(disabled);
   button.disabled = defaultsBusy || disabled;
-  button.addEventListener("click", callback);
+  button.addEventListener("click", async () => {
+    if (button.disabled) return;
+    button.disabled = true;
+    try { await callback(); } finally { if (!state.authExpired) button.disabled = defaultsBusy || disabled || defaultsNeedsRefresh; }
+  });
   return button;
 }
 
@@ -3461,12 +3602,11 @@ function defaultChatCell(row, rule) {
 
 function defaultSettingsCell(row, settings, workspace) {
   const td = document.createElement("td");
-  const model = settings.turn_settings;
   const title = document.createElement("div");
-  title.textContent = model ? `${model.model_id} / ${model.effort_id} / ${model.service_tier_id}` : "继承 Codex";
+  title.textContent = sessionConfigurationSummary(settings);
   const detail = document.createElement("div");
   detail.className = "default-settings-detail";
-  detail.textContent = scheduleSessionSummary(settings).split(" · ").slice(1).join(" · ");
+  detail.textContent = sessionFeedbackLabels(settings, { progressSource: true }).join(" · ");
   const location = document.createElement("div");
   location.className = "default-settings-detail";
   location.textContent = workspacePolicySummary(workspace);
@@ -3476,14 +3616,20 @@ function defaultSettingsCell(row, settings, workspace) {
 
 async function loadDefaults(offset = defaultsOffset, returnFocus = null) {
   const serial = ++defaultsListSerial;
-  const [chat, group, projects] = await Promise.all([
+  let chat, group, projects;
+  try { [chat, group, projects] = await Promise.all([
     api(`/api/v1/defaults?${new URLSearchParams({ kind: "chat", offset: String(offset), limit: "50" })}`),
     api("/api/v1/defaults?kind=group_name&limit=200"), queryProjectOptions(),
   ]);
+  } catch (error) {
+    if (serial === defaultsListSerial && !state.authExpired) for (const id of ["defaults-chat", "defaults-rules"]) window.NetizenList.error(id, error.message, () => loadDefaults(offset, returnFocus).catch(() => {}));
+    throw error;
+  }
   if (serial !== defaultsListSerial) return;
   if (offset > 0 && !chat.items.length) return loadDefaults(Math.max(0, offset - 50), returnFocus);
   const focused = returnFocus || document.activeElement;
   const restoreFocus = !document.activeElement || document.activeElement === focused || document.activeElement === document.body;
+  window.NetizenMenu.close();
   defaultsProjects = projects;
   defaultsOffset = offset;
   defaultsNeedsRefresh = false;
@@ -3511,13 +3657,15 @@ async function loadDefaults(offset = defaultsOffset, returnFocus = null) {
           defaultListButton("下移", () => moveDefaultRule(index, 1), { id: rule.id, disabled: index === page.items.length - 1 || page.has_more || !page.actions.reorder }),
         );
       }
+      window.NetizenMenu.compact(buttons, 1);
       actions.append(buttons);
       row.append(actions);
       body.append(row);
     });
     if (!page.items.length) {
       const row = document.createElement("tr");
-      const empty = cell(row, "", "defaults-empty");
+      row.className = "list-empty";
+      const empty = document.createElement("td"); row.append(empty);
       empty.colSpan = kind === "chat" ? 4 : 5;
       const message = document.createElement("p");
       message.textContent = kind === "chat" ? "还没有聊天配置，为一个单聊或群聊设置会话默认值。" : "还没有群名规则，通过关键词为匹配的群聊设置会话默认值。";
@@ -3526,6 +3674,7 @@ async function loadDefaults(offset = defaultsOffset, returnFocus = null) {
       body.append(row);
     }
   }
+  for (const id of ["defaults-chat", "defaults-rules", "defaults"]) window.NetizenList.success(id);
   defaultsInput("pagination").hidden = offset === 0 && !chat.has_more;
   defaultsInput("page").textContent = `第 ${Math.floor(offset / 50) + 1} 页`;
   renderDefaultControls();
@@ -3549,34 +3698,38 @@ function sessionSettingsFingerprint(settings) {
 }
 
 function confirmDiscardChanges(changed) {
-  return !changed || window.confirm("有未保存的修改，确定放弃吗？");
+  return !changed || window.NetizenConfirm.ask({ title: "放弃未保存修改", body: "有未保存的修改，确定放弃吗？", confirmLabel: "放弃修改" });
 }
 
-function hasUnsavedEditors() {
+function hasUnsavedEditors({ includePageDrafts = true } = {}) {
   return projectEditorHasChanges() || sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
-    || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty()) || Boolean(window.NetizenGroupAccess?.dirty())
-    || Boolean(window.NetizenProgressCard?.dirty() || window.NetizenQuestionNotifications?.dirty())
+    || (includePageDrafts && (Boolean(window.NetizenSessionAccess?.dirty()) || Boolean(window.NetizenGroupAccess?.dirty())
+    || Boolean(window.NetizenProgressCard?.dirty() || window.NetizenQuestionNotifications?.dirty())))
     || Boolean(window.NetizenWorktrees?.dirty());
 }
 
 // Navigation asks once before closing any editor. Busy submissions retain the
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
-function confirmDiscardEditors() {
+async function confirmDiscardEditors({ preservePageDrafts = false } = {}) {
   if (projectEditor?.saving || sessionSettingsEditor?.saving || sessionRenameEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
-      || window.NetizenSessionAccess?.busy() || window.NetizenGroupAccess?.busy() || window.NetizenProgressCard?.busy() || window.NetizenQuestionNotifications?.busy()
+      || (!preservePageDrafts && (window.NetizenSessionAccess?.busy() || window.NetizenGroupAccess?.busy() || window.NetizenProgressCard?.busy() || window.NetizenQuestionNotifications?.busy()))
       || window.NetizenWorktrees?.busy()) return false;
-  if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
+  if ((hasUnsavedEditors({ includePageDrafts: !preservePageDrafts }) && !(await confirmDiscardChanges(true)))) return false;
+  if (state.authExpired) return false;
+  window.NetizenConfirm.cancel();
   closeProjectEditor({ confirmed: true });
   closeProjectDeleteDialog();
   closeSessionSettingsEditor({ confirmed: true });
   closeSessionRenameEditor();
   closeDefaultEditor({ confirmed: true });
   if (scheduleEditor) closeScheduleEditor({ confirmed: true });
-  cancelScheduleSelection({ confirmed: true });
-  window.NetizenSessionAccess?.discard();
-  window.NetizenGroupAccess?.discard();
-  window.NetizenProgressCard?.discard();
-  window.NetizenQuestionNotifications?.discard();
+  scheduleEditorSerial += 1;
+  if (!preservePageDrafts) {
+    window.NetizenSessionAccess?.discard();
+    window.NetizenGroupAccess?.discard();
+    window.NetizenProgressCard?.discard();
+    window.NetizenQuestionNotifications?.discard();
+  }
   window.NetizenWorktrees?.discard();
   return true;
 }
@@ -3708,7 +3861,7 @@ let scheduleListQuery = null;
 let schedulePage = firstSessionPage();
 let scheduleListSerial = 0;
 let scheduleProjects = [];
-let pendingScheduleDraft = null;
+let scheduleSessionChatPicker = null;
 const pendingScheduleMutations = new Set();
 
 function scheduleInput(id) { return document.querySelector(`#schedule-${id}`); }
@@ -3731,7 +3884,7 @@ function setScheduleFieldError(field, message) {
   clearScheduleFieldError(field);
   const control = field === "chat" && !scheduleInput("group-picker").hidden
     ? scheduleInput("group-picker").querySelector(".chat-picker-trigger")
-    : scheduleInput(field === "binding" ? "select-session" : field);
+    : scheduleInput(field === "binding" ? scheduleEditor?.pickerOpen ? "session-search-button" : "select-session" : field);
   let note = scheduleInput(`${field}-error`);
   if (!note) {
     note = document.createElement("span");
@@ -3850,12 +4003,14 @@ function renderScheduleTarget() {
   const target = editor.targetSession;
   const selected = editor.plan?.target_binding_id || target?.bindingId || "";
   scheduleInput("binding").value = selected;
-  scheduleInput("select-session").hidden = Boolean(selected);
+  scheduleInput("select-session").hidden = Boolean(editor.plan || editor.pickerOpen);
+  scheduleInput("select-session").textContent = selected ? "更换" : "选择会话";
+  scheduleInput("session-picker").hidden = !binding || !editor.pickerOpen;
   scheduleInput("binding-summary").textContent = target
     ? `${target.nativeTitle || target.shortId || "未命名会话"}\n${target.chatLabel || target.chatId} · ${target.projectAlias}\nNetizen 会话编号：${target.shortId || target.bindingId.slice(0, 8)}${target.topicId ? ` · 话题 ${target.topicId}` : ""}`
       + (target.pointerState !== "current" || target.catalogState === "archived" ? "\n目标当前不是可执行的当前会话，计划将自动暂停；不会自动切换或恢复会话。" : "")
     : selected ? `${editor.plan.target_label || selected}\n${editor.plan.chat?.chatLabel || editor.plan.chat_id} · ${editor.plan.project_alias}`
-      : "请前往 Sessions 找到具体会话，再点击该行的“创建定时任务”。已填写内容会在当前页面保留。";
+      : "请在下方选择具体会话。";
   if (binding && editor.plan) scheduleInput("binding-summary").textContent += `\n${scheduleInheritedWorkspace(editor.plan)}`;
   scheduleInput("preview").disabled = binding && !selected;
 }
@@ -3871,12 +4026,13 @@ function renderScheduleProjects() {
       project.enabled ? project.alias : `${project.alias}（已停用）`])], selected);
 }
 
-function closeScheduleEditor({ saved = false, confirmed = false, preserveDraft = false } = {}) {
+async function closeScheduleEditor({ saved = false, confirmed = false } = {}) {
   if (scheduleInput("fields").disabled && !saved) return false;
-  if (!saved && !confirmed && !preserveDraft && !confirmDiscardChanges(scheduleEditorHasChanges())) return false;
+  if (!saved && !confirmed && (scheduleEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
   const returnFocus = scheduleEditor?.returnFocus;
   scheduleEditorSerial += 1;
   chatTargetControllers.get("schedule")?.close();
+  closeScheduleSessionPicker();
   scheduleEditor = null;
   invalidateSchedulePreview();
   scheduleInput("editor").hidden = true;
@@ -3912,67 +4068,146 @@ function scheduleEditorHasChanges() {
     !== JSON.stringify(scheduleEditor.discardBase));
 }
 
-function captureScheduleDraft() {
-  const fields = ["name", "instructions", "enabled", "auto-archive", "kind", "timezone", "time", "at", "offset", "end-at", "end-offset", "every"];
-  return {
-    discardBase: structuredClone(scheduleEditor.discardBase), dirty: scheduleEditorHasChanges(),
-    fields: fields.map((id) => ({ id, value: scheduleInput(id).value, checked: scheduleInput(id).checked })),
-    offsets: ["offset", "end-offset"].map((id) => ({ id, hidden: scheduleInput(`${id}-field`).hidden,
-      options: Array.from(scheduleInput(id).querySelectorAll("option")).map((option) => [option.value, option.textContent]) })),
-    weekdays: Array.from(scheduleInput("weekdays").querySelectorAll("input")).map((input) => input.checked),
-  };
+function scheduleSessionQuery() {
+  const inventory = scheduleInput("session-state").value;
+  const query = new URLSearchParams({ inventoryState: inventory, pageSize: "20",
+    sortBy: inventory === "lazy" ? "createdAt" : "updatedAt", sortDirection: "desc" });
+  const search = scheduleInput("session-search").value.trim();
+  if (search && inventory !== "lazy") query.set("searchTerm", search);
+  const project = scheduleInput("session-project").value;
+  if (project) query.set("project", project);
+  const chat = scheduleSessionChatPicker?.getSelection();
+  if (chat) query.set("chatId", chat.chatId);
+  return query.toString();
 }
 
-function restoreScheduleDraft(draft) {
-  for (const field of draft.offsets) {
-    scheduleSelectOptions(scheduleInput(field.id), field.options, "");
-    scheduleInput(`${field.id}-field`).hidden = field.hidden;
+function closeScheduleSessionPicker() {
+  if (scheduleEditor) {
+    scheduleEditor.pickerOpen = false;
+    scheduleEditor.picker = null;
   }
-  for (const field of draft.fields) {
-    scheduleInput(field.id).value = field.value;
-    scheduleInput(field.id).checked = field.checked;
-  }
-  Array.from(scheduleInput("weekdays").querySelectorAll("input"))
-    .forEach((input, index) => { input.checked = draft.weekdays[index]; });
+  scheduleSessionChatPicker?.close();
+  scheduleInput("session-picker").hidden = true;
+  scheduleInput("session-results").replaceChildren();
+}
+
+function selectScheduleSession(session) {
+  if (!scheduleEditor || scheduleEditor.plan || scheduleInput("fields").disabled || state.authExpired) return;
+  scheduleEditor.targetSession = session;
+  closeScheduleSessionPicker();
+  clearScheduleFieldError("binding");
   invalidateSchedulePreview();
+  renderScheduleTarget();
+  scheduleInput("select-session").focus();
 }
 
-function chooseScheduleSession() {
-  if (!scheduleEditor || scheduleEditor.plan || scheduleInput("fields").disabled) return;
-  pendingScheduleDraft = captureScheduleDraft();
-  closeScheduleEditor({ preserveDraft: true });
-  document.querySelector("#session-schedule-selection").hidden = false;
-  document.querySelector("#session-schedule-saved").hidden = true;
-  selectTab("sessions", "ordinary", { preserveEditors: true });
+async function loadScheduleSessionPage(page = firstSessionPage(scheduleSessionQuery())) {
+  const editor = scheduleEditor;
+  const picker = editor?.picker;
+  if (!picker || !editor.pickerOpen || scheduleInput("fields").disabled || state.authExpired) return;
+  const serial = ++picker.serial;
+  const current = () => scheduleEditor === editor && editor.picker === picker
+    && editor.pickerOpen && serial === picker.serial && !state.authExpired;
+  picker.loading = true;
+  picker.retryPage = page;
+  scheduleInput("session-status").textContent = "正在读取会话…";
+  scheduleInput("session-retry").hidden = true;
+  scheduleInput("session-previous").disabled = true;
+  scheduleInput("session-next").disabled = true;
+  // Old rows remain visible, but cannot select a target from an obsolete query.
+  for (const button of scheduleInput("session-results").querySelectorAll("button")) button.disabled = true;
+  const query = new URLSearchParams(page.query);
+  if (page.cursor) query.set("cursor", page.cursor);
+  try {
+    const data = await api(`/api/v1/sessions?${query}`);
+    if (!current()) return;
+    picker.page = { ...page, nextCursor: data.nextCursor || null };
+    const results = scheduleInput("session-results");
+    results.replaceChildren();
+    for (const session of data.items) {
+      const item = document.createElement("li");
+      const title = document.createElement("strong");
+      title.textContent = session.nativeTitle || (session.catalogState === "lazy" ? "未开始的会话" : "未命名会话");
+      const location = document.createElement("a");
+      location.className = "chat-link";
+      location.textContent = `${session.chatLabel || session.chatId} · ${session.sessionType === "topic" || session.topicId ? "话题" : "消息"}`;
+      location.href = session.topicOpenUrl || session.chatOpenUrl;
+      location.target = "_blank";
+      location.rel = "noopener noreferrer";
+      const detail = document.createElement("p");
+      detail.className = "hint";
+      detail.textContent = `${session.projectAlias} · ${pointerStateLabel(session.pointerState)} · ${catalogStateLabel(session.catalogState)}`
+        + ` · 最近更新：${sessionUpdatedAtLabel(session)} · ${session.shortId || session.bindingId.slice(0, 8)}`;
+      const select = actionButton("选择", () => {
+        if (editor.picker === picker && !picker.loading && current()) selectScheduleSession(session);
+      });
+      select.setAttribute("aria-label", `选择会话：${title.textContent}`);
+      const content = document.createElement("div");
+      content.append(title, location, detail);
+      item.append(content, select);
+      results.append(item);
+    }
+    scheduleInput("session-status").textContent = data.items.length ? "" : "当前范围内没有会话，可调整筛选或返回上一页。";
+    renderCursorPagination("schedule-session", picker.page, data.items.length);
+  } catch (error) {
+    if (!current()) return;
+    scheduleInput("session-status").textContent = error.message;
+    scheduleInput("session-retry").hidden = false;
+  } finally {
+    if (current()) {
+      picker.loading = false;
+      scheduleInput("session-previous").disabled = !picker.page.previousCursors.length;
+      scheduleInput("session-next").disabled = !picker.page.nextCursor;
+    }
+  }
 }
 
-function cancelScheduleSelection({ confirmed = false } = {}) {
-  if (!confirmed && !confirmDiscardChanges(Boolean(pendingScheduleDraft?.dirty))) return false;
-  pendingScheduleDraft = null;
-  scheduleEditorSerial += 1;
-  document.querySelector("#session-schedule-selection").hidden = true;
-  return true;
+async function chooseScheduleSession() {
+  const editor = scheduleEditor;
+  if (!editor || editor.plan || scheduleInput("fields").disabled || state.authExpired) return;
+  if (editor.pickerOpen) return;
+  editor.pickerOpen = true;
+  editor.picker = { serial: 0, page: firstSessionPage(), loading: false };
+  const picker = editor.picker;
+  scheduleSessionChatPicker ||= window.createChatPicker(scheduleInput("session-chat-picker"), {
+    id: "schedule-session-group", label: "群聊", placeholder: "全部", emptyOption: "全部", fetchPage: fetchChatPage,
+  });
+  scheduleSessionChatPicker.reset();
+  scheduleInput("session-search").value = "";
+  scheduleInput("session-search").disabled = false;
+  scheduleInput("session-state").value = "active";
+  scheduleInput("session-help").textContent = "不限更新时间。搜索匹配名称、标题或预览中的连续文字，英文区分大小写。";
+  scheduleSelectOptions(scheduleInput("session-project"), [["", "全部"],
+    ...scheduleProjects.map((project) => [project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`])], "");
+  renderScheduleTarget();
+  scheduleInput("session-search").focus();
+  const reading = loadScheduleSessionPage();
+  // The Sessions row entry has not necessarily loaded the schedule Project options.
+  if (!scheduleProjects.length) {
+    try {
+      const projects = await queryProjectOptions();
+      if (scheduleEditor === editor && editor.picker === picker && !state.authExpired) {
+        scheduleSelectOptions(scheduleInput("session-project"), [["", "全部"],
+          ...projects.map((project) => [project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`])],
+        scheduleInput("session-project").value);
+      }
+    } catch { /* Session search remains usable without optional Project choices. */ }
+  }
+  await reading;
 }
 
 async function openScheduleForSession(session, returnFocus) {
+  returnFocus = returnFocus?.menuTrigger || returnFocus;
   if (scheduleEditor || returnFocus.disabled) return;
   const serial = ++scheduleEditorSerial;
-  const draft = pendingScheduleDraft;
   returnFocus.disabled = true;
   try {
     // Obtain a fresh management grant without changing either tab's list/filter state.
     const data = await api("/api/v1/schedules?mode=list");
     if (serial !== scheduleEditorSerial || state.tab !== "sessions" || state.sessionTab === "temporary") return;
-    const loading = openScheduleEditor(null, { targetSession: session, returnFocus, draft,
+    await openScheduleEditor(null, { targetSession: session, returnFocus,
       action: data.actions.create, timezone: data.default_timezone });
-    // The editor takes ownership synchronously; catalog loading must not keep
-    // a second draft alive after the user saves or discards this editor.
-    if (scheduleEditor?.targetSession === session) {
-      pendingScheduleDraft = null;
-      document.querySelector("#session-schedule-selection").hidden = true;
-    }
-    await loading;
-  } catch (error) { setStatus(error.message, true); }
+  } catch (error) { if (!state.authExpired) window.NetizenList.error("sessions", error.message, () => openScheduleForSession(session, returnFocus)); }
   finally { returnFocus.disabled = false; }
 }
 
@@ -4049,6 +4284,8 @@ function renderProgressCardSettings(input, settings) {
   container.hidden = !settings.progress_card_enabled;
   const source = input("progress-source");
   if (source) source.hidden = settings.progress_card_settings !== null;
+  const reset = input("progress-reset");
+  if (reset) reset.hidden = settings.progress_card_settings === null;
   for (const node of container.querySelectorAll("input, select")) {
     const field = node.id.split("-progress-").at(-1);
     const key = field.replaceAll("-", "_");
@@ -4067,14 +4304,55 @@ function renderProgressCardSettings(input, settings) {
   note.hidden = !error;
 }
 
-function scheduleSessionSummary(settings) {
-  const model = settings.turn_settings;
-  const labels = [model ? `${model.model_id} / ${model.effort_id} / ${model.service_tier_id}` : "继承 Codex",
-    settings.message_context_mode === "catch-up" ? "补齐未读上下文" : "当前消息"];
+// Display names are borrowed only from an already loaded model catalog. Lists
+// without that catalog retain exact IDs; this never resolves execution settings.
+
+function catalogChoiceLabel(choice) {
+  return choice.display_name || choice.name || choice.id;
+}
+
+function messageContextLabel(value) {
+  return localizedLabel({ "current-only": "当前消息", "catch-up": "补齐未读上下文" }, value);
+}
+
+function sessionConfigurationSummary(settings, models = []) {
+  const turn = settings.turn_settings;
+  const context = messageContextLabel(settings.message_context_mode);
+  if (!turn) return `${context} · 继承 Codex`;
+  const model = models.find((item) => item.id === turn.model_id);
+  const effort = model?.efforts?.find((item) => item.id === turn.effort_id);
+  const tier = model?.service_tiers?.find((item) => item.id === turn.service_tier_id);
+  return `${context} · ${turn.model_id} · 推理 ${effort ? catalogChoiceLabel(effort) : turn.effort_id}`
+    + ` · 速度 ${tier ? catalogChoiceLabel(tier) : turn.service_tier_id}`;
+}
+
+function progressCardSourceLabel(settings) {
+  return settings.progress_card_enabled ? `过程卡：${settings.progress_card_settings === null ? "跟随全局" : "单独配置"}` : "";
+}
+
+async function restoreGlobalProgress(editor, isCurrent, render) {
+  if (!editor || editor.loading || editor.saving || state.authExpired || editor.settings.progress_card_settings === null) return;
+  editor.settings.progress_card_settings = null;
+  editor.touched = true;
+  editor.loading = true;
+  render();
+  await window.NetizenProgressCard.read();
+  if (isCurrent() && !state.authExpired) {
+    editor.loading = false;
+    render();
+  }
+}
+
+function sessionFeedbackLabels(settings, { progressSource = false } = {}) {
+  const labels = [];
   if (settings.reaction_pulse_enabled) labels.push("表情反馈");
-  if (settings.progress_card_enabled) labels.push("进度卡片");
+  if (settings.progress_card_enabled) labels.push(progressSource ? progressCardSourceLabel(settings) : "进度卡片");
   if (settings.completion_mention_enabled) labels.push("结束时 @ 提醒");
-  return labels.join(" · ");
+  return labels;
+}
+
+function scheduleSessionSummary(settings, models = []) {
+  return [sessionConfigurationSummary(settings, models), ...sessionFeedbackLabels(settings)].join(" · ");
 }
 
 function scheduleSelectOptions(node, choices, selected) {
@@ -4099,8 +4377,8 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   const model = models.find((item) => item.id === turn?.model_id);
   scheduleSelectOptions(input("model"), [["", "继承 Codex"],
     ...models.map((item) => [item.id, item.display_name])], turn?.model_id);
-  scheduleSelectOptions(input("effort"), (model?.efforts || []).map((item) => [item.id, item.id]), turn?.effort_id);
-  scheduleSelectOptions(input("tier"), (model?.service_tiers || []).map((item) => [item.id, item.name || item.id]), turn?.service_tier_id);
+  scheduleSelectOptions(input("effort"), (model?.efforts || []).map((item) => [item.id, catalogChoiceLabel(item)]), turn?.effort_id);
+  scheduleSelectOptions(input("tier"), (model?.service_tiers || []).map((item) => [item.id, catalogChoiceLabel(item)]), turn?.service_tier_id);
   input("effort").disabled = !model;
   input("tier").disabled = !model;
   input("context").value = settings.message_context_mode;
@@ -4147,7 +4425,7 @@ function renderScheduleSessionSettings() {
   const model = renderSessionSettingsFields(scheduleInput, settings, editor.models, editor.contextAvailable);
   scheduleInput("context-field").hidden = chatTarget("schedule").kind() === "p2p"
     && settings.message_context_mode === "current-only";
-  scheduleInput("session-summary").textContent = scheduleSessionSummary(settings);
+  scheduleInput("session-summary").textContent = scheduleSessionSummary(settings, editor.models);
   const notes = [];
   if (editor.catalogMessage) notes.push(editor.catalogMessage);
   if (editor.chatMessage) notes.push(editor.chatMessage);
@@ -4395,7 +4673,7 @@ async function prepareSchedule() {
 
 function openScheduleEditor(plan = null, source = {}) {
   if (scheduleInput("fields").disabled) return;
-  if (scheduleEditor && !closeScheduleEditor()) return;
+  if (scheduleEditor) return closeScheduleEditor().then((closed) => closed && openScheduleEditor(plan, source));
   for (const field of [...scheduleFieldErrors.keys()]) clearScheduleFieldError(field);
   showScheduleFormError();
   scheduleEditorSerial += 1;
@@ -4434,8 +4712,7 @@ function openScheduleEditor(plan = null, source = {}) {
   for (const input of scheduleInput("weekdays").querySelectorAll("input")) {
     input.checked = (rule.weekdays || []).includes(Number(input.value));
   }
-  scheduleEditor.discardBase = source.draft?.discardBase || scheduleEditorValues();
-  if (source.draft) restoreScheduleDraft(source.draft);
+  scheduleEditor.discardBase = scheduleEditorValues();
   scheduleInput("end-details").open = Boolean(scheduleInput("end-at").value);
   invalidateSchedulePreview();
   scheduleInput("session-settings").open = true;
@@ -4456,7 +4733,7 @@ async function editSchedule(plan) {
     const data = await api(`/api/v1/schedules?${new URLSearchParams({ mode: "view", plan_id: plan.id })}`);
     if (serial !== scheduleEditorSerial) return;
     await openScheduleEditor(data.plan);
-  } catch (error) { setStatus(error.message, true); }
+  } catch (error) { if (!state.authExpired) window.NetizenList.error("schedules", error.message, () => editSchedule(plan)); }
 }
 
 async function saveSchedule(event) {
@@ -4537,6 +4814,7 @@ async function saveSchedule(event) {
   scheduleInput("fields").disabled = true;
   scheduleInput("close").disabled = true;
   let saved = false;
+  setStatus("正在保存计划…");
   try {
     await api(`/api/v1/schedules/${editor.plan ? "update" : "create"}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -4578,14 +4856,16 @@ async function saveSchedule(event) {
 
 async function changeSchedule(plan, mode) {
   if (pendingScheduleMutations.has(plan.id)) return;
-  if (mode === "delete" && !window.confirm(
+  if (mode === "delete" && !(await window.NetizenConfirm.ask({ title: "删除计划", danger: true, confirmLabel: "删除", body:
     `删除计划「${plan.name}」？\n\n后续不再触发。已认领的执行可以继续，历史话题和普通会话保留。`,
-  )) return;
+  }))) return;
+  if (state.authExpired || pendingScheduleMutations.has(plan.id)) return;
   const action = plan.actions[mode];
   if (!action) return;
   pendingScheduleMutations.add(plan.id);
   plan.actions[mode] = null;
   const definition = mode === "update" ? { definition: { enabled: !plan.enabled } } : {};
+  setStatus("正在执行…");
   try {
     await api(`/api/v1/schedules/${mode}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -4610,6 +4890,7 @@ async function runSchedule(plan, button) {
   if (button) button.disabled = true;
   scheduleInput("run-receipt").hidden = true;
   let receipt;
+  setStatus("正在提交手动运行…");
   try {
     receipt = await api("/api/v1/schedules/run-now", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -4639,7 +4920,7 @@ async function runSchedule(plan, button) {
     await loadSchedules(scheduleListCursor, scheduleListQuery);
     if (scheduleDetailId === plan.id) await showSchedule(plan.id);
   } catch (error) {
-    setStatus(`${message} 列表刷新失败：${error.message} 请手动刷新查看执行进展。`);
+    setStatus(`${message} 列表刷新失败：${error.message} 请手动刷新查看执行进展。`, true);
   }
 }
 
@@ -4654,9 +4935,14 @@ async function loadSchedules(cursor = undefined, appliedQuery = scheduleListQuer
   }
   const queryIdentity = query.toString();
   if (page.cursor) query.set("cursor", page.cursor);
-  const [data, projects] = await Promise.all([
+  let data, projects;
+  try { [data, projects] = await Promise.all([
     api(`/api/v1/schedules?${query}`), queryProjectOptions(),
   ]);
+  } catch (error) {
+    if (serial === scheduleListSerial && !state.authExpired) window.NetizenList.error("schedules", error.message, () => loadSchedules(cursor, appliedQuery).catch(() => {}));
+    throw error;
+  }
   if (serial !== scheduleListSerial) return false;
   state.schedules = data;
   scheduleProjects = projects;
@@ -4664,6 +4950,7 @@ async function loadSchedules(cursor = undefined, appliedQuery = scheduleListQuer
   scheduleListQuery = queryIdentity;
   schedulePage = { ...page, query: queryIdentity, nextCursor: data.next_cursor };
   renderScheduleProjects();
+  window.NetizenMenu.close();
   const body = document.querySelector("#schedules-body");
   body.replaceChildren();
   for (const plan of data.plans) {
@@ -4721,16 +5008,18 @@ async function loadSchedules(cursor = undefined, appliedQuery = scheduleListQuer
     }
     actions.append(actionButton("删除", () => changeSchedule(plan, "delete"), true));
     for (const button of actions.querySelectorAll("button")) button.disabled ||= pendingScheduleMutations.has(plan.id);
+    window.NetizenMenu.compact(actions);
     body.append(row);
   }
   if (!data.plans.length) {
-    const row = document.createElement("tr");
-    const empty = document.createElement("td");
-    empty.colSpan = 7;
-    empty.textContent = "没有符合筛选条件的计划。可调整结束状态查看历史计划，或创建新计划。";
-    row.append(empty);
-    body.append(row);
+    const filtered = [...query.entries()].some(([key, value]) => key !== "cursor" && value);
+    window.NetizenList.empty(body, 7, filtered ? "当前范围内没有计划，可调整或重置筛选。" : "还没有定时计划。",
+      filtered ? "重置" : "创建计划", filtered ? () => {
+        for (const filter of scheduleFilters.values()) filter.setValues([]);
+        refresh("schedules", firstSessionPage(""));
+      } : () => openScheduleEditor());
   }
+  window.NetizenList.success("schedules");
   renderCursorPagination("schedules", schedulePage, data.plans.length);
   syncPageUrl();
   return true;
@@ -4760,6 +5049,7 @@ function renderScheduleRunsPagination() {
 }
 
 async function showSchedule(planId, returnFocus = document.activeElement) {
+  returnFocus = returnFocus?.menuTrigger || returnFocus;
   const serial = ++scheduleDetailSerial;
   scheduleRunsSerial += 1;
   scheduleDetailId = planId;
@@ -4770,6 +5060,7 @@ async function showSchedule(planId, returnFocus = document.activeElement) {
   drawer.querySelector(".drawer-body").scrollTop = 0;
   document.body.classList.toggle("schedule-detail-open", true);
   scheduleInput("detail-title").textContent = "计划详情";
+  window.NetizenList.freshness("schedule-runs", null);
   scheduleInput("detail-content").hidden = true;
   scheduleInput("detail-note").textContent = "正在读取计划详情…";
   scheduleInput("detail-note").classList.toggle("error", false);
@@ -4851,16 +5142,20 @@ async function loadScheduleRuns(page = scheduleRunsPage) {
       if (run.binding_id && !run.binding_removed) {
         const link = document.createElement("a");
         link.href = `/sessions/ordinary?${new URLSearchParams({ identity: run.binding_id, updatedRange: "all" })}`;
-        link.textContent = "打开 Session";
+        link.textContent = "打开会话";
         links.append(link);
       }
       body.append(row);
     }
     scheduleRunsPage = { ...candidate, nextCursor: data.next_cursor };
-    scheduleInput("runs-note").textContent = data.runs.length ? "" : "暂无触发记录。";
+    if (!data.runs.length) window.NetizenList.empty(body, 4, "暂无触发记录。");
+    window.NetizenList.labelRows(body);
+    window.NetizenList.freshness("schedule-runs");
+    scheduleInput("runs-note").textContent = "";
     return true;
   } catch (error) {
     if (!isCurrent()) return false;
+    for (const row of scheduleInput("runs-body").querySelectorAll(".list-empty")) row.hidden = true;
     scheduleInput("runs-note").textContent = `${error.message} 当前页保持不变，请重试。`;
     scheduleInput("runs-note").classList.toggle("error", true);
     scheduleRunsRetryPage = candidate;
@@ -4891,14 +5186,36 @@ async function moveScheduleRunsPage(direction) {
 // Only durable query intent belongs in URLs. Grants, editor drafts and live
 // keyset cursors stay in this document and are never restored as server facts.
 const adminPagePaths = { projects: "/projects", worktrees: "/worktrees", schedules: "/schedules", defaults: "/defaults",
-  updates: "/maintenance", system: "/system" };
+  updates: "/maintenance", admins: "/admins", "group-access": "/group-access", "session-tools": "/session-tools",
+  "progress-card": "/progress-card", "question-notifications": "/question-notifications", attachments: "/attachments" };
+const configPageEditors = { "group-access": () => window.NetizenGroupAccess, "session-tools": () => window.NetizenSessionAccess,
+  "progress-card": () => window.NetizenProgressCard, "question-notifications": () => window.NetizenQuestionNotifications };
 const sessionUrlKeys = ["project", "scopeKind", "inventoryState", "searchTerm", "current", "chatId", "topicId", "identity",
   "createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange", "pageSize", "sortBy", "sortDirection"];
 const sideUrlKeys = ["project", "state", "chatId", "createdFrom", "createdBefore", "createdRange", "pageSize", "sortBy", "sortDirection"];
 let navigationReady = false;
 let navigationIndex = 0;
 let navigationHref = "";
-let restoringHistory = false;
+let navigationConfirmations = 0;
+let historyNavigation = 0;
+
+async function confirmPageNavigation(route, targetIndex) {
+  const navigation = { route, targetIndex, sourceIndex: navigationIndex, sourceHref: navigationHref,
+    request: ++historyNavigation };
+  // A modal confirmation yields to list reads. Keep their applied query and
+  // URL together by discarding reads that straddle this navigation decision.
+  invalidateSessionListRequest();
+  scheduleListSerial += 1;
+  navigationConfirmations += 1;
+  try {
+    const allowed = await confirmDiscardEditors({ preservePageDrafts: true });
+    return navigation.request === historyNavigation ? { ...navigation, allowed } : null;
+  } finally {
+    invalidateSessionListRequest();
+    scheduleListSerial += 1;
+    navigationConfirmations -= 1;
+  }
+}
 
 function pageQuery(tab, sessionTab, raw = "") {
   const input = new URLSearchParams(raw);
@@ -4943,11 +5260,13 @@ function defaultSessionQuery() {
   return pageQuery("sessions", "ordinary");
 }
 
-function openProjectSessions(alias) {
-  if (state.authExpired || !confirmDiscardEditors()) return;
+async function openProjectSessions(alias) {
+  if (state.authExpired) return;
   const query = defaultSessionQuery();
   query.set("project", alias);
-  restorePageFilters({ tab: "sessions", sessionTab: "ordinary", query });
+  const navigation = await confirmPageNavigation({ tab: "sessions", sessionTab: "ordinary", query });
+  if (!navigation?.allowed) return;
+  restorePageFilters(navigation.route);
   return selectTab("sessions", "ordinary", { preserveEditors: true });
 }
 
@@ -4970,28 +5289,28 @@ function pageUrl(tab, sessionTab = state.sessionTab, raw = "") {
   return path + (query.size ? `?${query}` : "");
 }
 
-function currentPageUrl(tab = state.tab) {
+function currentPageUrl(tab = state.tab, sessionTab = state.sessionTab) {
   let query = "";
   if (tab === "sessions") {
-    const kind = state.sessionTab === "temporary" ? "side" : "session";
+    const kind = sessionTab === "temporary" ? "side" : "session";
     query = state[`${kind}Page`].query || "";
   } else if (tab === "schedules") {
     query = new URLSearchParams(scheduleListQuery || "");
     if (scheduleListQuery !== null && !query.has("ended")) query.set("ended", "all");
   }
   else if (tab === "defaults") query = `kind=${defaultsTab}`;
-  return pageUrl(tab, state.sessionTab, query);
+  return pageUrl(tab, sessionTab, query);
 }
 
 function syncPageUrl({ replace = false } = {}) {
-  if (!navigationReady || state.authExpired) return;
+  if (!navigationReady || state.authExpired || navigationConfirmations) return;
   const href = currentPageUrl();
   if (replace || href !== navigationHref) {
     if (!replace) navigationIndex += 1;
     window.history[replace ? "replaceState" : "pushState"]({ netizenIndex: navigationIndex }, "", href);
     navigationHref = href;
   }
-  for (const link of document.querySelectorAll(".tab")) link.href = currentPageUrl(link.dataset.tab);
+  for (const link of document.querySelectorAll(".tab")) link.href = currentPageUrl(link.dataset.tab, link.dataset.sessionTab || state.sessionTab);
   const login = document.querySelector("#auth-expired a");
   if (login) login.href = `/login?${new URLSearchParams({ next: href })}`;
 }
@@ -5001,7 +5320,8 @@ function readPageLocation() {
   const query = new URLSearchParams(window.location.search);
   let tab = Object.keys(adminPagePaths).find((name) => adminPagePaths[name] === path) || "projects";
   const sessionTab = path === "/sessions/temporary" ? "temporary" : "ordinary";
-  if (path.startsWith("/sessions/")) tab = "sessions";
+  if (["/sessions/ordinary", "/sessions/temporary"].includes(path)) tab = "sessions";
+  if (path === "/system") tab = "admins";
   if (path === "/" && query.get("binding_id")) {
     tab = "sessions";
     query.set("identity", query.get("binding_id"));
@@ -5038,10 +5358,10 @@ function restorePageFilters(route) {
     state[`${kind}Page`] = firstSessionPage(query.toString());
     const name = kind === "side" ? "sides" : "sessions";
     state[name] = null;
-    if (kind === "session") document.querySelector("#sessions-empty").hidden = true;
     state[`${kind}RefreshedAt`] = null;
     document.querySelector(`#${name}-body`).replaceChildren();
     applySessionLayout(kind);
+    renderAppliedSessionFilters(kind);
     renderSessionPagination(kind);
     renderSessionSort(kind);
   } else if (tab === "schedules") {
@@ -5074,8 +5394,7 @@ function restorePageFilters(route) {
   }
 }
 
-function restorePageLocation() {
-  const route = readPageLocation();
+function restorePageLocation(route = readPageLocation()) {
   restorePageFilters(route);
   return selectTab(route.tab, route.sessionTab, { preserveEditors: true, replace: true });
 }
@@ -5083,93 +5402,114 @@ function restorePageLocation() {
 function initializePageNavigation() {
   navigationReady = true;
   navigationIndex = window.history.state?.netizenIndex || 0;
-  window.addEventListener("popstate", (event) => {
-    if (restoringHistory) { restoringHistory = false; return; }
+  window.addEventListener("popstate", async (event) => {
     const targetIndex = event.state?.netizenIndex;
-    if (!confirmDiscardEditors()) {
-      if (Number.isInteger(targetIndex) && targetIndex !== navigationIndex) {
-        restoringHistory = true;
-        window.history.go(navigationIndex - targetIndex);
-      } else window.history.replaceState({ netizenIndex: navigationIndex }, "", navigationHref);
+    window.NetizenConfirm.cancel();
+    closeNavigationMenu();
+    // Recognize an actual return to the accepted location, not merely the next
+    // event: history.go() may do nothing, and must never swallow a later Back.
+    if (targetIndex === navigationIndex && window.location.pathname + window.location.search === navigationHref) {
+      historyNavigation += 1;
       return;
     }
-    navigationIndex = Number.isInteger(targetIndex) ? targetIndex : 0;
-    restorePageLocation();
+    const navigation = await confirmPageNavigation(readPageLocation(), targetIndex);
+    if (!navigation) return;
+    if (!navigation.allowed) {
+      if (Number.isInteger(navigation.targetIndex) && navigation.targetIndex !== navigation.sourceIndex) {
+        window.history.go(navigation.sourceIndex - navigation.targetIndex);
+      } else window.history.replaceState({ netizenIndex: navigation.sourceIndex }, "", navigation.sourceHref);
+      return;
+    }
+    navigationIndex = Number.isInteger(navigation.targetIndex) ? navigation.targetIndex : 0;
+    restorePageLocation(navigation.route);
   });
   return restorePageLocation();
 }
 
-async function refresh(tab, cursor = undefined) {
+async function refresh(tab, cursor = undefined, { entering = false } = {}) {
   if (state.authExpired) return false;
   if (tab === "sessions") {
     return state.sessionTab === "temporary" ? loadSides(cursor) : loadSessions(cursor);
   }
   const request = state.refreshRequest = (state.refreshRequest || 0) + 1;
   const isCurrentView = () => state.tab === tab && request === state.refreshRequest;
-  setStatus("正在读取服务端事实…");
   try {
     if (tab === "projects" && await loadProjects(cursor) === false) return false;
     if (tab === "worktrees" && await window.NetizenWorktrees.load() === false) return false;
     if (tab === "updates") await loadUpdates();
     if (tab === "schedules" && await loadSchedules(cursor) === false) return false;
     if (tab === "defaults") await loadDefaults();
-    if (tab === "system") {
-      const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load(), window.NetizenGroupAccess?.load(),
-        window.NetizenProgressCard?.load(), window.NetizenQuestionNotifications?.load()]);
-      if (results.includes(false)) return false;
+    const config = configPageEditors[tab]?.();
+    // Navigation never consumes a draft or replaces its one-use authorization.
+    if (config) {
+      if (entering && (config.dirty() || config.busy())) return true;
+      if (await config.load() === false) return false;
+    }
+    if (tab === "admins") {
+      if (entering && !document.querySelector("#admin-user-panel").hidden) return true;
+      await window.NetizenIdentity.loadUsers();
     }
     if (state.authExpired) return false;
-    if (isCurrentView()) setStatus("已更新。");
+    if (isCurrentView()) window.NetizenList.success(tab);
     return true;
   } catch (error) {
-    if (isCurrentView()) setStatus(error.message, true);
+    if (isCurrentView() && !state.authExpired && (tab === "admins" || tab === "updates" || configPageEditors[tab])) window.NetizenList.error(tab, error.message, () => refresh(tab));
     return false;
   }
 }
 
 function renderSessionTabs() {
-  for (const button of document.querySelectorAll("[data-session-tab]")) {
-    const selected = button.dataset.sessionTab === state.sessionTab;
-    button.setAttribute("aria-selected", String(selected));
-    button.setAttribute("tabindex", selected ? "0" : "-1");
-    document.querySelector(`#sessions-${button.dataset.sessionTab}`).hidden = !selected;
+  for (const name of ["ordinary", "temporary"]) {
+    document.querySelector(`#sessions-${name}`).hidden = name !== state.sessionTab;
   }
+  document.querySelector("#sessions-heading").textContent = state.sessionTab === "temporary" ? "临时会话" : "普通会话";
   renderSessionFreshness();
 }
 
 function selectSessionTab(name) {
-  if (state.authExpired || !confirmDiscardEditors()) return;
-  state.sessionTab = name;
-  invalidateSessionListRequest();
-  sessionChatPicker?.close();
-  sideChatPicker?.close();
-  openFilter?.close();
-  openTimeRangeFilter?.cancel({ restoreFocus: false });
-  renderSessionTabs();
-  syncPageUrl();
-  return refresh("sessions");
+  return selectTab("sessions", name);
 }
 
-function selectSystemTab(name) {
-  if (state.authExpired || state.systemTab === name) return;
+const navigationDrawer = document.querySelector("#navigation-drawer");
+const navigationMenu = document.querySelector("#admin-navigation");
+const navigationTrigger = document.querySelector("#navigation-open");
+const narrowNavigation = window.matchMedia("(max-width: 1023px)");
+function closeNavigationMenu() {
+  if (!navigationDrawer.open) return;
+  navigationDrawer.close();
+  document.querySelector("#navigation-home").append(navigationMenu);
+  navigationTrigger.setAttribute("aria-expanded", "false");
+  document.body.classList.toggle("navigation-open", false);
+  navigationTrigger.focus();
+}
+navigationTrigger.addEventListener("click", () => {
+  if (state.authExpired || navigationDrawer.open) return;
+  window.NetizenMenu.close();
   window.NetizenSelect?.close();
-  if (state.systemTab === "admins") window.NetizenIdentity?.suspendSelector();
-  else if (state.systemTab === "groups") window.NetizenGroupAccess?.closePickers();
-  else if (state.systemTab === "access") window.NetizenSessionAccess?.closePickers();
-  state.systemTab = name;
-  for (const button of document.querySelectorAll("[data-system-tab]")) {
-    const selected = button.dataset.systemTab === name;
-    button.setAttribute("aria-selected", String(selected));
-    button.setAttribute("tabindex", selected ? "0" : "-1");
-    document.querySelector(`#system-${button.dataset.systemTab}`).hidden = !selected;
-  }
-}
+  navigationDrawer.append(navigationMenu);
+  navigationDrawer.showModal();
+  navigationTrigger.setAttribute("aria-expanded", "true");
+  document.body.classList.toggle("navigation-open", true);
+  [...navigationMenu.querySelectorAll(".tab")].find((link) => link.getAttribute("aria-current") === "page")?.focus();
+});
+document.querySelector("#navigation-close").addEventListener("click", closeNavigationMenu);
+navigationDrawer.addEventListener("cancel", (event) => { event.preventDefault(); closeNavigationMenu(); });
+navigationDrawer.addEventListener("click", (event) => {
+  if (event.target !== navigationDrawer) return;
+  const rect = navigationDrawer.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeNavigationMenu();
+});
+narrowNavigation.addEventListener("change", () => { if (!narrowNavigation.matches) closeNavigationMenu(); });
 
-function selectTab(name, sessionTab = state.sessionTab || "ordinary", { preserveEditors = false, replace = false } = {}) {
+async function selectTab(name, sessionTab = state.sessionTab || "ordinary", { preserveEditors = false, replace = false } = {}) {
   if (state.authExpired) return;
-  if (!preserveEditors && !confirmDiscardEditors()) return;
+  closeNavigationMenu();
+  if (!preserveEditors && !(await confirmPageNavigation({ tab: name, sessionTab }))?.allowed) return;
+  window.NetizenMenu.close();
   window.NetizenSelect?.close();
-  window.NetizenIdentity?.closePanel?.();
+  window.NetizenIdentity?.suspendSelector?.();
+  window.NetizenGroupAccess?.closePickers();
+  window.NetizenSessionAccess?.closePickers();
   closeScheduleDetail();
   closeLatestAnswer();
   state.tab = name;
@@ -5185,7 +5525,7 @@ function selectTab(name, sessionTab = state.sessionTab || "ordinary", { preserve
   renderSessionTabs();
   stopUpdatePolling();
   for (const item of document.querySelectorAll(".tab")) {
-    const active = item.dataset.tab === name;
+    const active = item.dataset.tab === name && (!item.dataset.sessionTab || item.dataset.sessionTab === sessionTab);
     item.classList.toggle("active", active);
     if (active) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
@@ -5195,43 +5535,19 @@ function selectTab(name, sessionTab = state.sessionTab || "ordinary", { preserve
     panel.hidden = !active;
     panel.classList.toggle("active", active);
   }
+  const heading = document.querySelector(`#${name}-heading`);
+  document.querySelector("#current-page-name").textContent = heading?.textContent || "Project";
   syncPageUrl({ replace });
-  return refresh(name);
+  return refresh(name, undefined, { entering: true });
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", (event) => {
     if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button > 0) return;
     event.preventDefault();
-    selectTab(tab.dataset.tab);
+    selectTab(tab.dataset.tab, tab.dataset.sessionTab || state.sessionTab);
   });
 }
-for (const tab of document.querySelectorAll("[data-session-tab]")) {
-  tab.addEventListener("click", () => selectSessionTab(tab.dataset.sessionTab));
-  tab.addEventListener("keydown", (event) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const name = event.key === "Home" ? "ordinary" : event.key === "End" ? "temporary"
-      : tab.dataset.sessionTab === "ordinary" ? "temporary" : "ordinary";
-    selectSessionTab(name);
-    document.querySelector(`#session-tab-${name}`).focus();
-  });
-}
-
-for (const tab of document.querySelectorAll("[data-system-tab]")) {
-  tab.addEventListener("click", () => selectSystemTab(tab.dataset.systemTab));
-  tab.addEventListener("keydown", (event) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const names = [...document.querySelectorAll("[data-system-tab]")].map((button) => button.dataset.systemTab);
-    const index = names.indexOf(tab.dataset.systemTab);
-    const name = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
-      : names[(index + (event.key === "ArrowRight" ? 1 : names.length - 1)) % names.length];
-    selectSystemTab(name);
-    document.querySelector(`#system-tab-${name}`).focus();
-  });
-}
-
 for (const button of document.querySelectorAll("[data-refresh]")) {
   button.addEventListener("click", () => refresh(button.dataset.refresh));
 }
@@ -5267,6 +5583,15 @@ for (const control of document.querySelectorAll("[data-session-layout]")) {
 for (const kind of ["session", "side"]) {
   document.querySelector(`#${kind}-groups-expand`).addEventListener("click", () => setSessionGroupsExpanded(kind, true));
   document.querySelector(`#${kind}-groups-collapse`).addEventListener("click", () => setSessionGroupsExpanded(kind, false));
+  const trigger = document.querySelector(`#${kind}-more-filters`);
+  const advanced = document.querySelector(`#${kind}-advanced-filters`);
+  trigger.addEventListener("click", () => {
+    advanced.hidden = !advanced.hidden;
+    trigger.setAttribute("aria-expanded", String(!advanced.hidden));
+    if (advanced.hidden) {
+      openFilter?.close(); openTimeRangeFilter?.cancel({ restoreFocus: false });
+    }
+  });
 }
 
 document.querySelector("#session-inventory-state").addEventListener("change", updateSessionDateFilters);
@@ -5276,14 +5601,14 @@ document.querySelector("#session-filter").addEventListener("submit", (event) => 
 });
 document.querySelector("#session-filter-reset").addEventListener("click", () => resetSessionFilters());
 document.querySelector("#session-page-size").addEventListener("change", () => {
-  refresh("sessions", sessionFilterPage());
+  resizeSessionPage("session");
 });
 document.querySelector("#side-filter").addEventListener("submit", (event) => {
   event.preventDefault(); refresh("sessions", sessionFilterPage("side"));
 });
 document.querySelector("#side-filter-reset").addEventListener("click", resetSideFilters);
 document.querySelector("#side-page-size").addEventListener("change", () => {
-  refresh("sessions", sessionFilterPage("side"));
+  resizeSessionPage("side");
 });
 document.querySelector("#projects-previous").addEventListener("click", () => moveListPage("projects", "previous"));
 document.querySelector("#projects-next").addEventListener("click", () => moveListPage("projects", "next"));
@@ -5354,9 +5679,18 @@ for (const field of ["model", "effort", "tier", "context", "reactions", "progres
 }
 for (const [name, delta] of [["previous", -50], ["next", 50]]) {
   defaultsInput(name).addEventListener("click", async () => {
-    try { await loadDefaults(Math.max(0, defaultsOffset + delta)); } catch (error) { setStatus(error.message, true); }
+    try { await loadDefaults(Math.max(0, defaultsOffset + delta)); } catch { /* Error is next to the list. */ }
   });
 }
+sessionSettingsInput("progress-reset").addEventListener("click", () => {
+  const editor = sessionSettingsEditor;
+  restoreGlobalProgress(editor, () => sessionSettingsEditor === editor, renderSessionSettingsEditor);
+});
+defaultsInput("progress-reset").addEventListener("click", () => {
+  if (defaultsBusy) return;
+  const editor = defaultsEditor;
+  restoreGlobalProgress(editor, () => defaultsEditor === editor, renderDefaultSettings);
+});
 scheduleInput("filter").addEventListener("submit", (event) => {
   event.preventDefault();
   const query = new URLSearchParams();
@@ -5365,7 +5699,9 @@ scheduleInput("filter").addEventListener("submit", (event) => {
 });
 scheduleInput("new").addEventListener("click", () => openScheduleEditor());
 scheduleInput("preview").addEventListener("click", previewSchedule);
-scheduleInput("editor").addEventListener("input", invalidateSchedulePreview);
+scheduleInput("editor").addEventListener("input", (event) => {
+  if (!scheduleInput("session-picker").contains(event.target)) invalidateSchedulePreview();
+});
 for (const eventName of ["input", "change"]) {
   scheduleInput("editor").addEventListener(eventName, (event) => {
     for (const [field, error] of scheduleFieldErrors) {
@@ -5385,11 +5721,35 @@ scheduleInput("workspace-ref").addEventListener("input", () => changeScheduleWor
 scheduleInput("target-kind").addEventListener("change", () => {
   for (const field of ["binding", "project", "chat", "workspace"]) clearScheduleFieldError(field);
   invalidateSchedulePreview();
+  if (scheduleTargetKind() !== "binding") closeScheduleSessionPicker();
   renderScheduleTarget();
+  if (scheduleTargetKind() === "binding" && !scheduleEditor.targetSession) chooseScheduleSession();
   loadScheduleSessionOptions();
 });
 scheduleInput("select-session").addEventListener("click", chooseScheduleSession);
-document.querySelector("#session-schedule-cancel").addEventListener("click", cancelScheduleSelection);
+scheduleInput("session-search-button").addEventListener("click", () => loadScheduleSessionPage());
+scheduleInput("session-search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    event.stopPropagation();
+    loadScheduleSessionPage();
+  }
+});
+scheduleInput("session-state").addEventListener("change", () => {
+  const lazy = scheduleInput("session-state").value === "lazy";
+  scheduleInput("session-search").disabled = lazy;
+  scheduleInput("session-help").textContent = lazy ? "未开始的会话不支持名称搜索，按登记时间排序。"
+    : "不限更新时间。搜索匹配名称、标题或预览中的连续文字，英文区分大小写。";
+});
+scheduleInput("session-retry").addEventListener("click", () => loadScheduleSessionPage(scheduleEditor?.picker?.retryPage));
+for (const direction of ["previous", "next"]) {
+  scheduleInput(`session-${direction}`).addEventListener("click", () => {
+    const picker = scheduleEditor?.picker;
+    if (!picker || picker.loading) return;
+    const page = stepCursorPage(picker.page, direction);
+    if (page) loadScheduleSessionPage(page);
+  });
+}
 document.querySelector("#session-schedule-view").addEventListener("click", () => selectTab("schedules"));
 for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
   scheduleInput(field).addEventListener("change", () => changeScheduleSessionSettings(field));
@@ -5415,12 +5775,19 @@ scheduleInput("detail-retry").addEventListener("click", () => showSchedule(sched
 scheduleInput("detail-close").addEventListener("click", closeScheduleDetail);
 scheduleInput("detail-done").addEventListener("click", closeScheduleDetail);
 scheduleInput("detail").addEventListener("cancel", (event) => { event.preventDefault(); closeScheduleDetail(); });
-document.querySelector("#service-restart").addEventListener("click", restartService);
+document.querySelector("#service-restart").addEventListener("click", async () => {
+  const button = document.querySelector("#service-restart");
+  if (button.disabled) return;
+  button.disabled = true;
+  try { await restartService(); } finally { if (!state.authExpired) { renderUpdates(); if (!button.disabled) button.focus(); } }
+});
 document.querySelector("#logout").addEventListener("click", async () => {
-  if (!confirmDiscardEditors()) return;
+  if (!(await confirmDiscardEditors())) return;
   await api("/logout", { method: "POST" });
   window.location.assign("/login");
 });
 
 initializePageNavigation();
-window.NetizenIdentity.loadProfile().catch((error) => setStatus(error.message, true));
+window.NetizenIdentity.loadProfile().catch((error) => {
+  if (!state.authExpired) { const user = document.querySelector("#current-user"); user.textContent = "资料暂不可用"; user.title = error.message; }
+});

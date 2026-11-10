@@ -4,7 +4,7 @@ const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 const status = () => document.querySelector("#status").textContent;
 let discardConfirmed = true;
 const discardPrompts = [];
-window.confirm = (message) => { discardPrompts.push(message); return discardConfirmed; };
+confirmResponder = (message) => { discardPrompts.push(message); return discardConfirmed; };
 const settings = { turn_settings: { model_id: "retired", effort_id: "high", service_tier_id: "priority" },
   reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true, message_context_mode: "catch-up",
   progress_card_settings: { show_commentary: false, show_operations: true, show_plan: false,
@@ -106,7 +106,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   const first = defaultsInput("rules-body").querySelector("tr");
   assert(first.textContent.includes("<b>first</b>"));
   assert.equal(first.querySelector("b"), null);
-  assert(first.querySelectorAll("button")[2].disabled);
+  assert(first.querySelectorAll("button").find((button) => button.textContent === "上移").disabled);
   assert.equal(defaultsInput("next").disabled, false);
   const chatRow = defaultsInput("chat-body").querySelector("tr");
   assert(chatRow.textContent.includes("<b>研发讨论群</b>"));
@@ -214,7 +214,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(defaultsEditor.settings.turn_settings, null);
   assert.equal(defaultsEditor.settings.message_context_mode, "current-only");
   assert(defaultsInput("note").textContent.includes("尚未配置"));
-  closeDefaultEditor();
+  await closeDefaultEditor();
   viewEffective = rules[0];
 
   await moveDefaultRule(1, -1);
@@ -243,7 +243,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await saveDefault({ preventDefault() {} });
   assert.equal(posts.length, beforeFailure + 1);
   failPost = false;
-  closeDefaultEditor();
+  await closeDefaultEditor();
   assert(defaultsInput("new").disabled);
   assert(defaultsInput("chat-body").querySelector("button").disabled);
   await loadDefaults();
@@ -267,7 +267,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   defaultsInput("progress").checked = false;
   changeDefaultSettings("progress");
   assert.equal(defaultsEditor.settings.progress_card_enabled, false);
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   // Both dependent reads keep the whole form disabled until the current
   // chat's configuration and model choices have finished loading.
@@ -316,6 +316,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   }
   pendingOptions = {};
   openDefaultEditor("group_name", state.defaults.group_name.items[0]);
+  await flush();
   assert(defaultsInput("fields").disabled);
   pendingOptions.reject("catalog unavailable");
   pendingOptions = null;
@@ -349,8 +350,10 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
   const previousEditorOptions = pendingOptions = {};
   openDefaultEditor("group_name", state.defaults.group_name.items[0]);
+  await flush();
   const currentEditorOptions = pendingOptions = {};
   openDefaultEditor("chat", state.defaults.chat.items[0]);
+  await flush();
   previousEditorOptions.resolve();
   await flush();
   assert(defaultsInput("fields").disabled);
@@ -387,7 +390,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert.equal(defaultsInput("fields").disabled, false);
     assert(defaultsInput("save").disabled);
   }
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   // Switching views and refreshing keep the exact-chat page, while saving a
   // group rule keeps the active group view and its priority order.
@@ -436,7 +439,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush();
   assert.equal(defaultsEditor.kind, "group_name");
   assert.equal(defaultsInput("keyword").value, rules[1].keyword);
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   // A completed write with a failed refresh cannot reuse the old list's
   // one-shot actions. A fresh read restores the editing controls.
@@ -486,12 +489,12 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush();
   assert.equal(defaultsEditor.kind, "chat");
   assert(defaultsInput("drawer").open);
-  closeDefaultEditor();
+  await closeDefaultEditor();
   defaultsInput("tab-group_name").click();
   defaultsInput("rules-body").querySelector("button").click();
   await flush();
   assert.equal(defaultsEditor.kind, "group_name");
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   // A slower list response cannot restore stale results over a newer refresh.
   chatItems = [exact];
@@ -586,7 +589,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush();
   assert.equal(defaultsInput("chat-kind").value, "p2p");
   assert.equal(defaultsInput("chat").value, "oc_p2p");
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   // Unknown saved targets stay visible and locked through failed/unresolved metadata.
   contextAvailable = null;
@@ -605,7 +608,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(defaultsInput("chat").value, "oc_exact");
   assert.equal(defaultsInput("chat-field").hidden, false);
   assert.equal(defaultsInput("chat").disabled, true);
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   // chatType is authoritative; chatMode may describe message layout, not p2p identity.
   const target = chatTarget("defaults");
@@ -704,7 +707,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   discardConfirmed = false;
   for (const cancel of [() => defaultsInput("close").click(), () => defaultsInput("cancel").click(),
     () => defaultsInput("drawer").dispatch("cancel")]) {
-    cancel();
+    cancel(); await flush();
     assert.equal(defaultsInput("drawer").open, true);
     assert.equal(defaultsInput("keyword").value, "changed keyword");
   }
@@ -725,7 +728,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush();
   defaultsInput("project").value = "available";
   discardConfirmed = true;
-  defaultsInput("cancel").click();
+  defaultsInput("cancel").click(); await flush();
   assert.equal(defaultsInput("drawer").open, false);
   assert.equal(defaultsEditor, null);
 
@@ -757,7 +760,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     .find((option) => option.value === "deleting-exact").textContent.includes("不可用"));
   assert.equal(defaultsInput("save").disabled, true);
   assert.equal(defaultEditorHasChanges(), false);
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   const unavailableRule = { ...existingRule, workspace: { mode: "existing", worktree_id: "deleted-worktree" } };
   openDefaultEditor("group_name", unavailableRule);
@@ -809,7 +812,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert(defaultsInput("workspace-help").textContent.includes("不是 Git 仓库"));
   assert.equal(defaultsInput("save").disabled, false);
   assert.equal(defaultEditorHasChanges(), true);
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   // Project changes, chat inheritance and delayed results all use the same
   // options request identity; old reads cannot restore a previous workspace.
@@ -829,7 +832,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(defaultsEditor.workspaceOptions.projectAlias, "nongit");
   assert.deepEqual(defaultsEditor.workspace, { mode: "project" });
   pendingWorkspace = {};
-  closeDefaultEditor();
+  await closeDefaultEditor();
   viewEffective = existingRule;
   openDefaultEditor("chat");
   await flush();
@@ -837,7 +840,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await loadDefaultOptions(true);
   assert.deepEqual(defaultsEditor.workspace, existingRule.workspace);
   assert.equal(defaultsInput("worktree").value, "managed-one");
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   workspaceErrors.available = "Project 已删除或不可用";
   delete workspaceOptions.available;
@@ -846,12 +849,37 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(defaultsEditor.workspace, existingRule.workspace);
   assert(defaultsInput("workspace-help").textContent.includes("Project 已删除"));
   assert(defaultsInput("save").disabled);
-  closeDefaultEditor();
+  await closeDefaultEditor();
 
   groupItems = [existingRule, { ...rules[1], workspace: { mode: "new", ref: "release" } }];
   await loadDefaults();
   assert(defaultsInput("rules-body").textContent.includes("使用已有 worktree：managed-one"));
   assert(defaultsInput("rules-body").textContent.includes("每个新会话新建 worktree · release"));
+
+  // Both default-rule kinds can restore the null intent without changing the saved rule on discard.
+  for (const kind of ["chat", "group_name"]) {
+    const explicitRule = { ...(kind === "chat" ? exact : rules[0]), project: "available", workspace: { mode: "project" } };
+    openDefaultEditor(kind, explicitRule); await flush();
+    const original = structuredClone(explicitRule.session_settings);
+    assert.equal(defaultsInput("progress-reset").hidden, false);
+    defaultsInput("progress-reset").click(); await flush();
+    assert.equal(defaultsInput("progress-reset").hidden, true);
+    assert.equal(defaultsInput("progress-source").hidden, false);
+    assert.equal(defaultsInput("progress-commentary-limit").value, 7);
+    assert.equal(defaultsEditor.settings.progress_card_settings, null);
+    assert.equal(defaultEditorHasChanges(), true);
+    discardConfirmed = false;
+    await closeDefaultEditor();
+    assert.equal(defaultsInput("drawer").open, true);
+    discardConfirmed = true;
+    await closeDefaultEditor();
+    assert.deepEqual(explicitRule.session_settings, original);
+    openDefaultEditor(kind, explicitRule); await flush();
+    assert.equal(defaultsInput("progress-reset").hidden, false);
+    defaultsInput("progress-reset").click(); await flush();
+    await saveDefault({ preventDefault() {} });
+    assert.equal(posts.at(-1).body.definition.session_settings.progress_card_settings, null);
+  }
 
   const unsetRule = { ...rules[0], project: "available", workspace: { mode: "project" },
     session_settings: { ...settings, progress_card_settings: null } };
@@ -859,6 +887,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush();
   assert.equal(defaultsInput("progress-commentary-limit").value, 7);
   assert.equal(defaultEditorHasChanges(), false);
+  assert.equal(defaultsInput("progress-reset").hidden, true);
   defaultsInput("model").value = "available-model"; changeDefaultSettings("model");
   defaultsInput("progress").checked = false; changeDefaultSettings("progress");
   await saveDefault({ preventDefault() {} });
@@ -872,5 +901,13 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await saveDefault({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.session_settings.progress_card_settings,
     { ...globalProgress, organization: "content" });
+  groupItems = [unsetRule, rules[1], { ...rules[2], session_settings: { ...settings, progress_card_enabled: false } }];
+  chatItems = [{ ...exact, session_settings: unsetRule.session_settings }];
+  await loadDefaults();
+  assert.match(defaultsInput("chat-body").textContent, /过程卡：跟随全局/);
+  const sourceRows = defaultsInput("rules-body").querySelectorAll("tr");
+  assert.match(sourceRows[0].textContent, /过程卡：跟随全局/);
+  assert.match(sourceRows[1].textContent, /过程卡：单独配置/);
+  assert(!sourceRows[2].textContent.includes("过程卡："));
   assert.equal(defaultScheduleSessionSettings().progress_card_settings, null);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

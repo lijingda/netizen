@@ -26,7 +26,7 @@ window.NetizenGroupAccess = (() => {
         return false;
       }
       return !(editor.snapshot.mode === "all" && value.mode === "only") ||
-        window.confirm(`切换为仅已启用的群聊？保存后只有名单中的 ${value.chatIds.length} 个群可以执行，其他群的新输入不会执行；实例管理员可在群里发送 /enable 启用。`);
+        window.NetizenConfirm.ask({ title: "限制群聊准入", confirmLabel: "保存配置", body: `切换为仅已启用的群聊？保存后只有名单中的 ${value.chatIds.length} 个群可以执行，其他群的新输入不会执行；实例管理员可在群里发送 /enable 启用。` });
     },
     loaded: "保存后应用于新的输入；正在执行的任务继续运行。",
     saved: "群聊准入已保存并生效。",

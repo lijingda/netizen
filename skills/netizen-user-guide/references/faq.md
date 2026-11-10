@@ -113,7 +113,7 @@ OpenAI 换成 Amazon Bedrock 或 Vertex AI），Codex 会拒绝在旧会话里�
 alias、未导出的 shell function 和依赖真实终端的初始化，后台服务都无法继承。Bash 用户如果只在
 `.bashrc` 中配置了 NVM，需要确认 `.bash_profile` 或 `.profile` 会 source 它。
 
-详见[宿主环境差异](native-capabilities.md#与-codex-appcli-的差异)与[实例维护](admin.md#admin-系统维护)。
+详见[宿主环境差异](native-capabilities.md#与-codex-appcli-的差异)与[服务与诊断](admin.md#admin-系统维护)。
 
 ## “Side 为什么不能继续了？”
 

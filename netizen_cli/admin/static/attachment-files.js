@@ -14,7 +14,7 @@ window.NetizenAttachmentFiles = (() => {
   async function remove(file, { isCurrent, signal }) {
     const options = await dependencies.api(`/api/v1/attachment-files/delete-options?${query(file)}`, { signal });
     if (!isCurrent() || dependencies.isExpired()) return null;
-    if (!window.confirm(`确认删除附件“${options.displayName || options.name}”？\n\n${options.confirmation || "删除可能影响正在执行或后续任务的读取。需要时请重新发送文件。"}`)) return null;
+    if (!(await window.NetizenConfirm.ask({ title: "删除附件", danger: true, confirmLabel: "删除", body: `确认删除附件“${options.displayName || options.name}”？\n\n${options.confirmation || "删除可能影响正在执行或后续任务的读取。需要时请重新发送文件。"}` }))) return null;
     if (!isCurrent() || dependencies.isExpired()) return null;
     const action = options.action;
     try {
@@ -32,7 +32,7 @@ window.NetizenAttachmentFiles = (() => {
   function open() {
     if (dependencies.isExpired()) return;
     return dependencies.browser.open({
-      rootId: "attachments", title: "文件附件", eyebrow: "INPUT ATTACHMENTS", emptyTitle: "浏览文件附件",
+      rootId: "attachments", title: "文件附件", eyebrow: "输入附件", emptyTitle: "浏览文件附件",
       description: "展开保存批次，选择附件查看信息或删除。支持预览的格式可直接查看内容。",
       entryLabel(entry) {
         if (entry.kind !== "directory" || !entry.savedAt) return entry.displayName || entry.name;

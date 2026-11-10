@@ -199,6 +199,8 @@ _CONTENT_VIEWER_ASSETS = (
 _ADMIN_PAGE_PATHS = frozenset({
     "/", "/projects", "/sessions/ordinary", "/sessions/temporary",
     "/schedules", "/defaults", "/maintenance", "/system", "/worktrees",
+    "/attachments", "/progress-card", "/question-notifications", "/admins",
+    "/group-access", "/session-tools",
 })
 
 _SECURITY_HEADERS = (
@@ -608,6 +610,10 @@ class AdminWebApplication:
                 ((b"Content-Type", b"text/javascript; charset=utf-8"),),
                 self._assets["admin.js"],
             )
+        if route == ("GET", "/static/admin-ui.js"):
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["admin-ui.js"])
+        if route == ("GET", "/static/config-editor.js"):
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["config-editor.js"])
         if route == ("GET", "/static/identity.js"):
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["identity.js"])
         if route == ("GET", "/static/group-access.js"):
@@ -3036,7 +3042,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "group-access.js", "worktrees.js", "progress-card.js", "question-notifications.js", "netizen.svg", *_CONTENT_VIEWER_ASSETS):
+    for name in ("index.html", "admin.css", "admin.js", "admin-ui.js", "config-editor.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "group-access.js", "worktrees.js", "progress-card.js", "question-notifications.js", "netizen.svg", *_CONTENT_VIEWER_ASSETS):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 

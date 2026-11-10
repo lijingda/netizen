@@ -318,7 +318,7 @@ const markdownLink = async (path, directoryHint = false) => {
     overrides.clear();
     changeWidth(true);
     batchFiles = [pdf, txt];
-    window.confirm = () => { confirmations += 1; return true; };
+    confirmResponder = () => { confirmations += 1; return true; };
     overrides.set("/api/v1/attachment-files/root:", () => ({ rootId: "attachments", identity: "attachment-root", cwd: "/retained" }));
     overrides.set(`${attachmentDirectory}:`, () => listing("", [...(batchFiles.length ? [batch] : []), otherBatch]));
     overrides.set(`${attachmentDirectory}:batch`, () => {

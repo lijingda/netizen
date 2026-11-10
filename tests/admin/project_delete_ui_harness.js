@@ -7,7 +7,7 @@ process.once("beforeExit", () => assert(completed, "All deletion dialog cases mu
 const requests = [];
 let statusError = false;
 document.querySelector("#status").classList.toggle = (_name, error) => { statusError = error; };
-window.confirm = () => { throw new Error("Project deletion must use its scope dialog"); };
+confirmResponder = () => { throw new Error("Project deletion must use its scope dialog"); };
 const envelope = (kind) => ({
   csrfToken: `${kind}-csrf`, actionToken: `${kind}-once`,
   target: { resource: "project", targetId: "example", revision: 7 },
@@ -74,7 +74,7 @@ async function confirmDeletion(project = state.projects.items[0]) {
   // Projects retain their local counts, with the optional cascade scoped to the dialog.
   await loadProjects();
   const localCells = document.querySelector("#projects-body").querySelectorAll("td");
-  assert.equal(localCells[3].textContent, "3（Lazy 1）");
+  assert.equal(localCells[3].textContent, "3（未开始 1）");
   assert.equal(localCells.length, 6);
   assert.equal(deletionButton().textContent, "删除…");
   assert.equal(deletionButton().getAttribute("aria-haspopup"), "dialog");
@@ -98,7 +98,7 @@ async function confirmDeletion(project = state.projects.items[0]) {
   assert.match(field("dialog").textContent, /归档/);
   assert.match(field("dialog").textContent, /定时/);
   assert.match(field("dialog").textContent, /永久.*无法恢复/);
-  assert.equal(field("sessions").textContent, "3（Lazy 1，已创建 2）");
+  assert.equal(field("sessions").textContent, "3（未开始 1，已创建 2）");
   assert.equal(field("sides").textContent, "2");
   assert.equal(field("plans").textContent, "2");
   assert.equal(field("runs").textContent, "1");
@@ -185,11 +185,11 @@ async function confirmDeletion(project = state.projects.items[0]) {
   projects = [];
   releaseDelete({ deleted: true, projectAlias: "example", deletedSessionCount: 3 });
   await operation;
-  assert.match(resultMessage(), /已删除 3 个 Session.*磁盘代码目录保留/);
+  assert.match(resultMessage(), /已删除 3 个会话.*磁盘代码目录保留/);
   assert.equal(statusError, false);
   assert.equal(field("result").hidden, false);
   await loadProjects();
-  assert.match(resultMessage(), /已删除 3 个 Session/);
+  assert.match(resultMessage(), /已删除 3 个会话/);
 
   // A 200 partial result remains visibly incomplete with inspectable remaining identities.
   projects = [projectFixture()];
@@ -204,7 +204,7 @@ async function confirmDeletion(project = state.projects.items[0]) {
   await confirmDeletion();
   assert.equal(statusError, true);
   assert.match(resultMessage(), /仍保留.*删除尚未全部完成/);
-  assert.match(resultMessage(), /已删除 1 个 Session；剩余 2 个 Session、1 个 Side/);
+  assert.match(resultMessage(), /已删除 1 个会话；剩余 2 个会话、1 个 Side/);
   assert.match(resultDetails(), /short-2.*topic:chat:topic.*full-binding-2/);
   assert.match(resultDetails(), /side-1/);
   assert.equal(field("result").querySelectorAll("img").length, 0);
