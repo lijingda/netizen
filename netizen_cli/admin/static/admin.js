@@ -2007,18 +2007,87 @@ function updateSessionLocationCell(td, session, { showIdentity = true, loading =
   td.setAttribute("aria-busy", String(loading));
 }
 
+// Previews are clamped to two lines by CSS. The expand control appears only for
+// text that the current layout actually cuts off, so rows are measured after
+// layout and again whenever their width or visibility changes.
+let sessionPreviewSerial = 0;
+let sessionPreviewObserver = null;
+
+function sessionPreview(text) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "session-preview";
+  const preview = document.createElement("div");
+  preview.className = "preview";
+  preview.id = `session-preview-${++sessionPreviewSerial}`;
+  preview.textContent = text;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "preview-toggle";
+  toggle.hidden = true;
+  toggle.textContent = "展开";
+  toggle.setAttribute("aria-controls", preview.id);
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.addEventListener("click", () => {
+    const expanded = toggle.getAttribute("aria-expanded") !== "true";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.textContent = expanded ? "收起" : "展开";
+    if (expanded) {
+      wrapper.setAttribute("data-expanded", "");
+      preview.title = "";
+    } else {
+      wrapper.removeAttribute("data-expanded");
+      syncSessionPreviews([wrapper]);
+    }
+  });
+  preview.addEventListener("click", () => {
+    // Dragging to select or copy part of the text must not collapse or expand it.
+    if (toggle.hidden || String(window.getSelection?.() || "")) return;
+    toggle.click();
+  });
+  wrapper.append(preview, toggle);
+  return wrapper;
+}
+
+function syncSessionPreviews(wrappers) {
+  // Read every size before changing any control so one page costs one layout.
+  const measured = wrappers.map((wrapper) => {
+    const preview = wrapper.querySelector(".preview");
+    const toggle = wrapper.querySelector(".preview-toggle");
+    // Rows in collapsed groups or hidden pages have no size yet; keep them as is.
+    const laidOut = preview.clientHeight > 0;
+    return { wrapper, preview, toggle, laidOut,
+      truncated: laidOut && preview.scrollHeight - preview.clientHeight > 1 };
+  });
+  for (const { wrapper, preview, toggle, laidOut, truncated } of measured) {
+    if (!laidOut || toggle.getAttribute("aria-expanded") === "true") continue;
+    toggle.hidden = !truncated;
+    preview.title = truncated ? preview.textContent : "";
+    if (truncated) wrapper.setAttribute("data-expandable", "");
+    else wrapper.removeAttribute("data-expandable");
+  }
+}
+
+function observeSessionPreviews(body) {
+  sessionPreviewObserver?.disconnect();
+  sessionPreviewObserver = null;
+  const wrappers = body.querySelectorAll(".session-preview");
+  if (typeof ResizeObserver !== "function") {
+    syncSessionPreviews(wrappers);
+    return;
+  }
+  sessionPreviewObserver = new ResizeObserver((entries) => {
+    syncSessionPreviews(entries.map((entry) => entry.target.parentElement));
+  });
+  for (const wrapper of wrappers) sessionPreviewObserver.observe(wrapper.querySelector(".preview"));
+}
+
 function sessionIdentityCell(row, session) {
   const td = document.createElement("td");
   const title = document.createElement("strong");
   title.textContent = session.nativeTitle
     || (session.catalogState === "lazy" ? "未开始的会话" : "未命名会话");
   td.append(title);
-  if (session.nativePreview) {
-    const preview = document.createElement("div");
-    preview.className = "preview";
-    preview.textContent = session.nativePreview;
-    td.append(preview);
-  }
+  if (session.nativePreview) td.append(sessionPreview(session.nativePreview));
   const bindingId = document.createElement("div");
   bindingId.className = "id";
   bindingId.textContent = `Netizen 会话编号：${session.shortId}`;
@@ -2532,6 +2601,7 @@ function renderSessions(data) {
     body.append(row);
   }
   applySessionLayout("session");
+  observeSessionPreviews(body);
 }
 
 let latestAnswerView = null;
