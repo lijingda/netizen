@@ -162,39 +162,37 @@
         <nav id="file-browser-breadcrumbs" class="file-browser-breadcrumbs" aria-label="文件目录路径"></nav>
         <div class="file-browser-body">
           <aside class="file-browser-sidebar" aria-label="文件树">
-            <div id="file-browser-tabs" class="file-browser-tools" hidden>
-              <button id="file-browser-files-tab" type="button" aria-pressed="true">文件</button>
-              <button id="file-browser-changes-tab" type="button" aria-pressed="false">变更</button>
-            </div>
-            <p id="file-browser-incomplete" class="file-browser-note" role="status" hidden></p>
-            <div id="file-browser-tree-panel" class="file-browser-tree-panel">
             <div class="file-browser-tree-tools">
               <label for="file-browser-filter" class="file-browser-sr-only">筛选已加载的文件</label>
               <input id="file-browser-filter" type="search" placeholder="筛选已加载的文件…" autocomplete="off">
               <button id="file-browser-collapse" type="button" title="收起所有目录" aria-label="收起所有目录"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M5 3V1.8h9.2V11H13"></path><rect x="1.8" y="4.8" width="9.4" height="9.4" rx="1"></rect><path d="M4 9.5h5"></path></svg></button>
             </div>
+            <div id="file-browser-changes-tools" class="file-browser-changes-tools" hidden>
+              <label><input id="file-browser-changes-only" type="checkbox">只看变更 <span id="file-browser-changes-count"></span></label>
+              <span class="file-browser-note">相对 HEAD</span>
+              <p id="file-browser-changes-note" class="file-browser-note" role="status"></p>
+              <button id="file-browser-changes-retry" type="button" hidden>重试</button>
+              <button id="file-browser-changes-current" type="button" hidden>只看当前目录</button>
+              <button id="file-browser-changes-root" type="button" hidden>整个根目录</button>
+            </div>
             <div class="file-browser-tree-scroll">
               <div id="file-browser-entries" class="file-browser-entries" role="tree" aria-label="文件"></div>
               <p id="file-browser-directory-note" class="file-browser-note" role="status" aria-live="polite"></p>
-            </div>
-            </div>
-            <div id="file-browser-changes-panel" class="file-browser-tree-scroll" hidden>
-              <p class="file-browser-note">相对 HEAD · 包含同目录中的所有修改</p>
-              <p id="file-browser-changes-note" class="file-browser-note" role="status"></p>
-              <button id="file-browser-changes-retry" type="button" hidden>重试</button>
-              <div id="file-browser-changes-scope" class="file-browser-tools" hidden>
-                <button id="file-browser-changes-current" type="button">仅当前目录</button>
-                <button id="file-browser-changes-root" type="button">整个根目录</button>
-              </div>
-              <div id="file-browser-changes-entries"></div>
             </div>
           </aside>
           <section class="file-browser-viewer" aria-label="文件内容">
             <div class="file-browser-file-head"><strong id="file-browser-filename">选择文件查看</strong><span id="file-browser-meta"></span></div>
             <div id="file-browser-view-modes" class="file-browser-tools" hidden>
-              <button id="file-browser-diff-mode" type="button" aria-pressed="false">差异</button>
-              <button id="file-browser-full-mode" type="button" aria-pressed="true">完整内容</button>
-              <span>相对 HEAD</span>
+              <div class="file-browser-segment" role="group" aria-label="查看方式">
+                <button id="file-browser-source" type="button" aria-pressed="true">源码</button>
+                <button id="file-browser-preview" type="button" aria-pressed="false" hidden>预览</button>
+                <button id="file-browser-difference" type="button" aria-pressed="false" hidden>差异</button>
+              </div>
+              <div id="file-browser-diff-layout" class="file-browser-segment" role="group" aria-label="差异布局" hidden>
+                <button id="file-browser-split" type="button" aria-pressed="true">分栏</button>
+                <button id="file-browser-unified" type="button" aria-pressed="false">合并</button>
+              </div>
+              <button id="file-browser-diff-fold" type="button" hidden>展开全部</button>
             </div>
             <p id="file-browser-diff-note" class="file-browser-note" role="status" hidden></p>
             <div id="file-browser-actions" class="file-browser-actions" hidden><button id="file-browser-delete" class="action compact danger" type="button">删除附件</button><span id="file-browser-action-note" role="status" aria-live="polite"></span></div>
@@ -203,7 +201,6 @@
               <form id="file-browser-line-form" class="file-browser-line"><label for="file-browser-line">行</label><input id="file-browser-line" type="number" min="1" value="1" aria-label="跳转行号"><button type="submit">跳转</button></form>
               <button id="file-browser-wrap" type="button" aria-pressed="true">自动折行</button>
               <button id="file-browser-copy" type="button">复制全文</button>
-              <button id="file-browser-markdown-toggle" type="button" aria-pressed="false" hidden>预览 Markdown</button>
             </div>
             <p id="file-browser-note" class="file-browser-note" role="status" aria-live="polite"></p>
             <div id="file-browser-empty" class="file-browser-empty">
