@@ -11,6 +11,11 @@ window.NetizenFileBrowser = {
   let current = null;
   let aceLoading = null;
   let diffLoading = null;
+  const DIFF_LAYOUT_KEY = "netizen-file-diff-layout";
+  function diffLayout() {
+    try { return window.localStorage.getItem(DIFF_LAYOUT_KEY) === "unified" ? "unified" : "split"; }
+    catch (_) { return "split"; }
+  }
 
   function active(view) { return current === view && !dependencies.isExpired(); }
   function renderLayout(view) {
@@ -66,7 +71,9 @@ window.NetizenFileBrowser = {
     stop(view, "diff");
     destroyDiff(view);
     view.diff = null;
-    view.mode = "full";
+    view.mode = "source";
+    view.modeSequence = (view.modeSequence || 0) + 1;
+    view.filePending = view.diffPending = null;
     node("view-modes").hidden = true;
     node("diff-note").hidden = true;
     node("diff-note").textContent = "";
@@ -74,14 +81,7 @@ window.NetizenFileBrowser = {
     view.file = null;
     view.selectedFile = null;
     view.fileSequence = (view.fileSequence || 0) + 1;
-    view.preview = false;
-    if (view.editor) {
-      view.editor.setValue("", -1);
-      view.editor.destroy();
-      view.editor = null;
-    }
-    node("editor").replaceChildren();
-    node("editor").hidden = true;
+    destroyEditor(view);
     node("markdown").replaceChildren();
     node("markdown").hidden = true;
     node("image").onerror = null;
@@ -106,9 +106,12 @@ window.NetizenFileBrowser = {
     view.tree.clear();
     view.identity = null;
     view.changes = null;
+    view.changesLoading = false;
     view.changesMap = new Map();
     view.changesScope = "";
-    view.sidebar = "files";
+    view.changesOnly = false;
+    view.changeDirectories = new Set();
+    view.deletedEntries = new Map();
     renderGit(view);
     view.desiredFile = null;
     view.path = "";
@@ -139,6 +142,8 @@ window.NetizenFileBrowser = {
     view.tree.clear();
     view.changes = null;
     view.changesMap = new Map();
+    view.changeDirectories.clear();
+    view.deletedEntries.clear();
     view.identity = null;
     renderGit(view);
     node("filter").value = "";
@@ -302,17 +307,47 @@ window.NetizenFileBrowser = {
     if (/\.(py|pyw|js|mjs|cjs|json|ts|tsx|jsx|html|css|sh|go|rs|java|yaml|yml|toml)$/i.test(entry.name)) return "code";
     return "file";
   }
+  function inheritedChange(view, path) {
+    for (let parent = parentPath(path); parent; parent = parentPath(parent)) {
+      const change = view.changesMap.get(parent);
+      if (change?.directory) return change;
+    }
+  }
+  function treeEntries(view, path) {
+    const branch = view.tree.get(path);
+    const entries = branch?.entries || [];
+    if (!view.changesOnly || view.changes?.git !== "available") return branch?.synthetic ? [] : entries;
+    const combined = new Map(entries.map((entry) => [entry.path, entry]));
+    if (branch?.entries) for (const entry of view.deletedEntries.get(path)?.values() || []) {
+      if (!combined.has(entry.path)) combined.set(entry.path, entry);
+    }
+    return [...combined.values()].filter((entry) => {
+      const scope = view.changesScope;
+      if (scope && entry.path !== scope && !entry.path.startsWith(`${scope}/`) && !scope.startsWith(`${entry.path}/`)) return false;
+      const change = view.changesMap.get(entry.path) || inheritedChange(view, entry.path);
+      if (change?.kind === "ignored") return false;
+      if (change?.directory && change.kind === "untracked") return true;
+      return entry.kind === "directory" ? view.changeDirectories.has(entry.path) || change?.directory
+        : entry.synthetic || ["modified", "added", "untracked", "conflict"].includes(change?.kind);
+    }).sort((a, b) => {
+      const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+      return Number(b.kind === "directory") - Number(a.kind === "directory")
+        || compare(a.name.toLowerCase(), b.name.toLowerCase()) || compare(a.name, b.name);
+    });
+  }
   function renderEntries(view) {
+    renderGit(view);
     const entriesNode = node("entries");
     const restoreFocus = entriesNode.contains(document.activeElement);
     const oldScroll = entriesNode.parentElement.scrollTop;
     const fragment = document.createDocumentFragment();
     const visibleRows = [];
-    const root = view.tree.get(compact.matches ? view.path : "");
+    const rootPath = compact.matches ? view.path : "";
+    const root = view.tree.get(rootPath);
     const filter = view.filter.trim().toLocaleLowerCase();
     const matches = new Set();
     if (filter) {
-      for (const branch of compact.matches ? [root || {}] : view.tree.values()) for (const entry of branch.entries || []) {
+      for (const path of compact.matches ? [rootPath] : view.tree.keys()) for (const entry of treeEntries(view, path)) {
         const label = compact.matches ? entryLabel(view, entry) : `${entry.path} ${entryLabel(view, entry)}`;
         if (!label.toLocaleLowerCase().includes(filter)) continue;
         let path = entry.path;
@@ -326,8 +361,8 @@ window.NetizenFileBrowser = {
       message.textContent = text;
       fragment.append(message);
     }
-    function appendBranch(branch, depth) {
-      const entries = (branch.entries || []).filter((entry) => !filter || matches.has(entry.path));
+    function appendBranch(path, depth) {
+      const entries = treeEntries(view, path).filter((entry) => !filter || matches.has(entry.path));
       for (const [index, entry] of entries.entries()) {
         const directoryEntry = entry.kind === "directory";
         const child = directoryEntry ? view.tree.get(entry.path) : null;
@@ -371,14 +406,14 @@ window.NetizenFileBrowser = {
           if (child.loading) hint("正在加载…", depth + 1);
           else if (child.error) hint(`${child.error} 收起后可重试。`, depth + 1, true);
           else if (child.entries) {
-            appendBranch(child, depth + 1);
-            if (!child.entries.length) hint("空目录", depth + 1);
+            appendBranch(entry.path, depth + 1);
             if (child.truncated) hint("条目较多，仅显示部分内容。", depth + 1);
           }
         }
       }
+      if (!entries.length && depth) hint(view.changesOnly ? "此层没有变更" : "空目录", depth);
     }
-    if (root) appendBranch(root, 0);
+    if (root) appendBranch(rootPath, 0);
     const rows = visibleRows.filter((row) => !row.disabled);
     const focus = rows.find((row) => row.dataset.path === view.focusedPath)
       || rows.find((row) => row.dataset.path === view.selectedPath) || rows[0];
@@ -387,7 +422,7 @@ window.NetizenFileBrowser = {
     entriesNode.setAttribute("aria-busy", String(Boolean(root?.loading)));
     note("directory-note", root?.loading ? "正在加载文件…" : root?.error || (root?.entries
       ? filter && !visibleRows.length ? compact.matches ? "当前目录没有匹配项。" : "已加载的文件中没有匹配项。"
-      : !root.entries.length ? "此目录为空。"
+      : !visibleRows.length ? view.changesOnly ? "此层没有变更。" : "此目录为空。"
       : root.truncated ? "目录条目较多，仅显示部分内容。" : "" : ""), Boolean(root?.error));
     if (restoreFocus && focus) focus.focus();
     entriesNode.parentElement.scrollTop = oldScroll;
@@ -405,7 +440,14 @@ window.NetizenFileBrowser = {
     const previous = view.tree.get(path);
     if (!force && previous?.entries) return previous;
     if (!force && previous?.pending) return previous.pending;
+    const entry = treeEntries(view, parentPath(path)).find((item) => item.path === path);
     if (force) discardBranch(view, path);
+    if (path && entry?.synthetic) {
+      const branch = { path, entries: [], synthetic: true, expanded: previous?.expanded ?? true, position: previous?.position };
+      view.tree.set(path, branch);
+      renderEntries(view);
+      return branch;
+    }
     const branch = { path, entries: null, expanded: previous?.expanded ?? true,
       position: previous?.position, loading: true, error: "" };
     view.tree.set(path, branch);
@@ -493,7 +535,7 @@ window.NetizenFileBrowser = {
         return;
       }
       target += `${target ? "/" : ""}${part}`;
-      if (!branch.entries.some((entry) => entry.path === target && entry.kind === "directory")) {
+      if (!treeEntries(view, parentPath(target)).some((entry) => entry.path === target && entry.kind === "directory")) {
         note("note", "目标目录不在已加载的列表中，可能已移除或目录条目较多。", true);
         return;
       }
@@ -508,7 +550,7 @@ window.NetizenFileBrowser = {
     }
     branch.expanded = true;
     if (selectedFile !== null) {
-      const entry = branch.entries.find((item) => item.path === selectedFile);
+      const entry = treeEntries(view, path).find((item) => item.path === selectedFile);
       if (entry?.kind === "directory") return directory(view, entry.path);
       if (entry?.kind === "file") return content(view, entry.path);
       note("note", entry ? "此目录项暂不支持预览。" : "目标不在当前目录列表中，可能已移除或目录条目较多。", true);
@@ -661,6 +703,7 @@ window.NetizenFileBrowser = {
     view.diffView = null;
     node("diff").replaceChildren();
     node("diff").hidden = true;
+    node("diff-layout").hidden = node("diff-fold").hidden = true;
   }
   async function ensureDiff() {
     const ace = await ensureAce();
@@ -675,15 +718,27 @@ window.NetizenFileBrowser = {
     });
     return diffLoading;
   }
-  function renderDiffToggle(view) {
-    const candidate = view.changesMap?.get(view.desiredFile);
+  function renderModes(view) {
+    const candidate = view.changesMap.get(view.desiredFile);
     const changes = view.changes;
     const known = changes?.complete && (!view.changesScope || view.desiredFile?.startsWith(`${view.changesScope}/`));
-    node("view-modes").hidden = !view.provider.changes || !view.identity || !view.desiredFile
-      || (changes && changes.git !== "available")
-      || (view.mode !== "diff" && known && !["modified", "deleted"].includes(candidate?.kind));
-    node("diff-mode").setAttribute("aria-pressed", String(view.mode === "diff"));
-    node("full-mode").setAttribute("aria-pressed", String(view.mode !== "diff"));
+    const deleted = candidate?.kind === "deleted" || view.diff?.kind === "deleted";
+    const canDiff = view.provider.changes && (!changes || changes.git === "available")
+      && !inheritedChange(view, view.desiredFile || "")?.directory
+      && (["modified", "deleted", "conflict"].includes(candidate?.kind) || !known);
+    const preview = typeof view.file?.markdownHtml === "string";
+    node("view-modes").hidden = !view.identity || !view.desiredFile || (!view.provider.changes && !preview);
+    node("source").disabled = deleted;
+    node("preview").hidden = !preview;
+    node("preview").disabled = deleted;
+    node("difference").hidden = changes?.git === "not_repository" || !canDiff && view.mode !== "diff";
+    for (const [id, mode] of [["source", "source"], ["preview", "preview"], ["difference", "diff"]]) {
+      node(id).setAttribute("aria-pressed", String(view.mode === mode));
+    }
+    node("diff-layout").hidden = view.mode !== "diff" || compact.matches || !view.diffView;
+    node("diff-fold").hidden = !view.diffView;
+    node("split").setAttribute("aria-pressed", String(view.diffLayout === "split"));
+    node("unified").setAttribute("aria-pressed", String(view.diffLayout === "unified"));
   }
   function diffNote(view) {
     const data = view.diff;
@@ -710,7 +765,8 @@ window.NetizenFileBrowser = {
       if (!active(view) || view.diff !== data || view.diffRender !== sequence || view.mode !== "diff") return;
       const ace = window.ace;
       for (const key of ["basePath", "modePath", "themePath", "workerPath"]) ace.config.set(key, "/static/vendor/ace");
-      const diff = view.diffView = extension.createDiffView({ valueA: data.old, valueB: data.new, inline: compact.matches ? "b" : false });
+      const inline = compact.matches || view.diffLayout === "unified";
+      const diff = view.diffView = extension.createDiffView({ valueA: data.old, valueB: data.new, inline: inline ? "b" : false });
       for (const editor of [diff.editorA, diff.editorB]) {
         editor.session.setUseWorker(false);
         editor.setReadOnly(true);
@@ -718,10 +774,14 @@ window.NetizenFileBrowser = {
         editor.session.setMode(`ace/mode/${modes.has(data.language) ? data.language : "text"}`);
         editor.session.setUseWrapMode(view.wrap);
       }
-      node("diff").append(...(compact.matches ? [diff.editorB.container] : [diff.editorA.container, diff.editorB.container]));
+      node("diff").append(...(inline ? [diff.editorB.container] : [diff.editorA.container, diff.editorB.container]));
       node("diff").hidden = false;
       diff.onInput();
+      diff.foldUnchanged();
+      view.diffFolded = true;
+      node("diff-fold").textContent = "展开全部";
       diff.resize();
+      renderModes(view);
     } catch (error) {
       if (active(view) && view.diff === data && view.diffRender === sequence) note("note", error.message, true);
     }
@@ -729,19 +789,13 @@ window.NetizenFileBrowser = {
   function decorateEntry(view, row, entry) {
     if (!view.provider.changes) return;
     const change = view.changesMap?.get(entry.path);
-    let path = entry.path;
-    let ignored = change?.kind === "ignored";
-    while (path && !ignored) {
-      path = parentPath(path);
-      const parent = view.changesMap?.get(path);
-      ignored = parent?.kind === "ignored" && parent.directory;
-    }
+    const ignored = (change || inheritedChange(view, entry.path))?.kind === "ignored";
     if (ignored) {
       row.className += " file-browser-ignored";
       row.setAttribute("aria-label", `${entryLabel(view, entry)} · 已忽略`);
     }
-    const label = { modified: "修改", added: "新增", untracked: "未跟踪" }[change?.kind];
-    if (entry.kind === "file" && label) {
+    const label = { modified: "修改", deleted: "删除", added: "新增", untracked: "未跟踪", conflict: "冲突" }[entry.synthetic ? "deleted" : change?.kind];
+    if (label) {
       const badge = document.createElement("span");
       badge.className = "file-browser-badge";
       badge.textContent = label;
@@ -752,77 +806,115 @@ window.NetizenFileBrowser = {
   function renderGit(view) {
     const data = view.changes;
     const enabled = view.provider.changes && view.identity && data?.git !== "not_repository";
-    if (!enabled) view.sidebar = "files";
-    const changes = enabled && view.sidebar === "changes";
-    node("tabs").hidden = !enabled;
-    node("tree-panel").hidden = Boolean(changes);
-    node("changes-panel").hidden = !changes;
-    node("files-tab").setAttribute("aria-pressed", String(!changes));
-    node("changes-tab").setAttribute("aria-pressed", String(Boolean(changes)));
-    const incomplete = data?.git === "available" && (!data.complete || view.changesScope);
-    node("incomplete").hidden = !enabled || !incomplete;
-    note("incomplete", incomplete ? "变更列表未覆盖整个根目录；没有标记不表示未修改。" : "");
-    node("changes-scope").hidden = !incomplete;
-    node("changes-current").disabled = !view.path;
-    node("changes-root").disabled = !view.changesScope;
-    node("changes-retry").hidden = data?.git !== "unavailable";
-    note("changes-note", !data ? "正在读取变更…" : data.git === "unavailable" ? data.message : view.changesScope ? `当前范围：${view.changesScope}` : "");
-    const list = node("changes-entries");
-    list.replaceChildren();
-    if (data?.git === "available") for (const [group, label] of [["tracked", "已跟踪变更"], ["untracked", "未跟踪"], ["ignored", "已忽略"]]) {
-      const entries = data.entries.filter((entry) => entry.group === group);
-      const section = document.createElement("details");
-      section.open = group !== "ignored";
-      const summary = document.createElement("summary");
-      summary.textContent = `${label} (${entries.length})${data.groupsComplete[group] ? "" : " · 未完整加载"}`;
-      section.append(summary);
-      for (const entry of entries) {
-        const label = { modified: "修改", deleted: "删除", added: "新增", untracked: "未跟踪", ignored: "已忽略", conflict: "冲突" }[entry.kind];
-        const row = button(`${entry.path} · ${label}`, () => {
-          if (entry.directory && !["modified", "deleted", "conflict"].includes(entry.kind)) {
-            view.sidebar = "files";
-            renderGit(view);
-            return directory(view, entry.path);
-          }
-          return content(view, entry.path, ["modified", "deleted", "conflict"].includes(entry.kind) ? "diff" : "full");
-        });
-        row.dataset.path = entry.path;
-        section.append(row);
-      }
-      list.append(section);
-    }
-    renderDiffToggle(view);
+    if (!enabled) view.changesOnly = false;
+    const incomplete = data?.git === "available" && !data.complete;
+    const unavailable = data?.git === "unavailable";
+    node("changes-tools").hidden = !enabled;
+    node("changes-only").checked = Boolean(view.changesOnly);
+    node("changes-only").disabled = view.changesLoading || data?.git !== "available";
+    node("changes-count").textContent = data?.git === "available" ? `(${data.entries.filter((entry) => entry.kind !== "ignored").length})` : "";
+    node("changes-retry").hidden = view.changesLoading || !unavailable && !incomplete;
+    node("changes-current").hidden = view.changesLoading || !(unavailable || incomplete) || !view.path;
+    node("changes-root").hidden = !view.changesScope;
+    note("changes-note", [view.changesLoading || !data ? "正在读取变更…" : unavailable ? data.message : incomplete
+      ? "只读取了部分变更；没有标记不表示未修改。" : "", view.changesScope ? `当前范围：${view.changesScope}` : ""].filter(Boolean).join(" · "));
+    renderModes(view);
     diffNote(view);
   }
   async function loadChanges(view, scope = "") {
     if (!active(view) || !view.identity || !view.provider.changes) return;
     view.changesScope = scope;
-    view.changes = null;
-    view.changesMap = new Map();
-    renderGit(view);
+    view.changesLoading = true;
     renderEntries(view);
     const identity = view.identity;
-    const epoch = view.treeEpoch;
-    try {
-      const data = await request(view, "changes", url(view, "changes", scope));
-      if (!data || !active(view) || view.identity !== identity) return;
-      view.changes = data;
-      view.changesMap = new Map((data.entries || []).map((entry) => [entry.path, entry]));
-    } catch (error) {
-      if (!active(view) || view.identity !== identity || view.treeEpoch !== epoch) return;
-      view.changes = { git: "unavailable", message: error.message };
+    let data;
+    try { data = await request(view, "changes", url(view, "changes", scope)); }
+    catch (error) { data = { git: "unavailable", message: error.message }; }
+    if (!data || !active(view) || view.identity !== identity) return;
+    view.changes = data;
+    view.changesMap = new Map((data.entries || []).map((entry) => [entry.path, entry]));
+    view.changeDirectories.clear();
+    view.deletedEntries.clear();
+    for (const entry of data.entries || []) {
+      if (entry.kind === "ignored") continue;
+      for (let path = entry.path; path; path = parentPath(path)) {
+        const parent = parentPath(path);
+        if (parent) view.changeDirectories.add(parent);
+        if (entry.kind !== "deleted") continue;
+        if (!view.deletedEntries.has(parent)) view.deletedEntries.set(parent, new Map());
+        view.deletedEntries.get(parent).set(path, { path, name: path.split("/").at(-1),
+          kind: path === entry.path && !entry.directory ? "file" : "directory", synthetic: true });
+      }
     }
-    if (active(view) && view.identity === identity) { renderGit(view); renderEntries(view); }
+    view.changesLoading = false;
+    renderEntries(view);
   }
-  function renderMode(view) {
-    node("editor").hidden = view.preview;
-    node("markdown").hidden = !view.preview;
-    node("search-form").hidden = view.preview;
-    node("line-form").hidden = view.preview;
-    node("wrap").hidden = view.preview;
-    node("markdown-toggle").setAttribute("aria-pressed", String(view.preview));
-    node("markdown-toggle").textContent = view.preview ? "查看源码" : "预览 Markdown";
-    if (!view.preview) view.editor?.resize();
+  function destroyEditor(view) {
+    if (view.editor) { view.editor.setValue("", -1); view.editor.destroy(); view.editor = null; }
+    node("editor").replaceChildren();
+    node("editor").hidden = true;
+  }
+  async function renderMode(view, mode = view.mode) {
+    if (!active(view) || !view.desiredFile) return;
+    view.mode = mode;
+    const sequence = ++view.modeSequence;
+    const selected = view.fileSequence;
+    const isCurrent = () => active(view) && view.modeSequence === sequence && view.fileSequence === selected;
+    destroyEditor(view);
+    destroyDiff(view);
+    node("markdown").hidden = node("image-wrap").hidden = node("tools").hidden = true;
+    renderModes(view);
+    diffNote(view);
+    note("note", "正在读取文件…");
+    try {
+      if (mode === "diff") {
+        view.diffPending ||= request(view, "diff", url(view, "diff", view.desiredFile));
+        const data = view.diff || await view.diffPending;
+        if (!data || !isCurrent()) return;
+        view.diff = data;
+        if (data.git === "not_repository") { view.changes = data; view.changesMap.clear(); renderEntries(view); }
+        renderModes(view);
+        return await renderDiff(view);
+      }
+      view.filePending ||= request(view, "content", url(view, "content", view.desiredFile));
+      const data = view.file || await view.filePending;
+      if (!data || !isCurrent()) return;
+      view.file = data;
+      Object.assign(view.selectedFile, { size: data.size, modifiedAt: data.modifiedAt, version: data.version });
+      showMetadata(view.selectedFile);
+      renderModes(view);
+      note("note", data.previewMessage || (data.kind === "text" ? data.text.length ? "" : "此文件为空。" : "此文件暂不支持预览。"));
+      if (data.kind === "image") {
+        node("image").onerror = () => imageFailed(view, data);
+        node("image").alt = data.path;
+        node("image").src = data.imageUrl;
+        node("image-wrap").hidden = false;
+        note("note", data.previewMessage || "");
+        return;
+      }
+      if (data.kind !== "text") return;
+      // Only the server's bounded, sanitized Markdown projection enters HTML.
+      window.NetizenContentPreview.renderMarkdown(node("markdown"), data.markdownHtml);
+      node("tools").hidden = false;
+      for (const id of ["search-form", "line-form", "wrap"]) node(id).hidden = mode === "preview";
+      if (mode === "preview") { node("markdown").hidden = false; return; }
+      const ace = await ensureAce();
+      if (!isCurrent()) return;
+      for (const key of ["basePath", "modePath", "themePath", "workerPath"]) ace.config.set(key, "/static/vendor/ace");
+      node("editor").hidden = false;
+      const editor = view.editor = ace.edit(node("editor"));
+      editor.session.setUseWorker(false);
+      editor.setReadOnly(true);
+      editor.setOptions({ showPrintMargin: false, fontSize: 13, highlightActiveLine: false, showLineNumbers: true });
+      editor.session.setMode(`ace/mode/${modes.has(data.language) ? data.language : "text"}`);
+      editor.session.setUseWrapMode(view.wrap);
+      editor.setValue(data.text, -1);
+      editor.commands.addCommand({ name: "find", bindKey: { win: "Ctrl-F", mac: "Command-F" },
+        exec: () => node("search").focus(), readOnly: true });
+      node("wrap").setAttribute("aria-pressed", String(view.wrap));
+    } catch (error) {
+      if (isCurrent()) note("note", error.message, true);
+    }
   }
   async function imageFailed(view, file) {
     if (!active(view) || view.file !== file) return;
@@ -833,16 +925,17 @@ window.NetizenFileBrowser = {
       if (active(view) && view.file === file) note("note", error.message, true);
     }
   }
-  async function content(view, path, mode = "full") {
+  async function content(view, path, mode) {
     if (!active(view) || !view.identity) return;
     if (view.screen === "directory") view.focusedPath = path;
     rememberDirectory(view);
     view.navigation += 1;
     stop(view, "image-check");
     clearFile(view);
-    view.mode = mode;
+    const kind = view.changesMap.get(path)?.kind;
+    view.mode = kind === "deleted" || !mode && view.changesOnly && ["modified", "conflict"].includes(kind) ? "diff" : mode || "source";
     view.desiredFile = path;
-    const entry = view.tree.get(parentPath(path))?.entries?.find((item) => item.path === path);
+    const entry = treeEntries(view, parentPath(path)).find((item) => item.path === path);
     view.selectedFile = entry ? { ...entry } : { path, name: path };
     view.screen = "file";
     showMetadata(view.selectedFile);
@@ -856,60 +949,7 @@ window.NetizenFileBrowser = {
     renderEntries(view);
     node("filename").textContent = entry?.displayName || path;
     node("filename").setAttribute("title", path);
-    note("note", "正在读取文件…");
-    renderDiffToggle(view);
-    const rootIdentity = view.identity;
-    const sequence = view.fileSequence;
-    try {
-      if (mode === "diff") {
-        const data = await request(view, "diff", url(view, "diff", path));
-        if (!data || view.fileSequence !== sequence) return;
-        view.diff = data;
-        if (data.git === "not_repository") { view.changes = data; view.changesMap = new Map(); renderGit(view); renderEntries(view); }
-        await renderDiff(view);
-        return;
-      }
-      const data = await request(view, "content", url(view, "content", path));
-      if (!data || !active(view) || view.fileSequence !== sequence) return;
-      view.file = data;
-      Object.assign(view.selectedFile, { size: data.size, modifiedAt: data.modifiedAt, version: data.version });
-      showMetadata(view.selectedFile);
-      for (const row of treeRows()) row.setAttribute("aria-current", String(row.dataset.path === data.path));
-      if (data.kind === "image") {
-        node("image").onerror = () => imageFailed(view, data);
-        node("image").alt = path;
-        node("image").src = data.imageUrl;
-        node("image-wrap").hidden = false;
-        note("note", data.previewMessage || "");
-        return;
-      }
-      if (data.kind !== "text") {
-        note("note", data.previewMessage || "此文件暂不支持预览。");
-        return;
-      }
-      const ace = await ensureAce();
-      if (!active(view) || view.identity !== rootIdentity || view.file !== data) return;
-      for (const key of ["basePath", "modePath", "themePath", "workerPath"]) ace.config.set(key, "/static/vendor/ace");
-      node("editor").hidden = false;
-      const editor = view.editor = ace.edit(node("editor"));
-      editor.session.setUseWorker(false);
-      editor.setReadOnly(true);
-      editor.setOptions({ showPrintMargin: false, fontSize: 13, highlightActiveLine: false, showLineNumbers: true });
-      editor.session.setMode(`ace/mode/${modes.has(data.language) ? data.language : "text"}`);
-      editor.session.setUseWrapMode(view.wrap);
-      editor.setValue(data.text, -1);
-      editor.commands.addCommand({ name: "find", bindKey: { win: "Ctrl-F", mac: "Command-F" },
-        exec: () => node("search").focus(), readOnly: true });
-      node("wrap").setAttribute("aria-pressed", String(view.wrap));
-      node("tools").hidden = false;
-      node("markdown-toggle").hidden = typeof data.markdownHtml !== "string";
-      // Only the server's bounded, sanitized Markdown projection enters HTML.
-      window.NetizenContentPreview.renderMarkdown(node("markdown"), data.markdownHtml);
-      renderMode(view);
-      note("note", data.previewMessage || (data.text.length ? "" : "此文件为空。"));
-    } catch (error) {
-      if (active(view) && view.fileSequence === sequence) note("note", error.message, true);
-    }
+    await renderMode(view);
   }
   async function chooseRoot(view) {
     if (!active(view)) return;
@@ -962,7 +1002,7 @@ window.NetizenFileBrowser = {
     const view = current = { provider, rootId: provider.rootId, identity: null, path: "", file: null,
       selectedFile: null, desiredFile: null, requests: {}, deleting: false, deleteUncertain: false,
       rootIds: new Set(), nextCursor: null, wrap: true, editor: null, returnFocus: document.activeElement,
-      tree: new Map(), treeEpoch: 0, navigation: 0, selectedPath: "", focusedPath: "", filter: "", screen: "directory" };
+      tree: new Map(), treeEpoch: 0, navigation: 0, selectedPath: "", focusedPath: "", filter: "", screen: "directory", diffLayout: diffLayout() };
     node("title").textContent = provider.title;
     node("eyebrow").textContent = provider.eyebrow;
     node("permission").textContent = provider.remove ? "可查看、删除" : "只读";
@@ -1007,13 +1047,29 @@ window.NetizenFileBrowser = {
     }
   }
   function init() {
-    node("files-tab").addEventListener("click", () => { if (current) { current.sidebar = "files"; renderGit(current); } });
-    node("changes-tab").addEventListener("click", () => { if (current) { current.sidebar = "changes"; renderGit(current); } });
+    node("changes-only").addEventListener("change", () => {
+      if (!current || node("changes-only").disabled) return;
+      current.changesOnly = node("changes-only").checked;
+      renderEntries(current);
+    });
     node("changes-retry").addEventListener("click", () => current && loadChanges(current, current.changesScope));
     node("changes-current").addEventListener("click", () => current && loadChanges(current, current.path));
     node("changes-root").addEventListener("click", () => current && loadChanges(current));
-    node("diff-mode").addEventListener("click", () => current?.desiredFile && content(current, current.desiredFile, "diff"));
-    node("full-mode").addEventListener("click", () => current?.desiredFile && content(current, current.desiredFile));
+    for (const [id, mode] of [["source", "source"], ["preview", "preview"], ["difference", "diff"]]) {
+      node(id).addEventListener("click", () => current && !node(id).disabled && !node(id).hidden && renderMode(current, mode));
+    }
+    for (const layout of ["split", "unified"]) node(layout).addEventListener("click", () => {
+      if (!current) return;
+      current.diffLayout = layout;
+      try { window.localStorage.setItem(DIFF_LAYOUT_KEY, layout); } catch (_) { /* Storage is optional. */ }
+      return renderDiff(current);
+    });
+    node("diff-fold").addEventListener("click", () => {
+      if (!current?.diffView) return;
+      current.diffView[current.diffFolded ? "unfoldUnchanged" : "foldUnchanged"]();
+      current.diffFolded = !current.diffFolded;
+      node("diff-fold").textContent = current.diffFolded ? "展开全部" : "折叠未改动";
+    });
     node("close").addEventListener("click", close);
     node("back").addEventListener("click", () => current && back(current));
     node("delete").addEventListener("click", () => current && deleteSelected(current));
@@ -1023,7 +1079,7 @@ window.NetizenFileBrowser = {
     node("more-roots").addEventListener("click", () => current && moreRoots(current, current.nextCursor));
     node("refresh").addEventListener("click", () => {
       if (!current) return;
-      if (current.provider.changes && current.identity) void loadChanges(current, current.changesScope);
+      if (current.provider.changes && current.identity) void loadChanges(current);
       return refreshTree(current);
     });
     node("filter").addEventListener("input", () => {
@@ -1039,11 +1095,6 @@ window.NetizenFileBrowser = {
       current.wrap = !current.wrap;
       current.editor.session.setUseWrapMode(current.wrap);
       node("wrap").setAttribute("aria-pressed", String(current.wrap));
-    });
-    node("markdown-toggle").addEventListener("click", () => {
-      if (!current?.editor || typeof current.file?.markdownHtml !== "string") return;
-      current.preview = !current.preview;
-      renderMode(current);
     });
     node("search-form").addEventListener("submit", (event) => {
       event.preventDefault();
