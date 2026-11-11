@@ -2,7 +2,10 @@
 const media = { matches: true, listeners: [], addEventListener(kind, callback) {
   assert.equal(kind, "change"); this.listeners.push(callback);
 } };
-window.matchMedia = (query) => { assert.equal(query, "(max-width: 720px)"); return media; };
+window.matchMedia = (query) => {
+  if (query === "(pointer: coarse)") return { matches: false, addEventListener() {} };
+  assert.equal(query, "(max-width: 720px)"); return media;
+};
 const changeWidth = (compact) => {
   media.matches = compact;
   for (const listener of media.listeners) listener({ matches: compact });

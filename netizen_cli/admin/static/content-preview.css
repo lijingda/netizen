@@ -2,7 +2,23 @@
 .file-browser-diff { display: flex; flex: 1; min-height: 100px; position: relative; }
 .file-browser-diff > .ace_editor { flex: 1; min-width: 0; position: relative; }
 .file-browser-diff > .ace_editor + .ace_editor { border-left: 1px solid var(--line); }
-.file-browser-diff .ace_fold { background: var(--wash); border-color: var(--line); color: var(--muted); cursor: pointer; }
+.file-browser-diff .ace_editor .ace_fold { height: 100%; margin-top: 0; vertical-align: top; line-height: inherit; box-sizing: border-box; background: var(--wash); background-image: none; border-color: var(--line); color: var(--ink); cursor: pointer; }
+.file-browser-diff .ace_fold:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.file-browser-diff .ace_editor > .ace_sb-v { background: var(--line); }
+.file-browser-diff .ace_editor > .ace_sb-v > div { background: var(--muted); border-color: var(--muted); }
+.file-browser-diff .ace_editor > .ace_sb-v > div:hover,
+.file-browser-diff .ace_editor > .ace_sb-v > div:active { background: var(--ink); border-color: var(--ink); }
+.file-browser-diff-menu { position: absolute; z-index: 30; left: var(--menu-x, 0); top: var(--menu-y, 0); display: flex; flex-direction: column; gap: 4px; width: max-content; max-width: min(260px, var(--menu-width), calc(100vw - 16px)); max-height: var(--menu-height); box-sizing: border-box; overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); box-shadow: 0 4px 16px rgb(16 33 63 / 18%); }
+.file-browser-scroll-host { position: relative; }
+.file-browser-scrollbar { position: absolute; z-index: 5; top: var(--scrollbar-top); right: var(--scrollbar-right); width: 12px; height: var(--scrollbar-height); border-radius: 3px; background: var(--line); }
+.file-browser-scrollbar-thumb { position: absolute; top: var(--scrollbar-thumb-y); height: var(--scrollbar-thumb-height); width: 100%; border-radius: 3px; background: var(--muted); touch-action: none; cursor: grab; }
+.file-browser-scrollbar-thumb:active { background: var(--ink); cursor: grabbing; }
+@media (pointer: coarse) {
+  .file-browser-editor.ace_editor > .ace_sb-v { background: var(--line); }
+  .file-browser-editor.ace_editor > .ace_sb-v > div { background: var(--muted); border-color: var(--muted); }
+  .file-browser-editor.ace_editor > .ace_sb-v > div:hover,
+  .file-browser-editor.ace_editor > .ace_sb-v > div:active { background: var(--ink); border-color: var(--ink); }
+}
 .file-browser-badge { font-size: 10px; color: var(--blue); }
 .file-browser-entry.file-browser-ignored { opacity: .55; }
 .file-browser-changes-tools { padding: 0 10px 10px; font-size: 12px; }
@@ -196,3 +212,7 @@ body.file-browser-open, body.session-answer-open { overflow: hidden; }
 
 .file-browser-drawer #file-browser-delete { border-color: var(--danger-line); }
 .file-browser-drawer #file-browser-delete:hover:not(:disabled) { background: var(--danger-soft); }
+.file-browser-drawer .file-browser-diff-menu button { min-height: 36px; text-align: left; white-space: normal; }
+@media (max-width: 720px) {
+  .file-browser-drawer .file-browser-diff-menu button { min-height: 44px; }
+}
