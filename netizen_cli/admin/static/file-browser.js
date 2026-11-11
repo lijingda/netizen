@@ -15,7 +15,7 @@ window.NetizenFileBrowser = {
   let aceLoading = null;
   let diffLoading = null;
   const DIFF_LAYOUT_KEY = "netizen-file-diff-layout";
-  const CONTEXT = 3, STEP = 20;
+  const CONTEXT = 3, STEP = 20, MAX_CHAR_RANGES = 200;
   function diffLayout() {
     try { return window.localStorage.getItem(DIFF_LAYOUT_KEY) === "unified" ? "unified" : "split"; }
     catch (_) { return "split"; }
@@ -28,7 +28,7 @@ window.NetizenFileBrowser = {
   function watchPreviewScrollbars() {
     if (!coarse.matches) { updatePreviewScrollbars(); return; }
     if (!previewScrollbars.length) {
-      for (const name of ["markdown", "image-wrap"]) {
+      for (const name of ["markdown", "image-wrap", "diff"]) {
         const content = node(name), host = content.parentElement;
         host.classList.toggle("file-browser-scroll-host", true);
         const track = document.createElement("div"), thumb = document.createElement("div");
@@ -131,6 +131,7 @@ window.NetizenFileBrowser = {
     stop(view, "diff");
     destroyDiff(view);
     view.diff = null;
+    view.diffModel = null;
     view.mode = "source";
     view.modeSequence = (view.modeSequence || 0) + 1;
     view.filePending = view.diffPending = null;
@@ -759,7 +760,7 @@ window.NetizenFileBrowser = {
     }
     return aceLoading;
   }
-  // Gaps are half-open row ranges on the new side; chunks use the same convention.
+  // Gaps and changed chunks use half-open ranges in the rendered row sequence.
   function diffGaps(chunks, rows) {
     if (!chunks?.length) return [];
     const gaps = [];
@@ -778,175 +779,207 @@ window.NetizenFileBrowser = {
     else end -= STEP;
     return end - start >= 2 ? { start, end } : null;
   }
-  function diffFolds(session) {
-    return session.getAllFolds().filter((fold) => /^⋯ \d+ 行未改动 · 点击展开\s*$/.test(fold.placeholder));
+  function diffLines(text) {
+    if (!text) return [];
+    const lines = text.split(/\r\n|\r|\n/);
+    if (lines.at(-1) === "") lines.pop();
+    return lines;
   }
-  function addDiffFold(session, gap) {
-    const Range = window.ace.require("ace/range").Range;
-    session.addFold(`⋯ ${gap.end - gap.start} 行未改动 · 点击展开`.padEnd(120, " "),
-      new Range(gap.start, 0, gap.end - 1, Number.MAX_VALUE));
+  async function diffTokenizer(language) {
+    if (!modes.has(language) || language === "text") return null;
+    const ace = window.ace, name = `ace/mode/${language}`;
+    const module = ace.require(name) || await new Promise((resolve) => ace.config.loadModule(["mode", name], resolve));
+    return module?.Mode || null;
   }
-  function foldDiff(view, folded) {
-    closeDiffMenu(view);
-    const diff = view.diffView;
-    for (const fold of diffFolds(diff.sessionB)) diff.sessionB.removeFold(fold);
-    if (folded) for (const gap of diffGaps(diff.chunks, view.diffRows)) addDiffFold(diff.sessionB, gap);
-    view.diffFolded = folded;
-    node("diff-fold").textContent = folded ? "展开全部" : "折叠未改动";
-  }
-  function closeDiffMenu(view, restoreFocus = false) {
-    const menu = view?.diffMenu;
-    if (!menu) return;
-    view.diffMenu = null;
-    menu.dispose();
-    menu.element.remove();
-    if (restoreFocus) menu.anchor.focus({ preventScroll: true });
-  }
-  function openDiffMenu(view, editor, fold, anchor) {
-    const index = diffFolds(editor.session).indexOf(fold);
-    if (index < 0) return;
-    // ext-diff mirrors the unchanged folds in order, even when changed row counts differ.
-    const canonical = diffFolds(view.diffView.sessionB)[index];
-    if (!canonical) return;
-    closeDiffMenu(view);
-    const menu = document.createElement("div");
-    menu.className = "file-browser-diff-menu";
-    menu.setAttribute("role", "group");
-    menu.setAttribute("aria-label", "展开未改动行");
-    const gap = { start: fold.start.row, end: fold.end.row + 1 };
-    const count = gap.end - gap.start;
-    const action = (label, direction) => {
-      const item = button(label, () => {
-        closeDiffMenu(view);
-        if (!editor.session.getAllFolds().includes(fold)) return;
-        const remaining = shrinkDiffGap(gap, direction);
-        editor.session.removeFold(fold);
-        if (remaining) addDiffFold(editor.session, remaining);
+  function diffTokens(lines, Mode) {
+    if (!Mode) return lines.map((value) => [{ type: "text", value }]);
+    try {
+      const tokenizer = new Mode().getTokenizer();
+      let state = "start";
+      return lines.map((line) => {
+        const result = tokenizer.getLineTokens(line, state);
+        state = result.state;
+        return result.tokens;
       });
+    } catch (_) { return lines.map((value) => [{ type: "text", value }]); }
+  }
+  function diffHighlights(chunks, lines, side) {
+    const highlights = new Map();
+    for (const chunk of chunks) {
+      if (!chunk.charChanges || chunk.charChanges.length > MAX_CHAR_RANGES) continue;
+      for (const change of chunk.charChanges) {
+        const { start, end } = change[side];
+        for (let row = start.row; row <= end.row && row < lines.length; row++) {
+          const from = row === start.row ? start.column : 0;
+          const to = Math.min(lines[row].length, row === end.row ? end.column : lines[row].length);
+          if (to <= from) continue;
+          if (!highlights.has(row)) highlights.set(row, []);
+          highlights.get(row).push([from, to]);
+        }
+      }
+    }
+    for (const [row, ranges] of highlights) {
+      const merged = [];
+      for (const range of ranges.sort((a, b) => a[0] - b[0])) {
+        const last = merged.at(-1);
+        if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+        else merged.push(range);
+      }
+      highlights.set(row, merged);
+    }
+    return highlights;
+  }
+  function diffRowData(model, unified) {
+    const rows = [], changes = [];
+    let old = 0, fresh = 0;
+    const unchanged = (end) => {
+      while (fresh < end) rows.push({ old: old++, new: fresh++ });
+    };
+    for (const chunk of model.chunks) {
+      unchanged(chunk.new.start.row);
+      const start = rows.length;
+      if (unified) {
+        while (old < chunk.old.end.row) rows.push({ old: old++, kind: "removed" });
+        while (fresh < chunk.new.end.row) rows.push({ new: fresh++, kind: "added" });
+      } else {
+        while (old < chunk.old.end.row || fresh < chunk.new.end.row) rows.push({
+          old: old < chunk.old.end.row ? old++ : undefined,
+          new: fresh < chunk.new.end.row ? fresh++ : undefined, kind: "changed",
+        });
+      }
+      changes.push({ new: { start: { row: start }, end: { row: rows.length } } });
+    }
+    unchanged(model.new.length);
+    return { rows, gaps: diffGaps(changes, rows.length) };
+  }
+  function diffCode(model, side, index, kind) {
+    const cell = document.createElement("div");
+    cell.className = `file-browser-diff-code${kind ? ` file-browser-diff-${kind}` : ""}`;
+    if (index === undefined) { cell.className += " file-browser-diff-pad"; return cell; }
+    const ranges = kind ? model.highlights[side].get(index) || [] : [];
+    let offset = 0, rangeIndex = 0;
+    for (const token of model.tokens[side][index]) {
+      const tokenStart = offset;
+      const end = offset + token.value.length;
+      while (offset < end) {
+        while (ranges[rangeIndex]?.[1] <= offset) rangeIndex++;
+        const range = ranges[rangeIndex];
+        const highlighted = range && range[0] <= offset;
+        const boundary = Math.min(end, range ? highlighted ? range[1] : range[0] : end);
+        const span = document.createElement("span");
+        span.className = token.type.split(".").map((type) => `ace_${type}`).join(" ")
+          + (highlighted ? " file-browser-diff-char" : "");
+        span.textContent = token.value.slice(offset - tokenStart, boundary - tokenStart);
+        cell.append(span);
+        offset = boundary;
+      }
+    }
+    return cell;
+  }
+  function diffRow(view, data) {
+    const row = document.createElement("div");
+    row.className = "file-browser-diff-row";
+    const number = (index) => {
+      const cell = document.createElement("span");
+      cell.className = "file-browser-diff-number";
+      cell.textContent = index === undefined ? "" : String(index + 1);
+      return cell;
+    };
+    if (view.diffUnified) {
+      const marker = document.createElement("span");
+      marker.className = "file-browser-diff-marker";
+      marker.textContent = data.kind === "removed" ? "-" : data.kind === "added" ? "+" : " ";
+      if (data.kind) row.className += ` file-browser-diff-${data.kind}`;
+      const side = data.kind === "removed" ? "old" : "new";
+      row.append(number(data.old), number(data.new), marker, diffCode(view.diffModel, side, data[side], data.kind));
+    } else {
+      for (const side of ["old", "new"]) {
+        const kind = data.kind && data[side] !== undefined ? side === "old" ? "removed" : "added" : "";
+        const label = number(data[side]);
+        if (kind) label.className += ` file-browser-diff-${kind}`;
+        row.append(label, diffCode(view.diffModel, side, data[side], kind));
+      }
+    }
+    return row;
+  }
+  function diffFragment(view, start, end) {
+    const fragment = document.createDocumentFragment();
+    for (let i = start; i < end; i++) fragment.append(diffRow(view, view.diffRows[i]));
+    return fragment;
+  }
+  function renderDiffGap(view, element, gap) {
+    element.replaceChildren();
+    element.className = "file-browser-diff-gap";
+    element.setAttribute("role", "group");
+    element.setAttribute("aria-label", "展开未改动行");
+    view.diffGaps.set(element, gap);
+    const count = gap.end - gap.start;
+    const label = document.createElement("span");
+    label.textContent = `${count} 行未改动`;
+    element.append(label);
+    const action = (label, direction) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.textContent = label;
       item.dataset.direction = direction;
-      menu.append(item);
+      element.append(item);
     };
     if (count > STEP) {
-      if (canonical.start.row > 0) action(`↓ 向下展开 ${STEP} 行`, "down");
-      if (canonical.end.row + 1 < view.diffRows) action(`↑ 向上展开 ${STEP} 行`, "up");
+      if (gap.start > 0) action(`↓ 展开 ${STEP} 行`, "down");
+      if (gap.end < view.diffRows.length) action(`↑ 展开 ${STEP} 行`, "up");
     }
     action(`展开全部 ${count} 行`, "all");
-    node("diff").append(menu);
-    const area = node("diff").getBoundingClientRect(), bar = anchor.getBoundingClientRect();
-    const left = Math.max(0, area.left), top = Math.max(0, area.top);
-    const right = Math.min(window.innerWidth, area.right), bottom = Math.min(window.innerHeight, area.bottom);
-    menu.style.setProperty("--menu-width", `${Math.max(0, right - left - 8)}px`);
-    menu.style.setProperty("--menu-height", `${Math.max(0, bottom - top - 8)}px`);
-    const size = menu.getBoundingClientRect();
-    const x = Math.max(left + 4, Math.min(bar.left, right - size.width - 4));
-    const y = Math.max(top + 4, Math.min(bar.bottom + 4, bottom - size.height - 4));
-    menu.style.setProperty("--menu-x", `${x - area.left}px`);
-    menu.style.setProperty("--menu-y", `${y - area.top}px`);
-    const outside = (event) => { if (!menu.contains(event.target)) closeDiffMenu(view); };
-    const escape = (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault(); event.stopPropagation();
-      closeDiffMenu(view, true);
-    };
-    document.addEventListener("pointerdown", outside, true);
-    document.addEventListener("click", outside, true);
-    document.addEventListener("keydown", escape, true);
-    view.diffMenu = { element: menu, anchor, dispose() {
-      document.removeEventListener("pointerdown", outside, true);
-      document.removeEventListener("click", outside, true);
-      document.removeEventListener("keydown", escape, true);
-    } };
-    menu.children[0].focus({ preventScroll: true });
   }
-  function bindDiffFolds(view) {
-    const area = node("diff"), cleanups = [], diff = view.diffView;
-    const editors = [diff.editorA, diff.editorB];
-    const listen = (target, name, fn, options) => {
-      target.addEventListener(name, fn, options);
-      cleanups.push(() => target.removeEventListener(name, fn, options));
-    };
-    const barAt = (target) => target.closest?.(".ace_fold");
-    const openAt = (anchor, x, y) => {
-      const editor = editors.find((item) => item.container.contains(anchor));
-      if (!editor) return;
-      const position = editor.renderer.screenToTextCoordinates(x, y);
-      const fold = editor.session.getFoldAt(position.row, position.column);
-      if (fold) openDiffMenu(view, editor, fold, anchor);
-    };
-    const close = () => closeDiffMenu(view);
-    for (const editor of editors) {
-      const click = (event) => {
-        const anchor = barAt(event.domEvent.target);
-        if (!anchor) return;
-        const position = event.getDocumentPosition();
-        const fold = editor.session.getFoldAt(position.row, position.column);
-        if (!diffFolds(editor.session).includes(fold)) return;
-        event.stop();
-        openDiffMenu(view, editor, fold, anchor);
-      };
-      editor.on("click", click, true);
-      cleanups.push(() => editor.off("click", click));
-      for (const name of ["changeScrollTop", "changeScrollLeft"]) {
-        editor.session.on(name, close);
-        cleanups.push(() => editor.session.off(name, close));
-      }
+  function expandDiffGap(view, event) {
+    const item = event.target.closest?.("button");
+    const element = item?.parentElement, gap = view.diffGaps.get(element);
+    if (!gap) return;
+    const remaining = shrinkDiffGap(gap, item.dataset.direction);
+    const area = node("diff"), top = area.scrollTop;
+    const fragment = diffFragment(view, remaining && item.dataset.direction === "up" ? remaining.end : gap.start,
+      remaining && item.dataset.direction === "down" ? remaining.start : gap.end);
+    const first = fragment.firstChild;
+    area.insertBefore(fragment, remaining && item.dataset.direction === "up" ? element.nextSibling : element);
+    if (remaining) {
+      renderDiffGap(view, element, remaining);
+      const buttons = [...element.querySelectorAll("button")];
+      (buttons.find((button) => button.dataset.direction === item.dataset.direction) || buttons.at(-1)).focus({ preventScroll: true });
+    } else {
+      view.diffGaps.delete(element);
+      element.remove();
+      if (first) { first.tabIndex = -1; first.focus({ preventScroll: true }); }
     }
-    let touch = null;
-    listen(area, "touchstart", (event) => {
-      if (touch) { touch.moved = true; event.stopPropagation(); return; }
-      const anchor = barAt(event.target);
-      if (!anchor || event.touches.length !== 1) return;
-      const point = event.touches[0];
-      touch = { anchor, x: point.clientX, y: point.clientY, moved: false };
-      event.stopPropagation();
-    }, { capture: true, passive: true });
-    listen(area, "touchmove", (event) => {
-      if (!touch) return;
-      event.stopPropagation();
-      const point = event.touches[0];
-      if (event.touches.length !== 1 || Math.hypot(point.clientX - touch.x, point.clientY - touch.y) >= 10) touch.moved = true;
-    }, { capture: true, passive: true });
-    listen(area, "touchend", (event) => {
-      if (!touch) return;
-      event.stopPropagation(); event.preventDefault();
-      const tapped = touch; touch = null;
-      const point = event.changedTouches[0];
-      if (!tapped.moved && Math.hypot(point.clientX - tapped.x, point.clientY - tapped.y) < 10)
-        openAt(tapped.anchor, tapped.x, tapped.y);
-    }, { capture: true, passive: false });
-    listen(area, "touchcancel", (event) => { if (touch) { event.stopPropagation(); touch = null; } }, true);
-    listen(area, "keydown", (event) => {
-      const anchor = barAt(event.target);
-      if (!anchor || !["Enter", " "].includes(event.key)) return;
-      event.preventDefault(); event.stopPropagation();
-      const rect = anchor.getBoundingClientRect();
-      openAt(anchor, rect.left + 1, rect.top + rect.height / 2);
-    });
-    const accessibleFolds = () => {
-      for (const bar of area.querySelectorAll(".ace_fold")) {
-        bar.tabIndex = 0;
-        bar.setAttribute("role", "button");
-        bar.setAttribute("aria-label", bar.textContent.trim());
-      }
-    };
-    accessibleFolds();
-    if (window.MutationObserver) {
-      const observer = new window.MutationObserver(accessibleFolds);
-      observer.observe(area, { childList: true, subtree: true });
-      cleanups.push(() => observer.disconnect());
+    // Disable native anchoring in CSS and retain the content above this expander.
+    area.scrollTop = top;
+    updatePreviewScrollbars();
+  }
+  function foldDiff(view, folded) {
+    view.diffGaps = new Map();
+    const fragment = document.createDocumentFragment();
+    let start = 0;
+    for (const gap of folded ? view.diffInitialGaps : []) {
+      fragment.append(diffFragment(view, start, gap.start));
+      const element = document.createElement("div");
+      renderDiffGap(view, element, gap);
+      fragment.append(element);
+      start = gap.end;
     }
-    view.diffDispose = () => { for (const cleanup of cleanups) cleanup(); touch = null; };
+    fragment.append(diffFragment(view, start, view.diffRows.length));
+    node("diff").replaceChildren(fragment);
+    view.diffFolded = folded;
+    node("diff-fold").textContent = folded ? "展开全部" : "折叠未改动";
+    updatePreviewScrollbars();
   }
   function destroyDiff(view) {
     view.diffRender = (view.diffRender || 0) + 1;
-    closeDiffMenu(view);
     view.diffDispose?.();
     view.diffDispose = null;
-    view.diffView?.destroy();
-    view.diffView = null;
+    view.diffRows = null;
+    view.diffGaps = null;
     node("diff").replaceChildren();
     node("diff").hidden = true;
     node("diff-layout").hidden = node("diff-fold").hidden = true;
+    updatePreviewScrollbars();
   }
   async function ensureDiff() {
     const ace = await ensureAce();
@@ -978,8 +1011,8 @@ window.NetizenFileBrowser = {
     for (const [id, mode] of [["source", "source"], ["preview", "preview"], ["difference", "diff"]]) {
       node(id).setAttribute("aria-pressed", String(view.mode === mode));
     }
-    node("diff-layout").hidden = view.mode !== "diff" || compact.matches || !view.diffView;
-    node("diff-fold").hidden = !view.diffView;
+    node("diff-layout").hidden = view.mode !== "diff" || compact.matches || !view.diffRows;
+    node("diff-fold").hidden = !view.diffRows;
     node("split").setAttribute("aria-pressed", String(view.diffLayout === "split"));
     node("unified").setAttribute("aria-pressed", String(view.diffLayout === "unified"));
   }
@@ -1008,22 +1041,45 @@ window.NetizenFileBrowser = {
       if (!active(view) || view.diff !== data || view.diffRender !== sequence || view.mode !== "diff") return;
       const ace = window.ace;
       for (const key of ["basePath", "modePath", "themePath", "workerPath"]) ace.config.set(key, "/static/vendor/ace");
-      const inline = compact.matches || view.diffLayout === "unified";
-      const diff = view.diffView = extension.createDiffView({ valueA: data.old, valueB: data.new, inline: inline ? "b" : false });
-      for (const editor of [diff.editorA, diff.editorB]) {
-        editor.session.setUseWorker(false);
-        editor.setReadOnly(true);
-        editor.setOptions({ showPrintMargin: false, fontSize: 13, highlightActiveLine: false, enableMobileMenu: false });
-        editor.session.setMode(`ace/mode/${modes.has(data.language) ? data.language : "text"}`);
-        editor.session.setUseWrapMode(view.wrap);
+      // Token colors must also load when no source editor has applied a theme yet.
+      ace.require("ace/theme/textmate");
+      if (ace.config.get("useStrictCSP") == null) ace.config.set("useStrictCSP", false);
+      if (!view.diffModel) {
+        const old = diffLines(data.old), fresh = diffLines(data.new);
+        const provider = new extension.DiffProvider();
+        const chunks = provider.compute(old, fresh, { ignoreTrimWhitespace: false, maxComputationTimeMs: 500 });
+        const deadline = performance.now() + 200;
+        for (const chunk of chunks) {
+          const remaining = deadline - performance.now();
+          if (!chunk.inlinePending || remaining <= 0) continue;
+          const refined = provider.refine(old, fresh, chunk, {
+            ignoreTrimWhitespace: false, maxComputationTimeMs: Math.min(25, remaining),
+          });
+          chunk.charChanges = refined.hitTimeout ? [] : refined.charChanges;
+        }
+        view.diffModel = { old, new: fresh, chunks };
       }
-      node("diff").append(...(inline ? [diff.editorB.container] : [diff.editorA.container, diff.editorB.container]));
-      node("diff").hidden = false;
-      diff.onInput();
-      view.diffRows = data.new.split(/\r\n|\r|\n/).length;
+      const model = view.diffModel;
+      if (!model.tokens) {
+        let Mode = null;
+        try { Mode = await diffTokenizer(data.language); } catch (_) { /* Plain text remains readable. */ }
+        if (!active(view) || view.diff !== data || view.diffRender !== sequence || view.mode !== "diff") return;
+        model.tokens = { old: diffTokens(model.old, Mode), new: diffTokens(model.new, Mode) };
+        model.highlights = { old: diffHighlights(model.chunks, model.old, "old"), new: diffHighlights(model.chunks, model.new, "new") };
+      }
+      view.diffUnified = compact.matches || view.diffLayout === "unified";
+      const { rows, gaps } = diffRowData(model, view.diffUnified);
+      view.diffRows = rows;
+      view.diffInitialGaps = gaps;
+      const area = node("diff");
+      area.className = "file-browser-diff ace-tm";
+      area.dataset.layout = view.diffUnified ? "unified" : "split";
+      area.hidden = false;
+      area.scrollTop = 0;
       foldDiff(view, true);
-      bindDiffFolds(view);
-      diff.resize();
+      const expand = (event) => expandDiffGap(view, event);
+      area.addEventListener("click", expand);
+      view.diffDispose = () => area.removeEventListener("click", expand);
       renderModes(view);
     } catch (error) {
       if (active(view) && view.diff === data && view.diffRender === sequence) note("note", error.message, true);
@@ -1313,7 +1369,7 @@ window.NetizenFileBrowser = {
       return renderDiff(current);
     });
     node("diff-fold").addEventListener("click", () => {
-      if (!current?.diffView) return;
+      if (!current?.diffRows) return;
       foldDiff(current, !current.diffFolded);
     });
     node("close").addEventListener("click", close);
@@ -1367,8 +1423,7 @@ window.NetizenFileBrowser = {
       return directory(current, parent, path);
     });
     window.addEventListener("resize", () => {
-      closeDiffMenu(current);
-      current?.editor?.resize(); current?.diffView?.resize();
+      current?.editor?.resize();
       updatePreviewScrollbars();
     });
     coarse.addEventListener("change", () => {

@@ -54,7 +54,7 @@ const until = async (condition) => {
 const changeWidth = async (compact) => {
   media.matches = compact;
   for (const callback of media.listeners) callback();
-  await until(() => input("diff").hidden || diffViews.at(-1)?.model.inline === (compact || storedLayout === "unified" ? "b" : false));
+  await until(() => input("diff").hidden || input("diff").dataset.layout === (compact || storedLayout === "unified" ? "unified" : "split"));
 };
 const changesRoute = "/api/v1/project-files/changes";
 const diffRoute = "/api/v1/project-files/diff";
@@ -66,7 +66,26 @@ const filterChanges = async (value) => {
   await trigger("changes-only", "change");
 };
 const filterName = async (value) => { input("filter").value = value; await trigger("filter", "input"); };
-const diffViews = [];
+// Native DOM insertion, including fragment consumption, for incremental expansion.
+Element.prototype.remove = function () {
+  if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+  this.parentElement = null;
+};
+Element.prototype.insertBefore = function (node, reference) {
+  if (node.tagName === "fragment") {
+    for (const child of [...node.children]) this.insertBefore(child, reference);
+    return node;
+  }
+  node.remove();
+  const index = reference ? this.children.indexOf(reference) : this.children.length;
+  assert(index >= 0);
+  this.children.splice(index, 0, node); node.parentElement = this;
+  return node;
+};
+Object.defineProperty(Element.prototype, "firstChild", { get() { return this.children[0] || null; } });
+Object.defineProperty(Element.prototype, "nextSibling", { get() {
+  return this.parentElement?.children[this.parentElement.children.indexOf(this) + 1] || null;
+} });
 let chunkFixture = null;
 class Range {
   constructor(startRow, startColumn, endRow, endColumn) {
@@ -76,120 +95,69 @@ class Range {
 const chunk = (start, end, oldStart = start, oldEnd = end) => ({
   new: new Range(start, 0, end, 0), old: new Range(oldStart, 0, oldEnd, 0),
 });
-const emitter = (target) => {
-  target.events = new Map();
-  target.on = (name, callback, capturing = false) => {
-    const callbacks = target.events.get(name) || [];
-    callbacks[capturing ? "unshift" : "push"](callback); target.events.set(name, callbacks);
-  };
-  target.off = (name, callback) => target.events.set(name, (target.events.get(name) || []).filter((fn) => fn !== callback));
-  target.emit = (name, event = {}) => {
-    for (const callback of target.events.get(name) || []) { callback(event); if (event.stopped) break; }
-  };
-  target.listenerCount = () => [...target.events.values()].reduce((sum, list) => sum + list.length, 0);
-};
 let extensionLoaded = false, storedLayout = null, storageThrows = false, storageKey;
 window.localStorage = {
   getItem(key) { if (storageThrows) throw new Error("storage denied"); storageKey = key; return storedLayout; },
   setItem(key, value) { if (storageThrows) throw new Error("storage denied"); assert.equal(key, storageKey); storedLayout = value; },
 };
 const liveViews = () => {
-  assert(diffViews.filter((view) => !view.destroyed).length <= 1, "at most one live diff view");
-  assert(editors.filter((editor) => !editor.destroyed && !editor.diff).length <= 1, "at most one live source editor");
+  assert(editors.filter((editor) => !editor.destroyed).length <= 1, "at most one live source editor");
+  if (!input("diff").hidden) assert(editors.every((editor) => editor.destroyed), "diff creates no Ace editors");
 };
-const extension = { createDiffView(model) {
-  liveViews();
-  assert(diffViews.every((view) => view.destroyed), "destroy the old diff before constructing its replacement");
-  const a = window.ace.edit(), b = window.ace.edit();
-  a.diff = b.diff = true;
-  a.container = document.createElement("div"); b.container = document.createElement("div");
-  a.text = model.valueA; b.text = model.valueB;
-  const view = { model, editorA: a, editorB: b, sessionA: a.session, sessionB: b.session,
-    resize() { assert(!this.destroyed); }, onInput() {
-      this.computed = true;
-      if (chunkFixture) this.chunks = chunkFixture;
-      else {
-        const old = a.text.split(/\r\n|\r|\n/), fresh = b.text.split(/\r\n|\r|\n/);
-        let start = 0, oldEnd = old.length, end = fresh.length;
-        while (start < Math.min(oldEnd, end) && old[start] === fresh[start]) start++;
-        while (oldEnd > start && end > start && old[oldEnd - 1] === fresh[end - 1]) { oldEnd--; end--; }
-        this.chunks = start === oldEnd && start === end ? [] : [chunk(start, end, start, oldEnd)];
-      }
-    },
-    destroy() {
-      assert(!this.destroyed, "destroy each diff exactly once");
-      for (const editor of [a, b]) {
-        assert.equal(editor.listenerCount(), 0, "remove editor listeners before disposal");
-        assert.equal(editor.session.listenerCount(), 0, "remove scroll listeners before disposal");
-        editor.container.listeners.clear();
-      }
-      this.destroyed = true; a.destroy(); b.destroy();
-    } };
-  view.explicitAdds = [];
-  const render = () => {
-    for (const editor of [a, b]) {
-      editor.container.replaceChildren();
-      for (const [index, fold] of editor.session.folds.entries()) {
-        const bar = document.createElement("span"); bar.className = "ace_fold";
-        bar.textContent = fold.placeholder; bar.fold = fold;
-        bar.getBoundingClientRect = () => ({ left: editor === a ? 40 : 440, top: 100 + index * 60,
-          right: editor === a ? 340 : 740, bottom: 120 + index * 60, width: 300, height: 20 });
-        editor.container.append(bar);
-      }
+const computations = [], refinements = [], tokenizations = [];
+let clockTime = 0, refineCost = 0, refinement = () => ({ charChanges: [], hitTimeout: false });
+const performance = { now: () => clockTime };
+const extension = { DiffProvider: class {
+  compute(old, fresh, options) {
+    assert.deepEqual(options, { ignoreTrimWhitespace: false, maxComputationTimeMs: 500 });
+    computations.push({ old, fresh });
+    let chunks = chunkFixture;
+    if (!chunks) {
+      let start = 0, oldEnd = old.length, end = fresh.length;
+      while (start < Math.min(oldEnd, end) && old[start] === fresh[start]) start++;
+      while (oldEnd > start && end > start && old[oldEnd - 1] === fresh[end - 1]) { oldEnd--; end--; }
+      chunks = start === oldEnd && start === end ? [] : [chunk(start, end, start, oldEnd)];
     }
-    for (const observer of observers) observer.notify();
-  };
-  for (const editor of [a, b]) {
-    emitter(editor); emitter(editor.session);
-    const session = editor.session, side = editor === a ? "old" : "new", other = editor === a ? b.session : a.session;
-    session.folds = [];
-    session.getAllFolds = () => session.folds.slice();
-    session.getFoldAt = (row, column) => session.folds.find((fold) =>
-      row >= fold.start.row && row <= fold.end.row && (row !== fold.start.row || column >= fold.start.column)
-      && (row !== fold.end.row || column <= fold.end.column));
-    session.addFold = (placeholder, range, mirrored = false) => {
-      assert(view.computed, "fold only after computing chunks");
-      assert(range instanceof Range);
-      range.end.column = Math.min(range.end.column, editor.text.split(/\r\n|\r|\n/)[range.end.row].length);
-      const fold = { placeholder, range, start: range.start, end: range.end };
-      session.folds.push(fold); session.folds.sort((a, b) => a.start.row - b.start.row);
-      if (!mirrored) {
-        view.explicitAdds.push(side);
-        let offset = 0;
-        for (const change of view.chunks) if (change[side].end.row <= range.start.row)
-          offset = change[side === "new" ? "old" : "new"].end.row - change[side].end.row;
-        fold.other = other.addFold(placeholder, new Range(range.start.row + offset, range.start.column,
-          range.end.row + offset, range.end.column), true);
-        fold.other.other = fold;
-        render();
-      }
-      return fold;
-    };
-    session.removeFold = (fold, mirrored = false) => {
-      assert(session.folds.includes(fold), "remove only an existing fold");
-      session.folds.splice(session.folds.indexOf(fold), 1);
-      if (!mirrored) { other.removeFold(fold.other, true); render(); }
-    };
-    editor.renderer = { screenToTextCoordinates(x, y) {
-      const bar = editor.container.children.find((bar) => {
-        const rect = bar.getBoundingClientRect(); return y >= rect.top && y <= rect.bottom;
-      });
-      return bar ? { row: bar.fold.start.row, column: 0 } : { row: 0, column: 0 };
-    } };
-    editor.container.addEventListener("click", (domEvent) => {
-      const event = { domEvent, getDocumentPosition: () => domEvent.target.fold?.start || { row: 0, column: 0 },
-        stop() { this.stopped = true; domEvent.preventDefault(); domEvent.stopPropagation(); } };
-      editor.emit("click", event);
-      if (!event.stopped && domEvent.target.fold) session.removeFold(domEvent.target.fold);
-    });
+    return chunks.map((change) => ({ ...change, charChanges: undefined,
+      inlinePending: change.old.end.row > change.old.start.row && change.new.end.row > change.new.start.row }));
   }
-  diffViews.push(view);
-  liveViews();
-  return view;
+  refine(old, fresh, change, options) {
+    assert.equal(options.ignoreTrimWhitespace, false);
+    assert(options.maxComputationTimeMs > 0 && options.maxComputationTimeMs <= 25);
+    refinements.push({ old, fresh, change, options }); clockTime += refineCost;
+    return refinement(change);
+  }
 } };
+let modeLoaded = false, modeLoad = null, tokenizerUnavailable = false, themeLoads = 0, strictCSP;
+class Mode {
+  getTokenizer() {
+    if (tokenizerUnavailable) throw new Error("tokenizer unavailable");
+    const calls = []; tokenizations.push(calls);
+    return { getLineTokens(line, state) {
+      assert.equal(state, calls.length ? `line-${calls.length}` : "start", "tokenizer state follows each side independently");
+      calls.push(line);
+      return { state: `line-${calls.length}`, tokens: [
+        { type: "keyword.control", value: line.slice(0, 3) }, { type: "string", value: line.slice(3) },
+      ] };
+    } };
+  }
+}
+window.ace.config.loadModule = ([kind, name], callback) => {
+  assert.equal(kind, "mode"); assert.equal(name, "ace/mode/python");
+  if (modeLoad) modeLoad(callback);
+  else { modeLoaded = true; callback({ Mode }); }
+};
+window.ace.config.get = (key) => { assert.equal(key, "useStrictCSP"); return strictCSP; };
+window.ace.config.set = (key, value) => {
+  if (key === "useStrictCSP") {
+    assert(themeLoads > 0, "request the theme before flushing Ace's pending styles");
+    strictCSP = value;
+  }
+};
 window.ace.require = (name) => {
-  if (name === "ace/range") return { Range };
-  assert.equal(name, "ace/ext/diff"); return extensionLoaded ? extension : null;
+  if (name === "ace/ext/diff") return extensionLoaded ? extension : null;
+  if (name === "ace/theme/textmate") { themeLoads++; return { cssClass: "ace-tm" }; }
+  assert.equal(name, "ace/mode/python"); return modeLoaded ? { Mode } : null;
 };
 const changed = (path, kind, directory = false) => ({ path, kind, directory,
   group: ["untracked", "ignored"].includes(kind) ? kind : "tracked" });
@@ -212,23 +180,16 @@ const directoryFixtures = () => {
   overrides.set(`${directoryRoute}:ignored`, () => listing("ignored", [["child.py"]]));
   overrides.set(`${directoryRoute}:clean`, () => listing("clean", [["unchanged.txt"]]));
 };
-const foldRows = (session) => session.getAllFolds().map((fold) => [fold.start.row, fold.end.row + 1]);
-const menus = () => input("diff").querySelectorAll(".file-browser-diff-menu");
-const menuOptions = () => menus()[0].children.map((item) => item.dataset.direction);
-const clickFold = (editor, index = 0) => {
-  const bar = editor.container.children[index], count = editor.session.getAllFolds().length;
-  assert(bar, "requested fold bar exists");
-  bar.dispatch("click");
-  assert.equal(menus().length, 1, "only one fold menu");
-  assert.equal(editor.session.getAllFolds().length, count, "capturing click suppresses Ace expand-all");
-  assert.equal(document.activeElement, menus()[0].children[0], "menu receives focus");
-  return bar;
-};
-const expand = (direction) => {
-  const item = menus()[0].children.find((item) => item.dataset.direction === direction);
+const diffRows = () => input("diff").querySelectorAll(".file-browser-diff-row");
+const gapRows = () => input("diff").querySelectorAll(".file-browser-diff-gap");
+const gapCounts = () => gapRows().map((row) => Number(row.children[0].textContent.split(" ")[0]));
+const gapOptions = (index = 0) => gapRows()[index].querySelectorAll("button").map((item) => item.dataset.direction);
+const expand = (direction, index = 0) => {
+  const item = gapRows()[index].querySelectorAll("button").find((item) => item.dataset.direction === direction);
   assert(item, `offered ${direction}`); item.click();
-  assert.equal(menus().length, 0, "action closes menu");
 };
+const cells = () => diffRows().map((row) => row.children.map((cell) => cell.textContent));
+const highlights = () => input("diff").querySelectorAll(".file-browser-diff-char").map((span) => span.textContent);
 const longChunks = [chunk(30, 31, 30, 33), chunk(90, 92, 92, 93)];
 const setDiffFixture = (rows = 160, chunks = longChunks, oldRows = 161) => {
   chunkFixture = chunks;
@@ -336,7 +297,7 @@ input("diff").getBoundingClientRect = () => ({ left: 20, top: 70, right: 800, bo
   await openFile("readme.md");
   extensionLoaded = true; script.onload(); await firstDiff;
   assert.equal(input("diff").hidden, true, "late extension loading cannot revive a previous file");
-  assert.equal(diffViews.length, 0);
+  assert.equal(computations.length, 0);
   const markdownReads = countReads("content");
   await trigger("preview");
   assert.equal(input("markdown").hidden, false);
@@ -345,137 +306,182 @@ input("diff").getBoundingClientRect = () => ({ left: 20, top: 70, right: 800, bo
   assert.equal(countReads("content"), markdownReads);
   assert.equal(input("difference").hidden, true, "untracked content has no diff candidate");
 
-  setDiffFixture();
-  await filterChanges(true); await openFile("a.py");
-  assert.equal(input("difference").getAttribute("aria-pressed"), "true");
-  let wide = diffViews.at(-1);
-  assert.equal(wide.model.inline, false);
-  assert.deepEqual(foldRows(wide.sessionB), [[0, 27], [34, 87], [95, 160]]);
-  assert.deepEqual(foldRows(wide.sessionA), [[0, 27], [36, 89], [96, 161]], "mirror rows account for insertions/deletions");
-  assert(wide.explicitAdds.every((side) => side === "new"), "initial folds are added on B only");
-  assert(wide.sessionB.folds.every((fold) => fold.placeholder.length === 120));
-  for (const editor of [wide.editorA, wide.editorB]) {
-    assert.equal(editor.worker, false); assert.equal(editor.readonly, true); assert.equal(editor.mode, "ace/mode/python");
-    assert.equal(editor.options.enableMobileMenu, false, "diff never leaves Ace's touch menu alongside our fold menu");
+  await filterChanges(true);
+  // Real public line/column conventions: zero based, half open; no trailing phantom row.
+  chunkFixture = null;
+  overrides.set(`${diffRoute}:a.py`, () => diffResult({ old: "same\r\nold\r\nlast\r\n", new: "same\nnew\nextra\nlast\n" }));
+  const beforeEditors = editors.length;
+  assert.equal(themeLoads, 0);
+  assert.equal(strictCSP, undefined);
+  await openFile("a.py"); liveViews();
+  assert.equal(editors.length, beforeEditors, "no Ace editor created for diff");
+  assert(themeLoads > 0, "the diff itself loads TextMate colors without creating a source editor");
+  assert.equal(strictCSP, false, "initialize Ace's pending style injection without a VirtualRenderer");
+  assert(input("diff").className.split(" ").includes("ace-tm"));
+  assert.equal(input("diff").dataset.layout, "split");
+  assert.deepEqual(cells(), [["1", "same", "1", "same"], ["2", "old", "2", "new"],
+    ["", "", "3", "extra"], ["3", "last", "4", "last"]]);
+  assert(diffRows()[2].children[1].className.includes("file-browser-diff-pad"));
+  assert.deepEqual(tokenizations.at(-2), ["same", "old", "last"]);
+  assert.deepEqual(tokenizations.at(-1), ["same", "new", "extra", "last"]);
+  const computed = computations.length, refined = refinements.length, tokenized = tokenizations.length;
+  const cachedReads = requests.length;
+  strictCSP = true;
+  await trigger("unified");
+  assert.equal(strictCSP, true, "an explicitly configured CSP preference is preserved");
+  strictCSP = false;
+  assert.deepEqual(cells(), [["1", "1", " ", "same"], ["2", "", "-", "old"],
+    ["", "2", "+", "new"], ["", "3", "+", "extra"], ["3", "4", " ", "last"]]);
+  assert.equal(storedLayout, "unified");
+  await trigger("split"); await changeWidth(true);
+  await until(() => input("diff").dataset.layout === "unified" && !input("diff").hidden);
+  assert.equal(input("diff-layout").hidden, true);
+  await changeWidth(false);
+  await until(() => input("diff").dataset.layout === "split" && !input("diff").hidden);
+  assert.equal(input("diff-layout").hidden, false);
+  assert.equal(computations.length, computed); assert.equal(refinements.length, refined);
+  assert.equal(tokenizations.length, tokenized); assert.equal(requests.length, cachedReads);
+
+  overrides.set(`${diffRoute}:a.py`, () => diffResult({ old: "a\nb\n", new: "a\n" }));
+  await openFile("a.py");
+  assert.deepEqual(cells(), [["1", "a", "1", "a"], ["2", "b", "", ""]], "shorter new side is padded");
+  assert(diffRows()[1].children[3].className.includes("file-browser-diff-pad"));
+  for (const [old, fresh, expected] of [["a\n", "a", 1], ["", "", 0], ["\n", "\n", 1]]) {
+    overrides.set(`${diffRoute}:a.py`, () => diffResult({ old, new: fresh }));
+    await openFile("a.py"); assert.equal(diffRows().length, expected);
   }
-  clickFold(wide.editorB); assert.deepEqual(menuOptions(), ["up", "all"], "first gap has context only below");
-  expand("up"); assert.deepEqual(foldRows(wide.sessionB)[0], [0, 7]);
-  clickFold(wide.editorA); assert.deepEqual(menuOptions(), ["all"], "at most STEP rows offers only full expansion");
-  expand("all"); assert.equal(wide.sessionB.folds.length, 2);
-  clickFold(wide.editorA); assert.deepEqual(menuOptions(), ["down", "up", "all"]);
-  expand("down");
-  assert.deepEqual(foldRows(wide.sessionA)[0], [56, 89]);
-  assert.deepEqual(foldRows(wide.sessionB)[0], [54, 87]);
-  assert.equal(wide.explicitAdds.at(-1), "old", "shrink on the clicked session and let ext-diff mirror");
-  clickFold(wide.editorB); expand("up");
-  assert.deepEqual(foldRows(wide.sessionB)[0], [54, 67]);
-  assert.deepEqual(foldRows(wide.sessionA)[0], [56, 69]);
-  clickFold(wide.editorB, 1); assert.deepEqual(menuOptions(), ["down", "all"], "last gap has context only above");
-  expand("down"); assert.deepEqual(foldRows(wide.sessionB)[1], [115, 160]);
-  clickFold(wide.editorB);
-  const anchor = clickFold(wide.editorB, 1);
-  assert.equal(menus().length, 1, "opening another fold replaces its menu");
-  const escaped = document.activeElement.dispatch("keydown", { key: "Escape" });
-  assert(escaped.prevented && escaped.stopped); assert.equal(menus().length, 0);
-  assert.equal(document.activeElement, anchor, "Escape restores fold focus");
-  anchor.dispatch("keydown", { key: "Enter" }); assert.equal(menus().length, 1, "folds are keyboard reachable");
-  input("filename").dispatch("pointerdown"); assert.equal(menus().length, 0);
-  clickFold(wide.editorB); input("filename").dispatch("click"); assert.equal(menus().length, 0);
-  for (const session of [wide.sessionA, wide.sessionB]) for (const name of ["changeScrollTop", "changeScrollLeft"]) {
-    clickFold(wide.editorB); session.emit(name); assert.equal(menus().length, 0, "scroll dismisses menu");
+  const char = { old: new Range(0, 2, 0, 7), new: new Range(0, 2, 0, 7) };
+  refinement = () => ({ charChanges: [char], hitTimeout: false });
+  overrides.set(`${diffRoute}:a.py`, () => diffResult({ old: "<script>&abc\n", new: "<script>&xyz\n" }));
+  await openFile("a.py");
+  assert.deepEqual(highlights(), ["c", "ript", "c", "ript"], "character ranges split syntax tokens at both boundaries");
+  assert.equal(diffRows()[0].children[1].textContent, "<script>&abc");
+  assert.equal(input("diff").querySelectorAll("script").length, 0, "code is text, never injected markup");
+  assert.equal(diffRows()[0].children[1].children[1].className, "ace_keyword ace_control file-browser-diff-char");
+  await trigger("unified"); assert.deepEqual(highlights(), ["c", "ript", "c", "ript"]);
+  await trigger("split");
+  for (const count of [200, 201]) {
+    refinement = () => ({ charChanges: Array(count).fill(char), hitTimeout: false });
+    await openFile("a.py"); assert.equal(highlights().length, count === 200 ? 4 : 0, "range-count bound applies to the entire chunk");
   }
+  refinement = () => ({ charChanges: [char], hitTimeout: true });
+  await openFile("a.py"); assert.equal(highlights().length, 0, "timed out refinement leaves line highlighting");
+  refinement = () => ({ charChanges: [{ old: new Range(0, 2, 1, 2), new: new Range(0, 2, 1, 2) }], hitTimeout: false });
+  overrides.set(`${diffRoute}:a.py`, () => diffResult({ old: "abcd\nefgh", new: "ABCD\nEFGH" }));
+  await openFile("a.py"); assert.deepEqual(highlights(), ["c", "d", "C", "D", "ef", "EF"], "multi-line ranges use exclusive columns");
+  refinement = () => ({ charChanges: [], hitTimeout: false });
+  refineCost = 25;
+  setDiffFixture(60, Array.from({ length: 12 }, (_, i) => chunk(i * 5, i * 5 + 1)), 60);
+  const refinedBefore = refinements.length;
+  await openFile("a.py"); assert.equal(refinements.length - refinedBefore, 8, "refinement has a shared 200 ms budget");
+  await trigger("unified"); assert.equal(refinements.length - refinedBefore, 8, "refinement is cached across layouts");
+  refineCost = 0; chunkFixture = null;
+  for (const language of ["text", "unsupported"]) {
+    overrides.set(`${diffRoute}:a.py`, () => diffResult({ language }));
+    const tokenCount = tokenizations.length;
+    await openFile("a.py"); assert.equal(tokenizations.length, tokenCount);
+    assert.equal(diffRows()[0].children[3].textContent, "old");
+  }
+  tokenizerUnavailable = true;
+  overrides.set(`${diffRoute}:a.py`, () => diffResult()); await openFile("a.py");
+  assert.equal(diffRows()[0].children[3].textContent, "old", "tokenizer failure falls back to plain text");
+  tokenizerUnavailable = false;
+  await trigger("split");
+
+  setDiffFixture(); await openFile("a.py");
+  assert.deepEqual(gapCounts(), [27, 53, 65]);
+  assert.deepEqual(gapOptions(), ["up", "all"]);
+  const stableRows = diffRows(), stableGap = gapRows()[1];
+  input("diff").scrollTop = 280;
+  stableRows[0].getBoundingClientRect = () => ({ top: input("diff").children
+    .slice(0, input("diff").children.indexOf(stableRows[0]))
+    .reduce((height, row) => height + (row.className === "file-browser-diff-gap" ? 44 : 21), 0) - input("diff").scrollTop });
+  expand("up"); assert.deepEqual(gapCounts(), [7, 53, 65]);
+  assert.equal(cells()[0][0], "8", "up reveals the bottom twenty lines of the leading run");
+  assert.equal(gapRows()[1], stableGap); assert.equal(input("diff").scrollTop, 280);
+  assert(stableRows.every((row) => diffRows().includes(row)), "expansion retains every already rendered row");
+  assert.deepEqual(gapOptions(), ["all"]); expand("all");
+  assert.equal(cells()[0][0], "1");
+  assert.deepEqual(gapCounts(), [53, 65]); assert.deepEqual(gapOptions(), ["down", "up", "all"]);
+  const stableTop = stableRows[0].getBoundingClientRect().top;
+  expand("down"); assert.deepEqual(gapCounts(), [33, 65]);
+  const beforeGap = input("diff").children[input("diff").children.indexOf(gapRows()[0]) - 1];
+  assert.deepEqual(beforeGap.children.map((cell) => cell.textContent), ["56", "line 55", "54", "line 53"],
+    "down reveals the top twenty lines, retaining independent old/new numbers");
+  assert.equal(input("diff").scrollTop, 280, "down expansion does not move content above the expander");
+  assert.equal(stableRows[0].getBoundingClientRect().top, stableTop);
+  assert.equal(document.activeElement.dataset.direction, "down", "native buttons retain keyboard focus after expansion");
+  expand("up"); assert.deepEqual(gapCounts(), [13, 65]);
+  assert.deepEqual(gapRows()[0].nextSibling.children.map((cell) => cell.textContent), ["70", "line 69", "68", "line 67"]);
+  assert.equal(stableRows[0].getBoundingClientRect().top, stableTop);
+  assert.deepEqual(gapOptions(1), ["down", "all"]); expand("down", 1);
+  assert.deepEqual(gapCounts(), [13, 45]);
+  while (gapRows().length) expand("all");
+  for (const [column, length] of [[0, 161], [2, 160]]) assert.deepEqual(cells()
+    .map((row) => row[column]).filter(Boolean), Array.from({ length }, (_, index) => String(index + 1)),
+  "incremental expansion neither loses nor duplicates any row");
   for (const [rows, chunks, expected] of [
-    [18, [chunk(5, 6), chunk(6, 7), chunk(12, 13)], [[0, 2], [16, 18]]],
+    [18, [chunk(5, 6), chunk(6, 7), chunk(12, 13)], [2, 2]],
     [17, [chunk(4, 5), chunk(12, 13)], []],
-    [40, [chunk(0, 1), chunk(39, 40)], [[4, 36]]],
+    [40, [chunk(0, 1), chunk(39, 40)], [32]],
     [20, [chunk(0, 20)], []], [30, [], []],
   ]) {
-    setDiffFixture(rows, chunks, rows); await openFile("a.py");
-    assert.deepEqual(foldRows(diffViews.at(-1).sessionB), expected, "3 context rows, adjacent changes and tiny gaps");
+    setDiffFixture(rows, chunks, rows); await openFile("a.py"); assert.deepEqual(gapCounts(), expected);
   }
   setDiffFixture(50, [chunk(20, 20, 20, 23)], 53); await openFile("a.py");
-  assert.deepEqual(foldRows(diffViews.at(-1).sessionB), [[0, 17], [23, 50]], "deletion-only chunk keeps both contexts");
+  assert.deepEqual(gapCounts(), [17, 27], "deletion-only chunk keeps both contexts");
   for (const direction of ["up", "down"]) for (const hidden of [20, 21, 22]) {
     setDiffFixture(hidden + 7, [direction === "up" ? chunk(hidden + 3, hidden + 4) : chunk(3, 4)], hidden + 7);
     await openFile("a.py");
-    const view = diffViews.at(-1); clickFold(view.editorB);
-    assert.deepEqual(menuOptions(), hidden <= 20 ? ["all"] : [direction, "all"]);
+    assert.deepEqual(gapOptions(), hidden <= 20 ? ["all"] : [direction, "all"]);
     expand(hidden <= 20 ? "all" : direction);
-    assert.deepEqual(foldRows(view.sessionB), hidden === 22 ? [direction === "up" ? [0, 2] : [27, 29]] : [],
-      "fewer than 2 remaining lines removes fold");
-    assert.deepEqual(foldRows(view.sessionA), foldRows(view.sessionB));
+    assert.deepEqual(gapCounts(), hidden === 22 ? [2] : [], "fewer than 2 hidden lines reveals the whole remainder");
   }
-  setDiffFixture(); await openFile("a.py"); wide = diffViews.at(-1);
-  const reads = requests.length;
-  clickFold(wide.editorB);
-  await trigger("diff-fold"); assert.equal(wide.sessionB.folds.length, 0); assert.match(input("diff-fold").textContent, /折叠/);
-  assert.equal(menus().length, 0);
-  await trigger("diff-fold"); assert.deepEqual(foldRows(wide.sessionB), [[0, 27], [34, 87], [95, 160]]);
-  clickFold(wide.editorA); expand("up"); assert.deepEqual(foldRows(wide.sessionB)[0], [0, 7]);
-  clickFold(wide.editorA);
-  await trigger("unified");
-  assert.equal(wide.destroyed, true); assert.equal(diffViews.at(-1).model.inline, "b");
-  assert.equal(menus().length, 0);
-  assert.equal(storedLayout, "unified"); assert.equal(diffViews.at(-1).sessionB.folds.length, 3);
-  await trigger("split"); await changeWidth(true);
-  await until(() => diffViews.at(-1).model.inline === "b");
-  assert.equal(input("diff-layout").hidden, true);
-  const compactView = diffViews.at(-1), bar = compactView.editorB.container.children[0];
-  const point = { clientX: 450, clientY: 110 };
-  assert(bar.dispatch("touchstart", { touches: [point] }).stopped);
-  const tap = bar.dispatch("touchend", { changedTouches: [point] });
-  assert(tap.prevented && tap.stopped, "suppress Ace touch selection/menu and compatibility click");
-  assert.equal(menus().length, 1);
-  assert(menus()[0].className.includes("file-browser-diff-menu"), "compact sizing hook");
-  assert(parseFloat(menus()[0].style["--menu-width"]) <= 780);
-  assert(parseFloat(menus()[0].style["--menu-x"]) >= 0);
-  assert(parseFloat(menus()[0].style["--menu-y"]) >= 0);
-  input("filename").dispatch("pointerdown");
-  bar.dispatch("touchstart", { touches: [point] });
-  bar.dispatch("touchmove", { touches: [{ clientX: 450, clientY: 150 }] });
-  bar.dispatch("touchend", { changedTouches: [{ clientX: 450, clientY: 150 }] });
-  assert.equal(menus().length, 0, "a swipe on a fold is not a tap");
-  bar.dispatch("touchstart", { touches: [point] });
-  bar.dispatch("touchend", { changedTouches: [{ clientX: 450, clientY: 150 }] });
-  assert.equal(menus().length, 0, "touchend displacement also rejects a swipe");
-  bar.dispatch("touchstart", { touches: [point] }); bar.dispatch("touchcancel");
-  bar.dispatch("touchend", { changedTouches: [point] }); assert.equal(menus().length, 0);
-  assert(!compactView.editorB.container.dispatch("touchstart", { touches: [point] }).stopped,
-    "ordinary text touches remain owned by Ace");
-  clickFold(compactView.editorB);
-  await changeWidth(false); await until(() => diffViews.at(-1).model.inline === false);
-  assert.equal(menus().length, 0);
-  assert.equal(input("diff-layout").hidden, false);
-  assert.equal(requests.length, reads, "layouts and breakpoints render cached texts");
-  const diffReads = countReads("diff"), contentReads = countReads("content");
+  setDiffFixture(); await openFile("a.py");
+  await trigger("diff-fold"); assert.deepEqual(gapCounts(), []); assert.match(input("diff-fold").textContent, /折叠/);
+  assert.equal(diffRows().length, 162);
+  await trigger("diff-fold"); assert.deepEqual(gapCounts(), [27, 53, 65]);
+  expand("up"); await trigger("unified"); assert.deepEqual(gapCounts(), [27, 53, 65]);
+  const diffReads = countReads("diff"), contentReads = countReads("content"), computedBeforeModes = computations.length;
   for (let i = 0; i < 4; i += 1) {
-    clickFold(diffViews.at(-1).editorB);
     await trigger("source"); liveViews();
-    assert.equal(menus().length, 0);
-    assert.equal(listenerCount(input("diff")), 0, "diff DOM listeners leave with the view");
-    assert.equal(editors.at(-1).options.customScrollbar, undefined, "fine-pointer source options unchanged");
-    assert.equal(editors.at(-1).options.enableMobileMenu, undefined, "source retains Ace's native touch menu");
+    assert.equal(input("diff").children.length, 0);
+    assert.equal(listenerCount(input("diff")), 0, "diff listener leaves with its rows");
+    assert.equal(editors.at(-1).options.customScrollbar, undefined);
+    assert.equal(editors.at(-1).options.enableMobileMenu, undefined);
     await trigger("difference"); liveViews();
+    assert.equal(listenerCount(input("diff")), 1, "one delegated expander listener");
     await trigger("unified"); await trigger("split"); liveViews();
   }
-  assert.equal(countReads("diff"), diffReads, "diff fetched once for the open file");
-  assert.equal(countReads("content"), contentReads + 1, "source fetched once for the open file");
-  clickFold(diffViews.at(-1).editorB);
-  await openFile("readme.md"); assert.equal(menus().length, 0, "file change closes menu");
+  assert.equal(countReads("diff"), diffReads); assert.equal(countReads("content"), contentReads + 1);
+  assert.equal(computations.length, computedBeforeModes, "mode switching retains computed chunks");
+  await openFile("readme.md"); assert.equal(listenerCount(input("diff")), 0);
+  await openFile("a.py"); input("root").value = "one"; await trigger("root", "change");
+  assert.equal(listenerCount(input("diff")), 0); assert.equal(input("diff").children.length, 0);
+  await filterChanges(true); await openFile("a.py"); browser.close();
   assert.equal(listenerCount(input("diff")), 0);
-  await openFile("a.py");
-  clickFold(diffViews.at(-1).editorB);
-  input("root").value = "one"; await trigger("root", "change");
-  assert.equal(menus().length, 0, "root change closes menu"); assert.equal(listenerCount(input("diff")), 0);
-  await filterChanges(true); await openFile("a.py"); clickFold(diffViews.at(-1).editorB);
-  browser.close(); assert.equal(menus().length, 0); assert.equal(listenerCount(input("diff")), 0);
-  assert.equal(listenerCount(document), originalDocumentListeners, "outside/Escape listeners do not survive closing");
-  assert(observers.every((observer) => observer.targets.size === 0), "diff observers disconnect");
+  assert.equal(listenerCount(document), originalDocumentListeners);
+  assert(observers.every((observer) => observer.targets.size === 0));
+  // Late tokenizer completion cannot restore a closed/changed file, mode or root.
+  chunkFixture = null;
+  overrides.set(`${diffRoute}:a.py`, () => diffResult());
+  for (const leave of [() => openFile("readme.md"), () => trigger("source"),
+    () => trigger("root", "change"), async () => browser.close()]) {
+    await open(); await filterChanges(true);
+    modeLoaded = false; const waiting = defer(); let resolveMode;
+    modeLoad = (callback) => { resolveMode = callback; waiting.resolve(); };
+    const pending = openFile("a.py"); await waiting.promise;
+    await leave(); resolveMode({ Mode }); await pending;
+    assert.equal(input("diff").hidden, true); assert.equal(input("diff").children.length, 0);
+    modeLoad = null;
+  }
+  modeLoaded = true;
   await open(); await filterChanges(true); await openFile("a.py");
   await trigger("source"); await trigger("copy"); assert.equal(clipboard, files["a.py"].text);
   chunkFixture = null;
   await openFile("gone.py");
-  assert.equal(diffViews.at(-1).model.valueB, "");
+  assert.deepEqual(computations.at(-1).fresh, []);
+  assert.deepEqual(cells(), [["1", "old", "", ""]], "deleted file has no phantom new-side line");
   assert.equal(input("source").disabled, true); assert.equal(input("preview").disabled, true);
   assert.match(input("diff-note").textContent, /已删除/);
   const beforeDeletedSource = countReads("content");
@@ -495,11 +501,11 @@ input("diff").getBoundingClientRect = () => ({ left: 20, top: 70, right: 800, bo
   }
 
   await trigger("unified"); await open(); await openFile("a.py"); await trigger("difference");
-  assert.equal(diffViews.at(-1).model.inline, "b", "wide preference persists across browser opens");
+  assert.equal(input("diff").dataset.layout, "unified", "wide preference persists across browser opens");
   storageThrows = true;
   await open(); await openFile("a.py"); await trigger("difference");
-  assert.equal(diffViews.at(-1).model.inline, false, "denied storage defaults to split");
-  await trigger("unified"); assert.equal(diffViews.at(-1).model.inline, "b", "denied writes do not break layout");
+  assert.equal(input("diff").dataset.layout, "split", "denied storage defaults to split");
+  await trigger("unified"); assert.equal(input("diff").dataset.layout, "unified", "denied writes do not break layout");
   storageThrows = false; await trigger("split");
   overrides.set(`${diffRoute}:a.py`, () => ({ git: "not_repository" }));
   await openFile("a.py"); await trigger("difference");
@@ -575,8 +581,23 @@ input("diff").getBoundingClientRect = () => ({ left: 20, top: 70, right: 800, bo
   assert.equal(tracks().length, 0, "fine pointers create no extra preview scrollbars");
   pointer.matches = true;
   for (const callback of pointer.listeners) callback();
+  overrides.set(`${diffRoute}:a.py`, () => diffResult());
+  overrides.set(`${changesRoute}:`, () => result());
+  await open(); await filterChanges(true); await openFile("a.py");
+  assert.equal(tracks().length, 3, "one persistent indicator per native scrolling container");
+  const diffArea = input("diff"), diffTrack = tracks().find((track) => track.dataset.preview === "diff");
+  diffArea.clientHeight = 200; diffArea.scrollHeight = 1000; diffArea.scrollTop = 0;
+  diffArea.dispatch("scroll");
+  assert.equal(diffTrack.hidden, false, "coarse-pointer indicator is attached to the native diff scroll container");
+  const diffThumb = diffTrack.children[0];
+  diffThumb.dispatch("pointerdown", { pointerId: 10, button: 0, clientY: 100 });
+  diffThumb.dispatch("pointermove", { pointerId: 10, clientY: 138.4 });
+  assert(Math.abs(diffArea.scrollTop - 200) < 0.001);
+  await trigger("source"); assert.equal(diffTrack.hidden, true); assert(!diffThumb.hasPointerCapture(10));
+  assert.equal(listenerCount(diffArea), 2, "only reusable indicator listeners survive mode changes");
+  await trigger("difference"); assert.equal(listenerCount(diffArea), 3);
+  browser.close(); assert.equal(diffTrack.hidden, true); assert.equal(listenerCount(diffArea), 2);
   await window.NetizenAttachmentFiles.open();
-  assert.equal(tracks().length, 2, "one persistent indicator per preview container");
   await openFile("a.py");
   assert.equal(editors.at(-1).options.customScrollbar, true, "coarse pointer opts source into Ace custom scrollbar");
   assert.equal(editors.at(-1).options.enableMobileMenu, undefined);
@@ -624,7 +645,7 @@ input("diff").getBoundingClientRect = () => ({ left: 20, top: 70, right: 800, bo
     browser.close(); assert(tracks().every((track) => track.hidden));
     assert(observers.every((observer) => observer.targets.size === 0), "close disconnects preview observers");
     await window.NetizenAttachmentFiles.open(); await openFile("image.png");
-    assert.equal(tracks().length, 2); assert.deepEqual([markdown, picture].map(listenerCount), previewListenerCounts);
+    assert.equal(tracks().length, 3); assert.deepEqual([markdown, picture].map(listenerCount), previewListenerCounts);
   }
   imageTrack.children[0].dispatch("pointerdown", { pointerId: 2, button: 0, clientY: 100 });
   browser.close(); assert(!imageTrack.children[0].hasPointerCapture(2), "close ends an active drag");
@@ -636,7 +657,7 @@ input("diff").getBoundingClientRect = () => ({ left: 20, top: 70, right: 800, bo
   assert(tracks().every((track) => track.hidden), "return to fine pointer restores native previews");
   browser.close(); liveViews();
   assert.equal(input("diff").children.length, 0);
-  assert(diffViews.every((view) => view.destroyed), "created and destroyed diff counts match after close");
+  assert.equal(listenerCount(input("diff")), 2, "only the reusable scroll indicator listeners remain");
   assert(editors.every((editor) => editor.destroyed), "created and destroyed editor counts match after close");
   console.log("Shared tree changes filter, view modes, diff layouts, folding, disposal and races passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

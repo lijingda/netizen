@@ -1,19 +1,25 @@
 /* Shared file and answer drawers, including file-browser navigation. */
-.file-browser-diff { display: flex; flex: 1; min-height: 100px; position: relative; }
-.file-browser-diff > .ace_editor { flex: 1; min-width: 0; position: relative; }
-.file-browser-diff > .ace_editor + .ace_editor { border-left: 1px solid var(--line); }
-.file-browser-diff .ace_editor .ace_fold { height: 100%; margin-top: 0; vertical-align: top; line-height: inherit; box-sizing: border-box; background: var(--wash); background-image: none; border-color: var(--line); color: var(--ink); cursor: pointer; }
-.file-browser-diff .ace_fold:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-.file-browser-diff .ace_editor > .ace_sb-v { background: var(--line); }
-.file-browser-diff .ace_editor > .ace_sb-v > div { background: var(--muted); border-color: var(--muted); }
-.file-browser-diff .ace_editor > .ace_sb-v > div:hover,
-.file-browser-diff .ace_editor > .ace_sb-v > div:active { background: var(--ink); border-color: var(--ink); }
-.file-browser-diff-menu { position: absolute; z-index: 30; left: var(--menu-x, 0); top: var(--menu-y, 0); display: flex; flex-direction: column; gap: 4px; width: max-content; max-width: min(260px, var(--menu-width), calc(100vw - 16px)); max-height: var(--menu-height); box-sizing: border-box; overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); box-shadow: 0 4px 16px rgb(16 33 63 / 18%); }
+.file-browser-diff { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; overscroll-behavior: contain; padding-bottom: 16px; font: 13px/21px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.file-browser-diff-row { display: grid; grid-template-columns: calc(5ch + 10px) minmax(0, 1fr) calc(5ch + 10px) minmax(0, 1fr); min-height: 21px; }
+.file-browser-diff[data-layout="unified"] .file-browser-diff-row { grid-template-columns: calc(5ch + 10px) calc(5ch + 10px) 2ch minmax(0, 1fr); }
+.file-browser-diff-number, .file-browser-diff-marker { user-select: none; -webkit-user-select: none; color: var(--muted); }
+.file-browser-diff-number { padding: 0 5px; text-align: right; background: var(--wash); }
+.file-browser-diff-marker { text-align: center; }
+.file-browser-diff-code { min-width: 0; padding: 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+.file-browser-diff[data-layout="split"] .file-browser-diff-code:last-child { border-left: 1px solid var(--line); }
+.file-browser-diff-removed { background: var(--danger-soft); }
+.file-browser-diff-added { background: var(--success-soft); }
+.file-browser-diff-removed .file-browser-diff-char { background: color-mix(in srgb, var(--danger) 22%, var(--danger-soft)); }
+.file-browser-diff-added .file-browser-diff-char { background: color-mix(in srgb, var(--success) 22%, var(--success-soft)); }
+.file-browser-diff-pad { background: var(--wash); }
+.file-browser-diff-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; background: var(--blue-soft); color: var(--muted); font: 12px/20px system-ui, sans-serif; }
+.file-browser-diff-gap > span { user-select: none; -webkit-user-select: none; }
 .file-browser-scroll-host { position: relative; }
 .file-browser-scrollbar { position: absolute; z-index: 5; top: var(--scrollbar-top); right: var(--scrollbar-right); width: 12px; height: var(--scrollbar-height); border-radius: 3px; background: var(--line); }
 .file-browser-scrollbar-thumb { position: absolute; top: var(--scrollbar-thumb-y); height: var(--scrollbar-thumb-height); width: 100%; border-radius: 3px; background: var(--muted); touch-action: none; cursor: grab; }
 .file-browser-scrollbar-thumb:active { background: var(--ink); cursor: grabbing; }
 @media (pointer: coarse) {
+  .file-browser-diff { padding-right: 16px; }
   .file-browser-editor.ace_editor > .ace_sb-v { background: var(--line); }
   .file-browser-editor.ace_editor > .ace_sb-v > div { background: var(--muted); border-color: var(--muted); }
   .file-browser-editor.ace_editor > .ace_sb-v > div:hover,
@@ -212,7 +218,7 @@ body.file-browser-open, body.session-answer-open { overflow: hidden; }
 
 .file-browser-drawer #file-browser-delete { border-color: var(--danger-line); }
 .file-browser-drawer #file-browser-delete:hover:not(:disabled) { background: var(--danger-soft); }
-.file-browser-drawer .file-browser-diff-menu button { min-height: 36px; text-align: left; white-space: normal; }
+.file-browser-drawer .file-browser-diff-gap button { min-height: 36px; white-space: normal; }
 @media (max-width: 720px) {
-  .file-browser-drawer .file-browser-diff-menu button { min-height: 44px; }
+  .file-browser-drawer .file-browser-diff-gap button { min-height: 44px; }
 }
