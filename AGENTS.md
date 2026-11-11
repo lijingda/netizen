@@ -57,7 +57,7 @@ The usage guides are not implementation guides.
 - [Native environment](docs/design.md#原生环境与能力配置): Codex configuration, capabilities and built-in Skill registration.
 - [Admin](docs/design.md#管理查询与操作): management operations and administrator identities.
 - [Runtime polling](docs/design.md#运行态投影与轮询): displayed runtime state and bounded status polling.
-- [Project browsing](docs/design.md#project-文件查看): current-directory file trees, bounded reads and previews.
+- [Project browsing](docs/design.md#project-文件查看): current-directory file trees, bounded reads and previews; [HEAD diffs](docs/design.md#project-未提交变更).
 - [Project deletion](docs/design.md#project-删除与交接): inventory, tombstones and native lifecycle handoffs.
 - [Worktrees](docs/design.md#受管-worktree-与实际目录): resource ownership, actual working directories and optional deletion cascades.
 - [Schedules](docs/design.md#定时任务): plans, dispatch, ordinary topics, MCP and saved-plan manual runs.
@@ -80,7 +80,9 @@ The usage guides are not implementation guides.
   its manual enablement unchanged.
 - Project browsing must use current-directory identity, bounded descriptor-relative
   reads and inert previews, remain separate from exact-Turn Files, and expose no
-  download endpoint.
+  download endpoint. Its HEAD diff (ADR 0095) persists no Git state and runs only the
+  isolated read-only Git commands with lazy fetch and transports disabled; viewing
+  must never execute repository-configured programs.
 - Preserve exact Scope/Binding-to-native-Thread identity. Existing running input
   steers the exact Turn; it is never queued or converted into another Turn.
   Only the verified session-tool entry uses native ExternalMessage start/join

@@ -41,6 +41,7 @@ REQUIRED_WHEEL_FILES = frozenset({
     "netizen_cli/admin/static/content-preview.js",
     "netizen_cli/admin/static/content-preview.css",
     "netizen_cli/admin/static/vendor/ace/ace.js",
+    "netizen_cli/admin/static/vendor/ace/ext-diff.js",
     "netizen_cli/admin/static/vendor/ace/mode-python.js",
     "netizen_cli/admin/static/vendor/ace/mode-javascript.js",
     "netizen_cli/admin/static/vendor/ace/mode-json.js",

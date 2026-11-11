@@ -10,6 +10,7 @@ window.NetizenFileBrowser = {
   const compact = window.matchMedia("(max-width: 720px)");
   let current = null;
   let aceLoading = null;
+  let diffLoading = null;
 
   function active(view) { return current === view && !dependencies.isExpired(); }
   function renderLayout(view) {
@@ -61,6 +62,14 @@ window.NetizenFileBrowser = {
     for (const slot of Object.keys(view.requests)) stop(view, slot);
   }
   function clearFile(view) {
+    stop(view, "content");
+    stop(view, "diff");
+    destroyDiff(view);
+    view.diff = null;
+    view.mode = "full";
+    node("view-modes").hidden = true;
+    node("diff-note").hidden = true;
+    node("diff-note").textContent = "";
     view.screen = "directory";
     view.file = null;
     view.selectedFile = null;
@@ -96,6 +105,11 @@ window.NetizenFileBrowser = {
     view.navigation += 1;
     view.tree.clear();
     view.identity = null;
+    view.changes = null;
+    view.changesMap = new Map();
+    view.changesScope = "";
+    view.sidebar = "files";
+    renderGit(view);
     view.desiredFile = null;
     view.path = "";
     view.selectedPath = "";
@@ -123,6 +137,10 @@ window.NetizenFileBrowser = {
     node("actions").hidden = true;
     note("action-note", "");
     view.tree.clear();
+    view.changes = null;
+    view.changesMap = new Map();
+    view.identity = null;
+    renderGit(view);
     node("filter").value = "";
     node("root").replaceChildren();
     node("entries").replaceChildren();
@@ -345,6 +363,7 @@ window.NetizenFileBrowser = {
         name.className = "file-browser-entry-name";
         name.textContent = entryLabel(view, entry);
         row.append(chevron, icon, name);
+        decorateEntry(view, row, entry);
         row.addEventListener("focus", () => { view.focusedPath = entry.path; });
         fragment.append(row);
         visibleRows.push(row);
@@ -533,6 +552,7 @@ window.NetizenFileBrowser = {
     view.deleteError = false;
     view.deleteUncertain = false;
     const file = view.desiredFile;
+    const mode = view.mode;
     const path = file ? parentPath(file) : view.path;
     const epoch = view.treeEpoch;
     const navigation = ++view.navigation;
@@ -546,6 +566,7 @@ window.NetizenFileBrowser = {
     }
     const branch = await loadDirectory(view, path, true);
     if (!active(view) || view.treeEpoch !== epoch || view.navigation !== navigation) return;
+    if (file && mode === "diff") return content(view, file, "diff");
     if (!branch) {
       // A removed batch (including a deletion whose response was lost) cannot
       // be refreshed in place. Reconcile one root listing without changing its
@@ -634,6 +655,165 @@ window.NetizenFileBrowser = {
     }
     return aceLoading;
   }
+  function destroyDiff(view) {
+    view.diffRender = (view.diffRender || 0) + 1;
+    view.diffView?.destroy();
+    view.diffView = null;
+    node("diff").replaceChildren();
+    node("diff").hidden = true;
+  }
+  async function ensureDiff() {
+    const ace = await ensureAce();
+    if (ace.require("ace/ext/diff")) return ace.require("ace/ext/diff");
+    if (!diffLoading) diffLoading = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "/static/vendor/ace/ext-diff.js";
+      const failed = () => { script.remove(); diffLoading = null; reject(new Error("差异查看器未能加载，请重试。")); };
+      script.onload = () => ace.require("ace/ext/diff") ? resolve(ace.require("ace/ext/diff")) : failed();
+      script.onerror = failed;
+      document.querySelector("head").append(script);
+    });
+    return diffLoading;
+  }
+  function renderDiffToggle(view) {
+    const candidate = view.changesMap?.get(view.desiredFile);
+    const changes = view.changes;
+    const known = changes?.complete && (!view.changesScope || view.desiredFile?.startsWith(`${view.changesScope}/`));
+    node("view-modes").hidden = !view.provider.changes || !view.identity || !view.desiredFile
+      || (changes && changes.git !== "available")
+      || (view.mode !== "diff" && known && !["modified", "deleted"].includes(candidate?.kind));
+    node("diff-mode").setAttribute("aria-pressed", String(view.mode === "diff"));
+    node("full-mode").setAttribute("aria-pressed", String(view.mode !== "diff"));
+  }
+  function diffNote(view) {
+    const data = view.diff;
+    const notes = [];
+    if (data?.git === "available") {
+      if (data.same) notes.push("与 HEAD 相同");
+      if (data.kind === "unchanged") notes.push("Git 未报告此路径的变更，可查看完整内容。");
+      if (data.kind === "deleted") notes.push("已删除 · 与空的工作区内容比较");
+      if (data.reason) notes.push(data.message || "仅显示变化类型。");
+      if (view.changes?.git === "available" && data.head !== view.changes.head) notes.push("HEAD 已变化，请刷新");
+    } else if (data) notes.push(data.message || "此目录不是 Git 仓库。");
+    node("diff-note").hidden = view.mode !== "diff" || !notes.length;
+    note("diff-note", notes.join(" · "));
+  }
+  async function renderDiff(view) {
+    destroyDiff(view);
+    const sequence = view.diffRender;
+    const data = view.diff;
+    diffNote(view);
+    note("note", "");
+    if (data?.git !== "available" || typeof data.old !== "string" || typeof data.new !== "string") return;
+    try {
+      const extension = await ensureDiff();
+      if (!active(view) || view.diff !== data || view.diffRender !== sequence || view.mode !== "diff") return;
+      const ace = window.ace;
+      for (const key of ["basePath", "modePath", "themePath", "workerPath"]) ace.config.set(key, "/static/vendor/ace");
+      const diff = view.diffView = extension.createDiffView({ valueA: data.old, valueB: data.new, inline: compact.matches ? "b" : false });
+      for (const editor of [diff.editorA, diff.editorB]) {
+        editor.session.setUseWorker(false);
+        editor.setReadOnly(true);
+        editor.setOptions({ showPrintMargin: false, fontSize: 13, highlightActiveLine: false });
+        editor.session.setMode(`ace/mode/${modes.has(data.language) ? data.language : "text"}`);
+        editor.session.setUseWrapMode(view.wrap);
+      }
+      node("diff").append(...(compact.matches ? [diff.editorB.container] : [diff.editorA.container, diff.editorB.container]));
+      node("diff").hidden = false;
+      diff.onInput();
+      diff.resize();
+    } catch (error) {
+      if (active(view) && view.diff === data && view.diffRender === sequence) note("note", error.message, true);
+    }
+  }
+  function decorateEntry(view, row, entry) {
+    if (!view.provider.changes) return;
+    const change = view.changesMap?.get(entry.path);
+    let path = entry.path;
+    let ignored = change?.kind === "ignored";
+    while (path && !ignored) {
+      path = parentPath(path);
+      const parent = view.changesMap?.get(path);
+      ignored = parent?.kind === "ignored" && parent.directory;
+    }
+    if (ignored) {
+      row.className += " file-browser-ignored";
+      row.setAttribute("aria-label", `${entryLabel(view, entry)} · 已忽略`);
+    }
+    const label = { modified: "修改", added: "新增", untracked: "未跟踪" }[change?.kind];
+    if (entry.kind === "file" && label) {
+      const badge = document.createElement("span");
+      badge.className = "file-browser-badge";
+      badge.textContent = label;
+      row.append(badge);
+      row.setAttribute("aria-label", `${entryLabel(view, entry)} · ${label}`);
+    }
+  }
+  function renderGit(view) {
+    const data = view.changes;
+    const enabled = view.provider.changes && view.identity && data?.git !== "not_repository";
+    if (!enabled) view.sidebar = "files";
+    const changes = enabled && view.sidebar === "changes";
+    node("tabs").hidden = !enabled;
+    node("tree-panel").hidden = Boolean(changes);
+    node("changes-panel").hidden = !changes;
+    node("files-tab").setAttribute("aria-pressed", String(!changes));
+    node("changes-tab").setAttribute("aria-pressed", String(Boolean(changes)));
+    const incomplete = data?.git === "available" && (!data.complete || view.changesScope);
+    node("incomplete").hidden = !enabled || !incomplete;
+    note("incomplete", incomplete ? "变更列表未覆盖整个根目录；没有标记不表示未修改。" : "");
+    node("changes-scope").hidden = !incomplete;
+    node("changes-current").disabled = !view.path;
+    node("changes-root").disabled = !view.changesScope;
+    node("changes-retry").hidden = data?.git !== "unavailable";
+    note("changes-note", !data ? "正在读取变更…" : data.git === "unavailable" ? data.message : view.changesScope ? `当前范围：${view.changesScope}` : "");
+    const list = node("changes-entries");
+    list.replaceChildren();
+    if (data?.git === "available") for (const [group, label] of [["tracked", "已跟踪变更"], ["untracked", "未跟踪"], ["ignored", "已忽略"]]) {
+      const entries = data.entries.filter((entry) => entry.group === group);
+      const section = document.createElement("details");
+      section.open = group !== "ignored";
+      const summary = document.createElement("summary");
+      summary.textContent = `${label} (${entries.length})${data.groupsComplete[group] ? "" : " · 未完整加载"}`;
+      section.append(summary);
+      for (const entry of entries) {
+        const label = { modified: "修改", deleted: "删除", added: "新增", untracked: "未跟踪", ignored: "已忽略", conflict: "冲突" }[entry.kind];
+        const row = button(`${entry.path} · ${label}`, () => {
+          if (entry.directory && !["modified", "deleted", "conflict"].includes(entry.kind)) {
+            view.sidebar = "files";
+            renderGit(view);
+            return directory(view, entry.path);
+          }
+          return content(view, entry.path, ["modified", "deleted", "conflict"].includes(entry.kind) ? "diff" : "full");
+        });
+        row.dataset.path = entry.path;
+        section.append(row);
+      }
+      list.append(section);
+    }
+    renderDiffToggle(view);
+    diffNote(view);
+  }
+  async function loadChanges(view, scope = "") {
+    if (!active(view) || !view.identity || !view.provider.changes) return;
+    view.changesScope = scope;
+    view.changes = null;
+    view.changesMap = new Map();
+    renderGit(view);
+    renderEntries(view);
+    const identity = view.identity;
+    const epoch = view.treeEpoch;
+    try {
+      const data = await request(view, "changes", url(view, "changes", scope));
+      if (!data || !active(view) || view.identity !== identity) return;
+      view.changes = data;
+      view.changesMap = new Map((data.entries || []).map((entry) => [entry.path, entry]));
+    } catch (error) {
+      if (!active(view) || view.identity !== identity || view.treeEpoch !== epoch) return;
+      view.changes = { git: "unavailable", message: error.message };
+    }
+    if (active(view) && view.identity === identity) { renderGit(view); renderEntries(view); }
+  }
   function renderMode(view) {
     node("editor").hidden = view.preview;
     node("markdown").hidden = !view.preview;
@@ -653,13 +833,14 @@ window.NetizenFileBrowser = {
       if (active(view) && view.file === file) note("note", error.message, true);
     }
   }
-  async function content(view, path) {
+  async function content(view, path, mode = "full") {
     if (!active(view) || !view.identity) return;
     if (view.screen === "directory") view.focusedPath = path;
     rememberDirectory(view);
     view.navigation += 1;
     stop(view, "image-check");
     clearFile(view);
+    view.mode = mode;
     view.desiredFile = path;
     const entry = view.tree.get(parentPath(path))?.entries?.find((item) => item.path === path);
     view.selectedFile = entry ? { ...entry } : { path, name: path };
@@ -676,11 +857,20 @@ window.NetizenFileBrowser = {
     node("filename").textContent = entry?.displayName || path;
     node("filename").setAttribute("title", path);
     note("note", "正在读取文件…");
+    renderDiffToggle(view);
     const rootIdentity = view.identity;
     const sequence = view.fileSequence;
     try {
+      if (mode === "diff") {
+        const data = await request(view, "diff", url(view, "diff", path));
+        if (!data || view.fileSequence !== sequence) return;
+        view.diff = data;
+        if (data.git === "not_repository") { view.changes = data; view.changesMap = new Map(); renderGit(view); renderEntries(view); }
+        await renderDiff(view);
+        return;
+      }
       const data = await request(view, "content", url(view, "content", path));
-      if (!data) return;
+      if (!data || !active(view) || view.fileSequence !== sequence) return;
       view.file = data;
       Object.assign(view.selectedFile, { size: data.size, modifiedAt: data.modifiedAt, version: data.version });
       showMetadata(view.selectedFile);
@@ -731,6 +921,7 @@ window.NetizenFileBrowser = {
       if (!data) return;
       view.identity = data.identity;
       node("cwd").textContent = data.cwd;
+      if (view.provider.changes) void loadChanges(view);
       await directory(view, "");
     } catch (error) {
       note("directory-note", error.message, true);
@@ -816,6 +1007,13 @@ window.NetizenFileBrowser = {
     }
   }
   function init() {
+    node("files-tab").addEventListener("click", () => { if (current) { current.sidebar = "files"; renderGit(current); } });
+    node("changes-tab").addEventListener("click", () => { if (current) { current.sidebar = "changes"; renderGit(current); } });
+    node("changes-retry").addEventListener("click", () => current && loadChanges(current, current.changesScope));
+    node("changes-current").addEventListener("click", () => current && loadChanges(current, current.path));
+    node("changes-root").addEventListener("click", () => current && loadChanges(current));
+    node("diff-mode").addEventListener("click", () => current?.desiredFile && content(current, current.desiredFile, "diff"));
+    node("full-mode").addEventListener("click", () => current?.desiredFile && content(current, current.desiredFile));
     node("close").addEventListener("click", close);
     node("back").addEventListener("click", () => current && back(current));
     node("delete").addEventListener("click", () => current && deleteSelected(current));
@@ -825,6 +1023,7 @@ window.NetizenFileBrowser = {
     node("more-roots").addEventListener("click", () => current && moreRoots(current, current.nextCursor));
     node("refresh").addEventListener("click", () => {
       if (!current) return;
+      if (current.provider.changes && current.identity) void loadChanges(current, current.changesScope);
       return refreshTree(current);
     });
     node("filter").addEventListener("input", () => {
@@ -870,7 +1069,7 @@ window.NetizenFileBrowser = {
       const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
       return directory(current, parent, path);
     });
-    window.addEventListener("resize", () => current?.editor?.resize());
+    window.addEventListener("resize", () => { current?.editor?.resize(); current?.diffView?.resize(); });
     compact.addEventListener("change", () => {
       if (!current) return;
       current.filter = "";
@@ -879,6 +1078,7 @@ window.NetizenFileBrowser = {
       renderEntries(current);
       if (compact.matches && current.screen === "file") node("back").focus({ preventScroll: true });
       current.editor?.resize();
+      if (current.mode === "diff" && current.diff) void renderDiff(current);
     });
   }
   function back(view) {

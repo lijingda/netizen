@@ -181,6 +181,11 @@ _Avoid_：“产物快照”“Turn 完成时版本”，因为 Netizen 不保�
 仍累计，不表示最终净差异或工作区当前差异。
 _Avoid_：“最终净 diff”“文件快照”“代码贡献量”。
 
+**Uncommitted Change / 未提交变更**：Admin 文件查看中，所选根内工作区当前内容相对所在
+Git 仓库当前 HEAD 的差异，不区分暂存与未暂存。它是查看时的 Git 事实，包含任何来源的修改，
+不归属于某个会话或 Turn，也不保存。
+_Avoid_：“本轮改动”“Codex 改动”“会话 diff”。
+
 **Steer**：运行中 Binding 的下一条普通消息，固定映射为同一 handle 的
 `steer()`，不是 queue 或新 Turn。
 

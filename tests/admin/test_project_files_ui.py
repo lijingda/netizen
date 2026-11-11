@@ -26,3 +26,6 @@ class ProjectFilesUiTest(unittest.TestCase):
 
     def test_mobile_directory_preview_navigation_and_shared_provider_races(self):
         self._run_harness("mobile_files_ui_harness.js")
+
+    def test_project_changes_diff_modes_limits_races_and_attachment_isolation(self):
+        self._run_harness("changes_files_ui_harness.js")

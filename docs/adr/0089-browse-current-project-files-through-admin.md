@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-11-02
 related: 0031, 0080, 0085
+amended_by: 0095
 ---
 
 # Admin 按需查看 Project 当前目录中的文件
