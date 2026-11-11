@@ -8,16 +8,76 @@ window.NetizenFileBrowser = {
     : dependencies.container.querySelector(`#file-browser-${name}`);
   const modes = new Set(["python", "json", "javascript", "markdown", "text"]);
   const compact = window.matchMedia("(max-width: 720px)");
+  const coarse = window.matchMedia("(pointer: coarse)");
+  const previewScrollbars = [];
+  let previewObserver = null;
   let current = null;
   let aceLoading = null;
   let diffLoading = null;
   const DIFF_LAYOUT_KEY = "netizen-file-diff-layout";
+  const CONTEXT = 3, STEP = 20;
   function diffLayout() {
     try { return window.localStorage.getItem(DIFF_LAYOUT_KEY) === "unified" ? "unified" : "split"; }
     catch (_) { return "split"; }
   }
 
   function active(view) { return current === view && !dependencies.isExpired(); }
+  function updatePreviewScrollbars() {
+    for (const scrollbar of previewScrollbars) scrollbar.update();
+  }
+  function watchPreviewScrollbars() {
+    if (!coarse.matches) { updatePreviewScrollbars(); return; }
+    if (!previewScrollbars.length) {
+      for (const name of ["markdown", "image-wrap"]) {
+        const content = node(name), host = content.parentElement;
+        host.classList.toggle("file-browser-scroll-host", true);
+        const track = document.createElement("div"), thumb = document.createElement("div");
+        track.className = "file-browser-scrollbar";
+        track.dataset.preview = name;
+        track.setAttribute("aria-hidden", "true");
+        thumb.className = "file-browser-scrollbar-thumb";
+        track.append(thumb); host.append(track);
+        let drag = null, travel = 0, range = 0;
+        const endDrag = (event) => {
+          if (!drag || event && event.pointerId !== drag.id) return;
+          const id = drag.id; drag = null;
+          if (thumb.hasPointerCapture(id)) thumb.releasePointerCapture(id);
+        };
+        const update = () => {
+          range = content.scrollHeight - content.clientHeight;
+          track.hidden = !current || !coarse.matches || content.hidden || content.clientHeight <= 0 || !(range > 0);
+          if (track.hidden) { endDrag(); return; }
+          const rect = content.getBoundingClientRect(), parent = host.getBoundingClientRect();
+          const height = Math.max(0, content.clientHeight - 8);
+          const size = Math.min(height, Math.max(24, height * content.clientHeight / content.scrollHeight));
+          travel = height - size;
+          track.style.setProperty("--scrollbar-top", `${rect.top - parent.top + 4}px`);
+          track.style.setProperty("--scrollbar-right", `${parent.right - rect.right + 2}px`);
+          track.style.setProperty("--scrollbar-height", `${height}px`);
+          thumb.style.setProperty("--scrollbar-thumb-height", `${size}px`);
+          thumb.style.setProperty("--scrollbar-thumb-y", `${Math.max(0, Math.min(1, content.scrollTop / range)) * travel}px`);
+        };
+        thumb.addEventListener("pointerdown", (event) => {
+          if (event.button !== 0 || track.hidden || travel <= 0) return;
+          event.preventDefault();
+          drag = { id: event.pointerId, y: event.clientY, top: content.scrollTop, ratio: range / travel };
+          thumb.setPointerCapture(event.pointerId);
+        });
+        thumb.addEventListener("pointermove", (event) => {
+          if (!drag || event.pointerId !== drag.id) return;
+          content.scrollTop = Math.max(0, Math.min(range, drag.top + (event.clientY - drag.y) * drag.ratio));
+          update();
+        });
+        for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) thumb.addEventListener(event, endDrag);
+        content.addEventListener("scroll", update, { passive: true });
+        content.addEventListener("load", update, true);
+        previewScrollbars.push({ content, update });
+      }
+      if (window.ResizeObserver) previewObserver = new window.ResizeObserver(updatePreviewScrollbars);
+    }
+    if (current) for (const scrollbar of previewScrollbars) previewObserver?.observe(scrollbar.content);
+    updatePreviewScrollbars();
+  }
   function renderLayout(view) {
     node("drawer").dataset.screen = view.screen;
     const reading = compact.matches && view.screen === "file";
@@ -98,6 +158,7 @@ window.NetizenFileBrowser = {
     note("note", "");
     renderActions(view);
     renderLayout(view);
+    updatePreviewScrollbars();
   }
   function clearRoot(view) {
     for (const slot of Object.keys(view.requests)) if (slot !== "roots") stop(view, slot);
@@ -135,6 +196,7 @@ window.NetizenFileBrowser = {
     const view = current;
     if (!view) return;
     current = null;
+    previewObserver?.disconnect();
     stopAll(view);
     clearFile(view);
     node("actions").hidden = true;
@@ -697,8 +759,189 @@ window.NetizenFileBrowser = {
     }
     return aceLoading;
   }
+  // Gaps are half-open row ranges on the new side; chunks use the same convention.
+  function diffGaps(chunks, rows) {
+    if (!chunks?.length) return [];
+    const gaps = [];
+    let start = 0;
+    for (const chunk of chunks) {
+      const end = Math.max(0, chunk.new.start.row - CONTEXT);
+      if (end - start >= 2) gaps.push({ start, end });
+      start = Math.max(start, chunk.new.end.row + CONTEXT);
+    }
+    if (rows - start >= 2) gaps.push({ start, end: rows });
+    return gaps;
+  }
+  function shrinkDiffGap({ start, end }, direction) {
+    if (direction === "all") return null;
+    if (direction === "down") start += STEP;
+    else end -= STEP;
+    return end - start >= 2 ? { start, end } : null;
+  }
+  function diffFolds(session) {
+    return session.getAllFolds().filter((fold) => /^⋯ \d+ 行未改动 · 点击展开\s*$/.test(fold.placeholder));
+  }
+  function addDiffFold(session, gap) {
+    const Range = window.ace.require("ace/range").Range;
+    session.addFold(`⋯ ${gap.end - gap.start} 行未改动 · 点击展开`.padEnd(120, " "),
+      new Range(gap.start, 0, gap.end - 1, Number.MAX_VALUE));
+  }
+  function foldDiff(view, folded) {
+    closeDiffMenu(view);
+    const diff = view.diffView;
+    for (const fold of diffFolds(diff.sessionB)) diff.sessionB.removeFold(fold);
+    if (folded) for (const gap of diffGaps(diff.chunks, view.diffRows)) addDiffFold(diff.sessionB, gap);
+    view.diffFolded = folded;
+    node("diff-fold").textContent = folded ? "展开全部" : "折叠未改动";
+  }
+  function closeDiffMenu(view, restoreFocus = false) {
+    const menu = view?.diffMenu;
+    if (!menu) return;
+    view.diffMenu = null;
+    menu.dispose();
+    menu.element.remove();
+    if (restoreFocus) menu.anchor.focus({ preventScroll: true });
+  }
+  function openDiffMenu(view, editor, fold, anchor) {
+    const index = diffFolds(editor.session).indexOf(fold);
+    if (index < 0) return;
+    // ext-diff mirrors the unchanged folds in order, even when changed row counts differ.
+    const canonical = diffFolds(view.diffView.sessionB)[index];
+    if (!canonical) return;
+    closeDiffMenu(view);
+    const menu = document.createElement("div");
+    menu.className = "file-browser-diff-menu";
+    menu.setAttribute("role", "group");
+    menu.setAttribute("aria-label", "展开未改动行");
+    const gap = { start: fold.start.row, end: fold.end.row + 1 };
+    const count = gap.end - gap.start;
+    const action = (label, direction) => {
+      const item = button(label, () => {
+        closeDiffMenu(view);
+        if (!editor.session.getAllFolds().includes(fold)) return;
+        const remaining = shrinkDiffGap(gap, direction);
+        editor.session.removeFold(fold);
+        if (remaining) addDiffFold(editor.session, remaining);
+      });
+      item.dataset.direction = direction;
+      menu.append(item);
+    };
+    if (count > STEP) {
+      if (canonical.start.row > 0) action(`↓ 向下展开 ${STEP} 行`, "down");
+      if (canonical.end.row + 1 < view.diffRows) action(`↑ 向上展开 ${STEP} 行`, "up");
+    }
+    action(`展开全部 ${count} 行`, "all");
+    node("diff").append(menu);
+    const area = node("diff").getBoundingClientRect(), bar = anchor.getBoundingClientRect();
+    const left = Math.max(0, area.left), top = Math.max(0, area.top);
+    const right = Math.min(window.innerWidth, area.right), bottom = Math.min(window.innerHeight, area.bottom);
+    menu.style.setProperty("--menu-width", `${Math.max(0, right - left - 8)}px`);
+    menu.style.setProperty("--menu-height", `${Math.max(0, bottom - top - 8)}px`);
+    const size = menu.getBoundingClientRect();
+    const x = Math.max(left + 4, Math.min(bar.left, right - size.width - 4));
+    const y = Math.max(top + 4, Math.min(bar.bottom + 4, bottom - size.height - 4));
+    menu.style.setProperty("--menu-x", `${x - area.left}px`);
+    menu.style.setProperty("--menu-y", `${y - area.top}px`);
+    const outside = (event) => { if (!menu.contains(event.target)) closeDiffMenu(view); };
+    const escape = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault(); event.stopPropagation();
+      closeDiffMenu(view, true);
+    };
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("click", outside, true);
+    document.addEventListener("keydown", escape, true);
+    view.diffMenu = { element: menu, anchor, dispose() {
+      document.removeEventListener("pointerdown", outside, true);
+      document.removeEventListener("click", outside, true);
+      document.removeEventListener("keydown", escape, true);
+    } };
+    menu.children[0].focus({ preventScroll: true });
+  }
+  function bindDiffFolds(view) {
+    const area = node("diff"), cleanups = [], diff = view.diffView;
+    const editors = [diff.editorA, diff.editorB];
+    const listen = (target, name, fn, options) => {
+      target.addEventListener(name, fn, options);
+      cleanups.push(() => target.removeEventListener(name, fn, options));
+    };
+    const barAt = (target) => target.closest?.(".ace_fold");
+    const openAt = (anchor, x, y) => {
+      const editor = editors.find((item) => item.container.contains(anchor));
+      if (!editor) return;
+      const position = editor.renderer.screenToTextCoordinates(x, y);
+      const fold = editor.session.getFoldAt(position.row, position.column);
+      if (fold) openDiffMenu(view, editor, fold, anchor);
+    };
+    const close = () => closeDiffMenu(view);
+    for (const editor of editors) {
+      const click = (event) => {
+        const anchor = barAt(event.domEvent.target);
+        if (!anchor) return;
+        const position = event.getDocumentPosition();
+        const fold = editor.session.getFoldAt(position.row, position.column);
+        if (!diffFolds(editor.session).includes(fold)) return;
+        event.stop();
+        openDiffMenu(view, editor, fold, anchor);
+      };
+      editor.on("click", click, true);
+      cleanups.push(() => editor.off("click", click));
+      for (const name of ["changeScrollTop", "changeScrollLeft"]) {
+        editor.session.on(name, close);
+        cleanups.push(() => editor.session.off(name, close));
+      }
+    }
+    let touch = null;
+    listen(area, "touchstart", (event) => {
+      if (touch) { touch.moved = true; event.stopPropagation(); return; }
+      const anchor = barAt(event.target);
+      if (!anchor || event.touches.length !== 1) return;
+      const point = event.touches[0];
+      touch = { anchor, x: point.clientX, y: point.clientY, moved: false };
+      event.stopPropagation();
+    }, { capture: true, passive: true });
+    listen(area, "touchmove", (event) => {
+      if (!touch) return;
+      event.stopPropagation();
+      const point = event.touches[0];
+      if (event.touches.length !== 1 || Math.hypot(point.clientX - touch.x, point.clientY - touch.y) >= 10) touch.moved = true;
+    }, { capture: true, passive: true });
+    listen(area, "touchend", (event) => {
+      if (!touch) return;
+      event.stopPropagation(); event.preventDefault();
+      const tapped = touch; touch = null;
+      const point = event.changedTouches[0];
+      if (!tapped.moved && Math.hypot(point.clientX - tapped.x, point.clientY - tapped.y) < 10)
+        openAt(tapped.anchor, tapped.x, tapped.y);
+    }, { capture: true, passive: false });
+    listen(area, "touchcancel", (event) => { if (touch) { event.stopPropagation(); touch = null; } }, true);
+    listen(area, "keydown", (event) => {
+      const anchor = barAt(event.target);
+      if (!anchor || !["Enter", " "].includes(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      const rect = anchor.getBoundingClientRect();
+      openAt(anchor, rect.left + 1, rect.top + rect.height / 2);
+    });
+    const accessibleFolds = () => {
+      for (const bar of area.querySelectorAll(".ace_fold")) {
+        bar.tabIndex = 0;
+        bar.setAttribute("role", "button");
+        bar.setAttribute("aria-label", bar.textContent.trim());
+      }
+    };
+    accessibleFolds();
+    if (window.MutationObserver) {
+      const observer = new window.MutationObserver(accessibleFolds);
+      observer.observe(area, { childList: true, subtree: true });
+      cleanups.push(() => observer.disconnect());
+    }
+    view.diffDispose = () => { for (const cleanup of cleanups) cleanup(); touch = null; };
+  }
   function destroyDiff(view) {
     view.diffRender = (view.diffRender || 0) + 1;
+    closeDiffMenu(view);
+    view.diffDispose?.();
+    view.diffDispose = null;
     view.diffView?.destroy();
     view.diffView = null;
     node("diff").replaceChildren();
@@ -770,16 +1013,16 @@ window.NetizenFileBrowser = {
       for (const editor of [diff.editorA, diff.editorB]) {
         editor.session.setUseWorker(false);
         editor.setReadOnly(true);
-        editor.setOptions({ showPrintMargin: false, fontSize: 13, highlightActiveLine: false });
+        editor.setOptions({ showPrintMargin: false, fontSize: 13, highlightActiveLine: false, enableMobileMenu: false });
         editor.session.setMode(`ace/mode/${modes.has(data.language) ? data.language : "text"}`);
         editor.session.setUseWrapMode(view.wrap);
       }
       node("diff").append(...(inline ? [diff.editorB.container] : [diff.editorA.container, diff.editorB.container]));
       node("diff").hidden = false;
       diff.onInput();
-      diff.foldUnchanged();
-      view.diffFolded = true;
-      node("diff-fold").textContent = "展开全部";
+      view.diffRows = data.new.split(/\r\n|\r|\n/).length;
+      foldDiff(view, true);
+      bindDiffFolds(view);
       diff.resize();
       renderModes(view);
     } catch (error) {
@@ -863,6 +1106,7 @@ window.NetizenFileBrowser = {
     destroyEditor(view);
     destroyDiff(view);
     node("markdown").hidden = node("image-wrap").hidden = node("tools").hidden = true;
+    updatePreviewScrollbars();
     renderModes(view);
     diffNote(view);
     note("note", "正在读取文件…");
@@ -905,7 +1149,8 @@ window.NetizenFileBrowser = {
       const editor = view.editor = ace.edit(node("editor"));
       editor.session.setUseWorker(false);
       editor.setReadOnly(true);
-      editor.setOptions({ showPrintMargin: false, fontSize: 13, highlightActiveLine: false, showLineNumbers: true });
+      editor.setOptions({ showPrintMargin: false, fontSize: 13, highlightActiveLine: false, showLineNumbers: true,
+        ...(coarse.matches ? { customScrollbar: true } : {}) });
       editor.session.setMode(`ace/mode/${modes.has(data.language) ? data.language : "text"}`);
       editor.session.setUseWrapMode(view.wrap);
       editor.setValue(data.text, -1);
@@ -914,6 +1159,8 @@ window.NetizenFileBrowser = {
       node("wrap").setAttribute("aria-pressed", String(view.wrap));
     } catch (error) {
       if (isCurrent()) note("note", error.message, true);
+    } finally {
+      updatePreviewScrollbars();
     }
   }
   async function imageFailed(view, file) {
@@ -1016,6 +1263,7 @@ window.NetizenFileBrowser = {
     node("root").value = provider.rootId;
     node("more-roots").hidden = true;
     node("drawer").showModal();
+    watchPreviewScrollbars();
     document.body.classList.toggle("file-browser-open", true);
     node(provider.roots ? "root" : "filter").focus();
     await Promise.all([chooseRoot(view), moreRoots(view)]);
@@ -1066,9 +1314,7 @@ window.NetizenFileBrowser = {
     });
     node("diff-fold").addEventListener("click", () => {
       if (!current?.diffView) return;
-      current.diffView[current.diffFolded ? "unfoldUnchanged" : "foldUnchanged"]();
-      current.diffFolded = !current.diffFolded;
-      node("diff-fold").textContent = current.diffFolded ? "展开全部" : "折叠未改动";
+      foldDiff(current, !current.diffFolded);
     });
     node("close").addEventListener("click", close);
     node("back").addEventListener("click", () => current && back(current));
@@ -1120,7 +1366,15 @@ window.NetizenFileBrowser = {
       const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
       return directory(current, parent, path);
     });
-    window.addEventListener("resize", () => { current?.editor?.resize(); current?.diffView?.resize(); });
+    window.addEventListener("resize", () => {
+      closeDiffMenu(current);
+      current?.editor?.resize(); current?.diffView?.resize();
+      updatePreviewScrollbars();
+    });
+    coarse.addEventListener("change", () => {
+      current?.editor?.setOptions({ customScrollbar: coarse.matches });
+      if (current) watchPreviewScrollbars();
+    });
     compact.addEventListener("change", () => {
       if (!current) return;
       current.filter = "";
