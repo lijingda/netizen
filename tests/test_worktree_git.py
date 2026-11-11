@@ -555,6 +555,21 @@ class ViewerGitTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["groupsComplete"]["untracked"])
         self.assertNotIn("bad\nname", {entry["path"] for entry in result["entries"]})
 
+    async def test_truncation_tolerates_eperm_from_an_exited_unreaped_group(self):
+        # macOS reports EPERM, not ESRCH, when the group only has zombie members.
+        self.write("tracked")
+        self.commit()
+        self.write("tracked", "changed")
+        self.write("first")
+        self.write("second")
+        denied = PermissionError(1, "Operation not permitted")
+        with patch("netizen_cli.worktrees.git.os.killpg", side_effect=denied) as kill:
+            result = (await ViewerGit(entry_cap=2).status(self.repo, "")).response()
+        kill.assert_called_once()
+        self.assertEqual(result["git"], "available")
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["entries"]), 2)
+
     async def test_status_above_two_mib_is_complete_or_entry_capped(self):
         prefix = "/".join(f"segment-{index:02}-" + "x" * 190 for index in range(3))
         paths = [f"{prefix}/file-{index:04}.txt" for index in range(3600)]

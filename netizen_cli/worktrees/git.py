@@ -233,9 +233,11 @@ class WorktreeGit:
             if process is None:
                 return
             # The group was created by this call; never signal unrelated processes.
+            # macOS reports EPERM instead of ESRCH when every member has already
+            # exited but is not yet reaped (for example after a streaming cap).
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
             try:
                 async with asyncio.timeout(2):
