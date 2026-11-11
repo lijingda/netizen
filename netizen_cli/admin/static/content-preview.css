@@ -1,4 +1,13 @@
 /* Shared file and answer drawers, including file-browser navigation. */
+.file-browser-tree-panel { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.file-browser-diff { display: flex; flex: 1; min-height: 100px; position: relative; }
+.file-browser-diff > .ace_editor { flex: 1; min-width: 0; position: relative; }
+.file-browser-diff > .ace_editor + .ace_editor { border-left: 1px solid var(--line); }
+.file-browser-badge { font-size: 10px; color: var(--blue); }
+.file-browser-entry.file-browser-ignored { opacity: .55; }
+#file-browser-changes-entries details { padding: 6px 0; font-size: 12px; }
+#file-browser-changes-entries summary { padding: 6px; cursor: pointer; }
+#file-browser-changes-entries button { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; margin: 3px 0; }
 body.file-browser-open, body.session-answer-open { overflow: hidden; }
 .file-browser-drawer { inset: 0 0 0 auto; margin: 0; width: min(1440px, 96vw); max-width: 100vw; height: 100dvh; max-height: 100dvh; padding: 0; border: 0; border-left: 1px solid var(--line); color: var(--ink); background: var(--paper); box-shadow: -12px 0 48px rgb(16 33 63 / 16%); }
 .file-browser-drawer::backdrop { background: rgb(16 33 63 / 34%); }

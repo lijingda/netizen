@@ -98,6 +98,7 @@ class BuiltArtifactTests(unittest.TestCase):
             "from importlib.resources import files; "
             "assert files('netizen_cli.admin').joinpath('static/netizen.svg').read_bytes().startswith(b'<svg'); "
             "assert files('netizen_cli.admin').joinpath('static/vendor/ace/ace.js').read_bytes(); "
+            "assert files('netizen_cli.admin').joinpath('static/vendor/ace/ext-diff.js').read_bytes(); "
             "assert files('netizen_cli.admin').joinpath('static/vendor/ace/LICENSE').read_text(); "
             "print(json.dumps([str(builtin_skill_root()),str(resource_path('config.example.yaml'))]))"
         )

@@ -7,9 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, TypeVar
 
-from .blocking_io import BoundedBlockingIOExecutor
+from .blocking_io import (
+    BoundedBlockingIOExecutor, BlockingIODrainTimeout, BlockingIOExecutorClosed,
+    BlockingIOExecutorSaturated, BlockingIOResultUnknown,
+)
 from ..bindings import ProjectConflict, ProjectNotFound
-from ..project_files import FileBrowseError, FilePreview, list_directory, read_file, root_identity
+from ..project_files import (
+    FileBrowseError, FilePreview, _path_parts, check_root, file_language,
+    list_directory, read_file, root_identity,
+)
+from ..worktrees.git import GitError
+from ..worktrees.viewer import ViewerGit, git_failure, unavailable
 from ..worktrees.models import WorktreeConflict, WorktreeNotFound, WorktreeRecord
 
 if TYPE_CHECKING:
@@ -36,9 +44,100 @@ class ProjectFileService:
         self._io = io or BoundedBlockingIOExecutor(
             max_workers=2, capacity=4, thread_name_prefix="netizen-file-preview",
         )
+        self._git = ViewerGit()
+        self._git_reads: set[asyncio.Task[dict]] = set()
+        self._closed = False
 
     async def close(self, *, deadline: float | None = None) -> None:
+        self._closed = True
+        pending = tuple(self._git_reads)
+        for task in pending:
+            task.cancel()
+        if pending:
+            remaining = None if deadline is None else max(0, deadline - asyncio.get_running_loop().time())
+            _, unfinished = await asyncio.wait(pending, timeout=remaining)
+            if unfinished:
+                assert deadline is not None
+                raise BlockingIODrainTimeout(in_flight=len(unfinished), deadline=deadline)
         await self._io.aclose(deadline=deadline)
+
+    async def changes(self, *, project: str, worktree: str | None, identity: str,
+                      path: str = "", deadline: float) -> dict:
+        return await self._git_read(project=project, worktree=worktree, identity=identity,
+                                    path=path, deadline=deadline, diff=False)
+
+    async def diff(self, *, project: str, worktree: str | None, identity: str,
+                   path: str, deadline: float) -> dict:
+        return await self._git_read(project=project, worktree=worktree, identity=identity,
+                                    path=path, deadline=deadline, diff=True)
+
+    async def _git_read(self, *, project: str, worktree: str | None, identity: str,
+                        path: str, deadline: float, diff: bool) -> dict:
+        _path_parts(path, allow_empty=not diff)
+        if self._closed:
+            return unavailable()
+        if len(self._git_reads) >= 2:
+            return unavailable("Git 查看繁忙，请稍后重试。")
+
+        async def run() -> dict:
+            root = None
+            try:
+                async with asyncio.timeout_at(deadline):
+                    root = await self._resolve(project, worktree)
+                    await self._io.submit(check_root, root.cwd, "" if diff else path,
+                                          identity=identity, context=root.context, deadline=deadline)
+                    status = await self._git.status(root.cwd, path)
+                    result = status.response()
+                    if diff:
+                        entry = status.entries.get(path)
+                        result = {"git": "available", "head": status.head,
+                            "kind": entry.kind if entry and entry.kind else "unchanged",
+                            "old": None, "new": None, "language": file_language(path)}
+                        if entry and entry.kind:
+                            try:
+                                if entry.conflict:
+                                    raise FileBrowseError("conflict", "存在合并冲突，只显示变化类型。")
+                                modes = {entry.old_mode, entry.new_mode} - {"000000"}
+                                if modes - {"100644", "100755"}:
+                                    reason = "symlink" if "120000" in modes else "gitlink"
+                                    raise FileBrowseError(reason, "链接或子模块只显示变化类型。")
+                                old = await self._git.old_text(root.cwd, entry.head) if entry.head else ""
+                                new = ""
+                                if entry.worktree:
+                                    preview = await self._io.submit(read_file, root.cwd, path,
+                                        identity=identity, context=root.context, deadline=deadline)
+                                    if preview.kind != "text":
+                                        raise FileBrowseError("unsupported_file", "非文本文件只显示变化类型。")
+                                    new = preview.text or ""
+                                if (entry.head and entry.worktree and old == new
+                                        and entry.new_mode != "000000" and entry.old_mode != entry.new_mode):
+                                    raise FileBrowseError("mode_only", "仅文件模式变化。")
+                                result.update(old=old, new=new, same=old == new)
+                            except FileBrowseError as error:
+                                if error.code in {"root_changed", "invalid_path"}:
+                                    raise
+                                result.update(reason=error.code, message=error.message)
+            except GitError as error:
+                result = git_failure(error)
+            except TimeoutError:
+                result = unavailable("Git 状态读取超时，请重试。")
+            except (BlockingIOExecutorClosed, BlockingIOExecutorSaturated, BlockingIOResultUnknown):
+                return unavailable("文件读取暂不可用，请稍后重试。")
+            if root is not None:
+                try:
+                    await self._io.submit(check_root, root.cwd, "", identity=identity,
+                                          context=root.context, deadline=deadline)
+                except (BlockingIOExecutorClosed, BlockingIOExecutorSaturated, BlockingIOResultUnknown):
+                    result = unavailable("文件读取暂不可用，请稍后重试。")
+                self._assert_current(root)
+            return result
+
+        task = asyncio.create_task(run())
+        self._git_reads.add(task)
+        try:
+            return await task
+        finally:
+            self._git_reads.discard(task)
 
     def _project(self, alias: str):
         try:

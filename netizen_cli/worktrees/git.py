@@ -13,7 +13,7 @@ import json
 import os
 from pathlib import Path
 import signal
-from typing import Literal
+from typing import Callable, Literal
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,16 @@ class NotGitRepository(GitError):
     """An accessible directory has no usable Git checkout (not an I/O error)."""
 
 
+def is_not_repository(error: GitError) -> bool:
+    return error.outcome == "failed" and (
+        error.detail == "fatal: not a git repository (or any of the parent directories): .git"
+        or error.detail.startswith("fatal: not a git repository (or any parent up to mount point ")
+        or error.detail == "fatal: this operation must be run in a work tree"
+    )
+
+
 _MAX_OUTPUT = 2 * 1024 * 1024
+_MAX_RECORD = 64 * 1024
 _ISOLATED_OPTIONS = (
     "--no-optional-locks",
     "--literal-pathspecs",
@@ -163,10 +172,12 @@ def _token_parts(token: str) -> list[tuple[int, ...]]:
 
 
 class WorktreeGit:
-    def __init__(self, *, timeout: float = 15.0) -> None:
+    def __init__(self, *, timeout: float = 15.0,
+                 environment: dict[str, str] | None = None) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self.timeout = timeout
+        self.environment = environment or {}
 
     async def _run(
         self,
@@ -175,22 +186,41 @@ class WorktreeGit:
         mutating: bool = False,
         allowed: tuple[int, ...] = (0,),
         options: tuple[str, ...] = (),
+        on_record: Callable[[str], bool] | None = None,
     ) -> tuple[int, str]:
         process: asyncio.subprocess.Process | None = None
         spawning: asyncio.Task[asyncio.subprocess.Process] | None = None
+        truncated = False
 
-        async def read(stream: asyncio.StreamReader | None) -> bytes:
+        async def read(stream: asyncio.StreamReader | None, *, records: bool = False) -> bytes:
+            nonlocal truncated
             assert stream is not None
             chunks: list[bytes] = []
             length = 0
+            pending = b""
             while chunk := await stream.read(65536):
-                length += len(chunk)
-                if length > _MAX_OUTPUT:
-                    raise GitError(args[0], "Git output exceeds the bounded response size")
-                chunks.append(chunk)
+                if records and on_record is not None:
+                    pending += chunk
+                    while b"\0" in pending:
+                        record, pending = pending.split(b"\0", 1)
+                        if len(record) > _MAX_RECORD:
+                            raise GitError(args[0], "Git record exceeds the bounded response size")
+                        if on_record(record.decode("utf-8", "surrogateescape")):
+                            truncated = True
+                            await stop(drain=stream)
+                            return b""
+                    if len(pending) > _MAX_RECORD:
+                        raise GitError(args[0], "Git record exceeds the bounded response size")
+                else:
+                    length += len(chunk)
+                    if length > _MAX_OUTPUT:
+                        raise GitError(args[0], "Git output exceeds the bounded response size")
+                    chunks.append(chunk)
+            if pending:
+                raise GitError(args[0], "Incomplete Git status record")
             return b"".join(chunks)
 
-        async def stop() -> None:
+        async def stop(*, drain: asyncio.StreamReader | None = None) -> None:
             nonlocal process
             if process is None and spawning is not None:
                 # Cancellation must not lose the handle between OS spawn and
@@ -209,6 +239,11 @@ class WorktreeGit:
                 pass
             try:
                 async with asyncio.timeout(2):
+                    # After a streaming consumer stops, release any pipe buffer
+                    # left by the killed group so subprocess.wait can complete.
+                    if drain is not None:
+                        while await drain.read(65536):
+                            pass
                     await process.wait()
             except TimeoutError:
                 pass
@@ -217,13 +252,13 @@ class WorktreeGit:
             async with asyncio.timeout(self.timeout):
                 spawning = asyncio.create_task(asyncio.create_subprocess_exec(
                     "git", *_ISOLATED_OPTIONS, *options, "-C", str(cwd), *args,
-                    env=_environment(), stdin=asyncio.subprocess.DEVNULL,
+                    env={**_environment(), **self.environment}, stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                     start_new_session=True,
                 ))
                 process = await asyncio.shield(spawning)
                 stdout, stderr, _ = await asyncio.gather(
-                    read(process.stdout), read(process.stderr), process.wait()
+                    read(process.stdout, records=True), read(process.stderr), process.wait()
                 )
         except asyncio.CancelledError:
             await stop()
@@ -235,6 +270,8 @@ class WorktreeGit:
                 outcome="unknown" if mutating and process is not None else "not_started",
             ) from error
         assert process.returncode is not None
+        if truncated:
+            return 0, ""
         if process.returncode not in allowed:
             raise GitError(
                 args[0], (
@@ -277,11 +314,7 @@ class WorktreeGit:
             # LC_ALL=C is fixed for this narrow Git boundary. Do not confuse
             # permission, timeout, unsafe ownership or malformed metadata with a
             # normal non-Git Project; those states must remain unavailable.
-            if error.outcome == "failed" and (
-                error.detail == "fatal: not a git repository (or any of the parent directories): .git"
-                or error.detail.startswith("fatal: not a git repository (or any parent up to mount point ")
-                or error.detail == "fatal: this operation must be run in a work tree"
-            ):
+            if is_not_repository(error):
                 raise NotGitRepository("repository", "directory has no Git checkout", outcome="not_started") from error
             raise
         _, common = await self._run(resolved, "rev-parse", "--path-format=absolute", "--git-common-dir")

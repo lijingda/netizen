@@ -166,7 +166,7 @@ from ..projects import (
     StaleProject,
     UnknownProject,
 )
-from ..project_files import FileBrowseError
+from ..project_files import FileBrowseError, file_language
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 from ..defaults import DefaultConfigurationError
 from ..session_settings import SessionSettings, SessionSettingsError
@@ -194,6 +194,7 @@ _AUTO_PORTS = range(8787, 8887)
 _CONTENT_VIEWER_ASSETS = (
     "content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js",
     "vendor/ace/ace.js",
+    "vendor/ace/ext-diff.js",
     "vendor/ace/mode-python.js", "vendor/ace/mode-javascript.js",
     "vendor/ace/mode-json.js", "vendor/ace/mode-markdown.js",
 )
@@ -597,6 +598,7 @@ class AdminWebApplication:
         if context.method == "GET" and context.path in {
             "/api/v1/project-files/root", "/api/v1/project-files/directory",
             "/api/v1/project-files/content", "/api/v1/project-files/image",
+            "/api/v1/project-files/changes", "/api/v1/project-files/diff",
         }:
             return await self._project_files(context)
         if context.method == "GET" and context.path in _ADMIN_PAGE_PATHS:
@@ -769,7 +771,9 @@ class AdminWebApplication:
             raise AdminWebError(400, "invalid_query", "请选择 Project。")
         version = _optional_text_query(context.query, "version", maximum=128) if operation == "image" else None
         args = {"project": project, "worktree": worktree}
-        deadline = asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS
+        deadline = asyncio.get_running_loop().time() + (
+            _SESSION_QUERY_DEADLINE_SECONDS if operation in {"changes", "diff"} else _QUERY_DEADLINE_SECONDS
+        )
         try:
             if operation == "root":
                 data = await self._management.files.root(**args, deadline=deadline)
@@ -782,6 +786,10 @@ class AdminWebApplication:
                 read_args = {**args, "identity": identity, "path": path, "deadline": deadline}
                 if operation == "directory":
                     data = await self._management.files.directory(**read_args)
+                elif operation == "changes":
+                    data = await self._management.files.changes(**read_args)
+                elif operation == "diff":
+                    data = await self._management.files.diff(**read_args)
                 else:
                     if operation == "image":
                         preview = await self._management.files.content(**read_args)
@@ -3603,10 +3611,7 @@ def _file_content_data(preview, *, path: str, image_url) -> dict:
     if preview.kind == "image":
         data["imageUrl"] = image_url(path) + "&" + urlencode({"version": preview.version})
     else:
-        suffix = Path(path).suffix.lower()
-        language = {".py": "python", ".pyw": "python", ".js": "javascript",
-            ".mjs": "javascript", ".cjs": "javascript", ".json": "json",
-            ".md": "markdown", ".markdown": "markdown"}.get(suffix, "text")
+        language = file_language(path)
         data.update(text=preview.text, language=language)
         if language == "markdown":
             try:

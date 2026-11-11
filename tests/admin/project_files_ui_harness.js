@@ -73,6 +73,7 @@ async function api(url, options = {}) {
       { id: "missing", state: "missing", available: false, cwd: "/gone" }], nextCursor: query.has("cursor") ? null : "next" };
   }
   if (route.endsWith("/root")) return { projectAlias: "demo", rootId: query.get("worktree") || "project", cwd: "/project", identity: query.get("worktree") ? "worktree-identity" : "project-identity" };
+  if (route.endsWith("/changes")) return { git: "not_repository" };
   if (route.endsWith("/directory")) return { path, entries: path ? [] : [
     { name: "src", path: "src", kind: "directory" },
     ...Object.keys(files).map((name) => ({ name, path: name, kind: "file", size: 100 })),

@@ -110,9 +110,9 @@ class ProjectFilesWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("attachment", headers.get("content-disposition", ""))
 
     async def test_queries_images_and_vendor_assets_all_require_authentication(self):
-        paths = [self.target(operation) for operation in ("root", "directory", "content", "image")]
+        paths = [self.target(operation) for operation in ("root", "directory", "content", "image", "changes", "diff")]
         assets = ("content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "vendor/ace/ace.js",
-            "vendor/ace/mode-python.js")
+            "vendor/ace/mode-python.js", "vendor/ace/ext-diff.js")
         for path in [*paths, *("/static/" + asset for asset in assets)]:
             with self.subTest(path=path):
                 status, headers, body = await self.request(path, authenticated=False)
@@ -125,6 +125,28 @@ class ProjectFilesWebTest(unittest.IsolatedAsyncioTestCase):
             self.assert_private_response(headers)
         status, _, _ = await self.request("/static/vendor/ace/worker-javascript.js")
         self.assertEqual(status, 404)
+
+    async def test_git_routes_queries_deadlines_and_unavailable_response(self):
+        root = await self.root()
+        for operation in ("changes", "diff"):
+            with self.subTest(operation=operation):
+                for query in ({}, {"identity": root["identity"], "path": "../escape"},
+                              {"identity": root["identity"], "extra": "unexpected"}):
+                    status, _, _ = await self.get(operation, **query)
+                    self.assertEqual(status, 400)
+                before = asyncio.get_running_loop().time()
+                with patch.object(self.management.files, operation, new_callable=AsyncMock,
+                                  return_value={"git": "unavailable", "message": "busy"}) as read:
+                    status, headers, data = await self.get(operation, identity=root["identity"], path="hello.py")
+                self.assertEqual(status, 200)
+                self.assertEqual(data["git"], "unavailable")
+                self.assert_private_response(headers)
+                self.assertGreater(read.call_args.kwargs["deadline"], before + 9)
+        status, _, data = await self.get("changes", identity=root["identity"])
+        self.assertEqual(status, 200)
+        self.assertEqual(data["git"], "not_repository")
+        status, _, _ = await self.get("diff", identity=root["identity"])
+        self.assertEqual(status, 400)
 
     async def test_directory_text_markdown_and_image_share_authenticated_selected_root(self):
         (self.project / "docs").mkdir()

@@ -11,6 +11,8 @@ import unittest
 from unittest.mock import patch
 
 from netizen_cli.worktrees.git import GitError, NotGitRepository, WorktreeGit
+from netizen_cli.worktrees.viewer import ViewerGit, git_failure
+from netizen_cli.project_files import FileBrowseError
 
 
 @unittest.skipUnless(shutil.which("git"), "Git is required")
@@ -438,6 +440,202 @@ class WorktreeGitTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await task
         self.assertTrue(process.reaped)
+
+
+@unittest.skipUnless(shutil.which("git"), "Git is required")
+class ViewerGitTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="netizen-viewer-")
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name).resolve() / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.invalid")
+        self.backend = ViewerGit()
+
+    def git(self, *args, cwd=None):
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(cwd or self.repo), *args],
+            env=env, capture_output=True, check=True, timeout=15).stdout.decode().strip()
+
+    def write(self, path, text="base\n"):
+        target = self.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+    def commit(self):
+        self.git("add", ".")
+        self.git("commit", "-qm", "snapshot")
+
+    async def test_shapes_scoping_prefix_literal_names_and_unborn(self):
+        self.write("sub/[literal].txt")
+        unborn = await self.backend.status(self.repo, "")
+        self.assertIsNone(unborn.head)
+        self.commit()
+        self.write("sub/[literal].txt", "changed")
+        self.write("outside", "outside")
+        result = await self.backend.status(self.repo / "sub", "")
+        self.assertEqual(set(result.entries), {"[literal].txt"})
+        self.assertEqual(result.head, self.git("rev-parse", "HEAD"))
+        single = await self.backend.status(self.repo / "sub", "[literal].txt")
+        self.assertEqual(set(single.entries), {"[literal].txt"})
+        self.assertEqual(set((await self.backend.status(self.repo, "sub")).entries), {"sub/[literal].txt"})
+
+    async def test_nested_repository_submodule_and_collapsed_ignored_directory(self):
+        self.write("tracked")
+        self.write(".gitignore", "ignored/\n")
+        self.commit()
+        nested = self.repo / "nested"
+        nested.mkdir()
+        self.git("init", "-q", cwd=nested)
+        self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "initial", cwd=nested)
+        self.write("nested/file")
+        self.write("ignored/file")
+        self.git("-c", "protocol.file.allow=always", "submodule", "add", str(nested), "module")
+        self.git("commit", "-qm", "submodule")
+        self.write("module/file", "local")
+        status = await self.backend.status(self.repo, "")
+        self.assertEqual(status.entries["nested"].kind, "untracked")
+        self.assertTrue(status.entries["nested"].directory)
+        self.assertTrue(status.entries["ignored"].directory)
+        self.assertNotIn("module", status.entries)
+        for path in ("nested/file", "module/file"):
+            self.assertNotIn(path, (await self.backend.status(self.repo, path)).entries)
+
+    async def test_merging_cached_removal_rename_and_added_then_deleted(self):
+        self.write("cached")
+        self.write("before")
+        self.commit()
+        self.git("rm", "--cached", "cached")
+        self.write("cached", "edited")
+        self.git("mv", "before", "after")
+        self.write("vanishes")
+        self.git("add", "vanishes")
+        (self.repo / "vanishes").unlink()
+        result = (await self.backend.status(self.repo, "")).response()
+        entries = {entry["path"]: entry for entry in result["entries"]}
+        self.assertEqual({path: entry["kind"] for path, entry in entries.items()},
+                         {"cached": "modified", "before": "deleted", "after": "added"})
+        self.assertEqual(entries["cached"]["group"], "tracked")
+
+    async def test_tristate_diagnostics(self):
+        plain = self.repo.parent
+        with self.assertRaises(GitError) as error:
+            await self.backend.status(plain, "")
+        self.assertEqual(git_failure(error.exception)["git"], "not_repository")
+        with patch.dict(os.environ, {"PATH": "/nonexistent"}), self.assertRaises(GitError) as error:
+            await self.backend.status(self.repo, "")
+        self.assertEqual(git_failure(error.exception)["git"], "unavailable")
+        self.git("config", "core.repositoryformatversion", "9999")
+        with self.assertRaises(GitError) as error:
+            await self.backend.status(self.repo, "")
+        self.assertEqual(git_failure(error.exception)["git"], "unavailable")
+        for message in ("fatal: detected dubious ownership in repository", "Git timed out"):
+            self.assertEqual(git_failure(GitError("status", message))["git"], "unavailable")
+
+    async def test_truncation_kills_group_and_invalid_paths_mark_incomplete(self):
+        self.write("tracked")
+        self.write(".gitignore", "ignored/\n")
+        self.commit()
+        self.write("tracked", "changed")
+        self.write("untracked")
+        self.write("ignored/file")
+        backend = ViewerGit(entry_cap=2)
+        with patch("netizen_cli.worktrees.git.os.killpg", wraps=os.killpg) as kill:
+            result = (await backend.status(self.repo, "")).response()
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["entries"]), 2)
+        self.assertEqual(result["groupsComplete"], {"tracked": True, "untracked": False, "ignored": False})
+        kill.assert_called_once()
+        self.write("bad\nname")
+        result = (await self.backend.status(self.repo, "")).response()
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["groupsComplete"]["untracked"])
+        self.assertNotIn("bad\nname", {entry["path"] for entry in result["entries"]})
+
+    async def test_status_above_two_mib_is_complete_or_entry_capped(self):
+        prefix = "/".join(f"segment-{index:02}-" + "x" * 190 for index in range(3))
+        paths = [f"{prefix}/file-{index:04}.txt" for index in range(3600)]
+        for path in paths:
+            self.write(path)
+        self.commit()
+        for path in paths:
+            self.write(path, "changed\n")
+        cap = 3500
+        self.assertGreater(sum(len(path) for path in paths[:cap]), 2 * 1024 * 1024)
+        for limit, complete, count in ((3601, True, 3600), (cap, False, cap)):
+            with self.subTest(limit=limit):
+                result = (await ViewerGit(entry_cap=limit).status(self.repo, "")).response()
+                self.assertEqual(result["git"], "available")
+                self.assertEqual(result["complete"], complete)
+                self.assertEqual(len(result["entries"]), count)
+                self.assertEqual(result["groupsComplete"], dict.fromkeys(("tracked", "untracked", "ignored"), complete))
+
+    async def test_streaming_bounds_each_record_including_its_terminating_chunk(self):
+        for length in (65536, 65537):
+            self.git("config", "test.record", "x" * length)
+            records = []
+            def receive(record):
+                records.append(record)
+                return False
+            if length == 65536:
+                await self.backend._run(self.repo, "config", "--null", "--get", "test.record", on_record=receive)
+                self.assertEqual([len(record) for record in records], [length])
+            else:
+                with self.assertRaisesRegex(GitError, "record exceeds"):
+                    await self.backend._run(self.repo, "config", "--null", "--get", "test.record", on_record=receive)
+                self.assertEqual(records, [])
+
+    async def test_configured_programs_never_execute_and_index_stays_unchanged(self):
+        self.write("file.txt")
+        self.commit()
+        self.write("file.txt", "changed")
+        self.write(".gitattributes", "*.txt filter=evil diff=evil\n")
+        marker = self.repo.parent / "executed"
+        command = f"touch {marker}; cat"
+        for key in ("filter.evil.clean", "filter.evil.smudge", "filter.evil.process",
+                    "diff.evil.textconv", "diff.evil.command", "diff.external", "core.fsmonitor"):
+            self.git("config", key, command)
+        self.git("config", "filter.evil.required", "true")
+        hooks = self.repo.parent / "hooks"
+        hooks.mkdir()
+        for name in ("post-index-change", "post-checkout", "pre-auto-gc", "fsmonitor-watchman"):
+            hook = hooks / name
+            hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+            hook.chmod(0o755)
+        self.git("config", "core.hooksPath", str(hooks))
+        index = self.repo / ".git/index"
+        before = index.read_bytes()
+        status = await self.backend.status(self.repo, "")
+        self.assertEqual(await self.backend.old_text(self.repo, status.entries["file.txt"].head), "base\n")
+        await self.backend.status(self.repo, "file.txt")
+        self.assertFalse(marker.exists())
+        self.assertEqual(index.read_bytes(), before)
+
+    async def test_partial_clone_missing_blob_cannot_start_transport_but_explicit_fetch_can(self):
+        self.write("file")
+        self.commit()
+        oid = self.git("rev-parse", "HEAD:file")
+        self.git("config", "uploadpack.allowFilter", "true")
+        clone = self.repo.parent / "partial"
+        self.git("-c", "protocol.file.allow=always", "clone", "--filter=blob:none", "--no-checkout",
+                 self.repo.as_uri(), str(clone))
+        marker = self.repo.parent / "transport"
+        helper = self.repo.parent / "upload-pack"
+        helper.write_text(f'#!/bin/sh\ntouch {marker}\nexec git-upload-pack "$@"\n')
+        helper.chmod(0o755)
+        self.git("config", "remote.origin.uploadpack", str(helper), cwd=clone)
+        self.git("config", "protocol.file.allow", "always", cwd=clone)
+        status = await self.backend.status(clone, "")
+        self.assertEqual(status.entries["file"].head, oid)
+        with self.assertRaises(FileBrowseError) as error:
+            await self.backend.old_text(clone, oid)
+        self.assertEqual(error.exception.code, "missing_object")
+        self.assertFalse(marker.exists())
+        await WorktreeGit()._run(clone, "fetch", "origin", mutating=True)
+        self.assertTrue(marker.exists())
 
 
 if __name__ == "__main__":

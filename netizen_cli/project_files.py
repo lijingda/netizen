@@ -159,6 +159,18 @@ def root_identity(root: Path, *, context: str) -> str:
         return _identity(info, context)
 
 
+def check_root(root: Path, path: str, *, identity: str, context: str) -> None:
+    """Validate a selected root and optional scope directory without enumerating it."""
+    with _directories(root, _path_parts(path, allow_empty=True), identity=identity, context=context):
+        pass
+
+
+def file_language(path: str) -> str:
+    return {".py": "python", ".pyw": "python", ".js": "javascript",
+        ".mjs": "javascript", ".cjs": "javascript", ".json": "json",
+        ".md": "markdown", ".markdown": "markdown"}.get(Path(path).suffix.lower(), "text")
+
+
 def list_directory(root: Path, path: str, *, identity: str, context: str) -> dict:
     parts = _path_parts(path, allow_empty=True)
     with _directories(root, parts, identity=identity, context=context) as (chain, _):
@@ -292,11 +304,7 @@ def validate_image(
     return width, height
 
 
-def _preview(data: bytes, path: str, info: os.stat_result) -> FilePreview:
-    mime = _image_mime(data, path)
-    if mime:
-        validate_image(data, mime)
-        return FilePreview(path, "image", None, data, mime, len(data), _modified_at(info), _file_version(info))
+def preview_text(data: bytes) -> str:
     if len(data) > MAX_TEXT_BYTES:
         raise FileBrowseError("preview_too_large", "文本超过 1 MiB，暂不支持预览。")
     try:
@@ -310,7 +318,15 @@ def _preview(data: bytes, path: str, info: os.stat_result) -> FilePreview:
         raise FileBrowseError("preview_too_large", "文本超过 10000 行，暂不支持预览。")
     if any(len(line) > MAX_LINE_CHARACTERS for line in lines):
         raise FileBrowseError("preview_too_large", "文本单行超过 20000 字符，暂不支持预览。")
-    return FilePreview(path, "text", text, None, "text/plain; charset=utf-8", len(data), _modified_at(info), _file_version(info))
+    return text
+
+
+def _preview(data: bytes, path: str, info: os.stat_result) -> FilePreview:
+    mime = _image_mime(data, path)
+    if mime:
+        validate_image(data, mime)
+        return FilePreview(path, "image", None, data, mime, len(data), _modified_at(info), _file_version(info))
+    return FilePreview(path, "text", preview_text(data), None, "text/plain; charset=utf-8", len(data), _modified_at(info), _file_version(info))
 
 
 def read_file(root: Path, path: str, *, identity: str, context: str) -> FilePreview:
