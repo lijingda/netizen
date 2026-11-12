@@ -371,9 +371,9 @@
     <dialog id="session-answer-drawer" class="file-browser-drawer session-answer-drawer" aria-labelledby="session-answer-title">
       <div class="file-browser-shell">
         <header class="file-browser-head">
-          <div><h3 id="session-answer-title">最近一轮回答</h3><p id="session-answer-identity" class="session-answer-identity"></p></div>
+          <div><h3 id="session-answer-title">对话记录</h3><p id="session-answer-identity" class="session-answer-identity"></p></div>
           <button id="session-answer-refresh" type="button">刷新</button>
-          <button id="session-answer-close" class="drawer-close" type="button" aria-label="关闭最近回答">×</button>
+          <button id="session-answer-close" class="drawer-close" type="button" aria-label="关闭对话记录">×</button>
         </header>
         <div class="file-browser-tools session-answer-toolbar">
           <p id="session-answer-note" class="file-browser-note" role="status" aria-live="polite"></p>
@@ -382,11 +382,13 @@
         <details id="session-answer-details" class="session-answer-details">
           <summary>本次读取详情</summary>
           <p id="session-answer-metadata"></p>
-          <p>仅显示最近一轮的最终回答；无回答时不回溯旧答案。Goal 的单轮回答不代表整个 Goal 已完成。</p>
+          <p>每轮仅显示第一条输入和最终回答，不包含执行中追加的输入。Goal 的单轮回答不代表整个 Goal 已完成。</p>
         </details>
         <p id="session-answer-preview-note" class="file-browser-note" role="status"></p>
-        <article id="session-answer-content" class="file-browser-markdown markdown-preview" aria-label="回答正文" hidden></article>
-        <pre id="session-answer-source" class="file-browser-markdown session-answer-source" aria-label="回答原文" hidden></pre>
+        <div id="session-answer-scroll" class="conversation-scroll">
+          <button id="session-answer-earlier" class="conversation-earlier" type="button" hidden>加载更早</button>
+          <div id="session-answer-content" aria-label="对话轮次"></div>
+        </div>
       </div>
     </dialog>
 

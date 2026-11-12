@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
 from .message_content import MATERIAL_MESSAGE_TYPES, TEXT_TYPES, project_message_content
-from .user_questions import QuestionTarget, question_target_payload
+from .user_questions import BindingQuestionTarget, SideQuestionTarget, QuestionTarget, question_target_payload
 
 
 _PROMPT_KIND = "feishu_current_message"
@@ -325,3 +326,177 @@ def _metadata_json(value: Any, *, indent: int | None = None) -> str:
 
 def _nonempty_string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationInput:
+    """A read-only display of one native input part, never execution evidence."""
+
+    text: str
+    source: str | None = None
+    display_name: str | None = None
+    raw: bool = False
+    attachments: tuple[str, ...] = ()
+    quoted_count: int = 0
+    supplemental_count: int = 0
+
+
+_DISPLAY_MARKERS = (
+    "feishu_current_message", "feishu_card_answer_context", "feishu_question_answer",
+    "scheduled_plan", "feishu_quoted_prompt", "feishu_message_context_prompt",
+    "feishu_file_attachments",
+)
+
+
+def project_conversation_input(text: str) -> ConversationInput:
+    """Recognize only current envelopes, atomically; unfamiliar inputs stay raw.
+
+    The final trailer delimiter belongs to the renderer. Earlier delimiters can
+    be literal request text, including forged tags. Never strip a partial match.
+    """
+    if not any(
+        f"<{marker}" in text or f"</{marker}" in text
+        or re.search(r'"kind"\s*:\s*"' + re.escape(marker) + r'"', text)
+        for marker in _DISPLAY_MARKERS
+    ):
+        return ConversationInput(text)
+    try:
+        body = text
+        attachments: tuple[str, ...] = ()
+        if body.endswith("\n</feishu_file_attachments>"):
+            body, payload = _display_trailer(body, "feishu_file_attachments")
+            if (set(payload) != {"kind", "version", "handling", "files"}
+                    or payload["kind"] != "feishu_file_attachments" or type(payload["version"]) is not int
+                    or payload["version"] != 1 or not isinstance(payload["handling"], str)
+                    or not isinstance(payload["files"], list)):
+                raise ValueError("invalid attachment envelope")
+            names = []
+            for item in payload["files"]:
+                if (not isinstance(item, dict)
+                        or set(item) != {"source", "file_name", "local_path", "size_bytes"}
+                        or item["source"] not in {"current_message", "quoted_message"}
+                        or not isinstance(item["file_name"], str)
+                        or not isinstance(item["local_path"], str)
+                        or type(item["size_bytes"]) is not int or item["size_bytes"] < 0):
+                    raise ValueError("invalid attachment")
+                names.append(item["file_name"])
+            attachments = tuple(names)
+        for tag, kind, version, source in (
+            ("feishu_current_message_context", _PROMPT_KIND, _PROMPT_VERSION, "飞书消息"),
+            ("feishu_card_answer_context", "feishu_question_answer", 2, "卡片回答"),
+            ("scheduled_plan", "scheduled_plan", 1, "定时任务"),
+        ):
+            if not body.endswith(f"\n</{tag}>"):
+                continue
+            request, metadata = _display_trailer(body, tag)
+            if tag == "feishu_card_answer_context" and metadata.get("kind") == "feishu_message_context_prompt":
+                result = _display_context(metadata, card_request=request)
+            else:
+                if metadata.get("kind") != kind or type(metadata.get("version")) is not int or metadata["version"] != version:
+                    raise ValueError("unknown input version")
+                current = _display_current(metadata, request, plain=True)
+                result = ConversationInput(request, source, _display_sender(current))
+            return replace(result, attachments=attachments)
+        result = _display_context(_display_json(body))
+        return replace(result, attachments=attachments)
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return ConversationInput(text, raw=True)
+
+
+def _display_json(text: str) -> dict[str, Any]:
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    value = json.loads(text, object_pairs_hook=unique)
+    if not isinstance(value, dict):
+        raise ValueError("input envelope must be an object")
+    return value
+
+
+def _display_trailer(text: str, tag: str) -> tuple[str, dict[str, Any]]:
+    request, separator, payload = text.rpartition(f"\n\n<{tag}>\n")
+    if not separator or not payload.endswith(f"\n</{tag}>"):
+        raise ValueError("incomplete trailer")
+    return request, _display_json(payload[:-len(f"\n</{tag}>")])
+
+
+def _display_current(value: dict[str, Any], request: str, *, plain: bool = False) -> MessageInputProjection:
+    if not isinstance(request, str) or not isinstance(value.get("message_id"), str):
+        raise ValueError("invalid current message")
+    kind = value.get("kind")
+    current: MessageInputProjection
+    if kind == "scheduled_plan":
+        current = ScheduledInputProjection(value["message_id"], request, value["plan"])
+    elif kind == "feishu_question_answer":
+        if not isinstance(value.get("source_card_id"), str):
+            raise ValueError("invalid card source")
+        target = value["target"]
+        if not isinstance(target, dict) or set(target) != {"kind", "id"}:
+            raise ValueError("invalid card target")
+        if target["kind"] not in {"binding", "side"}:
+            raise ValueError("invalid card target kind")
+        current = CardAnswerProjection(
+            value["message_id"], value["source_card_id"],
+            BindingQuestionTarget(target["id"]) if target["kind"] == "binding" else SideQuestionTarget(target["id"]),
+            value["sender"], request,
+        )
+    else:
+        current = CurrentMessageProjection(
+            value["message_id"], value["message_type"], value["content_fidelity"], value["sender"], request,
+        )
+    expected = current.metadata()
+    if plain and isinstance(current, CurrentMessageProjection):
+        expected = {"kind": _PROMPT_KIND, "version": _PROMPT_VERSION, **expected, "handling": ATTRIBUTION_HANDLING}
+    if value != expected:
+        raise ValueError("unrecognized current metadata")
+    if "version" in value and type(value["version"]) is not int:
+        raise ValueError("invalid version")
+    if isinstance(current, (CurrentMessageProjection, CardAnswerProjection)):
+        sender = current.sender
+        if (set(sender) - {"display_name", "open_id", "sender_type", "is_bot"}
+                or any(not isinstance(v, str) for k, v in sender.items() if k != "is_bot")
+                or ("is_bot" in sender and type(sender["is_bot"]) is not bool)):
+            raise ValueError("invalid sender")
+    return current
+
+
+def _display_sender(current: MessageInputProjection) -> str | None:
+    return current.sender.get("display_name") if isinstance(current, (CurrentMessageProjection, CardAnswerProjection)) else None
+
+
+def _display_context(value: dict[str, Any], *, card_request: str | None = None) -> ConversationInput:
+    kind = value.get("kind")
+    expected = {"kind", "version", "handling", "current_message"}
+    if kind == "feishu_quoted_prompt" and value.get("version") == 4:
+        expected.add("quoted_message")
+    elif kind == "feishu_message_context_prompt" and value.get("version") == 2:
+        expected.update({"supplemental_messages", "context_status"})
+        if "quoted_message" in value:
+            expected.add("quoted_message")
+        messages, status = value["supplemental_messages"], value["context_status"]
+        if (not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages)
+                or not isinstance(status, dict) or set(status) != {"omitted_count", "truncated"}
+                or type(status["omitted_count"]) is not int or status["omitted_count"] < 0
+                or type(status["truncated"]) is not bool):
+            raise ValueError("invalid supplemental context")
+    else:
+        raise ValueError("unknown context version")
+    if (set(value) != expected or type(value["version"]) is not int
+            or not isinstance(value["handling"], str)
+            or ("quoted_message" in value and not isinstance(value["quoted_message"], dict))
+            or not isinstance(value["current_message"], dict)):
+        raise ValueError("invalid context envelope")
+    metadata = dict(value["current_message"])
+    request = metadata.pop("request_text") if card_request is None else card_request
+    current = _display_current(metadata, request)
+    if card_request is not None and not isinstance(current, CardAnswerProjection):
+        raise ValueError("invalid card context")
+    return ConversationInput(
+        request, "卡片回答" if card_request is not None else "带上下文的消息", _display_sender(current),
+        quoted_count=int("quoted_message" in value), supplemental_count=len(value.get("supplemental_messages", [])),
+    )

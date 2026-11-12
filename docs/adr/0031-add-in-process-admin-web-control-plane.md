@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
-amended_by: 0037, 0049, 0054, 0057, 0060, 0078, 0080
+amended_by: 0037, 0049, 0054, 0057, 0060, 0078, 0080, 0096
 related: 0016, 0019
 ---
 
@@ -37,6 +37,9 @@ related: 0016, 0019
 > [ADR 0060](0060-delete-projects-with-exact-session-inventory.md) 增加经完整清单确认的
 > Project 及关联 Sessions 删除，修订下文 Project 删除禁令；其逐对象失败边界不变，
 > 不开放任意筛选结果的批量 native mutation。当前筛选交互见设计文档。
+
+> [ADR 0096](0096-read-admin-conversations-through-summary-turn-pages.md) 将最近回答扩展为按轮分页的只读对话记录。
+> 下文历史浏览器禁令仍禁止完整工具历史与交互；仅开放第一条输入和最终回答的只读投影。
 
 ## 背景
 
@@ -81,7 +84,7 @@ Channel handlers、Admin runner/handlers、application service 和 Runtime locks
 等待 background-loop lifecycle；它不得执行 Web handler、切换 Admin admission 或取得共享锁。
 
 Web 不接受 Prompt、图片、Skill 或 Goal objective，不调用 `thread.turn()` / `steer()`，
-也不提供原生历史浏览器。它可以停止已有操作和执行下文明确列出的管理 mutation，但不能
+也不提供完整原生历史浏览器（只读对话记录的后续例外见 ADR 0096）。它可以停止已有操作和执行下文明确列出的管理 mutation，但不能
 成为第二个 Codex 交互客户端。前端资源与 JSON endpoints 由同一 origin 提供，不增加独立
 前端部署、WebSocket 或 durable Web job queue；运行态刷新使用有界 HTTP polling。
 
@@ -208,7 +211,7 @@ credential、CSRF、name、preview、cwd 或 Prompt 内容。
 | Binding | Stop | exact Binding 当前存在本进程可控的普通 Turn 或 Goal 物理 Turn；复用现有 interrupt、Goal pause 和 terminal cleanup 语义。Stop 中的 Goal pause 是停止既有工作的一部分，不开放 Goal start/resume/clear。 |
 | Binding | Release | exact active 或 inactive materialized Binding 已 idle，且满足 ADR 0028 除“当前 active”外的无活动/后台 terminal 前置条件；只取消本连接订阅，下一次消息仍 resume 同一 Thread。 |
 | Binding | Compact / Goal mutation | 不提供。它们会发起或推进 Codex 工作，继续从当前飞书会话控制；Web 只展示状态。 |
-| Binding | 查看完整历史 / 发送 Prompt | 不提供。Web 最多展示 native catalog 的有界 title/preview。 |
+| Binding | 查看完整历史 / 发送 Prompt | 原始决定不提供；ADR 0096 后另有只读对话记录，仍不展示完整工具历史或发送 Prompt。 |
 | Side Topic | Close | exact route 为 open 且当前进程仍有 Side Session；复用 interrupt、cleanup、unsubscribe、墓碑提交顺序，结果未知时保持 non-admitting route。 |
 | Side Topic | 删除墓碑 / resume / rename / archive | 不提供。terminal route 永久阻止旧话题落入普通 Binding，ephemeral native Thread 不可恢复。 |
 | 多个对象 | 批量 native mutation | 不提供。筛选和多选不能转换为批量 archive、stop、close 或 delete；每个未知副作用必须独立停住。 |

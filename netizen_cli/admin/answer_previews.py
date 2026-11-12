@@ -1,4 +1,4 @@
-"""Bounded native image content for a single latest-answer response.
+"""Independent answer previews for a read-only native conversation page.
 
 Paths only match final Markdown references to the same Turn's generated images.
 No filesystem, network, history cache or additional native request is involved.
@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import asdict
 from urllib.parse import unquote, urlsplit
 
 from ..project_files import FileBrowseError, validate_image
-from ..runtime.contracts import NativeLatestAnswer
-from .file_previews import render_markdown
+from ..runtime.contracts import NativeLatestAnswer, NativeConversationPage
+from .file_previews import PreviewUnavailable, render_markdown
 
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -20,6 +21,32 @@ MAX_ANSWER_IMAGES = 16
 MAX_TOTAL_IMAGE_PIXELS = 32_000_000
 MAX_IMAGE_DIMENSION = 16_384
 MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
+
+
+def render_conversation_page(page: NativeConversationPage) -> dict:
+    """Render each answer independently in the caller's single bounded job."""
+    turns = []
+    for turn in page.turns:
+        item = {
+            "turnId": turn.turn_id, "status": turn.status,
+            "inputs": [asdict(part) for part in turn.inputs], "answer": turn.answer,
+            "error": turn.error, "startedAt": turn.started_at, "completedAt": turn.completed_at,
+        }
+        if turn.answer:
+            try:
+                if turn.latest:
+                    item.update(render_answer_preview(NativeLatestAnswer(
+                        page.thread_id, turn.turn_id, turn.status, turn.answer,
+                        images=turn.images,
+                    )))
+                else:
+                    item["markdownHtml"] = render_markdown(
+                        turn.answer, inert_image_reason="更早轮次不加载图片",
+                    )
+            except PreviewUnavailable:
+                item["previewMessage"] = "回答超出排版预览限制，已显示原文。"
+        turns.append(item)
+    return {"threadId": page.thread_id, "turns": turns, "nextCursor": page.next_cursor}
 
 
 def _absolute_path(value: str) -> bool:

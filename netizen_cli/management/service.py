@@ -50,7 +50,7 @@ from ..session_settings import SessionSettingsError
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
-    NativeLatestAnswer,
+    NativeConversationPage,
     RuntimeClosed,
     NativeThreadCatalog,
     NativeThreadCatalogPage,
@@ -754,8 +754,10 @@ class ManagementRuntimePort:
             use_state_db_only=use_state_db_only,
         )
 
-    async def latest_thread_answer_exact(self, thread_id: str) -> NativeLatestAnswer:
-        return await self.__runtime.latest_thread_answer(thread_id)
+    async def thread_conversation_exact(
+        self, thread_id: str, *, cursor: str | None = None, limit: int = 10,
+    ) -> NativeConversationPage:
+        return await self.__runtime.thread_conversation(thread_id, cursor=cursor, limit=limit)
 
     async def thread_summary_exact(
         self, thread_id: str,
@@ -843,7 +845,7 @@ class InstanceManagementService:
         self._summary_read_limiter = asyncio.Semaphore(
             _SESSION_SUMMARY_READ_CONCURRENCY
         )
-        self._summary_reads: set[asyncio.Task[NativeThreadMetadata | NativeLatestAnswer]] = set()
+        self._summary_reads: set[asyncio.Task[NativeThreadMetadata | NativeConversationPage]] = set()
         self._summary_reads_closed = False
         self.schedules: ScheduleService | None = None
         self.defaults: SessionDefaultsService | None = None
@@ -1460,9 +1462,10 @@ class InstanceManagementService:
             has_lazy=has_lazy,
         )
 
-    async def latest_binding_answer(
+    async def binding_conversation(
         self, binding_id: str, *, thread_id: str, deadline: float,
-    ) -> NativeLatestAnswer:
+        cursor: str | None = None, limit: int = 10,
+    ) -> NativeConversationPage:
         binding = self._bindings.get(binding_id)
         if binding.native_thread_id is None or binding.native_thread_id != thread_id:
             raise NativeThreadMissing("Exact native Thread identity is no longer available")
@@ -1473,7 +1476,7 @@ class InstanceManagementService:
             if self._summary_reads_closed or asyncio.get_running_loop().time() >= deadline:
                 self._summary_read_limiter.release()
                 raise RuntimeClosed("Native history reads are closed or expired")
-            task = asyncio.create_task(self._runtime.latest_thread_answer_exact(thread_id))
+            task = asyncio.create_task(self._runtime.thread_conversation_exact(thread_id, cursor=cursor, limit=limit))
             self._summary_reads.add(task)
             task.add_done_callback(self._summary_read_finished)
             answer = await asyncio.shield(task)
@@ -2380,7 +2383,7 @@ class InstanceManagementService:
             task.add_done_callback(self._summary_read_finished)
             return await asyncio.shield(task)
 
-    def _summary_read_finished(self, task: asyncio.Task[NativeThreadMetadata | NativeLatestAnswer]) -> None:
+    def _summary_read_finished(self, task: asyncio.Task[NativeThreadMetadata | NativeConversationPage]) -> None:
         self._summary_reads.discard(task)
         self._summary_read_limiter.release()
         if not task.cancelled():

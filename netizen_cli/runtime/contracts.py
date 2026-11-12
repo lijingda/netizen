@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from ..bindings import BindingTaskFeedback, SideTopicState
 from ..domain import ActiveState, GoalOperationState, MessageContextAnchor
 from ..partial_answers import PartialAnswer
+from ..prompt_projection import ConversationInput
 from ..progress_card_settings import ProgressCardSettings
 from ..sdk_gap_adapter import GoalSnapshot
 from ..turn_activity import TurnActivityEntrySnapshot, TurnPlanStepSnapshot
@@ -520,6 +521,26 @@ class NativeLatestAnswer:
     started_at: int | None = None
     completed_at: int | None = None
     images: tuple[NativeAnswerImage, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NativeConversationTurn:
+    turn_id: str
+    status: str | None
+    inputs: tuple[ConversationInput, ...] = ()
+    answer: str | None = None
+    error: str | None = None
+    started_at: int | None = None
+    completed_at: int | None = None
+    images: tuple[NativeAnswerImage, ...] = ()
+    latest: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class NativeConversationPage:
+    thread_id: str
+    turns: tuple[NativeConversationTurn, ...] = ()
+    next_cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

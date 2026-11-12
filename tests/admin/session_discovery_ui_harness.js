@@ -1,6 +1,10 @@
 let latestAnswer = () => ({ threadId: "native", turnId: "turn-current", status: "completed",
   answer: "<script>inert</script>\nfinal", markdownHtml: "<p>&lt;script&gt;inert&lt;/script&gt;\nfinal</p>",
   startedAt: null, completedAt: null, readAt: "2026-11-03T08:00:00+00:00" });
+const pageOf = (turns, nextCursor = null, limit = 10, threadId = "native") => ({
+  threadId, turns, nextCursor, limit, readAt: "2026-11-12T08:00:00Z",
+});
+let conversationAnswer = () => pageOf([latestAnswer()], "older");
 let labelsAnswer = async () => ({ items: [] });
 const answerImageBlobs = [];
 const activeAnswerImageUrls = new Set();
@@ -15,9 +19,8 @@ URL.revokeObjectURL = (url) => {
   assert(activeAnswerImageUrls.delete(url), "each allocated image URL is released once");
   revokedAnswerImageUrls.push(url);
 };
-// The small DOM port only needs to recognize the trusted renderer's image slots here.
-const answerContent = document.querySelector("#session-answer-content");
-Object.defineProperty(answerContent, "innerHTML", {
+// Parse only trusted image slots, matching the shipped Markdown rendering sink.
+Object.defineProperty(Element.prototype, "innerHTML", {
   get() { return this.html || ""; },
   set(value) {
     this.html = value;
@@ -38,6 +41,22 @@ Object.defineProperty(answerContent, "innerHTML", {
     }
   },
 });
+Element.prototype.prepend = function (...nodes) {
+  const previous = [...this.children];
+  this.replaceChildren(...nodes, ...previous);
+};
+function requestAnimationFrame(callback) { queueMicrotask(callback); }
+const scroll = document.querySelector("#session-answer-scroll");
+scroll.scrollTop = 0;
+Object.defineProperty(scroll, "scrollHeight", { get() { return document.querySelector("#session-answer-content").children.length * 100; } });
+const normalRect = Element.prototype.getBoundingClientRect;
+Element.prototype.getBoundingClientRect = function () {
+  if (this.className === "conversation-turn") {
+    const top = this.parentElement.children.indexOf(this) * 100 - scroll.scrollTop + 20;
+    return { top, bottom: top + 100 };
+  }
+  return normalRect.call(this);
+};
 const imageAnswer = (id = "image-0") => ({
   turnId: "image-turn", status: "completed", answer: "![小猫](/tmp/cat.png)", readAt: "now",
   markdownHtml: `<p><img data-answer-image="${id}" alt="小猫" loading="lazy" decoding="async"></p>`,
@@ -46,9 +65,9 @@ const imageAnswer = (id = "image-0") => ({
 const priorFetch = fetch;
 fetch = async (path, options = {}) => {
   const url = new URL(path, "https://admin");
-  if (!["/api/v1/sessions/latest-answer", "/api/v1/chat-labels"].includes(url.pathname)) return priorFetch(path, options);
+  if (!["/api/v1/sessions/conversation", "/api/v1/chat-labels"].includes(url.pathname)) return priorFetch(path, options);
   requests.push({ path: url.pathname, query: url.searchParams, options });
-  const data = await (url.pathname.endsWith("latest-answer") ? latestAnswer() : labelsAnswer());
+  const data = await (url.pathname.endsWith("conversation") ? conversationAnswer() : labelsAnswer());
   return { ok: true, status: 200, json: async () => data };
 };
 // SHIPPED_ADMIN_PAGE
@@ -127,131 +146,172 @@ fetch = async (path, options = {}) => {
   await selectTab("sessions", "ordinary");
   const archived = { ...ordinary, nativeThreadId: "native", canReadLatestAnswer: true, catalogState: "archived" };
   state.sessions = { items: [archived] }; renderSessions(state.sessions);
-  const readButton = document.querySelector("#sessions-body").querySelectorAll("button").find((button) => button.textContent === "查看最近回答");
+  const readButton = document.querySelector("#sessions-body").querySelectorAll("button").find((button) => button.textContent === "查看对话记录");
   assert(readButton, "archived materialized sessions remain readable");
   const beforeAnswer = requests.length;
   readButton.click(); await flush();
   assert.equal(requests.length, beforeAnswer + 1);
   const answerRequest = requests.at(-1);
-  assert.equal(answerRequest.path, "/api/v1/sessions/latest-answer");
+  assert.equal(answerRequest.path, "/api/v1/sessions/conversation");
   assert.equal(answerRequest.query.get("bindingId"), archived.bindingId);
   assert.equal(answerRequest.query.get("threadId"), "native");
   assert.equal(answerRequest.options.method, undefined, "answer is a read-only GET");
-  assert.equal(answerNode("source").textContent, "<script>inert</script>\nfinal");
-  assert.equal(answerNode("content").innerHTML, latestAnswer().markdownHtml);
-  assert.equal(answerNode("content").hidden, false);
-  assert.equal(answerNode("source").hidden, true);
-  assert.equal(answerNode("content").querySelector("script"), null);
-  assert(!answerNode("metadata").textContent.includes("开始"));
+  assert.equal(answerNode("title").textContent, "对话记录");
+  assert.equal(answerNode("close").getAttribute("aria-label"), "关闭对话记录");
+  const current = () => conversationView.turns.at(-1);
+  assert.equal(current().source.textContent, "<script>inert</script>\nfinal");
+  assert.equal(current().preview.innerHTML, latestAnswer().markdownHtml);
+  assert.equal(current().preview.hidden, false);
+  assert.equal(current().source.hidden, true);
+  assert.equal(current().preview.querySelector("script"), null);
+  assert(!current().node.textContent.includes("开始"));
+  assert.equal(scroll.scrollTop, scroll.scrollHeight, "opening scrolls to latest");
   const afterAnswer = requests.length;
   answerNode("toggle").click();
-  assert.equal(answerNode("content").hidden, true);
-  assert.equal(answerNode("source").hidden, false);
+  assert.equal(current().preview.hidden, true);
+  assert.equal(current().source.hidden, false);
   answerNode("toggle").click();
-  assert.equal(answerNode("content").hidden, false);
-  assert.equal(requests.length, afterAnswer, "switching preview/source reuses the same snapshot");
+  assert.equal(requests.length, afterAnswer, "toggle is local");
+  scroll.dispatch("scroll"); await flush();
+  assert.equal(requests.length, afterAnswer, "scroll never loads a page");
 
-  const repeatedImage = imageAnswer();
-  repeatedImage.markdownHtml += repeatedImage.markdownHtml;
-  repeatedImage.images.push({ id: "unused", mime: "image/png", data: "aW1hZ2U=" });
-  latestAnswer = () => repeatedImage;
-  await refreshLatestAnswer();
-  const imageNodes = answerNode("content").querySelectorAll("img");
-  assert.equal(imageNodes.length, 2);
-  assert.equal(answerImageBlobs.length, 1, "repeated image references share one Blob; unreferenced images are not decoded");
-  assert.equal(imageNodes[0].src, imageNodes[1].src);
-  assert.equal(answerImageBlobs[0].type, "image/png");
+  // Click only; disable concurrent loads and preserve the first visible Turn.
+  scroll.scrollTop = 25;
+  const anchor = current().node;
+  const beforeTop = anchor.getBoundingClientRect().top;
+  const older = deferred(); conversationAnswer = () => older.promise;
+  answerNode("earlier").click(); await flush();
+  assert(answerNode("earlier").disabled);
+  const loadingCount = requests.length;
+  answerNode("earlier").click(); await flush();
+  assert.equal(requests.length, loadingCount);
+  assert.equal(requests.at(-1).query.get("cursor"), "older");
+  assert.equal(requests.at(-1).query.get("limit"), "10");
+  older.resolve(pageOf([{ turnId: "older-2", status: "failed", error: "failed input", inputs: [{ text: "request", source: "飞书消息" }] },
+    { turnId: "older-1", status: "interrupted" }], "oldest"));
+  await flush();
+  assert.deepEqual(conversationView.turns.map((turn) => turn.node.dataset.turnId), ["older-1", "older-2", "turn-current"]);
+  assert.equal(anchor.getBoundingClientRect().top, beforeTop, "prepend preserves the visible anchor");
+  assert(answerNode("content").textContent.includes("request"));
+  assert(answerNode("content").textContent.includes("failed input"));
+  conversationAnswer = () => { throw new Error("earlier failed"); };
+  await loadEarlierConversation();
+  assert.equal(conversationView.turns.length, 3);
+  assert.equal(conversationView.cursor, "oldest");
+  assert.match(answerNode("note").textContent, /上次读取的快照/);
+  conversationAnswer = () => { const error = new Error("游标失效，请刷新"); error.code = "invalid_cursor"; throw error; };
+  await loadEarlierConversation();
+  assert(answerNode("earlier").disabled);
+  const failedCount = requests.length;
+  await loadEarlierConversation(); assert.equal(requests.length, failedCount);
+  conversationAnswer = () => pageOf([latestAnswer()], "reset");
+  await refreshConversation();
+  assert.equal(conversationView.turns.length, 1);
+  assert.equal(conversationView.cursor, "reset");
+  assert.equal(requests.at(-1).query.has("cursor"), false);
+  assert.equal(requests.at(-1).query.get("limit"), "10");
+  assert.equal(scroll.scrollTop, scroll.scrollHeight);
+  conversationAnswer = () => ({ ...pageOf([{ turnId: "one-large", status: "completed", oversized: true }], "one-next", 1),
+    pageMessage: "本页内容较大，已改为逐轮加载" });
+  await loadEarlierConversation();
+  assert.equal(conversationView.limit, 1);
+  assert.match(answerNode("preview-note").textContent, /逐轮加载/);
+  assert.match(answerNode("content").textContent, /该轮内容过大/);
+  conversationAnswer = () => pageOf([{ turnId: "earliest", status: "completed", answer: "old" }], null, 1);
+  await loadEarlierConversation();
+  assert.equal(requests.at(-1).query.get("limit"), "1");
+  assert(answerNode("earlier").hidden);
+
+  const repeated = imageAnswer();
+  repeated.markdownHtml += repeated.markdownHtml;
+  repeated.images.push({ id: "unused", mime: "image/png", data: "aW1hZ2U=" });
+  conversationAnswer = () => pageOf([repeated]);
+  await refreshConversation();
+  let images = current().preview.querySelectorAll("img");
+  assert.equal(images.length, 2);
+  assert.equal(answerImageBlobs.length, 1);
+  assert.equal(images[0].src, images[1].src);
   assert.equal(await answerImageBlobs[0].text(), "image");
-  assert.equal(latestAnswerView.result.images, undefined, "snapshot does not retain base64 image data");
+  assert.equal(conversationView.turns[0].images, undefined, "snapshot does not retain base64");
   answerNode("toggle").click(); answerNode("toggle").click();
-  assert.equal(answerImageBlobs.length, 1, "source/preview toggles retain the image resources");
-  latestAnswer = async () => { throw new Error("refresh failed"); };
-  await refreshLatestAnswer();
-  assert.equal(answerNode("content").hidden, false, "refresh failure retains the rendered snapshot");
+  assert.equal(answerImageBlobs.length, 1);
+  conversationAnswer = () => { throw new Error("refresh failed"); };
+  await refreshConversation();
+  assert(activeAnswerImageUrls.has(images[0].src));
   assert.match(answerNode("note").textContent, /读取的快照/);
-  assert(activeAnswerImageUrls.has(imageNodes[0].src), "failed refresh preserves the displayed images");
-  latestAnswer = () => ({ turnId: "newest", status: "completed", answer: "large source", previewMessage: "已显示原文", readAt: "now" });
-  await refreshLatestAnswer();
-  assert.equal(activeAnswerImageUrls.size, 0, "successful replacement releases the previous images");
-  assert.equal(answerNode("source").textContent, "large source");
-  assert.equal(answerNode("source").hidden, false);
+  conversationAnswer = () => pageOf([{ turnId: "newest", status: "completed", answer: "large source", previewMessage: "已显示原文" }]);
+  await refreshConversation();
+  assert.equal(activeAnswerImageUrls.size, 0);
+  assert.equal(current().source.textContent, "large source");
+  assert.equal(current().source.hidden, false);
   assert.equal(answerNode("toggle").hidden, true);
-  assert.equal(answerNode("preview-note").textContent, "已显示原文");
   const afterRefresh = requests.length;
-  await advanceTime(60000); assert.equal(requests.length, afterRefresh, "no answer polling");
-  latestAnswer = () => ({ turnId: "newest", status: "inProgress", answer: null, readAt: "2026-11-03T09:00:00Z" });
-  await refreshLatestAnswer();
-  assert.equal(answerNode("content").hidden, true);
-  assert.equal(answerNode("source").hidden, true);
-  assert.equal(answerNode("toggle").hidden, true);
-  assert.match(answerNode("note").textContent, /运行中.*暂无最终回答/);
-  latestAnswer = async () => { throw new Error("history unavailable"); };
-  await refreshLatestAnswer();
-  assert.match(answerNode("note").textContent, /读取的快照/);
+  await advanceTime(60000); assert.equal(requests.length, afterRefresh, "no history polling");
+  conversationAnswer = () => pageOf([{ turnId: "running", status: "inProgress" }]);
+  await refreshConversation();
+  assert.match(current().node.textContent, /运行中/);
 
-  for (const images of [[], [{ id: "image-0", mime: "image/png", data: "!invalid!" }],
+  for (const imageData of [[], [{ id: "image-0", mime: "image/png", data: "!invalid!" }],
     [{ id: "image-0", mime: "image/svg+xml", data: "aW1hZ2U=" }]]) {
-    latestAnswer = () => ({ ...imageAnswer(), images });
-    await refreshLatestAnswer();
-    assert.equal(answerNode("content").querySelectorAll("img").length, 0);
-    assert.match(answerNode("content").textContent, /小猫.*图片预览不可用/);
+    conversationAnswer = () => pageOf([{ ...imageAnswer(), images: imageData }]);
+    await refreshConversation();
+    assert.equal(current().preview.querySelectorAll("img").length, 0);
+    assert.match(current().preview.textContent, /小猫.*图片预览不可用/);
     assert.equal(activeAnswerImageUrls.size, 0);
   }
-  latestAnswer = () => ({ ...imageAnswer(),
+  conversationAnswer = () => pageOf([{ ...imageAnswer(),
     markdownHtml: imageAnswer().markdownHtml + imageAnswer("image-1").markdownHtml,
     images: [{ id: "image-0", mime: "image/png", data: "!invalid!" }, ...imageAnswer("image-1").images],
-  });
-  await refreshLatestAnswer();
-  assert.match(answerNode("content").textContent, /小猫.*图片预览不可用/);
-  assert.equal(answerNode("content").querySelectorAll("img").length, 1, "one malformed image does not hide the remaining images");
+  }]);
+  await refreshConversation();
+  assert.match(current().preview.textContent, /小猫.*图片预览不可用/);
+  assert.equal(current().preview.querySelectorAll("img").length, 1, "one malformed image preserves the other images");
   assert.equal(activeAnswerImageUrls.size, 1);
-  latestAnswer = () => imageAnswer();
-  await refreshLatestAnswer();
-  const failedImage = answerNode("content").querySelector("img");
-  failedImage.dispatch("error");
-  assert.match(answerNode("content").textContent, /小猫.*图片预览不可用/);
-  assert.equal(answerNode("source").textContent, imageAnswer().answer);
-  assert.equal(answerNode("toggle").hidden, false, "image decode failure does not disrupt answer text/toggle");
-
-  const slow = deferred(); latestAnswer = () => slow.promise;
-  const beforeLateAnswer = answerImageBlobs.length;
-  const pending = refreshLatestAnswer(); closeLatestAnswer();
-  assert.equal(activeAnswerImageUrls.size, 0, "closing the drawer releases image resources");
-  slow.resolve({ ...imageAnswer(), answer: "must not appear" }); await pending;
-  assert.equal(answerImageBlobs.length, beforeLateAnswer, "closed drawer ignores late image responses before allocating URLs");
+  conversationAnswer = () => pageOf([imageAnswer()]);
+  await refreshConversation();
+  current().preview.querySelector("img").dispatch("error");
+  assert.match(current().preview.textContent, /小猫.*图片预览不可用/);
+  assert.equal(current().source.textContent, imageAnswer().answer);
+  const slow = deferred(); conversationAnswer = () => slow.promise;
+  const beforeLate = answerImageBlobs.length;
+  const pending = refreshConversation(); closeConversation();
+  assert.equal(activeAnswerImageUrls.size, 0);
+  slow.resolve(pageOf([imageAnswer()])); await pending;
+  assert.equal(answerImageBlobs.length, beforeLate);
   assert.equal(answerNode("drawer").open, false);
-  assert.equal(answerNode("source").textContent, "");
-  assert(!answerNode("content").textContent.includes("must not appear"));
+  assert.equal(answerNode("content").textContent, "");
+
   state.sessions = { items: [{ ...ordinary, canReadLatestAnswer: false }] }; renderSessions(state.sessions);
-  assert(!document.querySelector("#sessions-body").querySelectorAll("button").some((button) => button.textContent === "查看最近回答"));
-  latestAnswer = () => imageAnswer();
-  await openLatestAnswer(archived);
-  const otherPending = deferred(); latestAnswer = () => otherPending.promise;
-  const opening = openLatestAnswer(archived);
-  assert.equal(activeAnswerImageUrls.size, 0, "opening a session clears the preceding session's image resources immediately");
-  latestAnswer = () => ({ turnId: "other", status: "completed", answer: "new session", markdownHtml: "<p>new session</p>" });
-  await openLatestAnswer({ ...archived, bindingId: "other", nativeThreadId: "other" });
-  const beforeOldSession = answerImageBlobs.length;
-  otherPending.resolve(imageAnswer());
-  await opening;
-  assert.equal(answerImageBlobs.length, beforeOldSession, "late response from another session cannot allocate or display images");
-  assert.equal(answerNode("source").textContent, "new session");
-  assert.equal(answerNode("content").innerHTML, "<p>new session</p>");
-  latestAnswer = () => imageAnswer();
-  await refreshLatestAnswer();
+  assert(!document.querySelector("#sessions-body").querySelectorAll("button").some((button) => button.textContent === "查看对话记录"));
+  conversationAnswer = () => pageOf([imageAnswer()]);
+  await openConversation(archived);
   assert.equal(activeAnswerImageUrls.size, 1);
-  const staleRefresh = deferred(); latestAnswer = () => staleRefresh.promise;
-  const refreshing = refreshLatestAnswer();
-  latestAnswer = () => ({ ...imageAnswer(), answer: "fresh snapshot" });
-  await refreshLatestAnswer();
-  const beforeStaleRefresh = answerImageBlobs.length;
-  staleRefresh.resolve(imageAnswer()); await refreshing;
-  assert.equal(answerImageBlobs.length, beforeStaleRefresh, "older refresh cannot allocate images after a newer successful refresh");
-  assert.equal(answerNode("source").textContent, "fresh snapshot");
+  const beforeOldSession = answerImageBlobs.length;
+  const oldSession = deferred(); conversationAnswer = () => oldSession.promise;
+  const opening = openConversation(archived);
+  assert.equal(activeAnswerImageUrls.size, 0, "opening a session releases the preceding snapshot immediately");
+  conversationAnswer = () => pageOf([{ turnId: "other", status: "completed", answer: "new session" }], null, 10, "other");
+  await openConversation({ ...archived, bindingId: "other", nativeThreadId: "other" });
+  oldSession.resolve(pageOf([imageAnswer()])); await opening;
+  assert.equal(answerImageBlobs.length, beforeOldSession);
+  assert.equal(current().source.textContent, "new session");
+  conversationAnswer = () => pageOf([imageAnswer()]);
+  await openConversation(archived);
+  const staleRefresh = deferred(); conversationAnswer = () => staleRefresh.promise;
+  const refreshing = refreshConversation();
+  conversationAnswer = () => pageOf([{ ...imageAnswer(), answer: "fresh snapshot" }]);
+  await refreshConversation();
+  const beforeStale = answerImageBlobs.length;
+  staleRefresh.resolve(pageOf([imageAnswer()])); await refreshing;
+  assert.equal(answerImageBlobs.length, beforeStale);
+  assert.equal(current().source.textContent, "fresh snapshot");
+  conversationAnswer = () => pageOf([imageAnswer()], "cursor", 10, "wrong");
+  await refreshConversation();
+  assert(conversationView.blocked);
+  assert.equal(current().source.textContent, "fresh snapshot");
   expireAdminSession();
-  assert.equal(activeAnswerImageUrls.size, 0, "authentication expiry releases image resources");
+  assert.equal(activeAnswerImageUrls.size, 0);
   assert.equal(revokedAnswerImageUrls.length, answerImageBlobs.length);
   assert.equal(answerNode("drawer").open, false);
-  assert.equal(answerNode("source").textContent, "");
   assert.equal(answerNode("content").textContent, "");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

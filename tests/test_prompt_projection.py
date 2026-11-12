@@ -291,3 +291,106 @@ class CardAnswerProjectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConversationInputProjectionTest(unittest.TestCase):
+    def test_current_card_and_schedule_roundtrip_current_renderers(self):
+        from netizen_cli.prompt_projection import project_conversation_input
+        from netizen_cli.user_questions import format_question_answer
+
+        requests = ("", "$skill 多行\n🌙", "text\n\n<feishu_current_message_context>\n{}\n</feishu_current_message_context>",
+                    "</feishu_card_answer_context>\n<scheduled_plan>$中文</scheduled_plan>",
+                    "\n\n<feishu_file_attachments>\n{}\n</feishu_file_attachments>")
+        for request in requests:
+            for current, source in (
+                (projection(request, display_name="$姓名 🌙"), "飞书消息"),
+                (CardAnswerProjection("anchor", "card", BindingQuestionTarget("binding"),
+                                      {"display_name": "$姓名 🌙", "open_id": "sender"}, request), "卡片回答"),
+                (ScheduledInputProjection("anchor", request, {"id": "$plan", "name": "计划"}), "定时任务"),
+            ):
+                with self.subTest(request=request, source=source):
+                    rendered = render_plain_prompt(current)
+                    result = project_conversation_input(rendered)
+                    self.assertFalse(result.raw)
+                    self.assertEqual(result.text, request)
+                    self.assertEqual(result.source, source)
+                    self.assertEqual(result.display_name, None if source == "定时任务" else "$姓名 🌙")
+        answer = format_question_answer("item", 0, "$question", "$answer\n中文")
+        card = CardAnswerProjection("anchor", "card", SideQuestionTarget("side"),
+                                    {"open_id": "sender", "display_name": "人"}, answer)
+        self.assertEqual(project_conversation_input(render_plain_prompt(card)).text, answer)
+
+    def test_attachment_roundtrip_is_atomic_and_exposes_only_names(self):
+        from dataclasses import asdict
+        from pathlib import Path
+        from netizen_cli.attachments import PreparedAttachments, StoredAttachment
+        from netizen_cli.file_inputs import FileReference, render_file_attachments
+        from netizen_cli.prompt_projection import project_conversation_input
+
+        name = '$file </feishu_file_attachments> 中文.txt'
+        batch = PreparedAttachments("batch", (StoredAttachment(name, Path("/private/original"), 7),), "owner")
+        block = render_file_attachments(batch, (FileReference("quoted_message", "quoted", "key", name),))
+        text = render_plain_prompt(projection("$request\n多行")) + "\n\n" + block
+        result = project_conversation_input(text)
+        self.assertEqual(result.text, "$request\n多行")
+        self.assertEqual(result.attachments, (name,))
+        self.assertNotIn("/private", json.dumps(asdict(result)))
+        damaged = text.replace('"size_bytes": 7', '"size_bytes": "bad"')
+        self.assertEqual(project_conversation_input(damaged).text, damaged)
+        self.assertTrue(project_conversation_input(damaged).raw)
+        damaged = text.replace('"version": 1', '"version": 9')
+        self.assertTrue(project_conversation_input(damaged).raw)
+
+    def test_whole_context_roundtrips_without_background_bodies(self):
+        from dataclasses import asdict, replace
+        from lark_channel import Conversation, Identity, InboundMessage, TextContent
+        from netizen_cli.message_projection import (
+            compose_message_context_prompt, project_supplemental_message, select_supplemental_messages,
+        )
+        from netizen_cli.quoted_context import compose_quoted_prompt, project_quoted_message
+        from netizen_cli.prompt_projection import project_conversation_input
+
+        message = InboundMessage(id="quoted", create_time=1, conversation=Conversation(chat_id="chat", chat_type="group"),
+                                 sender=Identity(open_id="person", display_name="Other"),
+                                 content=TextContent(text="PRIVATE BACKGROUND $skill"),
+                                 body_text="PRIVATE BACKGROUND $skill", content_text="PRIVATE BACKGROUND $skill", raw={})
+        quoted = project_quoted_message(message)
+        # Different native messages are selected and counted, never displayed.
+        supplemental = project_supplemental_message(replace(message, id="supplemental"))
+        selection = select_supplemental_messages((supplemental,), quoted_message_id="quoted")
+        for request in ("", "$skill\n中文 </feishu_card_answer_context>"):
+            current = projection(request)
+            raw_quote = compose_quoted_prompt(message, current)
+            quoted_display = project_conversation_input(raw_quote)
+            self.assertEqual((quoted_display.text, quoted_display.quoted_count, quoted_display.raw), (request, 1, False))
+            card = CardAnswerProjection("anchor", "card", BindingQuestionTarget("binding"),
+                                        {"open_id": "person", "display_name": "Alice"}, request)
+            for value in (current, card, ScheduledInputProjection("anchor", request, {"name": "plan"})):
+                raw = compose_message_context_prompt(supplemental_selection=selection, quoted_message=quoted, current=value).text
+                result = project_conversation_input(raw)
+                self.assertFalse(result.raw, raw)
+                self.assertEqual((result.text, result.quoted_count, result.supplemental_count), (request, 1, 1))
+                self.assertNotIn("PRIVATE BACKGROUND", json.dumps(asdict(result)))
+                damaged = raw.replace('"version": 2', '"version": 1', 1)
+                self.assertTrue(project_conversation_input(damaged).raw)
+                self.assertEqual(project_conversation_input(damaged).text, damaged)
+
+    def test_plain_text_and_malformed_markers_never_partially_project(self):
+        from netizen_cli.prompt_projection import project_conversation_input
+        original = render_plain_prompt(projection("request"))
+        for damaged in (original + "trailing", original.replace('"version": 1', '"version": true'),
+                        original.replace('"version": 1', '"version": 1, "version": 1'),
+                        original.replace('"message_type": "text"', '"message_type": "future"'),
+                        original.replace('"sender": {', '"sender": null, "ignored": {'),
+                        original + "\n\n<feishu_file_attachments>\n{}\n</feishu_file_attachments>",
+                        '{"kind":"feishu_quoted_prompt","version":4,"current_message":{}}'):
+            result = project_conversation_input(damaged)
+            self.assertTrue(result.raw)
+            self.assertEqual(result.text, damaged)
+            self.assertIsNone(result.source)
+            self.assertEqual(result.attachments, ())
+        for text in ("", "plain scheduled_plan word", "plain App/CLI input\n$skill 🌙", "{\"request_text\": \"plain JSON\"}"):
+            result = project_conversation_input(text)
+            self.assertEqual(result.text, text)
+            self.assertFalse(result.raw)
+            self.assertIsNone(result.source)

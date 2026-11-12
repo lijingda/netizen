@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -17,8 +18,9 @@ from ..account_rate_limits import (
     AccountRateLimitsUnavailable,
 )
 from ..model_settings import ModelCatalog, ModelCatalogError, TurnModelSettings
+from ..prompt_projection import ConversationInput, project_conversation_input
 from ..thread_history import AppServerThreadHistory
-from .contracts import NativeAnswerImage, NativeLatestAnswer
+from .contracts import NativeAnswerImage, NativeLatestAnswer, NativeConversationPage, NativeConversationTurn
 from .contracts import (
     NativeThread,
     RuntimeClosed,
@@ -186,6 +188,57 @@ class NativeQueryRuntime(ForkRuntime):
                     },
                 )
                 return {"cwd": cwd, "status": "active" if local_busy else "unknown"}
+
+    async def thread_conversation(
+        self, thread_id: str, *, cursor: str | None = None, limit: int = 10,
+    ) -> NativeConversationPage:
+        """Read one summary page; full evidence is only for the newest images."""
+        if type(limit) is not int or limit not in {1, 10}:
+            raise ValueError("Conversation page limit must be 10 or 1")
+        try:
+            page = await AppServerThreadHistory(self._codex).list_turns(
+                thread_id, cursor=cursor, limit=limit, items_view="summary",
+            )
+        except InvalidRequestError as error:
+            if error.message != (
+                f"thread {thread_id} is not materialized yet; "
+                "thread/turns/list is unavailable before first user message"
+            ):
+                raise
+            return NativeConversationPage(thread_id)
+        turns = []
+        for turn in page.data:
+            status = _enum_value(turn.status)
+            terminal = status in {"completed", "failed", "interrupted"}
+            inputs = []
+            if terminal:
+                for item in turn.items:
+                    root = getattr(item, "root", item)
+                    if getattr(root, "type", None) != "userMessage":
+                        continue
+                    for part in getattr(root, "content", ()):
+                        value = getattr(part, "root", part)
+                        text = getattr(value, "text", None)
+                        kind = getattr(value, "type", None)
+                        if kind == "text" and isinstance(text, str):
+                            inputs.append(project_conversation_input(text))
+                        else:
+                            label = {"image": "图片", "localImage": "本地图片", "skill": "技能", "mention": "提及"}.get(kind, "非文本输入")
+                            inputs.append(ConversationInput(f"〔{label}；此处仅显示说明〕"))
+                    break
+            error_message = getattr(getattr(turn, "error", None), "message", None)
+            turns.append(NativeConversationTurn(
+                turn.id, status, tuple(inputs), _final_agent_response(list(turn.items)) if terminal else None,
+                error_message if status == "failed" and isinstance(error_message, str) else None,
+                getattr(turn, "started_at", None), getattr(turn, "completed_at", None),
+            ))
+        if cursor is None and turns:
+            latest = await self.latest_thread_answer(thread_id)
+            turns[0] = replace(
+                turns[0], latest=True,
+                images=latest.images if latest.turn_id == turns[0].turn_id and turns[0].status == "completed" else (),
+            )
+        return NativeConversationPage(thread_id, tuple(turns), page.next_cursor)
 
     async def latest_thread_answer(self, thread_id: str) -> NativeLatestAnswer:
         """Read only the newest complete Turn, including archived history.
