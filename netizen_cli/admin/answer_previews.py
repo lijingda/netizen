@@ -39,10 +39,7 @@ def conversation_raw_text_within_limit(page: NativeConversationPage, maximum: in
                 continue
             if len(text) > remaining:
                 return False
-            try:
-                remaining -= len(text.encode("utf-8"))
-            except UnicodeError:
-                return False
+            remaining -= len(text.encode("utf-8"))
             if remaining < 0:
                 return False
     return True
@@ -57,9 +54,7 @@ def render_conversation_page(page: NativeConversationPage, *, preview: bool = Tr
             "inputs": [asdict(part) for part in turn.inputs], "answer": turn.answer,
             "error": turn.error, "startedAt": turn.started_at, "completedAt": turn.completed_at,
         }
-        if not preview:
-            item["previewMessage"] = "排版预览暂不可用，已显示原文。"
-        elif turn.answer:
+        if preview and turn.answer:
             try:
                 if turn.latest:
                     item.update(render_answer_preview(NativeLatestAnswer(
@@ -73,7 +68,10 @@ def render_conversation_page(page: NativeConversationPage, *, preview: bool = Tr
             except PreviewUnavailable:
                 item["previewMessage"] = "回答超出排版预览限制，已显示原文。"
         turns.append(item)
-    return {"threadId": page.thread_id, "turns": turns, "nextCursor": page.next_cursor}
+    result = {"threadId": page.thread_id, "turns": turns, "nextCursor": page.next_cursor}
+    if not preview and any(turn.answer for turn in page.turns):
+        result["previewMessage"] = "排版预览暂不可用，已显示原文。"
+    return result
 
 
 def _absolute_path(value: str) -> bool:
@@ -110,7 +108,7 @@ def render_answer_preview(answer: NativeLatestAnswer) -> dict:
                 candidates[image.saved_path] = None if image.saved_path in candidates else image.data
     selected: dict[str, str | None] = {}
     pixels: dict[str, int] = {}
-    images: list[dict[str, str]] = []
+    images: list[dict] = []
     remaining = MAX_TOTAL_IMAGE_BYTES
     remaining_pixels = MAX_TOTAL_IMAGE_PIXELS
 
@@ -152,7 +150,7 @@ def render_answer_preview(answer: NativeLatestAnswer) -> dict:
         pixels[path] = width * height
         remaining_pixels -= pixels[path]
         slot = f"image-{len(images)}"
-        images.append({"id": slot, "mime": "image/png", "data": data})
+        images.append({"id": slot, "mime": "image/png", "data": data, "width": width, "height": height})
         selected[path] = slot
         return slot
 

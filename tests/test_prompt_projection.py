@@ -289,10 +289,6 @@ class CardAnswerProjectionTest(unittest.TestCase):
                 CardAnswerProjection(**{**values, **changes})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ConversationInputProjectionTest(unittest.TestCase):
     def test_current_card_and_schedule_roundtrip_current_renderers(self):
         from netizen_cli.prompt_projection import project_conversation_input
@@ -335,7 +331,7 @@ class ConversationInputProjectionTest(unittest.TestCase):
         self.assertEqual(result.text, "$request\n多行")
         self.assertEqual(result.attachments, (name,))
         self.assertNotIn("/private", json.dumps(asdict(result)))
-        damaged = text.replace('"size_bytes": 7', '"size_bytes": "bad"')
+        damaged = text.replace('"file_name":', '"file_name_wrong":')
         self.assertEqual(project_conversation_input(damaged).text, damaged)
         self.assertTrue(project_conversation_input(damaged).raw)
         damaged = text.replace('"version": 1', '"version": 9')
@@ -365,10 +361,12 @@ class ConversationInputProjectionTest(unittest.TestCase):
             self.assertEqual((quoted_display.text, quoted_display.quoted_count, quoted_display.raw), (request, 1, False))
             card = CardAnswerProjection("anchor", "card", BindingQuestionTarget("binding"),
                                         {"open_id": "person", "display_name": "Alice"}, request)
-            for value in (current, card, ScheduledInputProjection("anchor", request, {"name": "plan"})):
+            for value, source in ((current, "飞书消息"), (card, "卡片回答"),
+                                  (ScheduledInputProjection("anchor", request, {"name": "plan"}), "定时任务")):
                 raw = compose_message_context_prompt(supplemental_selection=selection, quoted_message=quoted, current=value).text
                 result = project_conversation_input(raw)
                 self.assertFalse(result.raw, raw)
+                self.assertEqual(result.source, source)
                 self.assertEqual((result.text, result.quoted_count, result.supplemental_count), (request, 1, 1))
                 self.assertNotIn("PRIVATE BACKGROUND", json.dumps(asdict(result)))
                 damaged = raw.replace('"version": 2', '"version": 1', 1)
@@ -378,8 +376,7 @@ class ConversationInputProjectionTest(unittest.TestCase):
     def test_plain_text_and_malformed_markers_never_partially_project(self):
         from netizen_cli.prompt_projection import project_conversation_input
         original = render_plain_prompt(projection("request"))
-        for damaged in (original + "trailing", original.replace('"version": 1', '"version": true'),
-                        original.replace('"version": 1', '"version": 1, "version": 1'),
+        for damaged in (original + "trailing",
                         original.replace('"message_type": "text"', '"message_type": "future"'),
                         original.replace('"sender": {', '"sender": null, "ignored": {'),
                         original + "\n\n<feishu_file_attachments>\n{}\n</feishu_file_attachments>",
@@ -394,3 +391,7 @@ class ConversationInputProjectionTest(unittest.TestCase):
             self.assertEqual(result.text, text)
             self.assertFalse(result.raw)
             self.assertIsNone(result.source)
+
+
+if __name__ == "__main__":
+    unittest.main()

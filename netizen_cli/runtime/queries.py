@@ -18,7 +18,7 @@ from ..account_rate_limits import (
     AccountRateLimitsUnavailable,
 )
 from ..model_settings import ModelCatalog, ModelCatalogError, TurnModelSettings
-from ..prompt_projection import ConversationInput, project_conversation_input
+from ..prompt_projection import ConversationInput, project_conversation_input, project_conversation_image_label
 from ..thread_history import AppServerThreadHistory, ThreadHistoryUnavailable
 from .contracts import NativeAnswerImage, NativeLatestAnswer, NativeConversationPage, NativeConversationTurn
 from .contracts import (
@@ -52,6 +52,14 @@ from .state import RUNTIME_LOGGER_NAME
 
 
 logger = logging.getLogger(RUNTIME_LOGGER_NAME)
+
+
+def _history_not_materialized(error: InvalidRequestError, thread_id: str) -> bool:
+    # Verified fixed-SDK result for a newly created, zero-input Thread.
+    return error.message == (
+        f"thread {thread_id} is not materialized yet; "
+        "thread/turns/list is unavailable before first user message"
+    )
 
 
 class NativeQueryRuntime(ForkRuntime):
@@ -191,19 +199,15 @@ class NativeQueryRuntime(ForkRuntime):
 
     async def thread_conversation(
         self, thread_id: str, *, cursor: str | None = None, limit: int = 10,
+        previous_page: NativeConversationPage | None = None,
     ) -> NativeConversationPage:
         """Read one summary page; full evidence is only for the newest images."""
-        if type(limit) is not int or limit not in {1, 10}:
-            raise ValueError("Conversation page limit must be 10 or 1")
         try:
             page = await AppServerThreadHistory(self._codex).list_turns(
                 thread_id, cursor=cursor, limit=limit, items_view="summary",
             )
         except InvalidRequestError as error:
-            if error.message != (
-                f"thread {thread_id} is not materialized yet; "
-                "thread/turns/list is unavailable before first user message"
-            ):
+            if not _history_not_materialized(error, thread_id):
                 raise
             return NativeConversationPage(thread_id)
         turns = []
@@ -215,11 +219,20 @@ class NativeQueryRuntime(ForkRuntime):
                 root = getattr(item, "root", item)
                 if getattr(root, "type", None) != "userMessage":
                     continue
-                for part in getattr(root, "content", ()):
-                    value = getattr(part, "root", part)
+                parts = [getattr(part, "root", part) for part in getattr(root, "content", ())]
+                index = 0
+                while index < len(parts):
+                    value = parts[index]
+                    index += 1
                     text = getattr(value, "text", None)
                     kind = getattr(value, "type", None)
                     if kind == "text" and isinstance(text, str):
+                        if index < len(parts) and getattr(parts[index], "type", None) in {"image", "localImage"}:
+                            image_label = project_conversation_image_label(text)
+                            if image_label is not None:
+                                inputs.append(image_label)
+                                index += 1
+                                continue
                         inputs.append(project_conversation_input(text))
                     else:
                         label = {"image": "图片", "localImage": "本地图片", "skill": "技能", "mention": "提及"}.get(kind, "非文本输入")
@@ -233,7 +246,12 @@ class NativeQueryRuntime(ForkRuntime):
             ))
         if cursor is None and turns:
             turns[0] = replace(turns[0], latest=True)
-            if turns[0].status == "completed" and "![" in (turns[0].answer or ""):
+            if previous_page is not None:
+                # One request's smaller-page retry reuses only exact image evidence.
+                if (previous_page.turns and turns[0].status == "completed"
+                        and previous_page.turns[0].turn_id == turns[0].turn_id):
+                    turns[0] = replace(turns[0], images=previous_page.turns[0].images)
+            elif turns[0].status == "completed" and "![" in (turns[0].answer or ""):
                 try:
                     latest = await self.latest_thread_answer(thread_id)
                 except (CodexError, ThreadHistoryUnavailable) as error:
@@ -261,12 +279,8 @@ class NativeQueryRuntime(ForkRuntime):
                 thread_id, limit=1, items_view="full",
             )
         except InvalidRequestError as error:
-            # Verified fixed-SDK result for a newly created, zero-input Thread.
             # Missing/deleted history and every other read error remain errors.
-            if error.message != (
-                f"thread {thread_id} is not materialized yet; "
-                "thread/turns/list is unavailable before first user message"
-            ):
+            if not _history_not_materialized(error, thread_id):
                 raise
             return NativeLatestAnswer(thread_id, None, None, None)
         if not page.data:

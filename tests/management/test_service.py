@@ -1048,7 +1048,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             await self.service.binding_conversation(binding.id, thread_id="wrong", deadline=deadline)
         read.assert_not_awaited()
         self.assertEqual(await self.service.binding_conversation(binding.id, thread_id="native", deadline=deadline), result)
-        read.assert_awaited_once_with("native", cursor=None, limit=10)
+        read.assert_awaited_once_with("native", cursor=None, limit=10, previous_page=None)
         read.return_value = replace(result, thread_id="wrong")
         with self.assertRaises(NativeThreadMissing):
             await self.service.binding_conversation(binding.id, thread_id="native", deadline=deadline)
@@ -1107,7 +1107,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, "get", side_effect=[binding, replace(binding, native_thread_id="different")]):
             with self.assertRaises(NativeThreadMissing):
                 await self.service.binding_conversation(binding.id, thread_id="native", cursor="next", limit=1, deadline=deadline)
-        self.runtime.thread_conversation_exact.assert_awaited_once_with("native", cursor="next", limit=1)
+        self.runtime.thread_conversation_exact.assert_awaited_once_with("native", cursor="next", limit=1, previous_page=None)
         await self.service.close()
         with self.assertRaises(RuntimeClosed):
             await self.service.binding_conversation(binding.id, thread_id="native", deadline=deadline)

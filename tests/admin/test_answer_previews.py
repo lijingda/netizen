@@ -57,7 +57,7 @@ class AnswerPreviewsTest(unittest.TestCase):
             f"before ![猫](<{path}>) after ![again](/missing/source-thread/%E7%8C%AB%20%E5%9B%BE.png)",
             [NativeAnswerImage(path, PNG), NativeAnswerImage("/unused.png", PNG)],
         )
-        self.assertEqual(result["images"], [{"id": "image-0", "mime": "image/png", "data": PNG}])
+        self.assertEqual(result["images"], [{"id": "image-0", "mime": "image/png", "data": PNG, "width": 1, "height": 1}])
         nodes = Images(result["markdownHtml"]).images
         self.assertEqual([node["data-answer-image"] for node in nodes], ["image-0", "image-0"])
         self.assertTrue(all("src" not in node and node["loading"] == "lazy" for node in nodes))

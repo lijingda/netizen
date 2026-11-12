@@ -1520,35 +1520,31 @@ class AdminWebApplication:
 
     async def _session_conversation(self, context: _RequestContext) -> Response:
         from openai_codex import CodexError
-        from openai_codex.errors import JsonRpcError
+        from openai_codex.errors import InvalidRequestError, JsonRpcError
         from ..thread_history import ThreadHistoryUnavailable
 
-        _require_query_keys(context.query, {"bindingId", "threadId", "cursor", "limit"})
+        _require_query_keys(context.query, {"bindingId", "threadId", "cursor"})
         binding_id = _optional_text_query(context.query, "bindingId")
         thread_id = _optional_text_query(context.query, "threadId")
         cursor = _optional_text_query(context.query, "cursor", maximum=2048)
-        if cursor is not None and (not cursor or cursor.strip() != cursor):
-            raise AdminWebError(400, "invalid_cursor", "分页游标无效，请从最新重新读取。")
-        limit_value = _optional_one(context.query, "limit")
-        if limit_value not in {None, "10", "1"}:
-            raise AdminWebError(400, "invalid_query", "每页只能读取 10 轮或 1 轮。")
-        limit = int(limit_value or "10")
         if not binding_id or not thread_id:
             raise AdminWebError(400, "invalid_query", "需要准确的会话标识。")
         deadline = asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS
         try:
             # At most two reads of this cursor: a large ten-turn page falls back
             # to one turn without discarding any native cursor interval.
-            for page_limit in ((10, 1) if limit == 10 else (1,)):
+            previous_page = None
+            for page_limit in (10, 1):
                 page = await self._management.binding_conversation(
                     binding_id, thread_id=thread_id, cursor=cursor, limit=page_limit, deadline=deadline,
+                    previous_page=previous_page,
                 )
                 read_at = datetime.now().astimezone().isoformat()
 
                 def encode(*, preview: bool = True):
                     payload = {
                         "requestId": context.request.request_id, "readAt": read_at,
-                        "limit": page_limit, **render_conversation_page(page, preview=preview),
+                        **render_conversation_page(page, preview=preview),
                     }
                     if page_limit == 1:
                         payload["pageMessage"] = "本页内容较大，已改为逐轮加载"
@@ -1565,7 +1561,7 @@ class AdminWebApplication:
                         "turnId": turn.turn_id, "status": turn.status,
                         "startedAt": turn.started_at, "completedAt": turn.completed_at,
                         "inputs": [], "answer": None, "error": None,
-                        "oversized": True, "previewMessage": "该轮内容过大，Admin 不显示",
+                        "oversized": True,
                     } for turn in page.turns]
                     return _json_response(200, payload, ensure_ascii=True)
 
@@ -1582,8 +1578,9 @@ class AdminWebApplication:
                 self._authenticate(context)
                 if response is not None:
                     return response
+                previous_page = page
         except JsonRpcError as error:
-            if cursor is not None and "cursor" in error.message.lower():
+            if isinstance(error, InvalidRequestError) and "cursor" in error.message.lower():
                 raise AdminWebError(400, "invalid_cursor", "分页游标已失效，请从最新重新读取。") from error
             raise AdminWebError(503, "conversation_unavailable", "会话历史暂时不可读取，可能已删除或不可用。") from error
         except (TimeoutError, BlockingIOResultUnknown) as error:

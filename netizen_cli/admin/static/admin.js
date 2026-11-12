@@ -2614,7 +2614,7 @@ function releaseConversationImages(view) {
   view.imageUrls.clear();
 }
 
-function installConversationImages(view, container, turnId, images) {
+function installConversationImages(view, container, turnId, images, imageUrls) {
   const slots = new Map();
   for (const node of container.querySelectorAll("[data-answer-image]")) {
     const id = node.dataset.answerImage;
@@ -2633,11 +2633,13 @@ function installConversationImages(view, container, turnId, images) {
       for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index);
       const url = URL.createObjectURL(new Blob([bytes], { type: image.mime }));
       const key = `${turnId}:${id}`;
-      view.imageUrls.set(key, url);
+      imageUrls.set(key, url);
       for (const node of nodes) {
         node.addEventListener("error", () => {
           if (conversationView === view && view.imageUrls.get(key) === url) unavailable(node);
         }, { once: true });
+        node.width = image.width;
+        node.height = image.height;
         node.src = url;
       }
     } catch (_error) {
@@ -2688,10 +2690,25 @@ function renderConversation(view) {
   answerNode("earlier").disabled = view.pending || view.blocked;
 }
 
-function conversationTurn(view, result) {
+function captureConversationPosition(view, toLatest = false) {
+  const scroll = answerNode("scroll");
+  const request = conversationRequest;
+  const bottom = toLatest || scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= 1;
+  const top = scroll.getBoundingClientRect().top;
+  const anchor = view.turns.find((turn) => turn.node.getBoundingClientRect().bottom > top)?.node;
+  const offset = anchor ? anchor.getBoundingClientRect().top - top : 0;
+  return () => {
+    if (conversationView !== view || conversationRequest !== request) return;
+    if (bottom) scroll.scrollTop = scroll.scrollHeight;
+    else if (anchor) scroll.scrollTop += anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top - offset;
+  };
+}
+
+function conversationTurn(view, result, imageUrls) {
   const node = document.createElement("article");
   node.className = "conversation-turn";
   node.dataset.turnId = result.turnId;
+  node.tabIndex = -1;
   const status = { completed: "已完成", interrupted: "已停止", failed: "失败", inProgress: "运行中" }[result.status] || "状态未知";
   const metadata = document.createElement("p");
   metadata.className = "conversation-turn-meta";
@@ -2730,11 +2747,11 @@ function conversationTurn(view, result) {
   preview.className = "markdown-preview";
   const source = document.createElement("pre");
   source.className = "session-answer-source";
-  source.textContent = result.answer ?? (result.oversized ? "该轮内容过大，Admin 不显示" : "暂无最终回答。");
+  source.textContent = result.answer || (result.oversized ? "该轮内容过大，Admin 不显示" : "暂无最终回答。");
   const hasPreview = typeof result.markdownHtml === "string";
   window.NetizenContentPreview.renderMarkdown(preview, hasPreview ? result.markdownHtml : null);
-  installConversationImages(view, preview, result.turnId, result.images);
-  answer.append(preview, source);
+  installConversationImages(view, preview, result.turnId, result.images, imageUrls);
+  if (result.status !== "inProgress") answer.append(preview, source);
   if (result.error || result.previewMessage) {
     const note = document.createElement("p");
     note.className = "conversation-turn-meta";
@@ -2760,46 +2777,40 @@ async function loadConversation(earlier) {
   answerNode("note").textContent = earlier ? "正在加载更早的对话…" : "正在读取对话记录…";
   answerNode("note").classList.toggle("error", false);
   try {
-    const query = new URLSearchParams({ bindingId: view.session.bindingId, threadId: view.session.nativeThreadId,
-      limit: "10" });
+    const query = new URLSearchParams({ bindingId: view.session.bindingId, threadId: view.session.nativeThreadId });
     if (earlier) query.set("cursor", view.cursor);
     const result = await api(`/api/v1/sessions/conversation?${query}`);
     if (!isCurrent()) return;
-    if (result.threadId !== view.session.nativeThreadId) {
-      const error = new Error("会话身份已变化，请刷新后重新读取。");
-      error.code = "stale_or_conflict";
+    const position = captureConversationPosition(view, !earlier);
+    const existing = new Set(earlier ? view.turns.map((turn) => turn.node.dataset.turnId) : []);
+    const staged = { imageUrls: new Map() };
+    const added = [];
+    try {
+      for (const turn of [...result.turns].reverse()) {
+        if (existing.has(turn.turnId)) continue;
+        added.push(conversationTurn(view, turn, staged.imageUrls));
+        existing.add(turn.turnId);
+      }
+    } catch (error) {
+      releaseConversationImages(staged);
       throw error;
     }
-    const scroll = answerNode("scroll");
-    const top = scroll.getBoundingClientRect().top;
-    const anchor = earlier ? view.turns.find((turn) => turn.node.getBoundingClientRect().bottom > top)?.node : null;
-    const offset = anchor ? anchor.getBoundingClientRect().top - top : 0;
-    if (!earlier) {
-      releaseConversationImages(view);
-      view.turns = [];
-      answerNode("content").replaceChildren();
-    }
-    const existing = new Set(view.turns.map((turn) => turn.node.dataset.turnId));
-    const added = [...result.turns].reverse().filter((turn) => !existing.has(turn.turnId))
-      .map((turn) => conversationTurn(view, turn));
     if (earlier) {
       answerNode("content").prepend(...added.map((turn) => turn.node));
       view.turns = [...added, ...view.turns];
     } else {
-      answerNode("content").append(...added.map((turn) => turn.node));
+      answerNode("content").replaceChildren(...added.map((turn) => turn.node));
+      releaseConversationImages(view);
       view.turns = added;
     }
+    for (const [key, url] of staged.imageUrls) view.imageUrls.set(key, url);
     view.cursor = result.nextCursor;
     view.blocked = false;
     renderConversation(view);
     answerNode("note").textContent = view.turns.length ? `已加载 ${view.turns.length} 轮` : "会话尚无执行轮次。";
-    answerNode("preview-note").textContent = result.pageMessage || "";
+    answerNode("preview-note").textContent = [result.pageMessage, result.previewMessage].filter(Boolean).join(" · ");
     answerNode("metadata").textContent = `读取于 ${sessionDateLabel(result.readAt)}`;
-    const position = () => {
-      if (!isCurrent()) return;
-      if (anchor) scroll.scrollTop += anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top - offset;
-      else if (!earlier) scroll.scrollTop = scroll.scrollHeight;
-    };
+    if (earlier && answerNode("earlier").hidden) added[0]?.node.focus({ preventScroll: true });
     position();
     requestAnimationFrame(position);
   } catch (error) {
@@ -2811,6 +2822,7 @@ async function loadConversation(earlier) {
     if (isCurrent()) {
       view.pending = false;
       renderConversation(view);
+      if (earlier && !answerNode("earlier").hidden) answerNode("earlier").focus({ preventScroll: true });
       answerNode("refresh").disabled = false;
       answerNode("drawer").setAttribute("aria-busy", "false");
     }
@@ -5732,8 +5744,11 @@ answerNode("refresh").addEventListener("click", refreshConversation);
 answerNode("earlier").addEventListener("click", loadEarlierConversation);
 answerNode("toggle").addEventListener("click", () => {
   if (!conversationView) return;
+  const position = captureConversationPosition(conversationView);
   conversationView.preview = !conversationView.preview;
   renderConversation(conversationView);
+  position();
+  requestAnimationFrame(position);
 });
 for (const control of document.querySelectorAll("[data-session-layout]")) {
   control.addEventListener("change", () => applySessionLayout(control.dataset.sessionLayout));

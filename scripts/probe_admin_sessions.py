@@ -233,6 +233,8 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     except JsonRpcError as error:
                         invalid = {"class": type(error).__name__, "code": error.code, "message": error.message}
                     assert invalid is not None
+                    assert invalid["class"] == "InvalidRequestError" and invalid["code"] == -32600
+                    assert "cursor" in invalid["message"].lower()
                     after_error = await runtime.thread_conversation(thread.id)
                     assert after_error.turns[0].turn_id == interrupted.id
                     await codex.thread_archive(thread.id)

@@ -2814,10 +2814,12 @@ summary 不含 steer 追加输入。无轮、无回答、失败 error.message、
 归档只读，不 resume/unarchive；不交互、不缓存、不预取、不写 SQLite。刷新丢弃更早页，
 重新读最新页。exact 身份前后校验、十秒请求期限和共享在途原生精读限额不变，超时
 不提前释放 worker。非法 cursor 明确拒绝并提示从最新重新读取，不回退完整 Thread。
-每页 Markdown 渲染和 JSON 编码只占用文件预览 2 worker / 4 capacity 执行器的一次任务。
+每次页读取的 Markdown 渲染和 JSON 编码合用文件预览 2 worker / 4 capacity 执行器的一次任务；
+十轮页回退到单轮时，同一请求最多提交两次任务。
 执行器繁忙时，本页输入、回答及展示元数据文本不超过 1 MiB，可在事件循环直接编码
-无 Markdown HTML/图片的原文页，提示“排版预览暂不可用，已显示原文。”；超出才返回
-503。执行器关闭仍为 503，超时或 worker 结果未知（期限耗尽）仍为 504。
+无 Markdown HTML/图片的原文页，有回答时在页面级提示一次“排版预览暂不可用，已显示原文。”；超出才返回
+503。执行器关闭返回 503；排版执行器超时或 worker 结果未知（期限耗尽）改为返回 504，
+此前最近回答在这些情况下降级为原文。
 各轮独立有界排版（256 KiB / 20k token），超限保留完整原文；不执行 HTML，本地链接
 保持静态、安全外链可打开。一页非图片部分（输入、回答、Markdown HTML、元数据）
 超过 16 MiB 时，从同一 cursor 用 limit=1 读取一轮，
@@ -2833,6 +2835,7 @@ Netizen 外层结构。成功时只展示来源、发送者 display_name、reque
 
 第一页仅当 summary 最新轮 completed 且回答包含 `![` 时额外读取最新一个 full Turn，
 沿用最近回答的图片收集；若它与 summary 最新 Turn ID 不同则不附图，不循环重读。
+十轮页回退为单轮时复用当次已取得的图片，仅在 Turn ID 相同时附图，不重复读取 full。
 该次额外读取的 CodexError/ThreadHistoryUnavailable 仅降级为无图并记录不含正文的
 warning，不使已成功的 summary 页失败；外层请求期限继续约束读取。仅最新 completed Turn 正文图片节点明确引用、且唯一匹配
 该轮 completed imageGeneration.savedPath 时使用原生 result PNG，路径仅作词法匹配，

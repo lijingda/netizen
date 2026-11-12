@@ -1,8 +1,8 @@
 let latestAnswer = () => ({ threadId: "native", turnId: "turn-current", status: "completed",
   answer: "<script>inert</script>\nfinal", markdownHtml: "<p>&lt;script&gt;inert&lt;/script&gt;\nfinal</p>",
   startedAt: null, completedAt: null, readAt: "2026-11-03T08:00:00+00:00" });
-const pageOf = (turns, nextCursor = null, limit = 10, threadId = "native") => ({
-  threadId, turns, nextCursor, limit, readAt: "2026-11-12T08:00:00Z",
+const pageOf = (turns, nextCursor = null, threadId = "native") => ({
+  threadId, turns, nextCursor, readAt: "2026-11-12T08:00:00Z",
 });
 let conversationAnswer = () => pageOf([latestAnswer()], "older");
 let labelsAnswer = async () => ({ items: [] });
@@ -47,20 +47,40 @@ Element.prototype.prepend = function (...nodes) {
 };
 function requestAnimationFrame(callback) { queueMicrotask(callback); }
 const scroll = document.querySelector("#session-answer-scroll");
-scroll.scrollTop = 0;
-Object.defineProperty(scroll, "scrollHeight", { get() { return document.querySelector("#session-answer-content").children.length * 100; } });
+scroll.clientHeight = 60;
+const turnHeight = (node) => node.querySelector(".markdown-preview")?.hidden === false ? 140 : 100;
+Object.defineProperty(scroll, "scrollHeight", { get() {
+  return document.querySelector("#session-answer-content").children.reduce((total, node) => total + turnHeight(node), 0);
+} });
+let scrollTop = 0;
+Object.defineProperty(scroll, "scrollTop", {
+  get() { return Math.min(scrollTop, Math.max(0, scroll.scrollHeight - scroll.clientHeight)); },
+  set(value) { scrollTop = Math.max(0, Math.min(value, scroll.scrollHeight - scroll.clientHeight)); },
+});
+const atBottom = () => scroll.scrollTop === scroll.scrollHeight - scroll.clientHeight;
 const normalRect = Element.prototype.getBoundingClientRect;
 Element.prototype.getBoundingClientRect = function () {
   if (this.className === "conversation-turn") {
-    const top = this.parentElement.children.indexOf(this) * 100 - scroll.scrollTop + 20;
-    return { top, bottom: top + 100 };
+    const siblings = this.parentElement.children;
+    const top = siblings.slice(0, siblings.indexOf(this)).reduce((sum, node) => sum + turnHeight(node), 0) - scroll.scrollTop + 20;
+    return { top, bottom: top + turnHeight(this) };
   }
   return normalRect.call(this);
 };
 const imageAnswer = (id = "image-0") => ({
   turnId: "image-turn", status: "completed", answer: "![小猫](/tmp/cat.png)", readAt: "now",
   markdownHtml: `<p><img data-answer-image="${id}" alt="小猫" loading="lazy" decoding="async"></p>`,
-  images: [{ id, mime: "image/png", data: "aW1hZ2U=" }],
+  images: [{ id, mime: "image/png", data: "aW1hZ2U=", width: 400, height: 200 }],
+});
+Object.defineProperty(Element.prototype, "src", {
+  get() { return this.imageSrc; },
+  set(value) {
+    if (this.dataset.answerImage) {
+      assert.equal(this.width, 400, "native image width reserves space before src is installed");
+      assert.equal(this.height, 200, "native image height reserves space before src is installed");
+    }
+    this.imageSrc = value;
+  },
 });
 const priorFetch = fetch;
 fetch = async (path, options = {}) => {
@@ -165,15 +185,15 @@ fetch = async (path, options = {}) => {
   assert.equal(current().source.hidden, true);
   assert.equal(current().preview.querySelector("script"), null);
   assert(!current().node.textContent.includes("开始"));
-  assert.equal(scroll.scrollTop, scroll.scrollHeight, "opening scrolls to latest");
+  assert(atBottom(), "opening scrolls to latest");
   const afterAnswer = requests.length;
   answerNode("toggle").click();
   assert.equal(current().preview.hidden, true);
   assert.equal(current().source.hidden, false);
+  assert(atBottom(), "switching to source preserves bottom position after reflow");
   answerNode("toggle").click();
+  assert(atBottom(), "switching to preview preserves bottom position after reflow");
   assert.equal(requests.length, afterAnswer, "toggle is local");
-  scroll.dispatch("scroll"); await flush();
-  assert.equal(requests.length, afterAnswer, "scroll never loads a page");
 
   // Click only; disable concurrent loads and preserve the first visible Turn.
   scroll.scrollTop = 25;
@@ -186,14 +206,22 @@ fetch = async (path, options = {}) => {
   answerNode("earlier").click(); await flush();
   assert.equal(requests.length, loadingCount);
   assert.equal(requests.at(-1).query.get("cursor"), "older");
-  assert.equal(requests.at(-1).query.get("limit"), "10");
+  assert(!requests.at(-1).query.has("limit"));
   older.resolve(pageOf([{ turnId: "older-2", status: "failed", error: "failed input", inputs: [{ text: "request", source: "飞书消息" }] },
-    { turnId: "older-1", status: "interrupted" }], "oldest"));
+    { turnId: "older-1", status: "interrupted", answer: "earlier answer", markdownHtml: "<p>earlier answer</p>" }], "oldest"));
   await flush();
   assert.deepEqual(conversationView.turns.map((turn) => turn.node.dataset.turnId), ["older-1", "older-2", "turn-current"]);
   assert.equal(anchor.getBoundingClientRect().top, beforeTop, "prepend preserves the visible anchor");
   assert(answerNode("content").textContent.includes("request"));
   assert(answerNode("content").textContent.includes("failed input"));
+  assert.equal(document.activeElement, answerNode("earlier"), "visible earlier button retains focus");
+  scroll.scrollTop = 150;
+  const middle = conversationView.turns[1].node;
+  const middleTop = middle.getBoundingClientRect().top;
+  answerNode("toggle").click(); await flush();
+  assert.equal(middle.getBoundingClientRect().top, middleTop, "source reflow preserves the visible turn offset");
+  answerNode("toggle").click(); await flush();
+  assert.equal(middle.getBoundingClientRect().top, middleTop, "preview reflow preserves the visible turn offset");
   conversationAnswer = () => { throw new Error("earlier failed"); };
   await loadEarlierConversation();
   assert.equal(conversationView.turns.length, 3);
@@ -209,36 +237,57 @@ fetch = async (path, options = {}) => {
   assert.equal(conversationView.turns.length, 1);
   assert.equal(conversationView.cursor, "reset");
   assert.equal(requests.at(-1).query.has("cursor"), false);
-  assert.equal(requests.at(-1).query.get("limit"), "10");
-  assert.equal(scroll.scrollTop, scroll.scrollHeight);
-  conversationAnswer = () => ({ ...pageOf([{ turnId: "one-large", status: "completed", oversized: true }], "one-next", 1),
-    pageMessage: "本页内容较大，已改为逐轮加载" });
+  assert(!requests.at(-1).query.has("limit"));
+  assert(atBottom());
+  conversationAnswer = () => ({ ...pageOf([{ turnId: "one-large", status: "completed", oversized: true }], "one-next"),
+    pageMessage: "PAGE FALLBACK" });
   await loadEarlierConversation();
-  assert.match(answerNode("preview-note").textContent, /逐轮加载/);
-  assert.match(answerNode("content").textContent, /该轮内容过大/);
-  conversationAnswer = () => pageOf([{ turnId: "earliest", status: "completed", answer: "old" }], null, 10);
+  assert.equal(answerNode("preview-note").textContent, "PAGE FALLBACK");
+  assert(conversationView.turns[0].source.textContent);
+  assert.equal(conversationView.turns[0].node.querySelector(".conversation-answer").children.length, 3, "oversized explanation is not repeated as a preview note");
+  conversationAnswer = () => pageOf([{ turnId: "earliest", status: "completed", answer: "old" }]);
   await loadEarlierConversation();
-  assert.equal(requests.at(-1).query.get("limit"), "10", "a large page does not change the next request size");
+  assert(!requests.at(-1).query.has("limit"));
   assert.equal(answerNode("preview-note").textContent, "", "large-page warning only describes its response");
   assert(answerNode("earlier").hidden);
+  assert.equal(document.activeElement, conversationView.turns[0].node, "exhausted cursor moves focus to the earliest inserted turn");
+  assert.equal(document.activeElement.tabIndex, -1);
 
   const repeated = imageAnswer();
   repeated.markdownHtml += repeated.markdownHtml;
   repeated.images.push({ id: "unused", mime: "image/png", data: "aW1hZ2U=" });
-  conversationAnswer = () => pageOf([repeated]);
+  conversationAnswer = () => pageOf([repeated], "image-cursor");
   await refreshConversation();
   let images = current().preview.querySelectorAll("img");
   assert.equal(images.length, 2);
   assert.equal(answerImageBlobs.length, 1);
   assert.equal(images[0].src, images[1].src);
   assert.equal(await answerImageBlobs[0].text(), "image");
-  assert.equal(conversationView.turns[0].images, undefined, "snapshot does not retain base64");
+  assert(atBottom(), "reserved image dimensions allow the initial bottom positioning");
   answerNode("toggle").click(); answerNode("toggle").click();
   assert.equal(answerImageBlobs.length, 1);
   conversationAnswer = () => { throw new Error("refresh failed"); };
   await refreshConversation();
   assert(activeAnswerImageUrls.has(images[0].src));
   assert.match(answerNode("note").textContent, /读取的快照/);
+  const snapshot = conversationView.turns;
+  const snapshotNodes = [...answerNode("content").children];
+  const snapshotUrls = [...activeAnswerImageUrls];
+  const renderMarkdown = window.NetizenContentPreview.renderMarkdown;
+  window.NetizenContentPreview.renderMarkdown = (container, html) => {
+    if (html === "RENDER FAILURE") throw new Error("fixture rendering failure");
+    return renderMarkdown(container, html);
+  };
+  conversationAnswer = () => pageOf([
+    { turnId: "render-failure", status: "completed", answer: "new", markdownHtml: "RENDER FAILURE" },
+    { ...imageAnswer(), turnId: "staged-image" },
+  ], "uncommitted-cursor");
+  await refreshConversation();
+  window.NetizenContentPreview.renderMarkdown = renderMarkdown;
+  assert.equal(conversationView.turns, snapshot, "rendering failure preserves the prior snapshot");
+  assert.deepEqual(answerNode("content").children, snapshotNodes);
+  assert.equal(conversationView.cursor, "image-cursor", "rendering failure keeps the old cursor usable");
+  assert.deepEqual([...activeAnswerImageUrls], snapshotUrls, "only the uncommitted image URLs are released");
   conversationAnswer = () => pageOf([{ turnId: "newest", status: "completed", answer: "large source", previewMessage: "已显示原文" }]);
   await refreshConversation();
   assert.equal(activeAnswerImageUrls.size, 0);
@@ -251,10 +300,35 @@ fetch = async (path, options = {}) => {
   await refreshConversation();
   assert.match(current().node.textContent, /运行中/);
   assert.match(current().node.textContent, /正在处理的输入/);
+  assert.equal(current().node.querySelector(".conversation-answer").children.length, 1, "running answer area contains only its status");
+  assert.equal(current().node.querySelector(".conversation-answer").querySelector("pre"), null);
   conversationAnswer = () => pageOf([{ turnId: "running", status: "inProgress" }]);
   await refreshConversation();
   assert.match(current().node.textContent, /运行中/);
   assert.equal(current().node.querySelector(".conversation-input"), null, "missing native input is never invented");
+
+  const input = { text: "$authored <tag>\n🌙", source: "SOURCE", display_name: "Alice", attachments: ["one.txt", "二.png"],
+    quoted_count: 2, supplemental_count: 3 };
+  conversationAnswer = () => pageOf([{ turnId: "metadata", status: "completed", answer: "",
+    inputs: [input, { ...input, raw: true }] }]);
+  await refreshConversation();
+  const inputBlocks = current().node.querySelectorAll(".conversation-input");
+  assert.equal(inputBlocks.length, 2);
+  for (const block of inputBlocks) {
+    assert.equal(block.querySelector("pre").textContent, input.text);
+    const label = block.querySelector(".conversation-input-label").textContent;
+    for (const value of [input.source, input.display_name, "2", "3"]) assert(label.includes(value));
+    for (const name of input.attachments) assert(block.children.at(-1).textContent.includes(name));
+  }
+  assert(inputBlocks[1].querySelector(".conversation-input-label").textContent.length >
+    inputBlocks[0].querySelector(".conversation-input-label").textContent.length, "raw input has an additional visible annotation");
+  const noAnswer = current().source.textContent;
+  assert(noAnswer, "empty answer has the no-answer presentation");
+  conversationAnswer = () => ({ ...pageOf([{ turnId: "no-answer", status: "completed", answer: null }]), previewMessage: "RAW PREVIEW" });
+  await refreshConversation();
+  assert.equal(current().source.textContent, noAnswer);
+  assert.equal(answerNode("preview-note").textContent, "RAW PREVIEW");
+  assert(!current().node.textContent.includes("RAW PREVIEW"), "page preview notice is not repeated within turns");
 
   for (const imageData of [[], [{ id: "image-0", mime: "image/png", data: "!invalid!" }],
     [{ id: "image-0", mime: "image/svg+xml", data: "aW1hZ2U=" }]]) {
@@ -295,7 +369,7 @@ fetch = async (path, options = {}) => {
   const oldSession = deferred(); conversationAnswer = () => oldSession.promise;
   const opening = openConversation(archived);
   assert.equal(activeAnswerImageUrls.size, 0, "opening a session releases the preceding snapshot immediately");
-  conversationAnswer = () => pageOf([{ turnId: "other", status: "completed", answer: "new session" }], null, 10, "other");
+  conversationAnswer = () => pageOf([{ turnId: "other", status: "completed", answer: "new session" }], null, "other");
   await openConversation({ ...archived, bindingId: "other", nativeThreadId: "other" });
   oldSession.resolve(pageOf([imageAnswer()])); await opening;
   assert.equal(answerImageBlobs.length, beforeOldSession);
@@ -309,10 +383,6 @@ fetch = async (path, options = {}) => {
   const beforeStale = answerImageBlobs.length;
   staleRefresh.resolve(pageOf([imageAnswer()])); await refreshing;
   assert.equal(answerImageBlobs.length, beforeStale);
-  assert.equal(current().source.textContent, "fresh snapshot");
-  conversationAnswer = () => pageOf([imageAnswer()], "cursor", 10, "wrong");
-  await refreshConversation();
-  assert(conversationView.blocked);
   assert.equal(current().source.textContent, "fresh snapshot");
   expireAdminSession();
   assert.equal(activeAnswerImageUrls.size, 0);
