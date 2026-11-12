@@ -3344,31 +3344,48 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.state, ThreadSubscriptionState.RELEASED)
 
     async def test_unsubscribe_unknown_survives_deferred_preconditions(self) -> None:
+        # Script both deferrals while the first unsubscribe is held, then hold
+        # each retry in its precondition read. Assertions observe the state the
+        # previous deferral left, independent of the 50 ms retry window.
         self.subscription.errors.append(
             ThreadUnsubscribeStateUnknown("response lost")
         )
+        self.subscription.gate = asyncio.Event()
         binding = await self._complete_turn(self.binding())
-        await self._wait_for_calls(1)
+        await asyncio.wait_for(self.subscription.entered.wait(), timeout=0.5)
 
         reads_before = len(self.codex.read_calls)
-        self.codex.read_statuses.append("notLoaded")
-        await self._wait_for_reads(reads_before + 1)
-        await asyncio.sleep(0)
-        snapshot = self.runtime.thread_subscription_snapshot(binding.id)
-        assert snapshot is not None
-        self.assertEqual(snapshot.state, ThreadSubscriptionState.RELEASE_UNKNOWN)
-        self.assertGreater(snapshot.release_in_seconds or 0, 0)
-
         inspections_before = len(self.inspector.calls)
+        self.codex.read_gate = asyncio.Event()
+        self.codex.read_statuses.append("notLoaded")
         self.inspector.results.append(True)
-        await self._wait_for_inspections(inspections_before + 1)
-        await asyncio.sleep(0)
-        snapshot = self.runtime.thread_subscription_snapshot(binding.id)
-        assert snapshot is not None
-        self.assertEqual(snapshot.state, ThreadSubscriptionState.RELEASE_UNKNOWN)
-        self.assertGreater(snapshot.release_in_seconds or 0, 0)
+        self.subscription.gate.set()
 
-        await self._wait_for_calls(2, timeout=1)
+        async def held_retry(reads: int, inspections: int) -> None:
+            await self._wait_for_reads(reads)
+            snapshot = self.runtime.thread_subscription_snapshot(binding.id)
+            assert snapshot is not None
+            self.assertEqual(snapshot.state, ThreadSubscriptionState.RELEASE_UNKNOWN)
+            self.assertEqual(len(self.inspector.calls), inspections)
+            self.assertEqual(len(self.subscription.calls), 1)
+
+        def release_read(*, hold_next: bool) -> None:
+            held = self.codex.read_gate
+            assert held is not None
+            self.codex.read_gate = asyncio.Event() if hold_next else None
+            held.set()
+
+        # Retry after the unknown result; it will read notLoaded and defer.
+        await held_retry(reads_before + 1, inspections_before)
+        release_read(hold_next=True)
+        # Retry after notLoaded; it will find a running background terminal.
+        await held_retry(reads_before + 2, inspections_before)
+        release_read(hold_next=True)
+        # Retry after the terminal deferral; it may now release.
+        await held_retry(reads_before + 3, inspections_before + 1)
+        release_read(hold_next=False)
+
+        await self._wait_for_calls(2)
         snapshot = self.runtime.thread_subscription_snapshot(binding.id)
         assert snapshot is not None
         self.assertEqual(snapshot.state, ThreadSubscriptionState.RELEASED)
