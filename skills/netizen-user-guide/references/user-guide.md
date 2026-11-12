@@ -18,7 +18,7 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 | 查看状态、账号额度，压缩或停止任务 | [状态与控制](status-and-control.md) |
 | 创建、修改、暂停或立即运行定时计划 | [定时任务](scheduled-tasks.md) |
 | 创建持久分支、临时讨论或持续推进目标 | [持久分支、Side 与 Goal](fork-side-goal.md) |
-| 搜索和分组会话、查看最近回答、管理输入附件、管理员登录和实例维护 | [Admin Web](admin.md) |
+| 搜索和分组会话、查看对话记录、管理输入附件、管理员登录和实例维护 | [Admin Web](admin.md) |
 | 使用 Skills、登录 MCP 或比较 Codex App/CLI | [原生能力与宿主差异](native-capabilities.md) |
 | 排查使用问题 | [常见问题](faq.md) |
 

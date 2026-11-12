@@ -40,7 +40,7 @@ from .auth import (
 )
 from .errors import AdminWebError
 from .file_previews import PreviewUnavailable, render_markdown
-from .answer_previews import render_answer_preview
+from .answer_previews import conversation_raw_text_within_limit, render_conversation_page
 from .credentials import AdminCredentials
 from .feishu import AuthExpired, FeishuClient, FeishuError
 from .login import AdminLogin
@@ -184,6 +184,8 @@ _SESSION_COOKIE = "netizen_admin_session"
 _PREAUTH_COOKIE = "netizen_admin_preauth"
 _JSON_TYPE = "application/json"
 _QUERY_DEADLINE_SECONDS = 5.0
+MAX_CONVERSATION_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_CONVERSATION_RAW_TEXT_BYTES = 1024 * 1024
 _SESSION_QUERY_DEADLINE_SECONDS = 10.0
 _CHAT_LABEL_QUERY_DEADLINE_SECONDS = 8.0
 _MUTATION_DEADLINE_SECONDS = 15.0
@@ -683,8 +685,8 @@ class AdminWebApplication:
             return await self._defaults(context)
         if route == ("GET", "/api/v1/sessions"):
             return await self._sessions(context)
-        if route == ("GET", "/api/v1/sessions/latest-answer"):
-            return await self._session_latest_answer(context)
+        if route == ("GET", "/api/v1/sessions/conversation"):
+            return await self._session_conversation(context)
         if route == ("GET", "/api/v1/sessions/options"):
             _require_query_keys(context.query, set())
             if self._management.defaults is None:
@@ -1516,47 +1518,76 @@ class AdminWebApplication:
             "items": [_chat_label_json(label) for label in labels.values()],
         })
 
-    async def _session_latest_answer(self, context: _RequestContext) -> Response:
+    async def _session_conversation(self, context: _RequestContext) -> Response:
         from openai_codex import CodexError
+        from openai_codex.errors import InvalidRequestError, JsonRpcError
         from ..thread_history import ThreadHistoryUnavailable
 
-        _require_query_keys(context.query, {"bindingId", "threadId"})
+        _require_query_keys(context.query, {"bindingId", "threadId", "cursor"})
         binding_id = _optional_text_query(context.query, "bindingId")
         thread_id = _optional_text_query(context.query, "threadId")
+        cursor = _optional_text_query(context.query, "cursor", maximum=2048)
         if not binding_id or not thread_id:
             raise AdminWebError(400, "invalid_query", "需要准确的会话标识。")
         deadline = asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS
         try:
-            answer = await self._management.latest_binding_answer(
-                binding_id, thread_id=thread_id,
-                deadline=deadline,
-            )
-        except TimeoutError as error:
-            raise AdminWebError(504, "answer_timeout", "最近一轮读取超时，请手动重试。") from error
-        except (CodexError, ThreadHistoryUnavailable, OSError) as error:
-            raise AdminWebError(503, "answer_unavailable", "会话历史暂时不可读取，可能已删除或不可用。") from error
-        payload = {
-            "requestId": context.request.request_id,
-            "threadId": answer.thread_id, "turnId": answer.turn_id,
-            "status": answer.status, "answer": answer.answer,
-            "startedAt": answer.started_at, "completedAt": answer.completed_at,
-            "readAt": datetime.now().astimezone().isoformat(),
-        }
-        response = None
-        if answer.answer:
-            try:
-                # Decode, render and encode the larger image-bearing response
-                # in the existing bounded executor, off the service event loop.
-                response = await self._management.file_reads.submit(
-                    lambda: _json_response(200, {**payload, **render_answer_preview(answer)}, ensure_ascii=True),
-                    deadline=deadline,
+            # At most two reads of this cursor: a large ten-turn page falls back
+            # to one turn without discarding any native cursor interval.
+            previous_page = None
+            for page_limit in (10, 1):
+                page = await self._management.binding_conversation(
+                    binding_id, thread_id=thread_id, cursor=cursor, limit=page_limit, deadline=deadline,
+                    previous_page=previous_page,
                 )
-            except PreviewUnavailable:
-                payload["previewMessage"] = "回答超出排版预览限制，已显示原文。"
-            except (TimeoutError, BlockingIOResultUnknown, BlockingIOExecutorClosed, BlockingIOExecutorSaturated):
-                payload["previewMessage"] = "排版预览暂不可用，已显示原文。"
-        self._authenticate(context)
-        return response if response is not None else _json_response(200, payload)
+                read_at = datetime.now().astimezone().isoformat()
+
+                def encode(*, preview: bool = True):
+                    payload = {
+                        "requestId": context.request.request_id, "readAt": read_at,
+                        **render_conversation_page(page, preview=preview),
+                    }
+                    if page_limit == 1:
+                        payload["pageMessage"] = "本页内容较大，已改为逐轮加载"
+                    response = _json_response(200, payload, ensure_ascii=True)
+                    # Validated PNG Base64 is ASCII and needs no JSON escaping.
+                    # Image bytes retain their separate existing preview budgets.
+                    image_bytes = sum(len(image["data"]) for turn in payload["turns"] for image in turn.get("images", []))
+                    if len(response.body) - image_bytes <= MAX_CONVERSATION_RESPONSE_BYTES:
+                        return response
+                    if page_limit == 10:
+                        return None
+                    # Keep the complete native identity/cursor, not a skipped Turn.
+                    payload["turns"] = [{
+                        "turnId": turn.turn_id, "status": turn.status,
+                        "startedAt": turn.started_at, "completedAt": turn.completed_at,
+                        "inputs": [], "answer": None, "error": None,
+                        "oversized": True,
+                    } for turn in page.turns]
+                    return _json_response(200, payload, ensure_ascii=True)
+
+                try:
+                    response = await self._management.file_reads.submit(encode, deadline=deadline)
+                except BlockingIOExecutorSaturated:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise TimeoutError("conversation preview deadline elapsed") from None
+                    if not conversation_raw_text_within_limit(page, MAX_CONVERSATION_RAW_TEXT_BYTES):
+                        raise
+                    # Saturation started no worker. A bounded text-only fallback
+                    # is safe here; expired/unknown workers never use this path.
+                    response = encode(preview=False)
+                self._authenticate(context)
+                if response is not None:
+                    return response
+                previous_page = page
+        except JsonRpcError as error:
+            if isinstance(error, InvalidRequestError) and "cursor" in error.message.lower():
+                raise AdminWebError(400, "invalid_cursor", "分页游标已失效，请从最新重新读取。") from error
+            raise AdminWebError(503, "conversation_unavailable", "会话历史暂时不可读取，可能已删除或不可用。") from error
+        except (TimeoutError, BlockingIOResultUnknown) as error:
+            raise AdminWebError(504, "conversation_timeout", "对话记录读取超时，请手动重试。") from error
+        except (CodexError, ThreadHistoryUnavailable, OSError, BlockingIOExecutorClosed, BlockingIOExecutorSaturated) as error:
+            raise AdminWebError(503, "conversation_unavailable", "会话历史暂时不可读取，请稍后刷新。") from error
+        raise AssertionError("conversation page did not produce a response")
 
     async def _sessions(self, context: _RequestContext) -> Response:
         allowed = {

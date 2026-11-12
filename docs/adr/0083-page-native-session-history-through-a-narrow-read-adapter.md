@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-10-17
 amends: 0014, 0081
+amended_by: 0096
 related: 0077
 ---
 
@@ -11,6 +12,9 @@ related: 0077
 每次查询成本持续增长。固定 Python SDK 0.163.0 的公开 facade 尚未提供历史分页，
 但同版本 App Server 与安装包 generated models 已支持 `thread/turns/list` 和
 `thread/items/list`。采用这两个固定方法的薄适配，不建立本地历史或第二客户端。
+
+> [ADR 0096](0096-read-admin-conversations-through-summary-turn-pages.md) 将下文 Admin 最近回答扩展为 Summary Turn 分页对话记录，
+> 保留最新轮图片规则与本适配的迁移条件。下文保留原始决定。
 
 ## 决定
 

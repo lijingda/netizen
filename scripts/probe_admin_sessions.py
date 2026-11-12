@@ -1,4 +1,4 @@
-"""Disposable native acceptance for Admin search and latest-answer reads.
+"""Disposable native acceptance for Admin search and read-only conversation pages.
 
 Uses only temporary Codex state, the bundled App Server, and a local scripted
 Responses provider. It never reads registered/production sessions or uses a real
@@ -15,6 +15,7 @@ from pathlib import Path
 import sys
 import time
 import tempfile
+import threading
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -129,6 +130,136 @@ async def native_case(root: Path, mode: str) -> dict:
             store.close()
 
 
+async def conversation_case(root: Path, mode: str) -> dict:
+    """Cover the production summary projection against both native stores."""
+    replies = [(200, response_events(f"page-{index}", *message_events(
+        f"answer-{index}", f"ANSWER-{index}", "final_answer",
+    ))) for index in range(10)]
+    replies += [
+        (200, response_events("steer-first", *message_events("steer-initial", "STEER-FIRST-ANSWER", "final_answer"))),
+        (200, response_events("steer-final", *message_events("steer-answer", "STEER-FINAL-ANSWER", "final_answer"))),
+        (400, b'{"error":{"message":"CONVERSATION-FAILURE","type":"invalid_request_error"}}'),
+        (200, response_events("interrupted", *message_events("never-final", "INTERRUPTED-ANSWER", "final_answer"))),
+    ]
+    loop = asyncio.get_running_loop()
+
+    class ArrivalGate(threading.Event):
+        def __init__(self):
+            super().__init__()
+            self.arrived = asyncio.Event()
+
+        def wait(self, timeout=None):
+            loop.call_soon_threadsafe(self.arrived.set)
+            return super().wait(timeout)
+
+    with mock_provider(replies) as provider:
+        cwd, env = isolated_config(root, provider)
+        store = BindingStore(root / "channel.sqlite3")
+        gate, interrupt_gate = ArrivalGate(), ArrivalGate()
+        provider.response_gates[11] = gate
+        provider.response_gates[14] = interrupt_gate
+        try:
+            async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
+                runtime = runtime_for(codex, store)
+                try:
+                    if mode == "paginated":
+                        thread = await codex.thread_start(cwd=str(cwd), approval_mode=ApprovalMode.deny_all, sandbox=Sandbox.read_only)
+                    else:
+                        started = await codex._client.request("thread/start", {
+                            "cwd": str(cwd), "approvalPolicy": "never", "sandbox": "read-only", "historyMode": "legacy",
+                        }, response_model=ThreadStartResponse)
+                        thread = AsyncThread(codex, started.thread.id)
+                    turn_ids = []
+                    for index in range(10):
+                        turn = await thread.turn(f"FIRST-{index}")
+                        result = await turn.run()
+                        assert result.status.value == "completed"
+                        turn_ids.append(turn.id)
+                    turn = await thread.turn("STEER-FIRST")
+                    turn_ids.append(turn.id)
+                    await asyncio.wait_for(gate.arrived.wait(), 10)
+                    running_summary = await AppServerThreadHistory(codex).list_turns(thread.id, limit=10, items_view="summary")
+                    first_user = next(item.root for item in running_summary.data[0].items if item.root.type == "userMessage")
+                    assert [part.root.text for part in first_user.content if part.root.type == "text"] == ["STEER-FIRST"]
+                    running_page = await runtime.thread_conversation(thread.id)
+                    running_turn = running_page.turns[0]
+                    assert running_turn.turn_id == turn.id and running_turn.status == "inProgress"
+                    assert [part.text for part in running_turn.inputs] == ["STEER-FIRST"]
+                    assert running_turn.answer is None and not running_turn.images
+                    assert len(provider.requests) == 11, "running history read started model work"
+                    await turn.steer("STEER-SECOND")
+                    gate.set()
+                    result = await turn.run()
+                    assert result.status.value == "completed", result
+                    full = await AppServerThreadHistory(codex).list_turns(thread.id, limit=1, items_view="full")
+                    assert len([item for item in full.data[0].items if item.root.type == "userMessage"]) == 2
+                    failed = await thread.turn("FAIL-FIRST")
+                    turn_ids.append(failed.id)
+                    try:
+                        await failed.run()
+                    except RuntimeError as error:
+                        assert "CONVERSATION-FAILURE" in str(error), error
+                    else:
+                        raise AssertionError("failed native Turn did not raise its provider error")
+                    interrupted = await thread.turn("INTERRUPT-FIRST")
+                    turn_ids.append(interrupted.id)
+                    await asyncio.wait_for(interrupt_gate.arrived.wait(), 10)
+                    await interrupted.interrupt()
+                    interrupted_result = await interrupted.run()
+                    interrupt_gate.set()
+                    assert interrupted_result.status.value == "interrupted", interrupted_result
+                    requests_before = len(provider.requests)
+                    all_turns, pages, cursors = [], [], set()
+                    cursor = None
+                    for _ in range(4):
+                        page = await runtime.thread_conversation(thread.id, cursor=cursor)
+                        all_turns.extend(page.turns)
+                        pages.append({"count": len(page.turns), "has_next": page.next_cursor is not None})
+                        cursor = page.next_cursor
+                        if cursor is None:
+                            break
+                        assert cursor not in cursors
+                        cursors.add(cursor)
+                    else:
+                        raise AssertionError("summary cursor chain did not terminate")
+                    assert [turn.turn_id for turn in all_turns] == list(reversed(turn_ids))
+                    assert [page["count"] for page in pages] == [10, 3]
+                    assert all_turns[0].status == "interrupted" and all_turns[0].answer is None
+                    assert all_turns[1].status == "failed" and all_turns[1].error
+                    assert [part.text for part in all_turns[2].inputs] == ["STEER-FIRST"]
+                    invalid = None
+                    try:
+                        await runtime.thread_conversation(thread.id, cursor="invalid-history-cursor")
+                    except JsonRpcError as error:
+                        invalid = {"class": type(error).__name__, "code": error.code, "message": error.message}
+                    assert invalid is not None
+                    assert invalid["class"] == "InvalidRequestError" and invalid["code"] == -32600
+                    assert "cursor" in invalid["message"].lower()
+                    after_error = await runtime.thread_conversation(thread.id)
+                    assert after_error.turns[0].turn_id == interrupted.id
+                    await codex.thread_archive(thread.id)
+                    archived = await runtime.thread_conversation(thread.id)
+                    assert archived == after_error
+                    archived_catalog = await runtime.thread_catalog_page(archived=True)
+                    assert thread.id in {item.thread_id for item in archived_catalog.threads}
+                    assert len(provider.requests) == requests_before, "history reads must not run model work"
+                    assert not provider.replies
+                    assert all(error == "model response connection closed early" for error in provider.errors), provider.errors
+                    return {"mode": mode, "passed": True, "pages": pages, "turn_count": len(all_turns),
+                            "complete_newest_to_oldest_chain": True, "steer_first_input_only": True,
+                            "running_summary_first_input": True, "running_projected_first_input": True,
+                            "failed_error": all_turns[1].error, "interrupted_without_final": True,
+                            "invalid_cursor": invalid, "connection_reused_after_error": True,
+                            "archived_read_without_resume": True, "model_requests_during_reads": 0,
+                            "fixture_model_requests": requests_before, "real_model_used": False}
+                finally:
+                    gate.set()
+                    interrupt_gate.set()
+                    await runtime.cancel_tasks()
+        finally:
+            store.close()
+
+
 async def sparse_search_case(root: Path) -> dict:
     """Exercise the real native SQL/catalog path plus this instance's Binding join."""
     from netizen_cli.domain import FeishuScope, ScopeKind
@@ -203,6 +334,10 @@ async def run() -> dict:
             root.mkdir()
             async with asyncio.timeout(90):
                 evidence["cases"].append(await native_case(root, mode))
+            conversation_root = Path(temporary) / f"conversation-{mode}"
+            conversation_root.mkdir()
+            async with asyncio.timeout(90):
+                evidence.setdefault("conversations", []).append(await conversation_case(conversation_root, mode))
         sparse_root = Path(temporary) / "sparse"
         sparse_root.mkdir()
         async with asyncio.timeout(180):

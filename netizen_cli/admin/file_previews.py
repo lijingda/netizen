@@ -160,6 +160,7 @@ def render_markdown(
     image_url: Callable[[str], str] | None = None,
     answer_image: Callable[[str], str | None] | None = None,
     max_images: int = MAX_MARKDOWN_IMAGES,
+    inert_image_reason: str = "此处不加载图片",
 ) -> str:
     """Render safe HTML; image_url maps a root-relative file to its Admin endpoint.
 
@@ -224,7 +225,7 @@ def render_markdown(
                     token.attrSet("decoding", "async")
                     images += 1
             elif path is None or image_url is None:
-                _replace_image(token, "此处不加载图片")
+                _replace_image(token, inert_image_reason)
             elif target is None or target[0] != "local":
                 _replace_image(token, "仅预览当前根目录内的相对路径图片")
             elif images >= max_images:

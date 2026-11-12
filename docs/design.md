@@ -13,7 +13,7 @@ Netizen 把飞书单聊、群聊和话题接成 Codex 的消息 Channel。仓库
 `AsyncCodex`。Channel SDK 负责飞书消息与卡片；Netizen 负责 Scope/Binding 路由、项目
 登记、展示和定时交接；官方 `openai-codex` SDK 管理原生 App Server/CLI 上的 Thread、
 Turn、历史、工具与权限。Admin Web 是同一应用边界上的管理入口，不能提交即时 Prompt
-或浏览完整历史。环境更新协调器与实例重启的一次性进程是限定例外，见[架构](#架构)与
+或浏览完整工具历史；提供 ADR 0096 的按轮分页只读对话记录。环境更新协调器与实例重启的一次性进程是限定例外，见[架构](#架构)与
 [系统维护 API](#系统维护-api)。
 同账号可部署多个 root，各自管理自己的机器人和 Channel 状态，同时共享原生 Codex
 用户状态；不因此增加业务 instance ID、权限隔离或跨实例服务依赖。
@@ -1114,7 +1114,7 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | `ThreadSubscriptionControl.unsubscribe`（[0028](adr/0028-release-idle-persistent-thread-subscriptions.md)） | 固定 `thread/unsubscribe`，供普通 Binding/Side 复用 | 能力门禁，固定 request/response。 | 公开等价 unsubscribe，独立于 Side boundary。 |
 | `ThreadDeleteControl`（[0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)、[0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)） | 固定 `thread/delete` | 生产构造须过独立 shape/synthetic，另需 disposable live；区分可信 RPC 拒绝与传输/响应未知，仅原生成功响应后删 Binding，无目录对账或自动重试。 | 公开等价 Delete facade。 |
 | `AppServerAccountRateLimits.read`（[0077](adr/0077-read-account-rate-limits-on-demand.md)） | 只读固定 `account/rateLimits/read` | 能力门禁；不消费通知、不维护账号状态。 | 公开等价额度读取 facade。 |
-| `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 分页 | shape/synthetic 与原生 paginated/legacy 探针；不替代运行终态或 Files 证据读取，不以全历史读取兜底失败。 | 公开等价历史分页 facade。 |
+| `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页 | shape/synthetic 与原生 paginated/legacy 探针；不替代运行终态或 Files 证据读取，不以全历史读取兜底失败。 | 公开等价历史分页 facade。 |
 | `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
 
 Activity observer 与 Goal Tap 只交付 sanitized Activity、[0071](adr/0071-answer-native-questions-through-binding-input.md)
@@ -2803,24 +2803,49 @@ Project 行仅增加“查看会话”，以同一标准默认查询构造后覆
 视图，切换布局或折叠不发请求、不改变刷新时间。异步补名原位更新位置单元格及聊天组头，
 不重建组头按钮、不改变焦点或折叠选择；行操作仍依稳定 Binding/Side 身份定位。
 
-物化持久普通会话提供“最近回答”，Lazy/Side 不显示。点击时校验准确 Binding/Thread，
-读取最新一个完整 Turn（ADR 0083），归档也只读，不 resume/unarchive。运行中只显示
-该轮状态；终态使用既有最终答案 phase/旧格式兼容口径，无答案不回溯；无轮、无回答、
-读取失败和身份变化分别表达。只有原生实际存在的时间才展示，不造轮次计数。
-结果是一次快照，支持手动刷新；不逐行预读、不轮询、不展示推理/工具输出/输出文件。
-读取共用在途原生精读限额，超时不提前释放尚未结束的 worker。正文默认使用与文件预览
-共用的有界 Markdown 渲染与排版，支持表格，并可切回完整原文；解析共用文件预览的
-2 worker / 4 capacity 执行器，超限、繁忙或超时只降级原文。回答无文件根上下文，
-本地链接保持静态，安全外链可打开；不执行原始 HTML，不新增历史存储。
-completed Turn 的正文图片节点可按绝对路径匹配该轮唯一 completed imageGeneration
-的 savedPath，使用其 result PNG 字节（ADR 0083）；路径仅作词法匹配，允许继承历史，
-不读取文件、飞书资源或远程 URL。未引用、歧义、缺失及其他格式的图片不加载。
-同一执行器完成字节校验、渲染与响应编码：最多十六个图片节点，单图 10 MiB、累计解码
-20 MiB、累计 3200 万像素（含重复引用）、单边 16384 像素，含图片的响应限 32 MiB；
-超限保留文字。字节和像素预算分别限制传输和解码成本；Project 文件预览预算保持独立。
-这些预算限制新增 HTTP/浏览器成本，不限制既有原生 Full Turn 读取大小。前端按需创建
-Blob URL，重复引用复用字节；成功替换、关闭或认证过期时释放，快照不保留 Base64，
-刷新失败保留旧内容。迟到响应不创建图片资源或恢复正文；详细读取信息折叠展示。
+物化持久普通会话提供“查看对话记录”，Lazy/Side 不显示（[ADR 0096](adr/0096-read-admin-conversations-through-summary-turn-pages.md)）。
+点击时校验准确 Binding/Thread，以 summary 视图读取十轮；最新轮位于下方，打开定位到
+最新。只有点击顶部“加载更早”才读取下一原生 cursor，不自动翻页。每轮展示第一条
+用户输入、终态最终回答、状态与原生实际存在的开始/完成时间；运行中轮也展示 summary
+实际返回的第一条用户输入，不显示未终态回答或 commentary；原生未返回输入时仅显示运行中。
+summary 不含 steer 追加输入。无轮、无回答、失败 error.message、读取失败和身份变化
+分别表达，不展示推理、commentary、工具参数/输出或输出文件。
+
+归档只读，不 resume/unarchive；不交互、不缓存、不预取、不写 SQLite。刷新丢弃更早页，
+重新读最新页。exact 身份前后校验、十秒请求期限和共享在途原生精读限额不变，超时
+不提前释放 worker。非法 cursor 明确拒绝并提示从最新重新读取，不回退完整 Thread。
+每次页读取的 Markdown 渲染和 JSON 编码合用文件预览 2 worker / 4 capacity 执行器的一次任务；
+十轮页回退到单轮时，同一请求最多提交两次任务。
+执行器繁忙时，本页输入、回答及展示元数据文本不超过 1 MiB，可在事件循环直接编码
+无 Markdown HTML/图片的原文页，有回答时在页面级提示一次“排版预览暂不可用，已显示原文。”；超出才返回
+503。执行器关闭返回 503；排版执行器超时或 worker 结果未知（期限耗尽）改为返回 504，
+此前最近回答在这些情况下降级为原文。
+各轮独立有界排版（256 KiB / 20k token），超限保留完整原文；不执行 HTML，本地链接
+保持静态、安全外链可打开。一页非图片部分（输入、回答、Markdown HTML、元数据）
+超过 16 MiB 时，从同一 cursor 用 limit=1 读取一轮，
+提示“本页内容较大，已改为逐轮加载”。回退仅针对本次请求，下次“加载更早”重新尝试
+十轮。单轮非图片部分仍过大时保留身份、状态、时间、原生 cursor，
+正文标注“该轮内容过大，Admin 不显示”；不丢整轮或截断正文后静默越过游标。
+
+用户输入只整体识别当前版本普通消息、卡片回答、定时 trailer、引用与 @ 补充上下文的
+Netizen 外层结构。成功时只展示来源、发送者 display_name、request_text、附件文件名和
+引用/补充上下文条数；不显示其他人的上下文正文。带标记但整体解析失败时返回完整原文
+并标记 raw；无标记纯文本保持原样，不算失败。非文本输入只展示占位说明，不传字节。
+实例管理员能读取任意会话每轮的输入正文，包括单聊，符合受信管理员定位，手册须告知。
+
+第一页仅当 summary 最新轮 completed 且回答包含 `![` 时额外读取最新一个 full Turn，
+沿用最近回答的图片收集；若它与 summary 最新 Turn ID 不同则不附图，不循环重读。
+十轮页回退为单轮时复用当次已取得的图片，仅在 Turn ID 相同时附图，不重复读取 full。
+该次额外读取的 CodexError/ThreadHistoryUnavailable 仅降级为无图并记录不含正文的
+warning，不使已成功的 summary 页失败；外层请求期限继续约束读取。仅最新 completed Turn 正文图片节点明确引用、且唯一匹配
+该轮 completed imageGeneration.savedPath 时使用原生 result PNG，路径仅作词法匹配，
+不读取本地文件/远程 URL。更早轮次仅显示“更早轮次不加载图片”的文字说明，不读 full。
+既有图片预算不变：最多十六个图片节点，单图 10 MiB、累计解码 20 MiB、累计 3200 万像素
+（含重复引用）、单边 16384 像素，图片预览编码限 32 MiB；图片字节不计入上述 16 MiB，
+不因图片过大隐藏文字。
+超限或缺失图片保留说明。这些预算不限制原生 full 读取大小。前端 Blob URL 只用于实际
+展示图片，成功替换、关闭或认证过期时释放，快照不保留 Base64；迟到响应不创建资源。
+顶部插入更早页以首个可见轮为锚点保持位置，渲染后校正一次，不使用定时循环。
 
 ### 运行态投影与轮询
 

@@ -1149,6 +1149,13 @@ mock provider，不读取真实用户历史、不使用真实模型账号、不�
 .venv/bin/python scripts/probe_input_attachments.py --output /tmp/netizen-input-attachments.json
 ```
 
+`probe_admin_sessions.py` 同时覆盖 ADR 0096 对话记录：paginated/legacy 的 summary
+十轮分页完整游标链、运行中首条输入、steer 仅第一条输入、failed/interrupted 过滤、归档只读，以及非法
+cursor 后连接继续可用。它只访问隔离原生状态，不代表真实模型、飞书或手机界面验收。
+2026-11-12，固定 Codex SDK `0.167.0` 的上述两种 history mode 均通过 13 轮的 10+3
+完整分页、运行中与 steer 首条输入、失败与中断、归档和非法游标验收；读取期间没有模型请求。
+原有搜索用例同时通过 105 个原生候选、两页目录与单一所属 Binding 的稀疏求交。
+
 2026-11-03，Codex SDK `0.163.0` / Channel SDK `1.4.0`：隔离原生 history/附件读取、SDK
 归一化、本地 Chromium 和代码/打包门禁通过；mock provider 与合成数据不覆盖真实模型、
 桌面/手机附件 + @ 入口、问题卡提醒、飞书 WebView 或 macOS 平台效果，未部署/发布。
