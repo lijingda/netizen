@@ -2662,7 +2662,7 @@ async function openConversation(session) {
   if (state.authExpired || !session.canReadLatestAnswer) return;
   releaseConversationImages(conversationView);
   conversationView = { session, returnFocus: document.activeElement, preview: true,
-    turns: [], cursor: null, limit: 10, blocked: false, pending: false, imageUrls: new Map() };
+    turns: [], cursor: null, blocked: false, pending: false, imageUrls: new Map() };
   answerNode("title").textContent = "对话记录";
   answerNode("identity").textContent = `${session.nativeTitle || "未命名会话"} · ${session.shortId}`;
   answerNode("content").replaceChildren();
@@ -2761,7 +2761,7 @@ async function loadConversation(earlier) {
   answerNode("note").classList.toggle("error", false);
   try {
     const query = new URLSearchParams({ bindingId: view.session.bindingId, threadId: view.session.nativeThreadId,
-      limit: String(earlier ? view.limit : 10) });
+      limit: "10" });
     if (earlier) query.set("cursor", view.cursor);
     const result = await api(`/api/v1/sessions/conversation?${query}`);
     if (!isCurrent()) return;
@@ -2790,7 +2790,6 @@ async function loadConversation(earlier) {
       view.turns = added;
     }
     view.cursor = result.nextCursor;
-    view.limit = result.limit;
     view.blocked = false;
     renderConversation(view);
     answerNode("note").textContent = view.turns.length ? `已加载 ${view.turns.length} 轮` : "会话尚无执行轮次。";

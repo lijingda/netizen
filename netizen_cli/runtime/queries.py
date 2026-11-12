@@ -19,7 +19,7 @@ from ..account_rate_limits import (
 )
 from ..model_settings import ModelCatalog, ModelCatalogError, TurnModelSettings
 from ..prompt_projection import ConversationInput, project_conversation_input
-from ..thread_history import AppServerThreadHistory
+from ..thread_history import AppServerThreadHistory, ThreadHistoryUnavailable
 from .contracts import NativeAnswerImage, NativeLatestAnswer, NativeConversationPage, NativeConversationTurn
 from .contracts import (
     NativeThread,
@@ -211,21 +211,20 @@ class NativeQueryRuntime(ForkRuntime):
             status = _enum_value(turn.status)
             terminal = status in {"completed", "failed", "interrupted"}
             inputs = []
-            if terminal:
-                for item in turn.items:
-                    root = getattr(item, "root", item)
-                    if getattr(root, "type", None) != "userMessage":
-                        continue
-                    for part in getattr(root, "content", ()):
-                        value = getattr(part, "root", part)
-                        text = getattr(value, "text", None)
-                        kind = getattr(value, "type", None)
-                        if kind == "text" and isinstance(text, str):
-                            inputs.append(project_conversation_input(text))
-                        else:
-                            label = {"image": "图片", "localImage": "本地图片", "skill": "技能", "mention": "提及"}.get(kind, "非文本输入")
-                            inputs.append(ConversationInput(f"〔{label}；此处仅显示说明〕"))
-                    break
+            for item in turn.items:
+                root = getattr(item, "root", item)
+                if getattr(root, "type", None) != "userMessage":
+                    continue
+                for part in getattr(root, "content", ()):
+                    value = getattr(part, "root", part)
+                    text = getattr(value, "text", None)
+                    kind = getattr(value, "type", None)
+                    if kind == "text" and isinstance(text, str):
+                        inputs.append(project_conversation_input(text))
+                    else:
+                        label = {"image": "图片", "localImage": "本地图片", "skill": "技能", "mention": "提及"}.get(kind, "非文本输入")
+                        inputs.append(ConversationInput(f"〔{label}；此处仅显示说明〕"))
+                break
             error_message = getattr(getattr(turn, "error", None), "message", None)
             turns.append(NativeConversationTurn(
                 turn.id, status, tuple(inputs), _final_agent_response(list(turn.items)) if terminal else None,
@@ -233,11 +232,21 @@ class NativeQueryRuntime(ForkRuntime):
                 getattr(turn, "started_at", None), getattr(turn, "completed_at", None),
             ))
         if cursor is None and turns:
-            latest = await self.latest_thread_answer(thread_id)
-            turns[0] = replace(
-                turns[0], latest=True,
-                images=latest.images if latest.turn_id == turns[0].turn_id and turns[0].status == "completed" else (),
-            )
+            turns[0] = replace(turns[0], latest=True)
+            if turns[0].status == "completed" and "![" in (turns[0].answer or ""):
+                try:
+                    latest = await self.latest_thread_answer(thread_id)
+                except (CodexError, ThreadHistoryUnavailable) as error:
+                    # Optional image evidence must not hide a successful summary.
+                    # Log identity/type only: provider errors can contain input.
+                    logger.warning(
+                        "latest conversation images unavailable",
+                        extra={"thread_id": thread_id, "turn_id": turns[0].turn_id,
+                               "error_type": type(error).__name__},
+                    )
+                else:
+                    if latest.turn_id == turns[0].turn_id:
+                        turns[0] = replace(turns[0], images=latest.images)
         return NativeConversationPage(thread_id, tuple(turns), page.next_cursor)
 
     async def latest_thread_answer(self, thread_id: str) -> NativeLatestAnswer:

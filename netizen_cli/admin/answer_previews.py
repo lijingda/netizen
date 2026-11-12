@@ -23,7 +23,32 @@ MAX_IMAGE_DIMENSION = 16_384
 MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 
 
-def render_conversation_page(page: NativeConversationPage) -> dict:
+def conversation_raw_text_within_limit(page: NativeConversationPage, maximum: int) -> bool:
+    """Bound a saturated executor's raw fallback without encoding large strings.
+
+    Count input display metadata and failure text too, so they cannot bypass the
+    input/answer text budget. A character precheck bounds each UTF-8 allocation.
+    """
+    remaining = maximum
+    for turn in page.turns:
+        texts = [turn.answer, turn.error]
+        for part in turn.inputs:
+            texts.extend((part.text, part.source, part.display_name, *part.attachments))
+        for text in texts:
+            if text is None:
+                continue
+            if len(text) > remaining:
+                return False
+            try:
+                remaining -= len(text.encode("utf-8"))
+            except UnicodeError:
+                return False
+            if remaining < 0:
+                return False
+    return True
+
+
+def render_conversation_page(page: NativeConversationPage, *, preview: bool = True) -> dict:
     """Render each answer independently in the caller's single bounded job."""
     turns = []
     for turn in page.turns:
@@ -32,7 +57,9 @@ def render_conversation_page(page: NativeConversationPage) -> dict:
             "inputs": [asdict(part) for part in turn.inputs], "answer": turn.answer,
             "error": turn.error, "startedAt": turn.started_at, "completedAt": turn.completed_at,
         }
-        if turn.answer:
+        if not preview:
+            item["previewMessage"] = "排版预览暂不可用，已显示原文。"
+        elif turn.answer:
             try:
                 if turn.latest:
                     item.update(render_answer_preview(NativeLatestAnswer(

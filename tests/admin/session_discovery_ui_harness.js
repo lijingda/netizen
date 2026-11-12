@@ -214,12 +214,12 @@ fetch = async (path, options = {}) => {
   conversationAnswer = () => ({ ...pageOf([{ turnId: "one-large", status: "completed", oversized: true }], "one-next", 1),
     pageMessage: "本页内容较大，已改为逐轮加载" });
   await loadEarlierConversation();
-  assert.equal(conversationView.limit, 1);
   assert.match(answerNode("preview-note").textContent, /逐轮加载/);
   assert.match(answerNode("content").textContent, /该轮内容过大/);
-  conversationAnswer = () => pageOf([{ turnId: "earliest", status: "completed", answer: "old" }], null, 1);
+  conversationAnswer = () => pageOf([{ turnId: "earliest", status: "completed", answer: "old" }], null, 10);
   await loadEarlierConversation();
-  assert.equal(requests.at(-1).query.get("limit"), "1");
+  assert.equal(requests.at(-1).query.get("limit"), "10", "a large page does not change the next request size");
+  assert.equal(answerNode("preview-note").textContent, "", "large-page warning only describes its response");
   assert(answerNode("earlier").hidden);
 
   const repeated = imageAnswer();
@@ -247,9 +247,14 @@ fetch = async (path, options = {}) => {
   assert.equal(answerNode("toggle").hidden, true);
   const afterRefresh = requests.length;
   await advanceTime(60000); assert.equal(requests.length, afterRefresh, "no history polling");
+  conversationAnswer = () => pageOf([{ turnId: "running", status: "inProgress", inputs: [{ text: "正在处理的输入" }] }]);
+  await refreshConversation();
+  assert.match(current().node.textContent, /运行中/);
+  assert.match(current().node.textContent, /正在处理的输入/);
   conversationAnswer = () => pageOf([{ turnId: "running", status: "inProgress" }]);
   await refreshConversation();
   assert.match(current().node.textContent, /运行中/);
+  assert.equal(current().node.querySelector(".conversation-input"), null, "missing native input is never invented");
 
   for (const imageData of [[], [{ id: "image-0", mime: "image/png", data: "!invalid!" }],
     [{ id: "image-0", mime: "image/svg+xml", data: "aW1hZ2U=" }]]) {

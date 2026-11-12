@@ -178,6 +178,15 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     turn = await thread.turn("STEER-FIRST")
                     turn_ids.append(turn.id)
                     await asyncio.wait_for(gate.arrived.wait(), 10)
+                    running_summary = await AppServerThreadHistory(codex).list_turns(thread.id, limit=10, items_view="summary")
+                    first_user = next(item.root for item in running_summary.data[0].items if item.root.type == "userMessage")
+                    assert [part.root.text for part in first_user.content if part.root.type == "text"] == ["STEER-FIRST"]
+                    running_page = await runtime.thread_conversation(thread.id)
+                    running_turn = running_page.turns[0]
+                    assert running_turn.turn_id == turn.id and running_turn.status == "inProgress"
+                    assert [part.text for part in running_turn.inputs] == ["STEER-FIRST"]
+                    assert running_turn.answer is None and not running_turn.images
+                    assert len(provider.requests) == 11, "running history read started model work"
                     await turn.steer("STEER-SECOND")
                     gate.set()
                     result = await turn.run()
@@ -236,6 +245,7 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     assert all(error == "model response connection closed early" for error in provider.errors), provider.errors
                     return {"mode": mode, "passed": True, "pages": pages, "turn_count": len(all_turns),
                             "complete_newest_to_oldest_chain": True, "steer_first_input_only": True,
+                            "running_summary_first_input": True, "running_projected_first_input": True,
                             "failed_error": all_turns[1].error, "interrupted_without_final": True,
                             "invalid_cursor": invalid, "connection_reused_after_error": True,
                             "archived_read_without_resume": True, "model_requests_during_reads": 0,

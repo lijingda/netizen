@@ -2067,9 +2067,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         main_thread = threading.get_ident()
         workers = []
 
-        def render(value):
+        def render(value, **kwargs):
             workers.append(threading.get_ident())
-            return render_conversation_page(value)
+            return render_conversation_page(value, **kwargs)
 
         target = "/api/v1/sessions/conversation?bindingId=binding&threadId=native"
         with patch.object(self.management, "binding_conversation", AsyncMock(return_value=NativeConversationPage("native", (NativeConversationTurn(
@@ -2236,15 +2236,109 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("images", result["turns"][1])
         self.assertIsNone(result["turns"][2]["answer"])
 
+    async def test_conversation_image_bytes_do_not_hide_text_or_force_single_turn(self):
+        from netizen_cli.runtime.contracts import NativeAnswerImage, NativeConversationPage, NativeConversationTurn
+        from netizen_cli.management.blocking_io import BoundedBlockingIOExecutor
+
+        self.runner.open_admission()
+        self.management.file_reads = BoundedBlockingIOExecutor(max_workers=2, capacity=4)
+        self.addAsyncCleanup(self.management.file_reads.aclose)
+        session = await self.login()
+        data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOesAAAAASUVORK5CYII="
+        page = NativeConversationPage("native", (NativeConversationTurn("turn", "completed",
+            answer="text ![image](/image.png)", latest=True, images=(NativeAnswerImage("/image.png", data),)),), "next")
+        target = "/api/v1/sessions/conversation?bindingId=binding&threadId=native"
+        size = lambda payload: len(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii"))
+        with patch.object(self.management, "binding_conversation", AsyncMock(return_value=page), create=True) as read:
+            status, _, first = await self.json_get(target, session)
+            self.assertEqual(status, 200, first)
+            # A real validated PNG crosses this small injected total-size bound;
+            # its non-image envelope remains below it.
+            budget = size(first) - len(data) // 2
+            read.reset_mock()
+            with patch("netizen_cli.admin.web.MAX_CONVERSATION_RESPONSE_BYTES", budget):
+                status, _, result = await self.json_get(target, session)
+        self.assertEqual(status, 200, result)
+        self.assertGreater(size(result), budget)
+        self.assertLessEqual(size(result) - len(data), budget)
+        read.assert_awaited_once()
+        self.assertEqual(result["limit"], 10)
+        self.assertNotIn("pageMessage", result)
+        self.assertEqual(result["turns"][0]["answer"], page.turns[0].answer)
+        self.assertEqual(result["turns"][0]["images"][0]["data"], data)
+        self.assertNotIn("oversized", result["turns"][0])
+
+    async def test_conversation_saturation_returns_bounded_raw_page_and_rejects_larger_text(self):
+        import threading
+        from netizen_cli.admin.web import _json_response
+        from netizen_cli.prompt_projection import ConversationInput
+        from netizen_cli.runtime.contracts import NativeAnswerImage, NativeConversationPage, NativeConversationTurn
+        from netizen_cli.management.blocking_io import BlockingIOExecutorSaturated
+
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.file_reads = SimpleNamespace(submit=AsyncMock(side_effect=BlockingIOExecutorSaturated()))
+        page = NativeConversationPage("native", (NativeConversationTurn("turn", "completed",
+            inputs=(ConversationInput("中🌙"),), answer="# output", latest=True,
+            images=(NativeAnswerImage("/image.png", "unused"),), started_at=10),), "next")
+        budget = len("中🌙# output".encode("utf-8"))
+        encoders = []
+        def encode(*args, **kwargs):
+            encoders.append(threading.get_ident())
+            return _json_response(*args, **kwargs)
+
+        target = "/api/v1/sessions/conversation?bindingId=binding&threadId=native"
+        with patch.object(self.management, "binding_conversation", AsyncMock(return_value=page), create=True), \
+                patch("netizen_cli.admin.web._json_response", side_effect=encode), \
+                patch("netizen_cli.admin.answer_previews.render_answer_preview", side_effect=AssertionError("raw fallback rendered images")), \
+                patch("netizen_cli.admin.web.MAX_CONVERSATION_RAW_TEXT_BYTES", budget):
+            status, _, result = await self.json_get(target, session)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(encoders, [threading.get_ident()])
+        self.assertEqual(result["nextCursor"], "next")
+        turn = result["turns"][0]
+        self.assertEqual(turn["inputs"][0]["text"], "中🌙")
+        self.assertEqual(turn["answer"], "# output")
+        self.assertEqual(turn["startedAt"], 10)
+        self.assertNotIn("markdownHtml", turn)
+        self.assertNotIn("images", turn)
+        self.assertEqual(turn["previewMessage"], "排版预览暂不可用，已显示原文。")
+        with patch.object(self.management, "binding_conversation", AsyncMock(return_value=page), create=True), \
+                patch("netizen_cli.admin.web.MAX_CONVERSATION_RAW_TEXT_BYTES", budget - 1):
+            status, _, result = await self.json_get(target, session)
+        self.assertEqual(status, 503, result)
+        self.assertNotIn("turns", result)
+
+    async def test_conversation_raw_saturation_fallback_rechecks_authentication(self):
+        from netizen_cli.admin.web import _json_response
+        from netizen_cli.runtime.contracts import NativeConversationPage, NativeConversationTurn
+        from netizen_cli.management.blocking_io import BlockingIOExecutorSaturated
+
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.file_reads = SimpleNamespace(submit=AsyncMock(side_effect=BlockingIOExecutorSaturated()))
+        page = NativeConversationPage("native", (NativeConversationTurn("turn", "completed", answer="private"),))
+        def encode(status, payload, **kwargs):
+            result = _json_response(status, payload, **kwargs)
+            if status == 200 and isinstance(payload, dict) and payload.get("turns"):
+                self.assertTrue(self.auth.logout(session))
+            return result
+        with patch.object(self.management, "binding_conversation", AsyncMock(return_value=page), create=True), \
+                patch("netizen_cli.admin.web._json_response", side_effect=encode):
+            status, _, result = await self.json_get("/api/v1/sessions/conversation?bindingId=binding&threadId=native", session)
+        self.assertEqual(status, 401, result)
+        self.assertNotIn("turns", result)
+        self.assertNotIn("private", json.dumps(result))
+
     async def test_conversation_executor_failures_do_not_encode_unbounded_content_on_event_loop(self):
         from netizen_cli.runtime.contracts import NativeConversationPage
-        from netizen_cli.management.blocking_io import BlockingIOExecutorSaturated, BlockingIOExecutorClosed, BlockingIOResultUnknown
+        from netizen_cli.management.blocking_io import BlockingIOExecutorClosed, BlockingIOResultUnknown
 
         self.runner.open_admission()
         session = await self.login()
         self.management.file_reads = SimpleNamespace(submit=AsyncMock())
         with patch.object(self.management, "binding_conversation", AsyncMock(return_value=NativeConversationPage("native")), create=True):
-            for error, expected in ((BlockingIOExecutorSaturated(), 503), (BlockingIOExecutorClosed(), 503),
+            for error, expected in ((BlockingIOExecutorClosed(), 503),
                                     (BlockingIOResultUnknown(deadline=0), 504), (TimeoutError(), 504)):
                 self.management.file_reads.submit.side_effect = error
                 status, _, result = await self.json_get("/api/v1/sessions/conversation?bindingId=binding&threadId=native", session)

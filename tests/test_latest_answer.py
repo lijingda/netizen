@@ -121,7 +121,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
                                error=SimpleNamespace(message=error), items=[user("first"), user("steered"),
                                message("commentary", "commentary"), message(answer, "final_answer")])
 
-    async def test_summary_page_projects_first_input_terminal_only_and_cursor(self):
+    async def test_summary_page_projects_first_input_in_all_states_and_terminal_answers(self):
         from netizen_cli.runtime.contracts import NativeConversationPage
         from dataclasses import asdict
         turns = [self.turn("running", "inProgress"), self.turn("failed", "failed", error="provider failed"),
@@ -132,7 +132,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, NativeConversationPage)
         history.list_turns.assert_awaited_once_with("thread", cursor="opaque", limit=10, items_view="summary")
         self.assertEqual(result.next_cursor, "older")
-        self.assertEqual(result.turns[0].inputs, ())
+        self.assertEqual(result.turns[0].inputs[0].text, "first")
         self.assertIsNone(result.turns[0].answer)
         self.assertEqual(result.turns[1].error, "provider failed")
         self.assertIsNone(result.turns[2].answer, "legacy interrupted commentary must never become final")
@@ -146,7 +146,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_page_images_use_exact_latest_identity_without_retry(self):
         image = NativeAnswerImage("/image.png", "bytes")
-        summary = SimpleNamespace(data=[self.turn("latest"), self.turn("older")], next_cursor="next")
+        summary = SimpleNamespace(data=[self.turn("latest", answer="![image](/image.png)"), self.turn("older")], next_cursor="next")
         history = SimpleNamespace(list_turns=AsyncMock(return_value=summary))
         for identity in ("latest", "new-turn-started"):
             full = AsyncMock(return_value=NativeLatestAnswer("thread", identity, "completed", "answer", images=(image,)))
@@ -158,6 +158,54 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(page.turns[1].images, ())
             full.assert_awaited_once_with("thread")
         history.list_turns.assert_awaited_with("thread", cursor=None, limit=10, items_view="summary")
+
+    async def test_full_read_is_only_for_completed_latest_with_possible_markdown_image(self):
+        for status, answer in (("completed", "plain answer"), ("completed", None),
+                               ("inProgress", "![image](/image.png)"), ("failed", "![image](/image.png)"),
+                               ("interrupted", "![image](/image.png)")):
+            with self.subTest(status=status, answer=answer):
+                page = SimpleNamespace(data=[self.turn("latest", status, answer=answer),
+                                             self.turn("older", answer="![older](/image.png)")], next_cursor="next")
+                history = SimpleNamespace(list_turns=AsyncMock(return_value=page))
+                with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
+                        patch.object(self.runtime, "latest_thread_answer", AsyncMock()) as full:
+                    result = await self.runtime.thread_conversation("thread")
+                    full.assert_not_awaited()
+                self.assertEqual(result.turns[0].inputs[0].text, "first")
+                self.assertTrue(result.turns[0].latest)
+                self.assertEqual(result.turns[0].images, ())
+        missing_input = self.turn("running", "inProgress")
+        missing_input.items = [message("commentary", "commentary")]
+        history.list_turns.return_value = SimpleNamespace(data=[missing_input], next_cursor=None)
+        with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
+            result = await self.runtime.thread_conversation("thread")
+        self.assertEqual(result.turns[0].inputs, ())
+        self.assertEqual(result.turns[0].status, "inProgress")
+        self.assertIsNone(result.turns[0].answer)
+
+    async def test_optional_image_read_errors_preserve_summary_and_warn_without_content(self):
+        from openai_codex import CodexError
+        from netizen_cli.thread_history import ThreadHistoryUnavailable
+        from netizen_cli.runtime.state import RUNTIME_LOGGER_NAME
+
+        summary = SimpleNamespace(data=[self.turn("latest", answer="private answer ![image](/image.png)")], next_cursor="next")
+        history = SimpleNamespace(list_turns=AsyncMock(return_value=summary))
+        for error in (CodexError("private error content"), ThreadHistoryUnavailable("private error content")):
+            full = AsyncMock(side_effect=error)
+            with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
+                    patch.object(self.runtime, "latest_thread_answer", full), \
+                    self.assertLogs(RUNTIME_LOGGER_NAME, level="WARNING") as logs:
+                result = await self.runtime.thread_conversation("thread")
+            self.assertEqual(result.turns[0].answer, "private answer ![image](/image.png)")
+            self.assertEqual(result.turns[0].images, ())
+            self.assertEqual(result.next_cursor, "next")
+            self.assertNotIn("private", str(logs.output))
+            self.assertEqual(logs.records[0].error_type, type(error).__name__)
+            full.assert_awaited_once_with("thread")
+        with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
+                patch.object(self.runtime, "latest_thread_answer", AsyncMock(side_effect=TimeoutError())):
+            with self.assertRaises(TimeoutError):
+                await self.runtime.thread_conversation("thread")
 
     async def test_empty_unmaterialized_invalid_cursor_and_other_errors(self):
         from openai_codex.errors import JsonRpcError

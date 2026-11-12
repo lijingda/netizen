@@ -40,7 +40,7 @@ from .auth import (
 )
 from .errors import AdminWebError
 from .file_previews import PreviewUnavailable, render_markdown
-from .answer_previews import render_conversation_page
+from .answer_previews import conversation_raw_text_within_limit, render_conversation_page
 from .credentials import AdminCredentials
 from .feishu import AuthExpired, FeishuClient, FeishuError
 from .login import AdminLogin
@@ -185,6 +185,7 @@ _PREAUTH_COOKIE = "netizen_admin_preauth"
 _JSON_TYPE = "application/json"
 _QUERY_DEADLINE_SECONDS = 5.0
 MAX_CONVERSATION_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_CONVERSATION_RAW_TEXT_BYTES = 1024 * 1024
 _SESSION_QUERY_DEADLINE_SECONDS = 10.0
 _CHAT_LABEL_QUERY_DEADLINE_SECONDS = 8.0
 _MUTATION_DEADLINE_SECONDS = 15.0
@@ -1520,17 +1521,14 @@ class AdminWebApplication:
     async def _session_conversation(self, context: _RequestContext) -> Response:
         from openai_codex import CodexError
         from openai_codex.errors import JsonRpcError
-        from ..thread_history import ThreadHistoryUnavailable, _identity
+        from ..thread_history import ThreadHistoryUnavailable
 
         _require_query_keys(context.query, {"bindingId", "threadId", "cursor", "limit"})
         binding_id = _optional_text_query(context.query, "bindingId")
         thread_id = _optional_text_query(context.query, "threadId")
         cursor = _optional_text_query(context.query, "cursor", maximum=2048)
-        if cursor is not None:
-            try:
-                _identity(cursor)
-            except ThreadHistoryUnavailable as error:
-                raise AdminWebError(400, "invalid_cursor", "分页游标无效，请从最新重新读取。") from error
+        if cursor is not None and (not cursor or cursor.strip() != cursor):
+            raise AdminWebError(400, "invalid_cursor", "分页游标无效，请从最新重新读取。")
         limit_value = _optional_one(context.query, "limit")
         if limit_value not in {None, "10", "1"}:
             raise AdminWebError(400, "invalid_query", "每页只能读取 10 轮或 1 轮。")
@@ -1547,15 +1545,18 @@ class AdminWebApplication:
                 )
                 read_at = datetime.now().astimezone().isoformat()
 
-                def encode():
+                def encode(*, preview: bool = True):
                     payload = {
                         "requestId": context.request.request_id, "readAt": read_at,
-                        "limit": page_limit, **render_conversation_page(page),
+                        "limit": page_limit, **render_conversation_page(page, preview=preview),
                     }
                     if page_limit == 1:
                         payload["pageMessage"] = "本页内容较大，已改为逐轮加载"
                     response = _json_response(200, payload, ensure_ascii=True)
-                    if len(response.body) <= MAX_CONVERSATION_RESPONSE_BYTES:
+                    # Validated PNG Base64 is ASCII and needs no JSON escaping.
+                    # Image bytes retain their separate existing preview budgets.
+                    image_bytes = sum(len(image["data"]) for turn in payload["turns"] for image in turn.get("images", []))
+                    if len(response.body) - image_bytes <= MAX_CONVERSATION_RESPONSE_BYTES:
                         return response
                     if page_limit == 10:
                         return None
@@ -1568,7 +1569,16 @@ class AdminWebApplication:
                     } for turn in page.turns]
                     return _json_response(200, payload, ensure_ascii=True)
 
-                response = await self._management.file_reads.submit(encode, deadline=deadline)
+                try:
+                    response = await self._management.file_reads.submit(encode, deadline=deadline)
+                except BlockingIOExecutorSaturated:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise TimeoutError("conversation preview deadline elapsed") from None
+                    if not conversation_raw_text_within_limit(page, MAX_CONVERSATION_RAW_TEXT_BYTES):
+                        raise
+                    # Saturation started no worker. A bounded text-only fallback
+                    # is safe here; expired/unknown workers never use this path.
+                    response = encode(preview=False)
                 self._authenticate(context)
                 if response is not None:
                     return response
