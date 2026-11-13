@@ -217,6 +217,59 @@ class PersistentForkRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.turn_calls, [])
         self.assertEqual(self.store.active_binding(self.scope.key).id, self.source.id)
 
+    async def create_main_fork(self, scope):
+        async with self.runtime.track_fork_creation("project"):
+            thread = await self.runtime.fork_exact(self.source, expected_project_revision=self.project_revision)
+            created = self.store.create_fork_binding(
+                scope=scope, source=self.source, native_thread_id=thread.id, root_message_id="om_status",
+                creator_id="owner", expected_project_revision=self.project_revision, target_chat_kind="group",
+            )
+            await self.runtime.adopt_fork(created.binding, thread, name="branch")
+            await self.runtime.binding_pointer_changed(created.previous_active_binding_id, created.binding.id)
+        return created.binding
+
+    async def test_main_handoff_releases_previous_idle_subscription_and_protects_branch(self):
+        scope = FeishuScope("app", "main-target", ScopeKind.GROUP)
+        previous = self.store.create_channel_binding(scope=scope, project_alias="project", creator_id="owner")
+        self.store.assign_native_thread_id(previous.id, "native-previous")
+        previous = self.store.get(previous.id)
+        async with self.runtime.track_fork_creation("project"):
+            await self.runtime.adopt_fork(previous, fixtures.FakeThread("native-previous", self.codex), name="previous")
+        branch = await self.create_main_fork(scope)
+        release = self.runtime._subscriptions[previous.id].idle_task
+        self.assertIsNotNone(release)
+        await asyncio.wait_for(asyncio.shield(release), 1)
+        self.assertEqual(self.subscriptions.calls, ["native-previous"])
+        snapshot = self.runtime.thread_subscription_snapshot(branch.id)
+        self.assertEqual(snapshot.state, ThreadSubscriptionState.RELEASE_PENDING)
+        self.assertGreater(snapshot.release_in_seconds, 1)
+        self.assertEqual(self.store.get(previous.id).native_thread_id, "native-previous")
+        self.assertEqual(self.codex.turn_calls, [])
+
+    async def test_main_handoff_keeps_running_target_and_delivers_to_original_origin(self):
+        scope = FeishuScope("app", "main-target", ScopeKind.GROUP)
+        previous = self.store.create_channel_binding(scope=scope, project_alias="project", creator_id="owner")
+        origin, outcomes, completed = object(), [], asyncio.Event()
+        async def receive(outcome):
+            outcomes.append(outcome)
+            completed.set()
+        self.runtime.set_completion_handler(receive)
+        submission = await self.runtime.submit(binding=previous, cwd=Path(self.store.get_project("project").cwd),
+                                               input="original task", owner_id="owner", origin=origin)
+        handle = self.codex.handles[-1]
+        branch = await self.create_main_fork(scope)
+        self.assertEqual(self.runtime.active_turn(previous.id).turn_id, submission.turn_id)
+        self.assertEqual(handle.interrupt_count, 0)
+        self.assertEqual(self.subscriptions.calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, branch.id)
+        handle.complete()
+        submission.release_receipt_attempt()
+        await asyncio.wait_for(completed.wait(), 1)
+        self.assertEqual(len(outcomes), 1)
+        self.assertIs(outcomes[0].origin, origin)
+        self.assertEqual(outcomes[0].binding_id, previous.id)
+        self.assertEqual(outcomes[0].turn_id, submission.turn_id)
+
     async def test_fork_name_failure_keeps_binding_subscription_and_idle_policy(self):
         for error in (OSError("name result lost"), asyncio.CancelledError()):
             with self.subTest(error=type(error).__name__):

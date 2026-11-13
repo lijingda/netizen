@@ -19,6 +19,7 @@ class ChatTargetError(RuntimeError):
 class ValidatedChatTarget:
     chat_id: str
     chat_kind: Literal["group", "p2p"]
+    topic_mode: bool = False
 
 
 ChatTargetValidator = Callable[[str], Awaitable[ValidatedChatTarget]]

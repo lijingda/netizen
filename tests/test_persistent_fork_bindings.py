@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 
 from netizen_cli.bindings import (
     BindingConflict, BindingStore, BindingTaskFeedback, BindingTurnSettings,
@@ -38,7 +40,7 @@ class PersistentForkBindingTest(unittest.TestCase):
         })
 
     def test_complete_fork_copies_intent_and_uses_destination_anchor(self) -> None:
-        branch = self.create()
+        branch = self.create().binding
         self.assertEqual(branch.native_thread_id, "fork-native")
         self.assertEqual(branch.project_alias, self.source.project_alias)
         self.assertEqual(branch.turn_settings, self.source.turn_settings)
@@ -59,7 +61,7 @@ class PersistentForkBindingTest(unittest.TestCase):
         self.assertIsNone(self.store.get(existing.id).native_thread_id)
 
     def test_p2p_target_only_normalizes_future_catch_up_not_source_or_other_settings(self) -> None:
-        branch = self.create(target_chat_kind="p2p")
+        branch = self.create(target_chat_kind="p2p").binding
         self.assertEqual(branch.message_context_mode, MentionContextMode.CURRENT_ONLY)
         self.assertIsNone(branch.context_anchor)
         self.assertEqual(branch.turn_settings, self.source.turn_settings)
@@ -74,7 +76,7 @@ class PersistentForkBindingTest(unittest.TestCase):
             self.store.get_scope(self.target.key)
 
     def test_duplicate_native_identity_rolls_back_scope_and_current(self) -> None:
-        branch = self.create()
+        branch = self.create().binding
         other = FeishuScope("app", "target-chat", ScopeKind.TOPIC, "other-topic")
         with self.assertRaises(BindingConflict):
             self.create(scope=other)
@@ -115,7 +117,66 @@ class PersistentForkBindingTest(unittest.TestCase):
             scope=self.origin, project_alias="work", creator_id="source-user",
         )
         self.store.assign_native_thread_id(source.id, "other-source")
-        branch = self.create(source=self.store.get(source.id), context_anchor=None)
+        branch = self.create(source=self.store.get(source.id), context_anchor=None).binding
         self.assertIsNone(branch.turn_settings)
         self.assertIsNone(branch.context_anchor)
         self.assertEqual(branch.message_context_mode, MentionContextMode.CURRENT_ONLY)
+
+    def test_main_replacement_keeps_previous_binding_and_returns_exact_pointer(self):
+        main = FeishuScope("app", "target-chat", ScopeKind.GROUP)
+        previous = self.store.create_channel_binding(scope=main, project_alias="work", creator_id="previous")
+        result = self.create(scope=main)
+        self.assertEqual(result.previous_active_binding_id, previous.id)
+        self.assertEqual(self.store.active_binding(main.key).id, result.binding.id)
+        self.assertFalse(self.store.get(previous.id).active)
+        self.assertEqual(len(self.store.list_bindings(main.key)), 2)
+        self.assertEqual(result.binding.turn_settings, self.source.turn_settings)
+        self.assertEqual(result.binding.context_anchor, MessageContextAnchor("target-seed", 2000))
+
+    def test_main_previous_pointer_is_read_inside_creation_transaction(self):
+        main = FeishuScope("app", "target-chat", ScopeKind.GROUP)
+        previous = self.store.create_channel_binding(scope=main, project_alias="work", creator_id="previous")
+        transaction = self.store._transaction
+        @contextmanager
+        def archive_before_transaction():
+            # Archive's pointer update does not take the caller's Scope lock.
+            # Inject it at the last boundary before the writer transaction.
+            with patch.object(self.store, "_transaction", transaction):
+                self.store.archive_binding(previous.id)
+            with transaction():
+                yield
+        with patch.object(self.store, "_transaction", archive_before_transaction):
+            result = self.create(scope=main)
+        self.assertIsNone(result.previous_active_binding_id)
+        self.assertEqual(self.store.active_binding(main.key).id, result.binding.id)
+        self.assertFalse(self.store.get(previous.id).active)
+
+    def test_direct_main_has_no_catch_up_and_empty_previous_pointer(self):
+        main = FeishuScope("app", "private-chat", ScopeKind.DIRECT)
+        result = self.create(scope=main, target_chat_kind="p2p")
+        self.assertIsNone(result.previous_active_binding_id)
+        self.assertEqual(result.binding.message_context_mode, MentionContextMode.CURRENT_ONLY)
+        self.assertIsNone(result.binding.context_anchor)
+        self.assertEqual(self.store.get(self.source.id), self.source)
+
+    def test_main_scope_kind_app_and_source_identity_must_match(self):
+        for scope, kind, error in (
+            (self.origin, "group", ValueError),
+            (FeishuScope("app", "other", ScopeKind.DIRECT), "group", ValueError),
+            (FeishuScope("app", "other", ScopeKind.GROUP), "p2p", ValueError),
+            (FeishuScope("other-app", "other", ScopeKind.GROUP), "group", ScopeConflict),
+        ):
+            with self.subTest(scope=scope, kind=kind), self.assertRaises(error):
+                self.create(scope=scope, target_chat_kind=kind)
+        self.assertEqual(self.store.active_binding(self.origin.key), self.source)
+
+    def test_main_replacement_rolls_back_on_duplicate_native_or_stale_project(self):
+        self.create()
+        main = FeishuScope("app", "target-chat", ScopeKind.GROUP)
+        previous = self.store.create_channel_binding(scope=main, project_alias="work", creator_id="previous")
+        for changes, error in (({}, BindingConflict),
+                               ({"expected_project_revision": 2}, ProjectRevisionConflict)):
+            with self.subTest(changes=changes), self.assertRaises(error):
+                self.create(scope=main, **changes)
+            self.assertEqual(self.store.active_binding(main.key), previous)
+            self.assertEqual(len(self.store.list_bindings(main.key)), 1)

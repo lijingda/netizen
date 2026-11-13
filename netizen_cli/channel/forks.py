@@ -16,6 +16,7 @@ from lark_channel import (
 
 from .base import CHANNEL_LOGGER_NAME
 from ..bindings import (
+    BindingNotFound,
     ProjectConflict,
     ThreadBinding,
 )
@@ -29,11 +30,12 @@ from .messages import public_chat_kind as _public_chat_kind
 from .topics import TopicPublishError, complete_fresh_topic, send_topic_message
 from ..cards.chat_target import ChatSearchSnapshot
 from ..cards.fork import (
-    ForkCardAction, ForkCardCapacityError, ForkFormValidationError, ForkSource, decode_fork_action, fork_form_card, fork_status_card,
+    ForkCardAction, ForkCardCapacityError, ForkFormValidationError, ForkSource, decode_fork_action,
+    fork_confirmation_card, fork_form_card, fork_status_card,
 )
-from ..feishu_links import topic_open_url
+from ..feishu_links import chat_open_url, topic_open_url
 from ..runtime.contracts import (
-    ThreadNotMaterialized,
+    RuntimeClosed, ThreadLifecycleError, ThreadLifecycleStateUnknown, ThreadNotMaterialized,
 )
 from ..domain import (
     ControlIntent,
@@ -43,6 +45,7 @@ from ..domain import (
 )
 from ..error_messages import describe_error
 from ..management.chat_directory import AvailableChat
+from ..management.service import ExactBindingTarget
 
 from .app_values import (
     _CardReplyConversation,
@@ -86,6 +89,7 @@ class ForkChannel(SideChannel):
         self, scope: FeishuScope, source: ForkSource, binding: ThreadBinding, *,
         name: str | None = None, target_chat_id: str | None = None,
         target_mode: str | None = None, target_choice: str | None = None, target_id: str = "",
+        landing: str = "topic", source_action: str = "keep",
         query: str = "", notice: str | None = None,
         query_input: str | None = None, searched: bool = False,
         chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
@@ -114,6 +118,7 @@ class ForkChannel(SideChannel):
                          if chat_snapshot is None else chat_snapshot.avatar_keys),
             name=name, target_chat_id=target_chat_id, query=query, query_input=query_input,
             target_mode=target_mode, target_choice=target_choice, target_id=target_id,
+            landing=landing, source_action=source_action,
         )
         try:
             return fork_form_card(
@@ -170,15 +175,16 @@ class ForkChannel(SideChannel):
             except ForkFormValidationError as error:
                 request, notice = error.draft, str(error)
             source = self._require_fork_source(scope, request.source)
-            if request.action == "results":
+            if request.action in {"results", "back"}:
                 card = await self._fork_form(
                     scope, request.source, source, name=request.name, target_chat_id=request.target_chat_id,
                     target_mode=request.target_mode, target_choice=request.target_choice, target_id=request.target_id,
                     query=request.query or "", notice=notice,
                     query_input=request.query_input, searched=request.search_requested,
                     chat_snapshot=request.chat_snapshot, chat_page=request.chat_page,
+                    landing=request.landing, source_action=request.source_action,
                 )
-            elif request.action == "create":
+            elif request.action in {"create", "confirm"}:
                 await self._create_fork_from_card(
                     intent=request, scope=scope, source=source, source_title=await self._fork_source_title(source),
                     message_id=message_id, sender_id=sender_id,
@@ -203,8 +209,16 @@ class ForkChannel(SideChannel):
     ) -> None:
         assert intent.target_chat_id is not None and intent.name is not None
         target_chat_id = intent.target_chat_id
+        destination = None
         try:
             target = await self._management.validate_chat_target(target_chat_id)
+            if intent.landing == "main":
+                destination = FeishuScope(self._app_id, target_chat_id,
+                    ScopeKind.DIRECT if target.chat_kind == "p2p" else ScopeKind.GROUP)
+                if destination.key == scope.key:
+                    raise ChatTargetError("same_scope", "来源已在该聊天主线，请选择新话题或其他聊天。")
+                if target.topic_mode:
+                    raise ChatTargetError("topic_mode", "话题群没有聊天主线，请选择新话题或其他聊天。")
         except ChatTargetError as error:
             # This is before any native or topic creation. Only this boundary
             # can restore a submit button; unknown creation results must not.
@@ -213,21 +227,41 @@ class ForkChannel(SideChannel):
                 target_mode=intent.target_mode, target_choice=intent.target_choice, target_id=intent.target_id,
                 query=intent.query or "", notice=str(error),
                 query_input=intent.query_input,
+                landing=intent.landing, source_action=intent.source_action,
             )
             if not await self._safe_update_card(message_id, card):
                 raise CardActionError("目标校验未通过，表单恢复失败；本次未创建分支，请重新发送 /fork。") from error
             return
+        if destination is not None:
+            current = self._bindings.active_binding(destination.key)
+            if current is not None and intent.action != "confirm":
+                current_title = await self._fork_source_title(current)
+                try:
+                    async with asyncio.timeout(3):
+                        projection = await self._management.binding_status_exact(current.id)
+                        current_status = projection.primary_status or "状态暂不可读"
+                except Exception:
+                    current_status = "状态暂不可读"
+                chat = await self._card_display_group(target_chat_id) if target.chat_kind == "group" else None
+                card = fork_confirmation_card(scope, intent, target_title=chat.name if chat else target_chat_id,
+                    current_title=current_title, current_short_id=current.short_id, current_status=current_status)
+                if not await self._safe_update_card(message_id, card):
+                    raise CardActionError("主线替换确认卡更新未确认；本次未创建分支，请重新发送 /fork。")
+                return
         project = self._bindings.get_project(source.project_alias)
         self._bindings.require_project_not_deleting(project.alias)
         if not project.enabled:
             raise ProjectConflict("Project 已停用，不能创建分支。")
         if project.revision != intent.source.project_revision:
             raise CardActionError("来源 Project 已变化，请重新发送 /fork。")
-        common = {"name": intent.name, "source_title": source_title, "project_alias": project.alias}
+        common = {"name": intent.name, "source_title": source_title, "project_alias": project.alias,
+                  "landing": intent.landing, "source_action": intent.source_action}
         thread = root = binding = None
         topic_url = None
         status = "failed"
         detail = None
+        previous_id = None
+        replaced_session = None
         async with self._runtime.track_fork_creation(project.alias):
             try:
                 await self._safe_update_card(message_id, fork_status_card(status="creating", **common))
@@ -246,28 +280,43 @@ class ForkChannel(SideChannel):
                 root = await send_topic_message(self._channel, target_chat_id,
                     fork_status_card(status="creating", **common),
                     SendOpts(receive_id_type="chat_id", uuid=hashlib.sha256(
-                        ("netizen-fork-root:v1\0" + thread.id).encode()).hexdigest()[:32]))
-                origin = await complete_fresh_topic(
-                    self._channel, root,
-                    seed_content="分支创建结果请查看话题顶部卡片。创建成功后，可在本话题发送消息继续。",
-                    seed_uuid=hashlib.sha256(("netizen-fork-seed:v1\0" + thread.id).encode()).hexdigest()[:32],
-                )
-                if origin.thread_id is None or (target_chat_id == scope.chat_id and origin.thread_id == scope.topic_id):
-                    raise TopicPublishError("飞书未创建新的普通话题，本次未绑定分支。", unknown=True)
-                destination = FeishuScope(self._app_id, target_chat_id, ScopeKind.TOPIC, origin.thread_id)
-                topic_url = topic_open_url(target_chat_id, origin.thread_id)
+                        (("netizen-fork-main:v1\0" if intent.landing == "main" else "netizen-fork-root:v1\0")
+                         + thread.id).encode()).hexdigest()[:32]))
+                if intent.landing == "main":
+                    if root.thread_id is not None or root.parent_id is not None or root.root_id not in {None, root.message_id}:
+                        raise TopicPublishError("飞书未确认消息发布到聊天主线，本次未绑定分支。", unknown=True)
+                    assert destination is not None
+                    origin = root
+                    topic_url = chat_open_url(target_chat_id)
+                else:
+                    origin = await complete_fresh_topic(
+                        self._channel, root,
+                        seed_content="分支创建结果请查看话题顶部卡片。创建成功后，可在本话题发送消息继续。",
+                        seed_uuid=hashlib.sha256(("netizen-fork-seed:v1\0" + thread.id).encode()).hexdigest()[:32],
+                    )
+                    if origin.thread_id is None or (target_chat_id == scope.chat_id and origin.thread_id == scope.topic_id):
+                        raise TopicPublishError("飞书未创建新的普通话题，本次未绑定分支。", unknown=True)
+                    destination = FeishuScope(self._app_id, target_chat_id, ScopeKind.TOPIC, origin.thread_id)
+                    topic_url = topic_open_url(target_chat_id, origin.thread_id)
                 anchor = await self._resolve_context_anchor(destination, origin.message_id) if (
                     target.chat_kind == "group" and source.message_context_mode is MentionContextMode.CATCH_UP
                 ) else None
                 async with self._scope_coordinator.hold(destination.key):
                     self._runtime.require_fork_creation_open(project.alias)
-                    binding = self._bindings.create_fork_binding(
+                    created = self._bindings.create_fork_binding(
                         scope=destination, source=source, native_thread_id=thread.id,
                         root_message_id=root.message_id, creator_id=sender_id,
                         expected_project_revision=project.revision, context_anchor=anchor,
                         target_chat_kind=target.chat_kind,
                     )
-                    named = await self._runtime.adopt_fork(binding, thread, name=intent.name)
+                    binding, previous_id = created.binding, created.previous_active_binding_id
+                    try:
+                        named = await self._runtime.adopt_fork(binding, thread, name=intent.name)
+                    finally:
+                        if intent.landing == "main":
+                            # The persisted pointer already changed, as with /new;
+                            # reconcile subscriptions even if adoption failed.
+                            await self._runtime.binding_pointer_changed(previous_id, binding.id)
                 status = "success"
                 if not named:
                     detail = "会话已创建；Codex 名称更新未确认，可稍后使用 /rename 修改。"
@@ -281,17 +330,49 @@ class ForkChannel(SideChannel):
             finally:
                 if thread is not None and binding is None:
                     await self._runtime.release_unbound_fork(thread)
+            if previous_id is not None:
+                replaced_session = previous_id[:8]
+                try:
+                    previous = self._bindings.get(previous_id)
+                    replaced_session = f"{await self._fork_source_title(previous)} · {previous.short_id}"
+                except Exception:
+                    pass
             result = dict(status=status, detail=detail,
                 native_thread_id=None if thread is None else thread.id,
-                binding_saved=binding is not None, **common)
+                binding_saved=binding is not None, replaced_session=replaced_session, **common)
             if root is not None:
                 await self._safe_update_card(root.message_id, fork_status_card(**result))
-            card = fork_status_card(topic_url=topic_url, **result)
-            if not await self._safe_update_card(message_id, card):
-                target = _CardReplyTarget(message_id, message_id, scope.chat_id, _CardReplyConversation(scope.topic_id))
-                try:
-                    await self._reply(target, card)
-                except Exception:
-                    # Delivery cannot undo a known Binding or replace its
-                    # success/partial-result notice with a generic error.
-                    logger.warning("fork result receipt was not delivered", exc_info=True)
+            if status != "success" or intent.source_action != "archive":
+                await self._deliver_fork_receipt(scope, message_id, fork_status_card(topic_url=topic_url, **result))
+                return
+        # Source archive has its own lifecycle admission and shutdown semantics;
+        # it must not extend fork ownership or recheck the source's idle snapshot.
+        await self._safe_update_card(message_id, fork_status_card(
+            topic_url=topic_url, archive_result="正在归档来源会话，完成后更新本卡片。", **result,
+        ))
+        archive_result = None
+        try:
+            await self._management.archive_exact_binding(target=ExactBindingTarget(
+                scope_key=source.scope_key, binding_id=source.id, expected_active_binding_id=None,
+            ))
+            archive_result = "来源会话已归档，可在 /sessions archived 中恢复。"
+        except ThreadLifecycleStateUnknown as error:
+            archive_result = "来源会话归档结果未知；分支已保留。" + describe_error(error)
+        except ThreadLifecycleError as error:
+            archive_result = "来源会话归档未完成；分支已保留。" + describe_error(error)
+        except (RuntimeClosed, BindingNotFound) as error:
+            archive_result = "来源会话本次未归档；分支已保留。" + describe_error(error)
+        except Exception as error:
+            archive_result = "来源会话归档结果未知；分支已保留。" + describe_error(error)
+        card = fork_status_card(topic_url=topic_url, archive_result=archive_result, **result)
+        await self._deliver_fork_receipt(scope, message_id, card)
+
+    async def _deliver_fork_receipt(self, scope: FeishuScope, message_id: str, card: OutboundCard) -> None:
+        if not await self._safe_update_card(message_id, card):
+            reply_target = _CardReplyTarget(message_id, message_id, scope.chat_id, _CardReplyConversation(scope.topic_id))
+            try:
+                await self._reply(reply_target, card)
+            except Exception:
+                # Delivery cannot undo a known Binding or replace its
+                # success/partial-result notice with a generic error.
+                logger.warning("fork result receipt was not delivered", exc_info=True)

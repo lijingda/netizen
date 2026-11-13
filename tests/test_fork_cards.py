@@ -17,6 +17,7 @@ from netizen_cli.cards.fork import (
     ForkFormValidationError,
     decode_fork_action,
     fork_form_card,
+    fork_confirmation_card,
     fork_status_card,
     is_fork_card_action,
 )
@@ -53,7 +54,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def choice(card):
-        return next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v5")
+        return next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v6")
 
     def decode(self, card, label="创建分支", **changes):
         return decode_fork_action(self.scope, callback(card, label), {**form_values(card), **changes})
@@ -63,7 +64,8 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(elements(card.card, "form")), 1)
         self.assertEqual(len(elements(card.card, "button")), 2)
         self.assertEqual(set(form_values(card)), {
-            "fork_name_v5", "fork_mode_v5", "fork_chat_id_v5", "fork_query_v5",
+            "fork_name_v6", "fork_mode_v6", "fork_chat_id_v6", "fork_query_v6",
+            "fork_landing_v6", "fork_source_action_v6",
         })
         action = self.decode(card)
         self.assertEqual(action.action, "create")
@@ -72,9 +74,10 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action.source, self.source)
         self.assertTrue(card.card["config"]["update_multi"])
         self.assertTrue(is_fork_card_action(callback(card, "创建分支"), form_values(card)))
-        self.assertIn("在所选聊天中新建分支话题", str(card.card))
-        self.assertFalse(any(item["name"] == "fork_target_v5" for item in elements(card.card, "select_static")))
-        changed = self.decode(card, fork_mode_v5="group", fork_target_v5=self.chat.chat_id, fork_name_v5="方案 B")
+        self.assertIn("分支位置", str(card.card))
+        self.assertEqual((action.landing, action.source_action), ("topic", "keep"))
+        self.assertFalse(any(item["name"] == "fork_target_v6" for item in elements(card.card, "select_static")))
+        changed = self.decode(card, fork_mode_v6="group", fork_target_v6=self.chat.chat_id, fork_name_v6="方案 B")
         self.assertEqual((changed.target_chat_id, changed.name), (self.chat.chat_id, "方案 B"))
 
     def test_search_results_only_show_returned_chats(self):
@@ -82,8 +85,8 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["value"] for item in self.choice(card)["options"]],
                          [self.chat.chat_id, self.scope.chat_id])
         missing = self.form(target_chat_id=self.chat.chat_id)
-        self.assertFalse(any(item["name"] == "fork_target_v5" for item in elements(missing.card, "select_static")))
-        self.assertEqual(form_values(missing)["fork_mode_v5"], "id")
+        self.assertFalse(any(item["name"] == "fork_target_v6" for item in elements(missing.card, "select_static")))
+        self.assertEqual(form_values(missing)["fork_mode_v6"], "id")
         self.assertEqual(self.decode(missing).target_chat_id, self.chat.chat_id)
         card = self.form(chats=(self.chat,), target_chat_id=self.chat.chat_id)
         self.assertEqual(self.decode(card).target_chat_id, self.chat.chat_id)
@@ -91,22 +94,22 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
     def test_target_inputs_stay_visible_under_the_mode_in_the_same_form(self):
         card = self.form()
         fields = elements(card.card, "form")[0]["elements"]
-        mode = next(item for item in fields if item.get("name") == "fork_mode_v5")
+        mode = next(item for item in fields if item.get("name") == "fork_mode_v6")
         group = next(item for item in fields if item.get("tag") == "column_set")
-        submit = next(item for item in fields if item.get("name") == "fork_create_v5")
+        submit = next(item for item in fields if item.get("name") == "fork_create_v6")
         self.assertLess(fields.index(mode), fields.index(group))
         self.assertLess(fields.index(group), fields.index(submit))
         self.assertEqual(elements(card.card, "collapsible_panel"), [])
         self.assertEqual({item["name"] for item in elements(group, "input")},
-                         {"fork_query_v5", "fork_chat_id_v5"})
-        self.assertEqual(elements(group, "button")[0]["name"], "fork_search_v5")
+                         {"fork_query_v6", "fork_chat_id_v6"})
+        self.assertEqual(elements(group, "button")[0]["name"], "fork_search_v6")
         self.assertEqual(elements(group, "form"), [])
         self.assertNotIn("behaviors", mode)
         self.assertEqual(self.decode(card).target_chat_id, self.scope.chat_id)
         # Untouched optional controls may be absent in a submit; the mode
         # still selects the current chat without requiring other inputs.
         values = {key: value for key, value in form_values(card).items()
-                  if key not in {"fork_query_v5", "fork_chat_id_v5"}}
+                  if key not in {"fork_query_v6", "fork_chat_id_v6"}}
         self.assertEqual(decode_fork_action(self.scope, callback(card, "创建分支"), values).target_chat_id,
                          self.scope.chat_id)
 
@@ -126,39 +129,39 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
                 group = elements(form, "column_set")[0]
                 self.assertEqual(elements(card.card, "collapsible_panel"), [])
                 self.assertEqual({item["name"] for item in elements(group, "input")},
-                                 {"fork_query_v5", "fork_chat_id_v5"})
+                                 {"fork_query_v6", "fork_chat_id_v6"})
                 self.assertEqual(len(elements(card.card, "form")), 1)
-                self.assertEqual(form_values(card)["fork_name_v5"], "设计方案 · 分支")
+                self.assertEqual(form_values(card)["fork_name_v6"], "设计方案 · 分支")
                 if state.get("chat_page"):
                     self.assertEqual(len(elements(group, "select_static")), 2)
-                    self.assertEqual(self.decode(card, "跳转", fork_page_v5="2").chat_page, 2)
+                    self.assertEqual(self.decode(card, "跳转", fork_page_v6="2").chat_page, 2)
 
     def test_mode_selects_one_input_and_ignores_inactive_residual_values(self):
         card = self.form(chat_snapshot=self.snapshot(chats=(self.chat,)))
-        mode = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_mode_v5")
+        mode = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_mode_v6")
         self.assertEqual(mode["initial_option"], "current")
         self.assertNotIn("behaviors", mode)
         self.assertFalse(self.choice(card)["required"])
         for inactive in ("bad/id", "x" * 500, [], None):
             with self.subTest(inactive=inactive):
-                current = self.decode(card, fork_target_v5=inactive, fork_chat_id_v5=inactive)
+                current = self.decode(card, fork_target_v6=inactive, fork_chat_id_v6=inactive)
                 self.assertEqual(current.target_chat_id, self.scope.chat_id)
-                selected = self.decode(card, fork_mode_v5="group", fork_target_v5=self.chat.chat_id, fork_chat_id_v5=inactive)
+                selected = self.decode(card, fork_mode_v6="group", fork_target_v6=self.chat.chat_id, fork_chat_id_v6=inactive)
                 self.assertEqual(selected.target_chat_id, self.chat.chat_id)
-                direct = self.decode(card, fork_mode_v5="id", fork_chat_id_v5="  oc_direct  ",
-                                     fork_target_v5=inactive)
+                direct = self.decode(card, fork_mode_v6="id", fork_chat_id_v6="  oc_direct  ",
+                                     fork_target_v6=inactive)
                 self.assertEqual(direct.target_chat_id, "oc_direct")
         with self.assertRaises(ForkFormValidationError):
-            self.decode(card, fork_mode_v5="id", fork_chat_id_v5=" ", fork_target_v5=self.chat.chat_id)
+            self.decode(card, fork_mode_v6="id", fork_chat_id_v6=" ", fork_target_v6=self.chat.chat_id)
         for mode in (None, "choice", [], "both"):
             with self.subTest(mode=mode), self.assertRaises(CardActionError):
-                self.decode(card, fork_mode_v5=mode)
+                self.decode(card, fork_mode_v6=mode)
 
     def test_empty_choice_and_invalid_id_preserve_complete_draft_without_cross_fallback(self):
         card = self.form(chat_snapshot=self.snapshot(chats=(self.chat,)), name=" 已填名称 ")
         for changes in (
-            {"fork_mode_v5": "group", "fork_target_v5": "", "fork_chat_id_v5": "oc_direct"},
-            {"fork_mode_v5": "id", "fork_chat_id_v5": "bad/id"},
+            {"fork_mode_v6": "group", "fork_target_v6": "", "fork_chat_id_v6": "oc_direct"},
+            {"fork_mode_v6": "id", "fork_chat_id_v6": "bad/id"},
         ):
             with self.subTest(changes=changes):
                 with self.assertRaises(ForkFormValidationError) as caught:
@@ -167,7 +170,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(draft.target_chat_id)
                 self.assertEqual(draft.name, " 已填名称 ")
                 self.assertEqual(draft.query, "研发")
-                self.assertEqual(draft.target_id, changes["fork_chat_id_v5"])
+                self.assertEqual(draft.target_id, changes["fork_chat_id_v6"])
                 restored = self.form(chats=(self.chat,), name=draft.name, query=draft.query,
                                      target_mode=draft.target_mode, target_choice=draft.target_choice,
                                      target_id=draft.target_id)
@@ -182,7 +185,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         snapshot = self.snapshot()
         card = self.form(chat_snapshot=snapshot, target_mode="id", target_choice=self.chat.chat_id,
                          target_id="unfinished/id")
-        action = self.decode(card, "跳转", fork_page_v5="2")
+        action = self.decode(card, "跳转", fork_page_v6="2")
         self.assertIsNone(action.target_chat_id)
         self.assertEqual(action.target_mode, "id")
         self.assertEqual(action.target_choice, self.chat.chat_id)
@@ -190,7 +193,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action.chat_page, 2)
         self.assertEqual(action.chat_snapshot.query, snapshot.query)
         self.assertFalse(action.search_requested)
-        action = self.decode(card, "查找群聊", fork_mode_v5="group", fork_target_v5="")
+        action = self.decode(card, "查找群聊", fork_mode_v6="group", fork_target_v6="")
         self.assertEqual(action.target_choice, "")
         self.assertEqual(action.target_id, "unfinished/id")
 
@@ -227,7 +230,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
                 scope = FeishuScope("app", "oc_source", kind, "omt_source" if kind is ScopeKind.TOPIC else None)
                 card = fork_form_card(scope, self.source, **self.display)
                 option = next(item for item in elements(card.card, "select_static")
-                              if item["name"] == "fork_mode_v5")["options"][0]
+                              if item["name"] == "fork_mode_v6")["options"][0]
                 self.assertEqual(option["text"]["content"], "当前聊天")
                 self.assertNotIn("icon", option)
                 self.assertEqual(decode_fork_action(scope, callback(card, "创建分支"), form_values(card)).target_chat_id,
@@ -243,38 +246,38 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
     def test_search_clears_target_and_page_keeps_applied_query_separate_from_input(self):
         snapshot = self.snapshot()
         card = self.form(chat_snapshot=snapshot, target_chat_id=self.chat.chat_id, name="  草稿\n B  ")
-        search = self.decode(card, "查找群聊", fork_query_v5="  产品  ")
+        search = self.decode(card, "查找群聊", fork_query_v6="  产品  ")
         self.assertEqual((search.action, search.query, search.chat_snapshot), ("results", "产品", None))
         self.assertEqual((search.target_choice, search.name), ("", "  草稿\n B  "))
         self.assertIsNone(search.target_chat_id)
         self.assertEqual(search.source, self.source)
-        next_page = self.decode(card, "跳转", fork_page_v5="2")
+        next_page = self.decode(card, "跳转", fork_page_v6="2")
         self.assertEqual((next_page.query, next_page.chat_page), ("研发", 2))
-        changed_query = self.decode(card, "跳转", fork_query_v5="新关键词", fork_page_v5="1")
+        changed_query = self.decode(card, "跳转", fork_query_v6="新关键词", fork_page_v6="1")
         self.assertEqual((changed_query.query, changed_query.chat_page), ("研发", 1))
         self.assertEqual(changed_query.query_input, "新关键词")
         self.assertEqual(changed_query.target_choice, self.chat.chat_id)
         self.assertFalse(changed_query.search_requested)
         self.assertEqual(encode_chat_snapshot(changed_query.chat_snapshot), encode_chat_snapshot(snapshot))
-        blank_query = self.decode(card, "查找群聊", fork_query_v5="  ", fork_name_v5="")
+        blank_query = self.decode(card, "查找群聊", fork_query_v6="  ", fork_name_v6="")
         self.assertEqual((blank_query.query, blank_query.chat_snapshot, blank_query.name), ("", None, ""))
         self.assertEqual(self.decode(card).name, "草稿 B")
         self.assertEqual(self.decode(card).query, "研发")
         self.assertIsNone(self.decode(card).chat_snapshot)
         recreated = self.form(chat_snapshot=self.snapshot(chats=(self.chat,), query=search.query),
                               target_mode=search.target_mode, target_choice=search.target_choice, name=search.name)
-        self.assertEqual(form_values(recreated)["fork_name_v5"], "  草稿\n B  ")
-        self.assertEqual(form_values(recreated)["fork_target_v5"], "")
+        self.assertEqual(form_values(recreated)["fork_name_v6"], "  草稿\n B  ")
+        self.assertEqual(form_values(recreated)["fork_target_v6"], "")
         recreated_page = self.form(chat_snapshot=changed_query.chat_snapshot, chat_page=changed_query.chat_page,
                                    target_mode=changed_query.target_mode,
                                    target_choice=changed_query.target_choice,
                                    query=changed_query.query, query_input=changed_query.query_input)
-        self.assertEqual(form_values(recreated_page)["fork_query_v5"], "新关键词")
+        self.assertEqual(form_values(recreated_page)["fork_query_v6"], "新关键词")
         self.assertEqual(callback(recreated_page, "跳转")["snapshot"]["query"], "研发")
 
     def test_empty_directory_still_keeps_current_chat_creation_and_search(self):
         card = self.form(notice="部分群暂不可用。")
-        self.assertFalse(any(item["name"] == "fork_target_v5" for item in elements(card.card, "select_static")))
+        self.assertFalse(any(item["name"] == "fork_target_v6" for item in elements(card.card, "select_static")))
         self.assertEqual(self.decode(card).target_chat_id, self.scope.chat_id)
         self.assertIn("部分群暂不可用", str(card.card))
         self.assertFalse(any(button["text"]["content"] == "跳转" for button in elements(card.card, "button")))
@@ -282,12 +285,12 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
 
     def test_new_empty_search_does_not_restore_current_chat_as_a_selected_target(self):
         initial = self.form()
-        search = self.decode(initial, "查找群聊", fork_query_v5="没有匹配", fork_mode_v5="group")
+        search = self.decode(initial, "查找群聊", fork_query_v6="没有匹配", fork_mode_v6="group")
         card = self.form(chat_snapshot=self.snapshot(chats=(), query=search.query),
                          target_choice=search.target_choice,
                          target_mode=search.target_mode,
                          target_chat_id=self.scope.chat_id)
-        self.assertFalse(any(item["name"] == "fork_target_v5" for item in elements(card.card, "select_static")))
+        self.assertFalse(any(item["name"] == "fork_target_v6" for item in elements(card.card, "select_static")))
         self.assertIn("没有找到可选群聊", str(card.card))
         with self.assertRaises(ForkFormValidationError) as caught:
             self.decode(card)
@@ -305,7 +308,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(button["form_action_type"], "submit")
             self.assertEqual(button["behaviors"][0]["type"], "callback")
         # Empty name is a valid search draft, so only creation validates it.
-        name_input = next(item for item in elements(first.card, "input") if item["name"] == "fork_name_v5")
+        name_input = next(item for item in elements(first.card, "input") if item["name"] == "fork_name_v6")
         self.assertFalse(name_input.get("required", False))
 
     def test_name_limits_and_search_draft_validation(self):
@@ -315,20 +318,21 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(name.endswith(" · 分支"))
         for name in ("", "  "):
             with self.subTest(name=name), self.assertRaises(CardActionError):
-                self.decode(card, fork_name_v5=name)
-            self.assertEqual(self.decode(card, "查找群聊", fork_name_v5=name).name, name)
+                self.decode(card, fork_name_v6=name)
+            self.assertEqual(self.decode(card, "查找群聊", fork_name_v6=name).name, name)
         for name in ("长" * 121, "bad\x00name", 42, False, []):
             for label in ("创建分支", "查找群聊"):
                 with self.subTest(name=name, label=label), self.assertRaises(CardActionError):
-                    self.decode(card, label, fork_name_v5=name)
+                    self.decode(card, label, fork_name_v6=name)
 
     def test_native_omitted_or_null_optional_controls_are_unfinished_drafts(self):
         card = self.form()
         for form in (
-            {"fork_mode_v5": "group"},
-            {"fork_mode_v5": "group", "fork_name_v5": None, "fork_query_v5": None,
-             "fork_target_v5": None, "fork_chat_id_v5": None},
+            {"fork_mode_v6": "group"},
+            {"fork_mode_v6": "group", "fork_name_v6": None, "fork_query_v6": None,
+             "fork_target_v6": None, "fork_chat_id_v6": None},
         ):
+            form.update(fork_landing_v6="topic", fork_source_action_v6="keep")
             with self.subTest(form=form):
                 search = decode_fork_action(self.scope, callback(card, "查找群聊"), form)
                 self.assertEqual((search.name, search.query, search.target_choice, search.target_id),
@@ -341,19 +345,19 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
                 # recoverable creation error, never a failed search callback.
                 with self.assertRaisesRegex(ForkFormValidationError, "名称不能为空"):
                     decode_fork_action(self.scope, callback(card, "创建分支"),
-                                       {**form, "fork_target_v5": self.scope.chat_id})
+                                       {**form, "fork_target_v6": self.scope.chat_id})
 
     def test_query_validation_does_not_replace_target_selection(self):
         card = self.form(chats=(self.chat,))
         for query in ("群" * 51, "研\n发", "\t研发", "\x7f", "\x85", False, []):
             with self.subTest(query=query), self.assertRaises(CardActionError):
-                self.decode(card, "查找群聊", fork_query_v5=query)
-        self.assertEqual(self.decode(card, "查找群聊", fork_query_v5=None).query, "")
-        action = self.decode(card, fork_query_v5=self.chat.chat_id)
+                self.decode(card, "查找群聊", fork_query_v6=query)
+        self.assertEqual(self.decode(card, "查找群聊", fork_query_v6=None).query, "")
+        action = self.decode(card, fork_query_v6=self.chat.chat_id)
         self.assertEqual(action.target_chat_id, self.scope.chat_id)
         for target in ("", "not/a/chat", False, [], None, "x" * 193):
             with self.subTest(target=target), self.assertRaises(CardActionError):
-                self.decode(card, fork_mode_v5="group", fork_target_v5=target)
+                self.decode(card, fork_mode_v6="group", fork_target_v6=target)
 
     def test_wrong_scope_and_malformed_exact_source_are_rejected(self):
         card = self.form()
@@ -394,7 +398,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         form = form_values(card)
         value = callback(card, "创建分支")
         forms = [None, [], {}, {**form, "new_project": "project"},
-                 {"fork_target_v5": self.scope.chat_id}, {"fork_name_v5": "name"}]
+                 {"fork_target_v6": self.scope.chat_id}, {"fork_name_v6": "name"}]
         for malformed in forms:
             with self.subTest(form=malformed), self.assertRaises(CardActionError):
                 decode_fork_action(self.scope, value, malformed)
@@ -402,9 +406,9 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(value=malformed), self.assertRaises(CardActionError):
                 decode_fork_action(self.scope, malformed, form)
         no_query = decode_fork_action(self.scope, callback(card, "查找群聊"),
-                                    {key: item for key, item in form.items() if key != "fork_query_v5"})
+                                    {key: item for key, item in form.items() if key != "fork_query_v6"})
         self.assertEqual(no_query.query, "")
-        for version in (1, 4):
+        for version in (1, 4, 5):
             with self.assertRaisesRegex(CardActionError, "已过期"):
                 decode_fork_action(self.scope, {**value, "v": version}, form)
         self.assertFalse(is_fork_card_action({}, {"new_project": "anything"}))
@@ -424,7 +428,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
                 decode_fork_action(self.scope, item, form_values(card))
         for page in (None, 1, True, [], "-1", "3", "01", " 1", "１"):
             with self.subTest(page=page), self.assertRaises(CardActionError):
-                self.decode(card, "跳转", fork_page_v5=page)
+                self.decode(card, "跳转", fork_page_v6=page)
 
     def test_large_directory_keeps_every_option_within_json_and_element_limits(self):
         chats = tuple(AvailableChat(f"oc_group_{index:08}", "长群名" * 33 + str(index), None, False)
@@ -452,7 +456,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         selected = snapshot.chats[1].chat_id
         card = self.form(chat_snapshot=snapshot, target_mode="group", target_choice=selected, name="分支草稿")
         for page in (2, 1, 0, 2):
-            action = self.decode(card, "跳转", fork_page_v5=str(page))
+            action = self.decode(card, "跳转", fork_page_v6=str(page))
             self.assertEqual(action.chat_page, page)
             self.assertFalse(action.search_requested)
             self.assertEqual(action.target_choice, selected)
@@ -465,7 +469,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
                 expected.append(selected)
             self.assertEqual([option["value"] for option in self.choice(card)["options"]], expected)
             self.assertEqual(len(elements(card.card, "form")), 1)
-            self.assertEqual(form_values(card)["fork_page_v5"], str(page))
+            self.assertEqual(form_values(card)["fork_page_v6"], str(page))
             self.assertEqual(self.decode(card).target_chat_id, selected)
             self.assertEqual(self.decode(card).name, "分支草稿")
 
@@ -473,11 +477,11 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         for chats in ((), (self.chat,)):
             with self.subTest(chats=chats):
                 card = self.form(chat_snapshot=self.snapshot(chats=chats), target_choice="")
-                self.assertNotIn("fork_page_v5", form_values(card))
+                self.assertNotIn("fork_page_v6", form_values(card))
                 self.assertEqual(len(elements(card.card, "button")), 2)
                 self.assertFalse(any("snapshot" in button["behaviors"][0]["value"]
                                      for button in elements(card.card, "button")))
-                search = self.decode(card, "查找群聊", fork_query_v5="新查询")
+                search = self.decode(card, "查找群聊", fork_query_v6="新查询")
                 self.assertEqual(search.query, "新查询")
                 self.assertTrue(search.search_requested)
 
@@ -536,7 +540,7 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         for label, expected in (("创建分支", "create"), ("查找群聊", "results"), ("跳转", "results")):
             with self.subTest(label=label):
                 value = callback(card, label)
-                form = {**form_values(card), "fork_name_v5": "新名称", "fork_mode_v5": "group", "fork_target_v5": self.chat.chat_id}
+                form = {**form_values(card), "fork_name_v6": "新名称", "fork_mode_v6": "group", "fork_target_v6": self.chat.chat_id}
                 await channel._handle_interaction_event(P2CardActionTrigger({
                     "event": {
                         "operator": {"open_id": "ou_user"},
@@ -554,6 +558,100 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(decoded.name, "新名称")
                 self.assertEqual(decoded.source, self.source)
         self.assertEqual(len(received), 3)
+
+    def test_landing_and_source_action_are_submit_only_and_survive_navigation(self):
+        card = self.form(chat_snapshot=self.snapshot(), landing="main", source_action="archive")
+        for field in ("fork_landing_v6", "fork_source_action_v6"):
+            control = next(item for item in elements(card.card, "select_static") if item["name"] == field)
+            self.assertIs(control["required"], True)
+            self.assertNotIn("label", control)
+            fields = elements(card.card, "form")[0]["elements"]
+            description = fields[fields.index(control) - 1]
+            self.assertEqual(description["tag"], "div")
+            self.assertEqual(description["text"]["content"],
+                             "落点" if field == "fork_landing_v6" else "创建后")
+            self.assertNotIn("behaviors", control)
+            for invalid in (None, [], True, "", "other"):
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(CardActionError):
+                    self.decode(card, **{field: invalid})
+            values = form_values(card)
+            del values[field]
+            with self.assertRaises(CardActionError):
+                decode_fork_action(self.scope, callback(card, "创建分支"), values)
+        for label in ("创建分支", "查找群聊", "跳转"):
+            action = self.decode(card, label)
+            self.assertEqual((action.landing, action.source_action), ("main", "archive"))
+
+    def confirmation(self, **changes):
+        form = self.form(chats=(self.chat,), target_mode="id", target_id="oc_target", target_choice=self.chat.chat_id,
+                         name="保留草稿", query_input="保留查询", landing="main", source_action="archive")
+        intent = replace(self.decode(form), **changes)
+        return fork_confirmation_card(self.scope, intent, target_title="目标群",
+                                      current_title="原会话", current_short_id="12345678",
+                                      current_status="running")
+
+    def test_confirmation_is_read_only_and_buttons_carry_complete_draft(self):
+        card = self.confirmation()
+        self.assertEqual(elements(card.card, "form"), [])
+        self.assertEqual(elements(card.card, "input"), [])
+        self.assertEqual(elements(card.card, "select_static"), [])
+        self.assertEqual(len(elements(card.card, "button")), 2)
+        for label, action in (("确认创建", "confirm"), ("返回修改", "back")):
+            value = callback(card, label)
+            decoded = decode_fork_action(self.scope, value)
+            self.assertEqual(decoded.action, action)
+            self.assertEqual((decoded.name, decoded.target_mode, decoded.target_choice, decoded.target_id),
+                             ("保留草稿", "id", self.chat.chat_id, "oc_target"))
+            self.assertEqual((decoded.landing, decoded.source_action, decoded.query_input),
+                             ("main", "archive", "保留查询"))
+            if action == "confirm":
+                self.assertEqual(decoded.target_chat_id, "oc_target")
+            self.assertNotEqual(callback(self.confirmation(), label)["nonce"], value["nonce"])
+        text = str(card.card)
+        for fragment in ("目标群", "oc_target", "原会话", "12345678", "running", "/sessions", "切回后作答", "定时计划会自动暂停"):
+            self.assertIn(fragment, text)
+        self.assertLessEqual(len(json.dumps(card.card, ensure_ascii=False).encode()), 55_000)
+        self.assertLessEqual(tagged_elements(card.card), 200)
+
+    def test_confirmation_rejects_malformed_payload_and_form_injection(self):
+        value = callback(self.confirmation(), "确认创建")
+        changes = (
+            lambda item: item.update(draft=[]),
+            lambda item: item["draft"].pop("fork_landing_v6"),
+            lambda item: item["draft"].update(fork_landing_v6="other"),
+            lambda item: item["draft"].update(fork_source_action_v6=False),
+            lambda item: item["draft"].update(unexpected="value"),
+        )
+        for change in changes:
+            malformed = copy.deepcopy(value)
+            change(malformed)
+            with self.subTest(malformed=malformed), self.assertRaises(CardActionError):
+                decode_fork_action(self.scope, malformed)
+        with self.assertRaises(CardActionError):
+            decode_fork_action(self.scope, value, {"fork_chat_id_v6": "oc_other"})
+
+    def test_main_status_names_actual_replacement_and_archive_result(self):
+        card = fork_status_card(name="新方案", **self.display, status="success", landing="main",
+                                topic_url="https://example.test/chat", replaced_session="实际会话 · abcdefgh",
+                                source_action="archive", archive_result="来源会话已归档")
+        self.assertIn("目标聊天主线", str(card.card))
+        self.assertIn("实际会话 · abcdefgh", str(card.card))
+        self.assertIn("/sessions", str(card.card))
+        self.assertIn("来源会话已归档", str(card.card))
+        self.assertNotIn("来源会话保持不变", str(card.card))
+        self.assertEqual(elements(card.card, "button")[0]["text"]["content"], "进入聊天主线")
+        empty = fork_status_card(name="新方案", **self.display, status="success", landing="main")
+        self.assertNotIn("已替换", str(empty.card))
+        self.assertNotIn("归档", str(empty.card))
+
+    def test_failed_main_status_names_replacement_only_when_binding_saved(self):
+        for saved in (False, True):
+            with self.subTest(binding_saved=saved):
+                card = fork_status_card(name="新方案", **self.display, status="failed", landing="main",
+                                        native_thread_id="native-branch", binding_saved=saved,
+                                        replaced_session="实际会话 · abcdefgh")
+                self.assertEqual("已替换当前会话：实际会话 · abcdefgh" in str(card.card), saved)
+                self.assertEqual("原会话保留，可通过 /sessions 切回" in str(card.card), saved)
 
     def test_status_cards_never_recreate_or_retry_and_explain_partial_creation(self):
         display = {"name": "方案 B", **self.display}

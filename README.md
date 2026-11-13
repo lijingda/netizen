@@ -43,7 +43,7 @@
   的当前内容，详见[文件说明](skills/netizen-user-guide/references/feedback-and-files.md#查看和发送本轮文件)。
 - **保留上下文，另开一条讨论。** 用
   [持久分支](skills/netizen-user-guide/references/fork-side-goal.md#fork-持久分支)在当前聊天或其他群
-  创建普通话题，之后独立继续。
+  创建新话题或切到目标聊天主线，之后独立继续。
 - **展开临时讨论，推进持续目标。** 用
   [Side](skills/netizen-user-guide/references/fork-side-goal.md#side-临时话题)另开临时话题，或用
   [Goal](skills/netizen-user-guide/references/fork-side-goal.md#goal)让 Codex 围绕目标持续推进。
@@ -134,7 +134,7 @@ Git 项目可在 `/new` 中加载 worktree 选项，选择已有受管 worktree 
 | 新建会话，选择项目及受管 worktree | `/new` |
 | 查看、保存或删除当前聊天的会话默认配置 | `/defaults` |
 | 查看并切换已有会话 | `/sessions` |
-| 从当前空闲会话另建持久分支话题 | `/fork` |
+| 从当前空闲会话创建持久分支，落到新话题或聊天主线 | `/fork` |
 | 调整模型、思考强度和过程卡 | `/config`，当前会话空闲时使用 |
 | 查看当前任务和上下文用量 | `/status` |
 | 查看共享 Codex 账号额度和重置时间 | `/usage` |

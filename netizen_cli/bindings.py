@@ -266,6 +266,14 @@ class ThreadBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class BindingCreation:
+    """Complete Binding and the current pointer replaced in its transaction."""
+
+    binding: ThreadBinding
+    previous_active_binding_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectRecord:
     alias: str
     cwd: str
@@ -948,7 +956,7 @@ class BindingStore:
             empty_topic_root_message_id=empty_topic_root_message_id,
             working_cwd=working_cwd,
             worktree_id=worktree_id,
-        )
+        ).binding
 
     def create_fork_binding(
         self,
@@ -961,17 +969,19 @@ class BindingStore:
         expected_project_revision: int,
         target_chat_kind: str,
         context_anchor: MessageContextAnchor | None = None,
-    ) -> ThreadBinding:
-        """Bind an already-created persistent fork to one empty, real topic."""
+    ) -> BindingCreation:
+        """Bind a fork, atomically capturing any replaced main-line pointer."""
 
         if (
-            scope.kind is not ScopeKind.TOPIC or scope.key == source.scope_key
+            (scope.kind is not ScopeKind.TOPIC and (
+                scope.kind is not (ScopeKind.DIRECT if target_chat_kind == "p2p" else ScopeKind.GROUP)
+            )) or scope.key == source.scope_key
             or not native_thread_id or native_thread_id == source.native_thread_id
             or source.native_thread_id is None or not root_message_id
             or expected_project_revision < 1
             or target_chat_kind not in {"group", "p2p"}
         ):
-            raise ValueError("fork requires a new native Thread and a fresh topic")
+            raise ValueError("fork requires a new native Thread and a distinct valid destination")
         if self.get_scope(source.scope_key).app_id != scope.app_id:
             raise ScopeConflict("分支必须属于同一个飞书应用。")
         context_mode = (
@@ -986,7 +996,7 @@ class BindingStore:
                 context_anchor=context_anchor if context_mode is MentionContextMode.CATCH_UP else None,
                 expected_project_revision=expected_project_revision,
                 native_thread_id=native_thread_id,
-                empty_topic_root_message_id=root_message_id,
+                empty_topic_root_message_id=root_message_id if scope.kind is ScopeKind.TOPIC else None,
                 working_cwd=source.working_cwd,
                 worktree_id=source.worktree_id,
             )
@@ -1009,7 +1019,7 @@ class BindingStore:
         empty_topic_root_message_id: str | None = None,
         working_cwd: str | None = None,
         worktree_id: str | None = None,
-    ) -> ThreadBinding:
+    ) -> BindingCreation:
         if not project_alias or not creator_id:
             raise ValueError("Binding Project and creator must not be empty")
         if working_cwd is not None and (
@@ -1059,6 +1069,7 @@ class BindingStore:
                 _SCOPE_SELECT + " WHERE scope_key = ?",
                 (scope.key,),
             ).fetchone()
+            previous_id = scope_row["active_binding_id"] if scope_row is not None else None
             if scope_row is None:
                 self._connection.execute(
                     """
@@ -1164,7 +1175,7 @@ class BindingStore:
                 self.schedules._set_run(
                     scheduled_run_id, phase="binding_ready", binding_id=binding_id,
                 )
-        return self.get(binding_id)
+        return BindingCreation(self.get(binding_id), previous_id)
 
     def create_scheduled_binding(
         self, *, run_id: str, scope: FeishuScope,
@@ -1185,7 +1196,7 @@ class BindingStore:
             context_anchor=context_anchor, expected_project_revision=expected_project_revision,
             working_cwd=working_cwd, worktree_id=worktree_id,
             scheduled_run_id=run_id,
-        )
+        ).binding
 
     def find_by_native_thread_id(self, native_thread_id: str) -> ThreadBinding | None:
         with self._lock:
