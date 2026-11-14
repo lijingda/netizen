@@ -101,7 +101,7 @@ class OptionalProgressCardSettingsStorageTest(unittest.TestCase):
                     scope=FeishuScope("app", "chat", ScopeKind.TOPIC, "fork-topic"), source=binding,
                     native_thread_id="native-fork", root_message_id="root", creator_id="user",
                     expected_project_revision=project.revision, target_chat_kind="group",
-                )
+                ).binding
                 self.assertIsNone(fork.task_feedback.progress_card_settings)
                 rule = store.defaults.save(
                     app_id="app", kind="chat", chat_id="chat", keyword=None, project="p",

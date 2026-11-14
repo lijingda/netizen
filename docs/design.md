@@ -457,8 +457,9 @@ Compaction、普通 `STOPPING`／`OBSERVATION_UNAVAILABLE` 和 Goal 的其他活
 `/fork` 按 [ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
 从当前已物化、持久且确认空闲的普通 Binding 创建普通持久分支；运行中、停止中、压缩中
 及 lifecycle/观测未知时拒绝，暂停且空闲的 Goal 可作为来源，但不接管来源 Goal。
-默认在当前聊天另建话题，也可选择机器人已加入的其他群或填写可访问的群/单聊 ID；
-不接入已有话题或改变来源 current。跨群目录通过共享 Management 的 `query_available_chats`
+目标聊天默认当前聊天，也可选择机器人已加入的其他群或填写可访问的群/单聊 ID；落点按
+[ADR 0097](adr/0097-fork-into-chat-main-lines-with-replacement-confirmation.md) 选择新话题
+（默认）或该聊天主线，不接入已有话题；除非选择创建后归档来源，不改变来源 current。跨群目录通过共享 Management 的 `query_available_chats`
 查询，展示补查使用 `validate_available_chat`；最终提交的所有目标通过 `validate_chat_target`
 复核，复用既有 FeishuChatDirectory 和官方客户端，不经过 Admin HTTP 或增加权限层。
 创建卡使用一张表单，同时填写名称和目标飞书聊天；指定方式共用“当前聊天、选择群聊、
@@ -476,7 +477,7 @@ Compaction、普通 `STOPPING`／`OBSERVATION_UNAVAILABLE` 和 Goal 的其他活
 重新查找回到第一页并清空旧结果选择；跳页沿用原快照，保留已选目标、尚未提交的新
 关键词和其他表单草稿。单页不显示导航，空结果不生成空群下拉。原生下拉若自带本页
 过滤，不作为全群搜索入口。
-“新建话题”只在字段说明中出现，候选显示群名和头像，同名时补短 ID。查找失败明确提示，
+Fork 的落点由独立原生单选决定，Cron 仍只在字段说明中写“新建话题”；候选显示群名和头像，同名时补短 ID。查找失败明确提示，
 保留草稿供重新查找或填 ID，不将失败当作没有群。不增加服务端目录缓存或卡片 session。
 快照只用于展示，群信息变化要重新查找；最终提交仍实时校验目标，不将快照当作授权证据。
 群候选尽力展示群头像。目录只透传受支持飞书 CDN 的 HTTPS `avatar` URL，
@@ -497,23 +498,53 @@ Fork 将目标区标为“分支位置”，方式下拉与群搜索、结果分
 下方输入通过浅色背景和内边距归组，精简重复说明。所有控件仍在同一个表单内，
 切换方式只改变本地选择，不请求后端刷新，也无需展开额外区域；查找、翻页和创建
 仍由按钮提交。分组不改变字段提交和目标解析。Cron 沿用现有平铺布局。
+分组下方是“新话题／主线”落点单选和“创建后：保留当前会话／归档当前会话”单选，默认
+新话题和保留；两者同样只在提交时生效，切换不回调、不重绘。
 
 公开 `thread_fork(ephemeral=False, include_turns=False)` 继承原生历史和权限；分支与来源
 共用 Project 和来源实际 cwd，匹配受管工作区时保留关联，复制显式 Model/Effort/Speed、Task Feedback 和上下文模式，之后各自独立。
 目标为单聊时仅将后续飞书补读模式归为 current-only，来源设置与已继承的原生历史不变。
 不复制有效配置或聊天消息游标、不强制覆盖原生权限、不建立工作目录副本；catch-up 初始
-边界取新话题 root/seed。分支完成后使用全部普通会话操作，重启也按普通持久会话恢复。
+边界取新话题 root/seed 或主线状态消息。分支完成后使用全部普通会话操作，重启也按普通持久会话恢复。
 
-创建顺序固定为原生 fork → 唯一“创建中”根卡片 → 真实 topic ID → 完整 Binding 原子落库
+新话题落点的创建顺序固定为原生 fork → 唯一“创建中”根卡片 → 真实 topic ID → 完整 Binding 原子落库
 并设为目标 current → 登记原 fork handle 的普通订阅 → 原地更新根卡片为成功。
 成功卡以分支名称为主标题、“会话分支已创建”为副标题；目标根卡提示在本话题继续，
 不显示跳转自身的按钮，仅来源回执提供“进入新话题”链接。必要的 seed 仍属于同一话题，
 使用查看顶部卡片创建结果、成功后再继续的固定说明，不持续声称正在创建。
 没有 Lazy 占位 Binding，也不发送首轮模型任务。
-每次交接复核 exact 身份、Project revision 与目标未占用。创建中提示“请等待创建完成后
-再发送消息”；不增加专用输入拦截。提前输入可能先按目标默认配置建立并执行普通会话，
+每次交接复核 exact 身份与 Project revision，新话题落点还复核目标未占用。创建中提示“请等待创建完成后
+再发送消息”；不增加专用输入拦截。新话题中提前输入可能先按目标默认配置建立并执行普通会话，
 随后 fork 因目标占用失败；fork 先提交则输入使用分支。无可用默认配置沿用普通未建会话
 反馈，不排队或重放。不能覆盖已建立 Binding 或把它冒充 fork 成功。
+
+主线落点在原生副作用前拒绝与来源相同的 Scope，以及没有主线的话题群（`chat_mode=topic` 或 `group_message_type=thread`）。
+提交校验在原生 fork 前无副作用地读取目标主线指针：为空直接创建；非空则把卡片刷新为
+只读确认态，展示目标聊天及当前会话的名称、编号和运行状态，并说明三点：它保留在会话
+列表中可以切回；它若在等待提问回答，需要切回后作答；它的原会话定时计划会自动暂停。
+“确认创建”和“返回修改”的 callback value 携带同一份草稿；“确认创建”只能提交确认卡展示的
+草稿，返回修改后再次提交会重新检查目标主线。确认的含义是替换提交时该主线的当前会话（如有），
+不绑定确认卡展示的那一个：确认后指针变空、切换或被新建会话占用，以及未经确认路径上的
+同类竞态，都直接替换，不再次确认。
+
+主线落点的顺序为：原生 fork → 在目标主线发布唯一“创建中”状态消息（确定性 UUID 去重）
+→ 在目标 Scope 锁内重读实际当前会话 → 完整 Binding 原子落库并设为 current，被替换的
+Binding 保留 → 登记原 fork handle 的普通订阅 → 同锁按 `/new` 的指针交接处理新旧会话
+订阅 → 原地更新状态消息。状态消息是结果展示、来源回执的跳转目标和群聊 catch-up 初始
+边界；成功后写明实际被替换的会话（没有则不提）及 `/sessions` 切回方式，Binding 已保存但
+交接未完成时，失败消息同样写明被替换的会话。不对确认时的
+快照做比较交换。被替换会话上仍在准备的输入按“准备期间 active 会话已切换”拒绝，不改投
+分支；已运行的任务继续执行并在原锚点交付，之后主线新消息进入分支，与 `/new` 一致。
+
+选择“创建后：归档当前会话”时，只在分支完整交接成功后执行。勾选即表示同意，不再复核
+来源的运行状态或设置，沿用[原生归档](#原生归档与删除)不以运行态或 idle 为准入的规则；
+创建期间来源若已开始新任务，归档会交由 App Server 一并 shutdown。归档复用会话列表的
+exact archive：在 exact Binding/native 身份下预留 lifecycle intent，释放锁后委托 App Server；来源仍是
+当前会话时清空来源指针，否则保持来源指针不变。它不属于在途 fork 所有权，沿用 archive
+自身的准入与停服语义。明确拒绝只报告原因；服务停止、来源已不存在等在原生调用前失败的
+情况报告本次未归档；结果未知按 Binding-local lifecycle-unknown 处理；任何结果都不撤销
+分支，也不自动重试。来源回执先显示分支已创建、正在归档来源，归档返回后合并展示分支与
+归档结果。
 
 进程内在途调用所有权覆盖从第一个副作用到完整交接，服务停止和 Project 删除使用既有
 有界收尾。Project 删除遇到在途 fork 时保留停用 Project，要求收尾后重新预览确认；
@@ -522,11 +553,13 @@ Fork 将目标区标为“分支位置”，方式下拉与群搜索、结果分
 极端中断留下的未绑定 Thread 或话题按 exact 证据人工核查，不增加持久恢复队列。
 
 卡片沿用同类 controls 的公共去重、FIFO、callback 编码和 revision/exact identity
-校验；不写 fork 专属 SQLite 去重键或卡片 session。查找、跳页、创建通过公开按钮 callback
-value 区分，不依赖按钮名称；v5 提交按钮通过公开 callback value 携带一次来源 Scope/Binding/
-revision，选项只保存目标 chat ID，名称和目标通过 `form_value` 一次提交，沿用 ADR 0058
-已验证的 value + form_value 组合。查找、跳页和创建均用公共 nonce，重绘更新 nonce。
-只解析当前表单协议，不维护旧卡兼容；空名称、空选群、空 ID 或目标校验失败保留表单。
+校验；不写 fork 专属 SQLite 去重键或卡片 session。查找、跳页、创建、确认和返回修改通过
+公开按钮 callback value 区分，不依赖按钮名称；v6 提交按钮通过公开 callback value 携带一次来源 Scope/Binding/
+revision，选项只保存目标 chat ID，名称、目标、落点和来源处理通过 `form_value` 一次提交，沿用 ADR 0058
+已验证的 value + form_value 组合；只读确认态的两个按钮改由 value 携带同一份草稿。
+查找、跳页、创建、确认和返回修改均用公共 nonce，重绘更新 nonce。只解析当前表单协议，
+不维护旧卡兼容；空名称、空选群、空 ID、目标校验失败、主线与来源同 Scope 或目标为
+话题群时保留表单。
 受理后显示创建中，成功后移除提交入口。发生原生副作用后不能因失败重新恢复可提交表单。
 完整卡片按 SDK 的 UTF-8 JSON 序列化检查 55,000 bytes 和 200 个元素预算，超限时明确
 说明仅保留当前和已选聊天，保留草稿并提供缩小群名查找入口，不截断可搜索群名或静默漏项。
@@ -932,7 +965,7 @@ Goal 启动、恢复和释放也推进 revision；原生 rollover 不依赖 Runt
 普通持久 Thread 的连接订阅按 [ADR 0028](adr/0028-release-idle-persistent-thread-subscriptions.md)
 由 Runtime 保存瞬态记录。普通 start、resume 和持久 fork 都只登记各自返回的同一 handle，
 持久 fork 在完整 Binding 保存后交接，无需另一次 resume。当前 active Binding 每次原生操作精确回到 idle 后保留十五分钟
-warm window；切换 `/new`、`/resume` 或 archive/unarchive 使某个 idle Binding 不再 active
+warm window；切换 `/new`、`/resume`、archive/unarchive 或持久分支替换主线当前会话使某个 idle Binding 不再 active
 时立即尝试取消其订阅。策略没有 Thread 数量上限或 LRU，不扫描 SQLite，也不在进程重启
 时 resume Thread 或重建 timer；新进程从零条已知订阅开始。下一条消息仍用保存的 exact
 native ID 公开 resume，因此 Binding、历史与 Turn Settings 都不变。

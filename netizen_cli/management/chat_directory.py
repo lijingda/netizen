@@ -203,7 +203,10 @@ class FeishuChatDirectory:
                     raise ChatDirectoryError("chat_query_failed", "无法确认目标飞书聊天状态，请稍后重试。")
                 if kind == "group" and not await self._is_member(chat_id):
                     raise ChatDirectoryError("chat_unavailable", "机器人当前不在目标群中，请先将机器人加入群聊。")
-                return ValidatedChatTarget(chat_id, kind)
+                return ValidatedChatTarget(chat_id, kind, topic_mode=(
+                    getattr(data, "chat_mode", None) == "topic"
+                    or getattr(data, "group_message_type", None) == "thread"
+                ))
         except TimeoutError:
             raise ChatDirectoryError("chat_query_timeout", "飞书聊天校验超时，请重试。") from None
 

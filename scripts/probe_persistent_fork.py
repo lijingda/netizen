@@ -163,7 +163,7 @@ async def _scenario(
                     expected_project_revision=revision,
                     target_chat_kind="group",
                     context_anchor=MessageContextAnchor("destination-seed", 2000),
-                )
+                ).binding
                 await runtime.adopt_fork(branch, fork)
                 assert runtime._subscriptions[branch.id].thread is fork
                 assert runtime.thread_subscription_snapshot(branch.id).state is ThreadSubscriptionState.RELEASE_PENDING

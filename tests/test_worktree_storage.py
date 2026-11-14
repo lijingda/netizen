@@ -212,7 +212,7 @@ class WorktreeStorageTest(unittest.IsolatedAsyncioTestCase):
             scope=FeishuScope("app", "chat", ScopeKind.TOPIC, "fork-topic"), source=source,
             native_thread_id="native-fork", root_message_id="root", creator_id="user",
             expected_project_revision=1, target_chat_kind="p2p",
-        )
+        ).binding
         self.assertEqual((fork.working_cwd, fork.worktree_id), (record.cwd, record.id))
         self.assertEqual(len(self.store.worktrees.list_for_project("repo")), 1)
 
