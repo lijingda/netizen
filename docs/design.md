@@ -277,6 +277,10 @@ Goal set 经 SDK helper 仍按原 mutation unknown 处理，未结构化配置�
 和 `modelProviderPolicyConflict`（组织 managed requirements 冲突，在提交前拒绝）。
 `modelProviderMismatch` 已无产生者，保留既有识别。客户端 resume 显式换 provider 的
 无类型 `-32600` 错误不纳入分类；Netizen resume 不传 provider，不触发这一错误。
+持久 `/fork` 不传 provider，按原生语义使用当前默认 provider 并继承来源历史，是修改
+默认 provider 后迁移旧会话的路径；NotConfigured 拒绝提示包含此建议。Netizen 不读取
+或复制 provider 配置。跨 provider 的历史兼容由原生与 provider 决定，目前仅有双 mock
+provider 的热态、冷态分支证据；Side 与后台命名同样经原生 fork，未单独验证。
 除已验证拒绝外，`thread.turn()` 若没有返回 handle，其副作用结果无法确认：服务立即
 关闭全部新 admission 并要求重启，不能把 Binding 当 idle 再启动第二轮。
 
@@ -289,6 +293,8 @@ Goal set 经 SDK helper 仍按原 mutation unknown 处理，未结构化配置�
 配置；`turn()` 返回结果未知时同样保留并关闭 admission。
 已知限制：模型选择卡和跨会话消息的 model 校验使用当前默认 provider 的全局模型目录。
 旧 provider 会话可能选到原 provider 不支持的模型，执行结果由该 provider 决定。
+所选模型保存在 Binding 配置中，之后每个新 Turn 都显式传入，直到用户改选；通过
+`/config` 改回原 provider 支持的模型即可恢复。
 目前不为此新增 adapter；公开高层模型目录支持按 provider 查询或收到相关用户反馈时再评估。
 
 running Turn 的普通输入仍只调用 exact handle `steer()`：即使 Binding 有配置，也不读取
@@ -512,6 +518,7 @@ Fork 将目标区标为“分支位置”，方式下拉与群搜索、结果分
 
 公开 `thread_fork(ephemeral=False, include_turns=False)` 继承原生历史和权限；分支与来源
 共用 Project 和来源实际 cwd，匹配受管工作区时保留关联，复制显式 Model/Effort/Speed、Task Feedback 和上下文模式，之后各自独立。
+分支使用当前默认 provider，迁移路径与验证边界见[会话配置](#scopebinding-与会话配置)。
 目标为单聊时仅将后续飞书补读模式归为 current-only，来源设置与已继承的原生历史不变。
 不复制有效配置或聊天消息游标、不强制覆盖原生权限、不建立工作目录副本；catch-up 初始
 边界取新话题 root/seed 或主线状态消息。分支完成后使用全部普通会话操作，重启也按普通持久会话恢复。

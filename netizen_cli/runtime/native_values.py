@@ -87,7 +87,10 @@ def _model_provider_rejection(error: BaseException) -> ModelProviderRejected | N
         recovery = f"可把 Codex 配置切回 {saved} 后重试，或新建会话"
     elif isinstance(detail, ModelProviderNotConfiguredModelProviderError):
         reason = f"该会话使用的模型提供方 {saved} 在当前 Codex 配置中不存在"
-        recovery = "可恢复该提供方配置后重试，或新建会话"
+        recovery = (
+            "可恢复该提供方配置后重试，或在该会话中发送 /fork 创建分支"
+            "（带上原上下文，使用当前默认提供方）"
+        )
     else:
         required = _provider_id(detail.required_model_provider)
         reason = f"Codex 组织策略要求模型提供方 {required}，与 {saved} 不符"
