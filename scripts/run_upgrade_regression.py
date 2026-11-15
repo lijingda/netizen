@@ -81,6 +81,7 @@ REGISTRY = (
       for phase in ("mcp", "mcp-recovery", "dispatch", "manual", "binding")),
     Step("project-delete", "account", "probe_project_delete.py", live=True,
          evidence="project-delete"),
+    # Two providers: saved identity, new default, cold missing-definition rejection/recovery.
     Step("provider-admission", "isolated", "probe_model_provider_admission.py",
          ("--timeout", "60", "--output", "{json}"), deadline=90, grace=5, evidence_source="json"),
     Step("thread-restore", "isolated", "probe_thread_restore.py",

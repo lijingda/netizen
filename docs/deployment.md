@@ -389,8 +389,10 @@ timeout --signal=INT --kill-after=5s 90s .venv/bin/python \
 ```
 
 macOS 使用 `gtimeout`。它使用临时 HOME/CODEX_HOME/cwd、真实 bundled App Server 与
-同一 loopback mock URL 的两个 provider，验证旧会话被拒且零模型请求、全局准入保持、
-新 Binding 可完成、切回原 provider 后 exact Thread 可继续，并核对用户配置不变。
+两个独立的 loopback mock provider，分别计数，验证切换默认后旧会话在原 provider 完成、
+新 Binding 使用新默认，`thread/read` 仍返回原 provider；删除原定义并冷恢复后只拒绝
+本次输入、两个 provider 均零新增请求、全局准入及 Binding 保持；恢复原定义后同一
+Thread 可继续，默认仍为新 provider。全程核对用户配置不变。
 不使用真实账号、不发送飞书消息；三种拒绝变体及 Side/Goal/compact 等入口另由行为测试
 覆盖，真实配置策略和客户端显示仍须独立验收。
 
@@ -400,9 +402,10 @@ macOS 使用 `gtimeout`。它使用临时 HOME/CODEX_HOME/cwd、真实 bundled A
 选取场景、`--output` 保存证据，使用临时 HOME/CODEX_HOME、回环 mock Responses provider
 和真正 bundled App Server，不使用真实模型账号。前者覆盖阶段性答案、命令/MCP 输出冷恢复，
 以及通过生产 Goal Tap/CodexRuntime 验证两轮自动 continuation、阶段性片段保留与四证明收尾；
-后者覆盖 local/remote-v2 手动压缩成功和 provider 错误、超过 10 秒 idle closing、慢
+后者覆盖 local/remote-v2 手动压缩成功和 provider 错误、用临时 rollout 元数据读取 FIFO
+阻塞 shutdown 验证超过 10 秒 idle closing（恢复原文件后释放）、慢
 required MCP 启动断连回收及压缩准备失败。后者直接使用公开 WebSocket wire，是测试 harness，不能
-复用于生产私有 gateway；目前依赖 POSIX 文件锁。mock provider 的原生执行通过不代表
+复用于生产私有 gateway；目前依赖 POSIX FIFO。mock provider 的原生执行通过不代表
 真实模型触发频率、压缩自动路径或飞书展示已验收。
 
 历史分页适配（ADR 0083）变化时，运行
@@ -626,7 +629,7 @@ Parent 已被单独删除时的孤立 Runtime Side；检查原生四视图消失
 订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
 同一 ID 接管、继续 Turn 并再次取消订阅；这证明 Binding 可以保留 ID/历史而无需常驻订阅。
 该 phase 不等待也不冒充最后订阅者离开后的卸载验证；何时卸载由 Codex 的
-`thread_unload_delay_secs` 决定（0.167 默认 60 秒），Netizen 不设置。当前协议没有
+`thread_unload_delay_secs` 决定（0.169 默认 60 秒），Netizen 不设置。当前协议没有
 稳定、无副作用的 live registered-terminal fixture，因此 list 非空、检查错误与 unsubscribe
 响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为本地代码门禁。
 

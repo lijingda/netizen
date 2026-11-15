@@ -2,8 +2,8 @@
 """Disposable native compaction and lifecycle probes; no real model or account.
 
 Uses the installed bundled App Server over its public WebSocket JSON-RPC wire
-protocol. This harness is not a production SDK adapter. Slow teardown locks only
-the probe's temporary writer-coordination file, following the upstream test.
+protocol. This harness is not a production SDK adapter. Slow teardown gates only
+the probe's temporary rollout metadata read with a POSIX FIFO during shutdown.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 from contextlib import asynccontextmanager, suppress
-import fcntl
 import importlib.metadata
 import json
 import os
@@ -260,6 +259,50 @@ async def compaction_case(root: Path, *, fails: bool, remote: bool = False) -> d
             }
 
 
+@asynccontextmanager
+async def blocked_rollout_metadata(root: Path, rollout: Path):
+    """Hold shutdown's metadata read; restore the exact file before releasing it.
+
+    0.169 live_writer::shutdown_thread awaits materialize_to_sqlite, which reads
+    session metadata before projecting the rollout. The recorder retains its
+    open descriptor to the saved regular file. Only the new metadata reader sees
+    the empty FIFO; release supplies its original header and subsequent reads
+    see the restored regular file. All resources belong to this disposable case.
+    """
+    assert rollout.resolve().is_relative_to(root.resolve()) and rollout.is_file()
+    with rollout.open("rb") as stream:
+        metadata = stream.readline(4097)
+    # Bound the header and release time, including on failure. POSIX platforms
+    # can have different PIPE_BUF sizes, so release in atomic chunks.
+    assert metadata.endswith(b"\n") and len(metadata) <= 4096
+    saved = rollout.with_suffix(".probe-saved")
+    assert not saved.exists()
+    gate = None
+    rollout.rename(saved)
+    try:
+        os.mkfifo(rollout)
+        gate = os.open(rollout, os.O_RDWR | os.O_NONBLOCK)
+        yield
+    finally:
+        try:
+            os.replace(saved, rollout)
+            if gate is not None:
+                chunk_size = os.fpathconf(gate, "PC_PIPE_BUF")
+                async with asyncio.timeout(3):
+                    for offset in range(0, len(metadata), chunk_size):
+                        chunk = metadata[offset:offset + chunk_size]
+                        while True:
+                            try:
+                                written = os.write(gate, chunk)
+                                assert written == len(chunk)
+                                break
+                            except BlockingIOError:
+                                await asyncio.sleep(0.01)
+        finally:
+            if gate is not None:
+                os.close(gate)
+
+
 async def idle_unload_case(root: Path) -> dict[str, Any]:
     with mock_provider([final_reply("seed", "NATIVE-IDLE-SEED")]) as provider:
         cwd, env = isolated_config(root, provider)
@@ -267,14 +310,17 @@ async def idle_unload_case(root: Path) -> dict[str, Any]:
         config.write_text("thread_unload_delay_secs = 0\n" + config.read_text())
         async with native_server(cwd, env) as server:
             client = await server.connect()
-            thread_id = await start_thread(client, cwd)
+            thread_id = await start_thread(client, cwd, baseInstructions="Disposable idle probe.")
             await run_turn(client, thread_id, "NATIVE-IDLE-SEED")
-            coordination = Path(env["CODEX_HOME"]) / "thread-writer-locks/.coordination.lock"
-            with coordination.open("r+") as lock:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            snapshot = await client.request("thread/read", {"threadId": thread_id, "includeTurns": True})
+            async with blocked_rollout_metadata(root, Path(snapshot["thread"]["path"])):
                 began = time.monotonic()
                 result = await client.request("thread/unsubscribe", {"threadId": thread_id})
                 assert result == {"status": "unsubscribed"}, result
+                ack_elapsed = time.monotonic() - began
+                assert not any(event.get("method") == "thread/closed" and
+                               event["params"]["threadId"] == thread_id
+                               for event in client.notifications), "Thread closed before barrier release"
                 await server.wait_log("codex.app_server.thread_shutdown_slow", timeout=22)
                 elapsed = time.monotonic() - began
                 assert elapsed >= 10, elapsed
@@ -287,7 +333,6 @@ async def idle_unload_case(root: Path) -> dict[str, Any]:
                 else:
                     raise AssertionError("closing thread unexpectedly resumed")
                 assert closing == {"code": -32600, "message": f"thread {thread_id} is closing; retry thread/resume after the thread is closed"}, closing
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             await client.wait(lambda event: event.get("method") == "thread/closed" and event["params"]["threadId"] == thread_id, timeout=12)
             loaded = await client.request("thread/loaded/list", {})
             assert thread_id not in loaded["data"], loaded
@@ -296,8 +341,10 @@ async def idle_unload_case(root: Path) -> dict[str, Any]:
             assert not provider.errors and not provider.replies, provider.errors
             return {"scenario": "idle_unload_over_ten_seconds", "passed": True,
                     "thread_id": thread_id, "shutdown_warning_seconds": round(elapsed, 3),
+                    "unsubscribe_ack_seconds": round(ack_elapsed, 3), "ack_before_unload": True,
                     "loaded_during_closing": True, "closing_error": closing,
-                    "closed_after_lock_release": True, "resumed_after_closed": True}
+                    "closed_after_barrier_release": True, "resumed_after_closed": True,
+                    "fault_injection": "temporary rollout metadata FIFO"}
 
 
 async def compaction_preparation_error_case(root: Path) -> dict[str, Any]:

@@ -57,6 +57,7 @@ class AppServerThreadHistory:
             "sort_direction": "sortDirection", "thread_id": "threadId",
         })
         self._item_params = _model("ThreadItemsListParams", {
+            "defer_output": "deferOutput",
             "cursor": "cursor", "limit": "limit", "sort_direction": "sortDirection",
             "thread_id": "threadId", "turn_id": "turnId",
         })

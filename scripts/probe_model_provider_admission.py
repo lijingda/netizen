@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Verify provider rejection through CodexRuntime with an isolated mock provider.
+"""Verify saved-provider continuity and cold-resume rejection through CodexRuntime.
 
-Uses temporary HOME/CODEX_HOME/cwd and the real bundled App Server; no account
+Uses two independent mock providers, temporary HOME/CODEX_HOME/cwd and the
+real bundled App Server; no account
 or Feishu traffic. Run with an external process deadline, for example:
 ``timeout --signal=INT --kill-after=5s 90s .venv/bin/python
 scripts/probe_model_provider_admission.py --output /tmp/provider-admission.json``.
@@ -20,7 +21,7 @@ import sys
 import tempfile
 from typing import Any
 
-from openai_codex import AsyncCodex, CodexConfig
+from openai_codex import AsyncCodex, AsyncThread, CodexConfig
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
@@ -40,20 +41,35 @@ def _user_config_fingerprints() -> dict[Path, str | None]:
             for home in homes for path in (home / "config.toml",)}
 
 
-async def _scenario(root: Path) -> dict[str, Any]:
-    replies = [(200, response_events(name, *message_events(
+def _reply(name: str) -> tuple[int, bytes]:
+    return 200, response_events(name, *message_events(
         name + "-message", name.upper(), "final_answer",
-    ))) for name in ("seed-a", "seed-b", "new-provider", "original-provider")]
-    with mock_provider(replies) as provider:
-        cwd, env = isolated_config(root, provider)
+    ))
+
+
+async def _scenario(root: Path) -> dict[str, Any]:
+    with (
+        mock_provider([_reply(name) for name in (
+            "seed-a", "after-switch-a", "restored-a",
+        )]) as provider_a,
+        mock_provider([_reply("fresh-b")]) as provider_b,
+    ):
+        cwd, env = isolated_config(root, provider_a)
         config_path = Path(env["CODEX_HOME"]) / "config.toml"
         original = config_path.read_text(encoding="utf-8") + (
             '\n[model_providers.second_probe]\nname = "Second disposable provider"\n'
-            f'base_url = "http://127.0.0.1:{provider.server_port}/v1"\n'
+            f'base_url = "http://127.0.0.1:{provider_b.server_port}/v1"\n'
             'wire_api = "responses"\nrequires_openai_auth = false\n'
             'request_max_retries = 0\nstream_max_retries = 0\n'
         )
         config_path.write_text(original, encoding="utf-8")
+        switched = original.replace(
+            'model_provider = "native_probe"', 'model_provider = "second_probe"', 1,
+        )
+        start = switched.index("[model_providers.native_probe]")
+        end = switched.index("[", start + 1)
+        removed = switched[:start] + switched[end:]
+        assert "[model_providers.native_probe]" not in removed
         store = BindingStore(root / "channel.sqlite3")
         store.bootstrap_project(alias="provider-probe", cwd=str(cwd))
         outcomes: list[Any] = []
@@ -67,64 +83,86 @@ async def _scenario(root: Path) -> dict[str, Any]:
                 project_alias="provider-probe", creator_id="probe-owner",
             )
 
+        def make_runtime(codex: AsyncCodex) -> CodexRuntime:
+            return CodexRuntime(
+                codex=codex, bindings=store,
+                terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
+                on_completion=capture, poll_interval_seconds=0.01,
+                automatic_thread_naming=False,
+            )
+
+        def counts() -> tuple[int, int]:
+            return len(provider_a.requests), len(provider_b.requests)
+
+        async def complete(runtime: CodexRuntime, target, expected: str):
+            previous_count = len(outcomes)
+            submission = await runtime.submit(
+                binding=store.get(target.id), cwd=cwd, input="Return the scripted reply.",
+                owner_id="probe-owner", origin=None,
+            )
+            assert submission.release_receipt_attempt is not None
+            submission.release_receipt_attempt()
+            assert await runtime.wait_idle(timeout=15), "Turn did not finish"
+            assert len(outcomes) == previous_count + 1
+            outcome = outcomes[-1]
+            assert outcome.error is None, type(outcome.error).__name__
+            assert outcome.turn_id == submission.turn_id
+            assert outcome.result.status.value == "completed", outcome.result.status
+            assert outcome.result.final_response == expected, outcome.result.final_response
+            return submission
+
         try:
+            first = binding("binding-a")
             async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
-                runtime = CodexRuntime(
-                    codex=codex, bindings=store,
-                    terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
-                    on_completion=capture, poll_interval_seconds=0.01,
-                    automatic_thread_naming=False,
-                )
-
-                async def complete(target, expected: str):
-                    submission = await runtime.submit(
-                        binding=store.get(target.id), cwd=cwd, input="Return the scripted reply.",
-                        owner_id="probe-owner", origin=None,
-                    )
-                    assert submission.release_receipt_attempt is not None
-                    submission.release_receipt_attempt()
-                    assert await runtime.wait_idle(timeout=15), "Turn did not finish"
-                    outcome = outcomes[-1]
-                    assert outcome.error is None, type(outcome.error).__name__
-                    assert outcome.turn_id == submission.turn_id
-                    assert outcome.result.status.value == "completed", outcome.result.status
-                    assert outcome.result.final_response == expected, outcome.result.final_response
-                    return submission
-
+                runtime = make_runtime(codex)
                 try:
-                    first, second = binding("binding-a"), binding("binding-b")
-                    seed_a = await complete(first, "SEED-A")
-                    await complete(second, "SEED-B")
-                    # Resolve cwd once so the rejected operation cannot be
-                    # confused with the independent materialized cwd adoption.
+                    seed = await complete(runtime, first, "SEED-A")
+                    assert counts() == (1, 0), counts()
+                    config_path.write_text(switched, encoding="utf-8")
+                    continued = await complete(runtime, first, "AFTER-SWITCH-A")
+                    assert continued.thread_id == seed.thread_id
+                    assert counts() == (2, 0), counts()
+                    assert runtime._accepting
+                    fresh = await complete(runtime, binding("binding-b"), "FRESH-B")
+                    assert fresh.thread_id != seed.thread_id
+                    assert counts() == (2, 1), counts()
+                    native = await AsyncThread(codex, seed.thread_id).read()
+                    assert native.thread.model_provider == "native_probe"
+                    # Adopt the materialized cwd before comparing Binding snapshots.
                     await runtime.native_thread_cwd(first.id)
+                finally:
+                    runtime.close_admission()
+                    await runtime.cancel_tasks()
+
+            config_path.write_text(removed, encoding="utf-8")
+            async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
+                runtime = make_runtime(codex)
+                try:
                     before = store.get(first.id)
-                    request_count = len(provider.requests)
-                    assert request_count == 2
-                    config_path.write_text(original.replace(
-                        'model_provider = "native_probe"', 'model_provider = "second_probe"', 1,
-                    ), encoding="utf-8")
+                    requests_before = counts()
                     try:
                         await runtime.submit(
-                            binding=before, cwd=cwd, input="This must not reach the model.",
+                            binding=before, cwd=cwd, input="This must not reach any model.",
                             owner_id="probe-owner", origin=None,
                         )
                     except ModelProviderRejected as error:
-                        assert "native_probe" in str(error) and "second_probe" in str(error)
+                        assert "native_probe" in str(error)
+                        # The retired mismatch variant would also name the new default.
+                        assert "second_probe" not in str(error)
                         assert "未发送给模型" in str(error)
                     else:
-                        raise AssertionError("provider switch was not rejected")
+                        raise AssertionError("missing saved provider was not rejected")
+                    assert counts() == requests_before
                     assert runtime._accepting
                     assert first.id not in runtime._active
                     assert store.get(first.id) == before
-                    assert len(provider.requests) == request_count
-                    fresh = await complete(binding("binding-c"), "NEW-PROVIDER")
-                    assert fresh.thread_id != seed_a.thread_id
-                    config_path.write_text(original, encoding="utf-8")
-                    continued = await complete(first, "ORIGINAL-PROVIDER")
-                    assert continued.thread_id == seed_a.thread_id
-                    assert len(provider.requests) == 4 and len(outcomes) == 4
-                    assert not provider.errors and not provider.replies
+                    assert len(outcomes) == 3
+                    config_path.write_text(switched, encoding="utf-8")
+                    restored = await complete(runtime, first, "RESTORED-A")
+                    assert restored.thread_id == seed.thread_id
+                    assert counts() == (3, 1), counts()
+                    assert not provider_a.errors and not provider_a.replies
+                    assert not provider_b.errors and not provider_b.replies
                 finally:
                     runtime.close_admission()
                     await runtime.cancel_tasks()
@@ -133,11 +171,14 @@ async def _scenario(root: Path) -> dict[str, Any]:
     return {
         "passed": True, "sdk_version": importlib.metadata.version("openai-codex"),
         "cli_version": importlib.metadata.version("openai-codex-cli-bin"),
-        "transport": "bundled App Server + local mock Responses HTTP SSE",
+        "transport": "bundled App Server + two independent local mock Responses HTTP SSE providers",
         "real_model_used": False, "feishu_delivery_tested": False,
-        "model_request_count": 4, "rejected_model_request_count": 0,
-        "admission_preserved": True, "binding_preserved": True,
-        "new_binding_completed": True, "original_thread_continued": True,
+        "provider_request_counts": {"native_probe": 3, "second_probe": 1},
+        "old_binding_kept_saved_provider": True, "new_binding_used_new_default": True,
+        "thread_read_saved_provider": "native_probe",
+        "cold_resume_missing_provider_rejected": True, "rejected_model_request_count": 0,
+        "admission_preserved": True, "binding_preserved": True, "rejected_binding_inactive": True,
+        "restored_definition_same_thread_continued": True,
     }
 
 

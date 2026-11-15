@@ -396,11 +396,11 @@ def markdown(result: dict[str, Any], from_version: str, to_version: str) -> str:
     lines += ["## 整包文件清单", "", "| 文件 | from SHA-256 | to SHA-256 |", "| --- | --- | --- |"]
     old_files, new_files = (result["inventories"][side]["files"] for side in ("from", "to"))
     lines += [f"| `{name}` | {old_files.get(name, '—')} | {new_files.get(name, '—')} |" for name in sorted(old_files.keys() | new_files.keys())]
-    # The rust-v prefix was verified with gh api for both 0.163.0 and 0.167.0
-    # when implementing this tool. Offline analysis never queries the network.
+    # The rust-v prefix was verified with gh for 0.163.0, 0.167.0 and 0.169.0.
+    # Offline analysis never queries the network.
     url = f"https://github.com/openai/codex/compare/rust-v{from_version}...rust-v{to_version}"
     lines += ["", "## 上游 App Server 行为追查", "",
-              f"[上游源码比较]({url})。tag 命名 rust-v 已用 gh 核实 0.163.0/0.167.0；其他目标版本须另核实 tag。",
+              f"[上游源码比较]({url})。tag 命名 rust-v 已用 gh 核实 0.163.0/0.167.0/0.169.0；其他目标版本须另核实 tag。",
               "App Server 行为差异须按 docs/deployment.md 的「Netizen 边界 → 需追查的 App Server 请求/行为」对照表人工追查。",
               "逐个判断新增结构化错误和执行前校验能否证明未投递；本脚本不作该判断。"]
     return "\n".join(lines) + "\n"
