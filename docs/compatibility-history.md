@@ -7,6 +7,49 @@
 旧版本、mock provider、API ACK、浏览器 fixture 和真实客户端证据不可互相替代。
 不在这里记录私有主机坐标；原始私有证据继续留在忽略文件或运维系统。
 
+<a id="sdk-0169-20261115"></a>
+
+## 2026-11-14 至 2026-11-15：SDK 0.169.0 升级
+
+2026-11-14 的 `0.167.0` → `0.169.0` 升级完成精确 Python 包与 bundled App Server
+源码复核，并经独立复核交叉检查。高层 API 没有新方法，现有窄适配没有公开等价替代；
+生成模型新增的 `contentTokenCount`、`deferOutput` 等字段只接纳形状，Netizen 不读取也不发送。
+cleanup 与 Activity 保留原门禁，使用新版源码指纹
+`73e7a6238c7074dc8447a2a3890c62eda40cba4c1419347bbec8b06394d1166d`。
+
+新版 App Server 让会话保留自己保存的模型提供方：改默认提供方后旧会话继续使用原提供方，
+新会话使用新默认，`0.167.0` 的提供方不一致拒绝已无产生者。结构化拒绝只剩冷恢复时原提供方
+定义已删除和组织策略冲突两种，仍按
+[ADR 0093](adr/0093-reject-only-the-operation-on-native-provider-mismatch.md) 只拒绝本次操作；
+客户端 resume 显式更换提供方的无类型错误 Netizen 不会触发，也不纳入分类。持有 writer
+协调锁不再拖慢关闭（openai/codex #59969），原生边界探针改为阻塞探针自有临时 rollout 的
+元数据读取来注入慢关闭；该注入依赖当前关闭路径先读元数据，下次升级须复核。
+
+本机 `make check` 通过，执行 4,235 项测试（15 项条件跳过），包括 ruff、mypy、编译、依赖
+一致性与 SDK synthetic 门禁；该门禁运行于提交前内容相同的工作树。以下运行均在干净提交
+`f3d1cda` 上经 `run_upgrade_regression.py --live` 一次执行，49 项全部通过，无跳过，
+无残留进程告警，运行前后源码未变。
+
+Linux x86_64 源码 checkout（CPython 3.11、默认模型 `gpt-6.1-sol`）全部 17 个真实账号原生
+phase 通过，facade inventory 无候选迁移。同一账号的只读额度、持久 fork、后台命名、
+child Files、只读 Skill roots 与 Skills 七阶段、调度五阶段及 Project 删除两场景专项均通过；
+用户配置不变断言和自有资源清理按各探针执行。
+
+真实 bundled App Server 加 loopback mock provider：重写后的 provider 准入探针用两个分别计数的
+mock provider 确认，切换默认后旧会话仍在原提供方完成、`thread/read` 保留原提供方、新 Binding
+使用新默认；删除原定义后冷恢复被拒且零模型请求，全局准入与 Binding 保持；恢复定义后同一
+Thread 继续；用户配置不变。原生边界 7 项通过，其中 idle 场景 unsubscribe ACK 约 1 ms 返回，
+10.002 秒出现慢关闭告警，释放后关闭并按 exact ID 恢复。另有归档恢复 6 项、删除拒绝 4 项、
+阶段性答案 6 项、会话协作 8 项、取消 3 项、响应恢复 7 项、Admin 会话 2 项，以及历史分页、
+输入附件、定时 Worktree、定时自动归档与 cwd 探针通过。响应恢复的 `cold_permissions` 本次在
+本机通过：跨 3 个独立 App Server 的冷恢复保留只读权限并以 EROFS 拒绝写入，显式覆盖后可写。
+取消探针记录的 Goal 续流观测缺口仍在。
+
+两种结构化拒绝在各入口的处理只由行为测试覆盖，真实组织 provider 策略未验证；旧会话从全局
+模型目录选到原提供方不支持的模型属于已知限制，未实测。网络 grants、managed policy 与
+Responses WebSocket 未独立验证。以上不包含真实飞书投递、客户端显示或 Linux/macOS 服务
+部署/ready 验收；本次没有发布、更新或重启已有实例。
+
 ## 2026-11-11：补齐明确删除拒绝后的空闲回收排期
 
 对 `3532fe7` 的独立审查发现：任务在删除在途时完成，或已有 idle timer 在删除占用

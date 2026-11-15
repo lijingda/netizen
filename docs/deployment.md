@@ -1186,6 +1186,7 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 
 | 能力 / 实际版本与环境 | 验证层级与记录 | 未覆盖 / 复验入口 |
 | --- | --- | --- |
+| SDK/Runtime、provider 保留；`0.169.0`，2026-11-15 Linux 源码 checkout | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 保留与冷恢复拒绝及 mock 原生场景](compatibility-history.md#sdk-0169-20261115) | 真实组织 provider 策略、旧会话选到原提供方不支持的模型、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | SDK/Runtime、provider 准入；`0.167.0`，2026-11-09 Linux 候选 | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 准入及 mock 原生场景](compatibility-history.md#sdk-0167-20261109) | 冷恢复实际权限本机未验证；真实组织 provider 策略、图片附件形态的真实生成、卸载后接管、解除归档后代恢复、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | 历史分页、Goal 分离；`0.163.0`，2026-10-17/18 本机 | [本地门禁、mock 原生探针](compatibility-history.md#history-goal-20261017) | interrupted 续流缺口仍在；旧混合卡不承诺兼容；真实模型/客户端、十万会话压测与部署未验收；复验 history/Goal 专项 |
 | SDK/Runtime；`0.163.0`，2026-10-16 Linux 候选 | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除及 mock 28+1 场景](compatibility-history.md#sdk-0163-20261016) | 网络 grants、managed policy、Responses WebSocket、Code Mode 前台独立 wait、远端 Environment 最终 poll、飞书/平台 ready 及完整 CI 矩阵未覆盖；按受影响 phase 复验 |
