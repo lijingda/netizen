@@ -389,8 +389,10 @@ timeout --signal=INT --kill-after=5s 90s .venv/bin/python \
 ```
 
 macOS 使用 `gtimeout`。它使用临时 HOME/CODEX_HOME/cwd、真实 bundled App Server 与
-同一 loopback mock URL 的两个 provider，验证旧会话被拒且零模型请求、全局准入保持、
-新 Binding 可完成、切回原 provider 后 exact Thread 可继续，并核对用户配置不变。
+两个独立的 loopback mock provider，分别计数，验证切换默认后旧会话在原 provider 完成、
+新 Binding 使用新默认，`thread/read` 仍返回原 provider；删除原定义并冷恢复后只拒绝
+本次输入、两个 provider 均零新增请求、全局准入及 Binding 保持；恢复原定义后同一
+Thread 可继续，默认仍为新 provider。全程核对用户配置不变。
 不使用真实账号、不发送飞书消息；三种拒绝变体及 Side/Goal/compact 等入口另由行为测试
 覆盖，真实配置策略和客户端显示仍须独立验收。
 
@@ -400,9 +402,10 @@ macOS 使用 `gtimeout`。它使用临时 HOME/CODEX_HOME/cwd、真实 bundled A
 选取场景、`--output` 保存证据，使用临时 HOME/CODEX_HOME、回环 mock Responses provider
 和真正 bundled App Server，不使用真实模型账号。前者覆盖阶段性答案、命令/MCP 输出冷恢复，
 以及通过生产 Goal Tap/CodexRuntime 验证两轮自动 continuation、阶段性片段保留与四证明收尾；
-后者覆盖 local/remote-v2 手动压缩成功和 provider 错误、超过 10 秒 idle closing、慢
+后者覆盖 local/remote-v2 手动压缩成功和 provider 错误、用临时 rollout 元数据读取 FIFO
+阻塞 shutdown 验证超过 10 秒 idle closing（恢复原文件后释放）、慢
 required MCP 启动断连回收及压缩准备失败。后者直接使用公开 WebSocket wire，是测试 harness，不能
-复用于生产私有 gateway；目前依赖 POSIX 文件锁。mock provider 的原生执行通过不代表
+复用于生产私有 gateway；目前依赖 POSIX FIFO。mock provider 的原生执行通过不代表
 真实模型触发频率、压缩自动路径或飞书展示已验收。
 
 历史分页适配（ADR 0083）变化时，运行
@@ -626,7 +629,7 @@ Parent 已被单独删除时的孤立 Runtime Side；检查原生四视图消失
 订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
 同一 ID 接管、继续 Turn 并再次取消订阅；这证明 Binding 可以保留 ID/历史而无需常驻订阅。
 该 phase 不等待也不冒充最后订阅者离开后的卸载验证；何时卸载由 Codex 的
-`thread_unload_delay_secs` 决定（0.167 默认 60 秒），Netizen 不设置。当前协议没有
+`thread_unload_delay_secs` 决定（0.169 默认 60 秒），Netizen 不设置。当前协议没有
 稳定、无副作用的 live registered-terminal fixture，因此 list 非空、检查错误与 unsubscribe
 响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为本地代码门禁。
 
@@ -1183,6 +1186,7 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 
 | 能力 / 实际版本与环境 | 验证层级与记录 | 未覆盖 / 复验入口 |
 | --- | --- | --- |
+| SDK/Runtime、provider 保留；`0.169.0`，2026-11-15 Linux 源码 checkout | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 保留与冷恢复拒绝及 mock 原生场景](compatibility-history.md#sdk-0169-20261115) | 真实组织 provider 策略、旧会话选到原提供方不支持的模型、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | SDK/Runtime、provider 准入；`0.167.0`，2026-11-09 Linux 候选 | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 准入及 mock 原生场景](compatibility-history.md#sdk-0167-20261109) | 冷恢复实际权限本机未验证；真实组织 provider 策略、图片附件形态的真实生成、卸载后接管、解除归档后代恢复、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | 历史分页、Goal 分离；`0.163.0`，2026-10-17/18 本机 | [本地门禁、mock 原生探针](compatibility-history.md#history-goal-20261017) | interrupted 续流缺口仍在；旧混合卡不承诺兼容；真实模型/客户端、十万会话压测与部署未验收；复验 history/Goal 专项 |
 | SDK/Runtime；`0.163.0`，2026-10-16 Linux 候选 | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除及 mock 28+1 场景](compatibility-history.md#sdk-0163-20261016) | 网络 grants、managed policy、Responses WebSocket、Code Mode 前台独立 wait、远端 Environment 最终 poll、飞书/平台 ready 及完整 CI 矩阵未覆盖；按受影响 phase 复验 |
