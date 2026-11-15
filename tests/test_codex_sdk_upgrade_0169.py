@@ -126,6 +126,11 @@ class CodexProviderAdmissionContractTest(unittest.IsolatedAsyncioTestCase):
                             await runtime.submit(binding=before, cwd=cwd, input="blocked",
                                                  owner_id="owner", origin=None)
                         self.assertIn("saved-provider", str(rejected.exception))
+                        self.assertIn("未发送给模型", str(rejected.exception))
+                        if data["type"] == "modelProviderNotConfigured":
+                            self.assertIn("/fork", str(rejected.exception))
+                        else:
+                            self.assertNotIn("/fork", str(rejected.exception))
                         self.assertTrue(runtime._accepting)
                         self.assertNotIn(binding.id, runtime._active)
                         self.assertIsNone(runtime.thread_subscription_snapshot(binding.id))

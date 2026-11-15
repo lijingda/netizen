@@ -383,8 +383,8 @@ bundled App Server，验证正常恢复、已恢复、missing、writer 拒绝和
 Provider 准入分类（ADR 0093）或 SDK/App Server 升级时，运行隔离生产 Runtime 探针：
 
 ```bash
-timeout --signal=INT --kill-after=5s 90s .venv/bin/python \
-  scripts/probe_model_provider_admission.py --timeout 60 \
+timeout --signal=INT --kill-after=5s 120s .venv/bin/python \
+  scripts/probe_model_provider_admission.py --timeout 100 \
   --output /tmp/model-provider-admission.json
 ```
 
@@ -392,7 +392,10 @@ macOS 使用 `gtimeout`。它使用临时 HOME/CODEX_HOME/cwd、真实 bundled A
 两个独立的 loopback mock provider，分别计数，验证切换默认后旧会话在原 provider 完成、
 新 Binding 使用新默认，`thread/read` 仍返回原 provider；删除原定义并冷恢复后只拒绝
 本次输入、两个 provider 均零新增请求、全局准入及 Binding 保持；恢复原定义后同一
-Thread 可继续，默认仍为新 provider。全程核对用户配置不变。
+Thread 可继续，默认仍为新 provider。另经生产 `fork_exact`、`create_fork_binding` 和
+`adopt_fork` 验证默认切换后的热态分支，以及删除原定义、冷恢复被拒后的分支：新 Thread
+在新 provider 完成、原 provider 零新增请求、来源 provider 不变；新 provider 的请求体
+必须包含来源已完成的 assistant 回复，证明继承历史。全程核对用户配置不变。
 不使用真实账号、不发送飞书消息；三种拒绝变体及 Side/Goal/compact 等入口另由行为测试
 覆盖，真实配置策略和客户端显示仍须独立验收。
 

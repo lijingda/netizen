@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Verify saved-provider continuity and cold-resume rejection through CodexRuntime.
+"""Verify provider continuity, cold rejection and fork migration through CodexRuntime.
 
 Uses two independent mock providers, temporary HOME/CODEX_HOME/cwd and the
-real bundled App Server; no account
-or Feishu traffic. Run with an external process deadline, for example:
-``timeout --signal=INT --kill-after=5s 90s .venv/bin/python
+real bundled App Server; warm and cold forks must use the current default and
+carry source assistant history in the model request. No account or Feishu
+traffic. Run with an external process deadline, for example:
+``timeout --signal=INT --kill-after=5s 120s .venv/bin/python
 scripts/probe_model_provider_admission.py --output /tmp/provider-admission.json``.
 """
 
@@ -52,7 +53,9 @@ async def _scenario(root: Path) -> dict[str, Any]:
         mock_provider([_reply(name) for name in (
             "seed-a", "after-switch-a", "restored-a",
         )]) as provider_a,
-        mock_provider([_reply("fresh-b")]) as provider_b,
+        mock_provider([_reply(name) for name in (
+            "fresh-b", "warm-fork-b", "cold-fork-b",
+        )]) as provider_b,
     ):
         cwd, env = isolated_config(root, provider_a)
         config_path = Path(env["CODEX_HOME"]) / "config.toml"
@@ -73,6 +76,7 @@ async def _scenario(root: Path) -> dict[str, Any]:
         store = BindingStore(root / "channel.sqlite3")
         store.bootstrap_project(alias="provider-probe", cwd=str(cwd))
         outcomes: list[Any] = []
+        fork_history_evidence: dict[str, Any] = {}
 
         async def capture(outcome: Any) -> None:
             outcomes.append(outcome)
@@ -111,6 +115,46 @@ async def _scenario(root: Path) -> dict[str, Any]:
             assert outcome.result.final_response == expected, outcome.result.final_response
             return submission
 
+        async def fork_and_complete(runtime: CodexRuntime, codex: AsyncCodex, name: str):
+            source = store.get(first.id)
+            project = store.get_project(source.project_alias)
+            requests_before = counts()
+            async with runtime.track_fork_creation(project.alias):
+                thread = await runtime.fork_exact(source, expected_project_revision=project.revision)
+                created = store.create_fork_binding(
+                    scope=FeishuScope("probe-app", name, ScopeKind.DIRECT),
+                    source=source, native_thread_id=thread.id, root_message_id=name + "-root",
+                    creator_id="probe-owner", expected_project_revision=project.revision,
+                    target_chat_kind="p2p",
+                )
+                assert await runtime.adopt_fork(created.binding, thread)
+            assert counts() == requests_before, counts()
+            submission = await complete(runtime, created.binding, name.upper())
+            assert submission.thread_id == thread.id
+            assert thread.id != source.native_thread_id
+            assert counts() == (requests_before[0], requests_before[1] + 1), counts()
+            fork_native = await AsyncThread(codex, thread.id).read()
+            source_native = await AsyncThread(codex, source.native_thread_id).read()
+            assert fork_native.thread.model_provider == "second_probe"
+            assert source_native.thread.model_provider == "native_probe"
+            request = provider_b.requests[requests_before[1]]["body"]
+            assistant_texts = [
+                part["text"]
+                for item in request["input"] if item.get("role") == "assistant"
+                for part in item.get("content", []) if part.get("type") == "output_text"
+            ]
+            expected_history = ["SEED-A", "AFTER-SWITCH-A"]
+            assert all(text in assistant_texts for text in expected_history), assistant_texts
+            fork_history_evidence[name] = {
+                "source_provider": source_native.thread.model_provider,
+                "fork_provider": fork_native.thread.model_provider,
+                "distinct_thread_id": thread.id != source.native_thread_id,
+                "provider_requests_before": requests_before,
+                "provider_requests_after": counts(),
+                "history_location": "B request body input: assistant content output_text",
+                "matched_source_replies": expected_history,
+            }
+
         try:
             first = binding("binding-a")
             async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
@@ -130,6 +174,8 @@ async def _scenario(root: Path) -> dict[str, Any]:
                     assert native.thread.model_provider == "native_probe"
                     # Adopt the materialized cwd before comparing Binding snapshots.
                     await runtime.native_thread_cwd(first.id)
+                    await fork_and_complete(runtime, codex, "warm-fork-b")
+                    assert counts() == (2, 2), counts()
                 finally:
                     runtime.close_admission()
                     await runtime.cancel_tasks()
@@ -156,11 +202,13 @@ async def _scenario(root: Path) -> dict[str, Any]:
                     assert runtime._accepting
                     assert first.id not in runtime._active
                     assert store.get(first.id) == before
-                    assert len(outcomes) == 3
+                    assert len(outcomes) == 4
+                    await fork_and_complete(runtime, codex, "cold-fork-b")
+                    assert counts() == (2, 3), counts()
                     config_path.write_text(switched, encoding="utf-8")
                     restored = await complete(runtime, first, "RESTORED-A")
                     assert restored.thread_id == seed.thread_id
-                    assert counts() == (3, 1), counts()
+                    assert counts() == (3, 3), counts()
                     assert not provider_a.errors and not provider_a.replies
                     assert not provider_b.errors and not provider_b.replies
                 finally:
@@ -173,12 +221,16 @@ async def _scenario(root: Path) -> dict[str, Any]:
         "cli_version": importlib.metadata.version("openai-codex-cli-bin"),
         "transport": "bundled App Server + two independent local mock Responses HTTP SSE providers",
         "real_model_used": False, "feishu_delivery_tested": False,
-        "provider_request_counts": {"native_probe": 3, "second_probe": 1},
+        "provider_request_counts": {"native_probe": 3, "second_probe": 3},
         "old_binding_kept_saved_provider": True, "new_binding_used_new_default": True,
         "thread_read_saved_provider": "native_probe",
         "cold_resume_missing_provider_rejected": True, "rejected_model_request_count": 0,
         "admission_preserved": True, "binding_preserved": True, "rejected_binding_inactive": True,
         "restored_definition_same_thread_continued": True,
+        "warm_fork_used_current_default": True,
+        "cold_fork_after_rejection_used_current_default": True,
+        "fork_carried_source_history": True, "fork_history_evidence": fork_history_evidence,
+        "fork_binding_store_api": "create_fork_binding",
     }
 
 
@@ -195,7 +247,7 @@ async def probe(timeout: float) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--timeout", type=float, default=60, help="Overall deadline in seconds")
+    parser.add_argument("--timeout", type=float, default=100, help="Overall deadline in seconds")
     parser.add_argument("--output", type=Path, help="Optional JSON evidence file")
     args = parser.parse_args()
     if args.timeout <= 0:
