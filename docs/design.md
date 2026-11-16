@@ -291,11 +291,23 @@ provider 的热态、冷态分支证据；Side 与后台命名同样经原生 fo
 `/config` 不调用带 override 的 `thread_resume()`，也不声称能读取 Thread 当前值。
 模型目录失败、选项下线或不兼容时不会 start/resume/turn，Binding 配置保留供用户重新
 配置；`turn()` 返回结果未知时同样保留并关闭 admission。
-已知限制：模型选择卡和跨会话消息的 model 校验使用当前默认 provider 的全局模型目录。
-旧 provider 会话可能选到原 provider 不支持的模型，执行结果由该 provider 决定。
-所选模型保存在 Binding 配置中，之后每个新 Turn 都显式传入，直到用户改选；通过
-`/config` 改回原 provider 支持的模型即可恢复。
-目前不为此新增 adapter；公开高层模型目录支持按 provider 查询或收到相关用户反馈时再评估。
+已知限制：模型选择卡、跨会话消息的 model 校验，以及每个新 Turn 对已保存选择的重新校验，
+都使用当前默认 provider 的全局模型目录。旧 provider 会话可能选到原 provider 不支持的模型，
+执行结果由该 provider 决定；所选模型保存在 Binding 配置中，之后每个新 Turn 都显式传入，
+直到用户改选，通过 `/config` 改回原 provider 支持的模型即可恢复。反之，旧会话已保存的
+显式模型不在新默认 provider 的目录中时，每个新 Turn 都按选项下线在本地拒绝、不发给 Codex；
+`/config` 改为继承 Codex 后不再传模型，由原生按该 Thread 保存的 provider 与模型继续。
+持久分支复制来源的显式配置，同样按新默认 provider 的目录校验。
+按 0.169.0 源码，App Server 默认模型目录只在账号变化等情况下重新加载
+（[`ModelCatalog::current`](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server/src/model_catalog.rs#L82)），
+修改默认 provider 不会刷新；新 Thread 则立即使用新默认（双 mock provider 探针已验证）。
+因此切换默认 provider 后须重启实例，避免目录与新会话的 provider 不一致。Netizen 不提供
+provider 切换入口，也不写 Codex 配置；切换由部署者修改共享 Codex 配置后重启实例完成，
+共用该配置的各实例都需分别重启。
+App Server 协议的 `model/list` 已支持按 provider 列出模型
+（[`ModelListParams`](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server-protocol/src/protocol/v2/model.rs#L55)），
+但公开高层 `models()` 尚不支持；目前不为此新增 adapter，也不放宽每个新 Turn 的目录校验。
+公开高层模型目录支持按 provider 查询或收到相关用户反馈时再评估。
 
 running Turn 的普通输入仍只调用 exact handle `steer()`：即使 Binding 有配置，也不读取
 模型目录或应用它。`/config` 在 running/stopping、Goal active
