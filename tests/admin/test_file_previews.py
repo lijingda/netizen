@@ -12,6 +12,7 @@ from netizen_cli.admin.file_previews import (
     PreviewUnavailable,
     render_markdown,
 )
+from netizen_cli.admin.answer_previews import answer_file_link
 
 
 class ParsedHTML(HTMLParser):
@@ -32,6 +33,28 @@ class ParsedHTML(HTMLParser):
 
 
 class FilePreviewsTest(unittest.TestCase):
+    def test_answer_callback_is_separate_from_file_links_and_external_links(self):
+        text = "[absolute](/tmp/a.md) [relative](a.md) [web](https://example.org) [mail](mailto:a@example.org) [file](file:///tmp/a.md)"
+        answer = ParsedHTML(render_markdown(text, answer_link=answer_file_link))
+        links = answer.attributes("a")
+        self.assertEqual([link.get("href") for link in links], ["#", None, "https://example.org", "mailto:a@example.org"])
+        self.assertIn("[file](file:///tmp/a.md)", "".join(answer.text))
+        self.assertFalse(any("data-file-browser-path" in link for link in links))
+        with patch("netizen_cli.admin.answer_previews.answer_file_link", side_effect=AssertionError("file context")) as callback:
+            file = ParsedHTML(render_markdown(text, path="docs/a.md", answer_link=callback))
+        self.assertFalse(any(key.startswith("data-answer-file-") for link in file.attributes("a") for key in link))
+        self.assertEqual(file.attributes("a")[1]["data-file-browser-path"], "docs/a.md")
+
+    def test_answer_callback_attributes_have_a_closed_whitelist(self):
+        attrs = {"href": "https://evil.invalid", "class": "arbitrary", "onclick": "alert(1)",
+                 "data-file-browser-path": "a", "data-answer-file-root": "/tmp", "title": '<unsafe "title>'}
+        parsed = ParsedHTML(render_markdown("[file](/tmp/a)", answer_link=lambda _: attrs))
+        self.assertEqual(parsed.attributes("a"), [{"data-answer-file-root": "/tmp", "title": '<unsafe "title>'}])
+        attrs.update(href="#", **{"class": "answer-file-link-unavailable"})
+        parsed = ParsedHTML(render_markdown("[file](/tmp/a)", answer_link=lambda _: attrs))
+        self.assertEqual(parsed.attributes("a")[0]["href"], "#")
+        self.assertEqual(parsed.attributes("a")[0]["class"], "answer-file-link-unavailable")
+
     def setUp(self) -> None:
         self.images: list[str] = []
 

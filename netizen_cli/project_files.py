@@ -73,6 +73,24 @@ def _path_parts(path: str, *, allow_empty: bool) -> tuple[str, ...]:
     return parts
 
 
+def absolute_root_parts(value: str) -> tuple[str, ...]:
+    """Validate directory-root spelling before Path can normalize components."""
+    if not isinstance(value, str) or not value.startswith("/") or value.startswith("//"):
+        raise FileBrowseError("invalid_path", "目录路径无效。")
+    try:
+        if len(value.encode("utf-8")) > 4096:
+            raise FileBrowseError("invalid_path", "目录路径过长。")
+    except UnicodeError:
+        raise FileBrowseError("invalid_path", "目录路径无效。") from None
+    return _path_parts(value[1:], allow_empty=True)
+
+
+def _check_pseudo_filesystem(root_parts: tuple[str, ...], path_parts: tuple[str, ...]) -> None:
+    parts = root_parts + path_parts
+    if parts and parts[0].casefold() in {"proc", "sys", "dev"}:
+        raise FileBrowseError("invalid_path", "系统目录 /proc、/sys、/dev 不开放查看。")
+
+
 def _identity(info: os.stat_result, context: str) -> str:
     value = json.dumps([context, info.st_dev, info.st_ino], ensure_ascii=True)
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -125,6 +143,7 @@ def _directories(
     root = Path(root)
     if not root.is_absolute() or ".." in root.parts or len(root.parts) + len(parts) > 128:
         raise FileBrowseError("invalid_path", "项目目录无效。")
+    _check_pseudo_filesystem(root.parts[1:], parts)
     chain: list[_Directory] = []
     try:
         for component in (root.anchor, *root.parts[1:]):

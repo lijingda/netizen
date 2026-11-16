@@ -150,9 +150,10 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0060](0060-delete-projects-with-exact-session-inventory.md) | 按精确会话清单删除 Project | 架构决策 | 有效 | 被 [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 修订 |
 | [0080](0080-authenticate-admins-with-feishu-identities.md) | 用飞书身份登录并维护实例管理员 | 架构决策 | 有效 | 被 [0091](0091-load-admin-user-credentials-on-demand.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
 | [0091](0091-load-admin-user-credentials-on-demand.md) | 按用户独立存储并按需读取 Admin 飞书凭证 | 架构决策 | 有效 |  |
-| [0089](0089-browse-current-project-files-through-admin.md) | Admin 按需查看 Project 当前目录中的文件 | 架构决策 | 有效 | 被 [0095](0095-show-uncommitted-changes-against-head-in-project-files.md) 修订 |
+| [0089](0089-browse-current-project-files-through-admin.md) | Admin 按需查看 Project 当前目录中的文件 | 架构决策 | 有效 | 被 [0095](0095-show-uncommitted-changes-against-head-in-project-files.md)、[0098](0098-open-answer-file-links-in-directory-roots.md) 修订 |
 | [0095](0095-show-uncommitted-changes-against-head-in-project-files.md) | Admin 文件查看显示相对 HEAD 的未提交变更 | 架构决策 | 有效 |  |
 | [0096](0096-read-admin-conversations-through-summary-turn-pages.md) | Admin 按轮分页查看只读对话记录 | 架构决策 | 有效 | |
+| [0098](0098-open-answer-file-links-in-directory-roots.md) | Admin 对话记录中的本地文件链接按所在目录只读打开 | 架构决策 | 有效 | |
 
 ## 数据、凭据与服务环境
 
@@ -189,4 +190,4 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 ## 统计
 
-共 97 个 ADR：架构决策 64 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。
+共 98 个 ADR：架构决策 65 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。

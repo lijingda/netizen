@@ -37,6 +37,7 @@ REQUIRED_WHEEL_FILES = frozenset({
     "netizen_cli/admin/static/project-files.js",
     "netizen_cli/admin/static/file-browser.js",
     "netizen_cli/admin/static/attachment-files.js",
+    "netizen_cli/admin/static/path-files.js",
     "netizen_cli/admin/static/question-notifications.js",
     "netizen_cli/admin/static/content-preview.js",
     "netizen_cli/admin/static/content-preview.css",

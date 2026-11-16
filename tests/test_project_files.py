@@ -26,6 +26,33 @@ def webp_header(kind: bytes, payload: bytes) -> bytes:
 
 
 class ProjectFilesTest(unittest.TestCase):
+    def test_absolute_root_syntax_is_validated_before_path_normalization(self):
+        self.assertEqual(project_files.absolute_root_parts("/"), ())
+        self.assertEqual(project_files.absolute_root_parts("/a/猫 图"), ("a", "猫 图"))
+        for path in (None, "", "relative", "//host/a", "/a//b", "/a/", "/./a", "/a/../b", "/.git", "/a/.GIT/b",
+                     "/" + "a" * 4096, "/" + "猫" * 1366, "/a\udcff", "/a\\b", "/a\0b"):
+            with self.subTest(path=repr(path)):
+                self.assert_error("invalid_path", project_files.absolute_root_parts, path)
+
+    def test_pseudo_filesystem_checks_combined_path_and_not_similar_prefixes(self):
+        for root, path in (((), ("proc", "self")), (("SYS",), ("kernel",)), (("dev", "pts"), ()),
+                           (("PrOc",), ())):
+            with self.subTest(root=root, path=path):
+                self.assert_error("invalid_path", project_files._check_pseudo_filesystem, root, path)
+        for root, path in (((), ()), (("procfs",), ("a",)), (("device",), ()), (("tmp",), ("proc", "a"))):
+            project_files._check_pseudo_filesystem(root, path)
+
+    def test_filesystem_root_listing_rejects_pseudo_directory_reads(self):
+        root = Path("/")
+        identity = root_identity(root, context=self.context)
+        listing = list_directory(root, "", identity=identity, context=self.context)
+        self.assertIsInstance(listing["entries"], list)
+        for path in ("proc", "SYS", "dev"):
+            with self.subTest(path=path):
+                self.assert_error("invalid_path", list_directory, root, path,
+                                  identity=identity, context=self.context)
+                self.assert_error("invalid_path", root_identity, root / path, context=self.context)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="netizen-project-files-")
         self.addCleanup(self.temp.cleanup)

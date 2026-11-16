@@ -3282,7 +3282,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertEqual(parser.scripts, ["/static/admin-ui.js", "/static/chat-picker.js", "/static/identity.js",
                                           "/static/config-editor.js", "/static/session-access.js", "/static/group-access.js", "/static/progress-card.js", "/static/question-notifications.js", "/static/worktrees.js",
                                           "/static/content-preview.js", "/static/file-browser.js", "/static/project-files.js",
-                                          "/static/attachment-files.js", "/static/admin.js"])
+                                          "/static/attachment-files.js", "/static/path-files.js", "/static/admin.js"])
         self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css", "/static/content-preview.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates"} <= parser.ids)

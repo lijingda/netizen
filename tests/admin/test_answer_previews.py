@@ -7,9 +7,9 @@ import unittest
 from unittest.mock import patch
 import zlib
 
-from netizen_cli.admin.answer_previews import render_answer_preview
+from netizen_cli.admin.answer_previews import answer_file_link, render_answer_preview, render_conversation_page
 from netizen_cli.project_files import FileBrowseError, validate_image
-from netizen_cli.runtime.contracts import NativeAnswerImage, NativeLatestAnswer
+from netizen_cli.runtime.contracts import NativeAnswerImage, NativeLatestAnswer, NativeConversationPage, NativeConversationTurn
 
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOesAAAAASUVORK5CYII="
@@ -51,6 +51,58 @@ def padded_png(size):
 
 
 class AnswerPreviewsTest(unittest.TestCase):
+    def test_absolute_answer_links_split_files_directories_and_decode_once(self):
+        for href, root, name in (("/missing/report.md", "/missing", "report.md"),
+                                  ("/x.md", "/", "x.md"), ("/folder/", "/folder", None),
+                                  ("/%E7%8C%AB%20%E5%9B%BE/a%20b.md", "/猫 图", "a b.md")):
+            with self.subTest(href=href), patch("os.stat", side_effect=AssertionError("pure parser")):
+                attrs = answer_file_link(href)
+                self.assertEqual(attrs["href"], "#")
+                self.assertEqual(attrs["data-answer-file-root"], root)
+                self.assertEqual(attrs.get("data-answer-file-name"), name)
+        for suffix in (":12", ":12:3", ":12-20", "#L12", "#L12C3", "#L12-L20", "#L12C3-L20C4"):
+            with self.subTest(suffix=suffix):
+                attrs = answer_file_link("/a.py" + suffix)
+                self.assertEqual(attrs["data-answer-file-name"], "a.py")
+                self.assertEqual(attrs["data-answer-file-line"], "12")
+                self.assertEqual(attrs["title"], "/a.py:12")
+        for href in ("/a.py#install", "/a.py:10001", "/a.py#L10001", "/dir/#L12", "/a.py#L" + "9" * 5000):
+            with self.subTest(href=href[:50]):
+                self.assertNotIn("data-answer-file-line", answer_file_link(href))
+        self.assertEqual(answer_file_link("/a.py:10000")["data-answer-file-line"], "10000")
+        self.assertNotIn("data-answer-file-line", answer_file_link("/a.py#L0"))
+
+    def test_answer_link_rejections_and_unavailable_reasons(self):
+        for href in ("/x/.git/config", "/.GIT/config", "/proc/status", "/sys", "/dev/null", "/PROC/a"):
+            with self.subTest(href=href):
+                attrs = answer_file_link(href)
+                self.assertNotIn("href", attrs)
+                self.assertEqual(attrs["class"], "answer-file-link-unavailable")
+                self.assertIn("不开放", attrs["title"])
+        self.assertEqual(answer_file_link("/procfs/a")["href"], "#")
+        for href in ("/", "//host/x", "a.md", "file:///a.md", "/a.md?x=y", "/a/./b", "/a/../b",
+                     "/a//b", "/a//", "/%2561.md", "/%ff", "/x%00y", "/x%5cy", "/" + "a" * 4096):
+            with self.subTest(href=href[:50]):
+                self.assertIsNone(answer_file_link(href))
+
+    def test_conversation_links_cover_earlier_latest_image_fallback_and_raw_pages(self):
+        answer = "[local](/missing/a.py:12) ![image](/a.png)"
+        page = NativeConversationPage("thread", (
+            NativeConversationTurn("earlier", "completed", answer=answer),
+            NativeConversationTurn("latest", "completed", answer=answer, latest=True,
+                                   images=(NativeAnswerImage("/a.png", PNG),)),
+        ))
+        for limit in (32 * 1024 * 1024, 1):
+            with self.subTest(limit=limit), patch("netizen_cli.admin.answer_previews.MAX_IMAGE_RESPONSE_BYTES", limit):
+                turns = render_conversation_page(page)["turns"]
+                for turn in turns:
+                    self.assertIn('data-answer-file-root="/missing"', turn["markdownHtml"])
+                    self.assertIn('data-answer-file-line="12"', turn["markdownHtml"])
+                    self.assertNotIn("data-file-browser-path", turn["markdownHtml"])
+                self.assertEqual(bool(turns[-1]["images"]), limit != 1)
+        for turn in render_conversation_page(page, preview=False)["turns"]:
+            self.assertNotIn("markdownHtml", turn)
+
     def test_only_exact_referenced_native_bytes_are_selected_without_file_access(self):
         path = "/missing/source-thread/猫 图.png"
         result = render(

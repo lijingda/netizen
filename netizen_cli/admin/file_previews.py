@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
@@ -159,6 +159,7 @@ def render_markdown(
     path: str | None = None,
     image_url: Callable[[str], str] | None = None,
     answer_image: Callable[[str], str | None] | None = None,
+    answer_link: Callable[[str], Mapping[str, str] | None] | None = None,
     max_images: int = MAX_MARKDOWN_IMAGES,
     inert_image_reason: str = "此处不加载图片",
 ) -> str:
@@ -169,7 +170,8 @@ def render_markdown(
     carry ``data-file-browser-directory="true"``.
     Remote images and fragment-only links remain inert. No filesystem or network
     access occurs here; the file endpoint separately validates image contents.
-    Without a file context, local links remain inert. An answer_image resolver
+    Without a file context, answer_link may identify absolute answer links with
+    a closed set of inert attributes; other local links remain inert. An answer_image resolver
     may select already validated native image data by opaque slot id; it never
     grants file access or creates a resource URL.
     """
@@ -197,9 +199,18 @@ def render_markdown(
             if alignment in {"text-align:left", "text-align:center", "text-align:right"}:
                 token.attrSet("class", "markdown-align-" + alignment.split(":")[1])
         elif token.type == "link_open":
-            target = _target(token.attrGet("href") or "", directory)
+            href = token.attrGet("href") or ""
+            target = _target(href, directory)
             token.attrs.pop("href", None)
             if target is None:
+                if path is None and answer_link is not None:
+                    for key, value in (answer_link(href) or {}).items():
+                        if (
+                            key in {"title", "data-answer-file-root", "data-answer-file-name", "data-answer-file-line"}
+                            or key == "href" and value == "#"
+                            or key == "class" and value == "answer-file-link-unavailable"
+                        ):
+                            token.attrSet(key, value)
                 continue
             kind, value = target
             if kind == "external":

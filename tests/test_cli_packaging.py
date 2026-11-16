@@ -80,7 +80,7 @@ class BuiltArtifactTests(unittest.TestCase):
                              (ROOT / "netizen_cli/admin/static/netizen.svg").read_bytes())
             for path in (ROOT / "netizen_cli/admin/static/vendor/ace").iterdir():
                 self.assertEqual(wheel.read(path.relative_to(ROOT).as_posix()), path.read_bytes())
-            for name in ("content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js"):
+            for name in ("content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js"):
                 self.assertEqual(wheel.read("netizen_cli/admin/static/" + name),
                                  (ROOT / "netizen_cli/admin/static" / name).read_bytes())
             self.assertFalse(any(name.startswith("netizen/") for name in names))
