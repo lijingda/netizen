@@ -1,5 +1,5 @@
 let latestAnswer = () => ({ threadId: "native", turnId: "turn-current", status: "completed",
-  answer: "<script>inert</script>\nfinal", markdownHtml: "<p>&lt;script&gt;inert&lt;/script&gt;\nfinal</p>",
+  answer: "<script>inert</script>\nfinal", markdownHtml: '<p>&lt;script&gt;inert&lt;/script&gt;\nfinal</p><a href="#" data-answer-file-root="/tmp" data-answer-file-name="a.py" data-answer-file-line="12">file</a><a class="answer-file-link-unavailable" title="not available">blocked</a>',
   startedAt: null, completedAt: null, readAt: "2026-11-03T08:00:00+00:00" });
 const pageOf = (turns, nextCursor = null, threadId = "native") => ({
   threadId, turns, nextCursor, readAt: "2026-11-12T08:00:00Z",
@@ -19,16 +19,19 @@ URL.revokeObjectURL = (url) => {
   assert(activeAnswerImageUrls.delete(url), "each allocated image URL is released once");
   revokedAnswerImageUrls.push(url);
 };
-// Parse only trusted image slots, matching the shipped Markdown rendering sink.
+const openedAnswerFiles = [];
+window.NetizenPathFiles = { init() {}, open(target) { openedAnswerFiles.push(target); } };
+// Parse trusted image slots and answer anchors from the shipped rendering sink.
 Object.defineProperty(Element.prototype, "innerHTML", {
   get() { return this.html || ""; },
   set(value) {
     this.html = value;
     this.replaceChildren();
-    for (const match of value.matchAll(/<img\b([^>]*)>/g)) {
-      const attrs = Object.fromEntries([...match[1].matchAll(/([\w-]+)="([^"]*)"/g)]
+    for (const match of value.matchAll(/<(img|a)\b([^>]*)>/g)) {
+      const attrs = Object.fromEntries([...match[2].matchAll(/([\w-]+)="([^"]*)"/g)]
         .map((attribute) => [attribute[1], attribute[2]]));
-      const node = new Element("img", attrs);
+      const node = new Element(match[1], attrs);
+      node.closest = (selector) => selector === "a[data-answer-file-root]" && node.dataset.answerFileRoot ? node : null;
       node.replaceWith = (replacement) => {
         const parent = node.parentElement;
         const index = parent?.children.indexOf(node) ?? -1;
@@ -186,6 +189,12 @@ fetch = async (path, options = {}) => {
   assert.equal(current().preview.querySelector("script"), null);
   assert(!current().node.textContent.includes("开始"));
   assert(atBottom(), "opening scrolls to latest");
+  const fileLink = current().preview.querySelector("a");
+  assert(fileLink.dispatch("click").prevented);
+  assert.deepEqual(openedAnswerFiles, [{ root: "/tmp", file: "a.py", line: 12 }]);
+  assert.equal(document.activeElement, fileLink, "click explicitly focuses the anchor before opening the viewer");
+  current().preview.querySelector(".answer-file-link-unavailable").click();
+  assert.equal(openedAnswerFiles.length, 1);
   const afterAnswer = requests.length;
   answerNode("toggle").click();
   assert.equal(current().preview.hidden, true);
@@ -208,13 +217,17 @@ fetch = async (path, options = {}) => {
   assert.equal(requests.at(-1).query.get("cursor"), "older");
   assert(!requests.at(-1).query.has("limit"));
   older.resolve(pageOf([{ turnId: "older-2", status: "failed", error: "failed input", inputs: [{ text: "request", source: "飞书消息" }] },
-    { turnId: "older-1", status: "interrupted", answer: "earlier answer", markdownHtml: "<p>earlier answer</p>" }], "oldest"));
+    { turnId: "older-1", status: "interrupted", answer: "earlier answer", markdownHtml: '<p>earlier answer</p><a href="#" data-answer-file-root="/older">directory</a>' }], "oldest"));
   await flush();
   assert.deepEqual(conversationView.turns.map((turn) => turn.node.dataset.turnId), ["older-1", "older-2", "turn-current"]);
   assert.equal(anchor.getBoundingClientRect().top, beforeTop, "prepend preserves the visible anchor");
   assert(answerNode("content").textContent.includes("request"));
   assert(answerNode("content").textContent.includes("failed input"));
   assert.equal(document.activeElement, answerNode("earlier"), "visible earlier button retains focus");
+  const olderFileLink = conversationView.turns[0].preview.querySelector("a");
+  olderFileLink.click();
+  assert.deepEqual(openedAnswerFiles.at(-1), { root: "/older", file: null, line: null });
+  assert.equal(document.activeElement, olderFileLink, "delegation also covers appended earlier turns");
   scroll.scrollTop = 150;
   const middle = conversationView.turns[1].node;
   const middleTop = middle.getBoundingClientRect().top;

@@ -13,6 +13,7 @@ from typing import Any, Literal, NoReturn, TypeVar
 
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .project_files import ProjectFileService
+from .path_files import PathFileService
 from .attachment_files import AttachmentFileService
 from ..attachments import AttachmentStore
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
@@ -856,6 +857,10 @@ class InstanceManagementService:
         )
         self.files = ProjectFileService(self, io=self.file_reads)
         self.attachments = AttachmentFileService(attachment_store, self.file_reads)
+        self.path_reads = BoundedBlockingIOExecutor(
+            max_workers=2, capacity=4, thread_name_prefix="netizen-path-preview",
+        )
+        self.path_files = PathFileService(self.path_reads)
         self._default_creations: dict[str, asyncio.Future[CreatedBinding]] = {}
         self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
 
@@ -977,6 +982,7 @@ class InstanceManagementService:
         return self._runtime.native_delete_available
 
     async def close(self, *, deadline: float | None = None) -> None:
+        self.path_reads.close_admission()
         self._summary_reads_closed = True
         if self.schedules is not None:
             self.schedules.close_admission()
@@ -995,6 +1001,7 @@ class InstanceManagementService:
             # Do not cancel SDK wrappers and lose accounting for their workers.
             # Any remaining reads finish when the shared Codex transport closes.
             await asyncio.wait(tuple(self._summary_reads), timeout=remaining)
+        await self.path_reads.aclose(deadline=deadline)
 
     def set_service_ready(self, ready: bool) -> None:
         self._updates.set_service_ready(ready)

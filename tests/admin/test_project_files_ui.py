@@ -12,7 +12,7 @@ class ProjectFilesUiTest(unittest.TestCase):
             _, after = read_fixture(name)
         script = harness_source(
             "index.html",
-            ("content-preview.js", "file-browser.js", "project-files.js", "attachment-files.js"),
+            ("content-preview.js", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js"),
             before, after,
         )
         result = run_harness(self, script, timeout=30)
@@ -20,6 +20,9 @@ class ProjectFilesUiTest(unittest.TestCase):
 
     def test_readonly_navigation_identity_cancellation_and_preview_controls(self):
         self._run_harness("project_files_ui_harness.js")
+
+    def test_answer_directory_roots_initial_selection_lines_and_focus(self):
+        self._run_harness("path_files_ui_harness.js")
 
     def test_attachment_metadata_exact_deletion_and_provider_races(self):
         self._run_harness("attachment_files_ui_harness.js")

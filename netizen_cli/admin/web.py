@@ -194,7 +194,7 @@ _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 _AUTO_PORTS = range(8787, 8887)
 _CONTENT_VIEWER_ASSETS = (
-    "content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js",
+    "content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js",
     "vendor/ace/ace.js",
     "vendor/ace/ext-diff.js",
     "vendor/ace/mode-python.js", "vendor/ace/mode-javascript.js",
@@ -598,6 +598,11 @@ class AdminWebApplication:
         if route == ("POST", "/api/v1/attachment-files/delete"):
             return await self._attachment_delete(context)
         if context.method == "GET" and context.path in {
+            "/api/v1/path-files/root", "/api/v1/path-files/directory",
+            "/api/v1/path-files/content", "/api/v1/path-files/image",
+        }:
+            return await self._path_files(context)
+        if context.method == "GET" and context.path in {
             "/api/v1/project-files/root", "/api/v1/project-files/directory",
             "/api/v1/project-files/content", "/api/v1/project-files/image",
             "/api/v1/project-files/changes", "/api/v1/project-files/diff",
@@ -812,6 +817,51 @@ class AdminWebApplication:
                         return _file_content_data(preview, path=path, image_url=image_url)
 
                     data = await self._management.files.content(**read_args, transform=content_data)
+        except (TimeoutError, BlockingIOResultUnknown) as error:
+            raise AdminWebError(504, "read_timeout", "文件读取超时，请稍后重试。") from error
+        except BlockingIOExecutorClosed as error:
+            raise AdminWebError(503, "read_unavailable", "文件查看暂不可用。") from error
+        self._authenticate(context)
+        return _json_response(200, {**data, "requestId": context.request.request_id})
+
+    async def _path_files(self, context: _RequestContext) -> Response:
+        operation = context.path.rsplit("/", 1)[1]
+        allowed = {"root"} if operation == "root" else {"root", "identity", "path"}
+        if operation == "image":
+            allowed.add("version")
+        _require_query_keys(context.query, allowed)
+        root = _optional_one(context.query, "root")
+        if not root:
+            raise AdminWebError(400, "invalid_query", "请重新打开文件链接。")
+        version = _optional_text_query(context.query, "version", maximum=128) if operation == "image" else None
+        deadline = asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS
+        service = self._management.path_files
+        try:
+            if operation == "root":
+                data = await service.root(root=root, deadline=deadline)
+            else:
+                identity = _optional_text_query(context.query, "identity", maximum=128)
+                paths = context.query.get("path", [""])
+                if not identity or len(paths) != 1 or len(paths[0].encode("utf-8")) > 4096:
+                    raise AdminWebError(400, "invalid_query", "目录身份或相对路径无效，请重新打开文件查看。")
+                path = paths[0]
+                args = {"root": root, "identity": identity, "path": path, "deadline": deadline}
+                if operation == "directory":
+                    data = await service.directory(**args)
+                elif operation == "image":
+                    preview = await service.content(**args)
+                    if preview.kind != "image":
+                        raise FileBrowseError("unsupported_file", "该文件不支持图片预览。")
+                    if version is not None and version != preview.version:
+                        raise FileBrowseError("file_changed", "图片已变化，请刷新后重新查看。")
+                    self._authenticate(context)
+                    return Response(200, ((b"Content-Type", preview.mime.encode("ascii")),), preview.data)
+                else:
+                    def image_url(relative: str) -> str:
+                        return "/api/v1/path-files/image?" + urlencode({"root": root, "identity": identity, "path": relative})
+
+                    data = await service.content(**args, transform=lambda preview:
+                        _file_content_data(preview, path=path, image_url=image_url))
         except (TimeoutError, BlockingIOResultUnknown) as error:
             raise AdminWebError(504, "read_timeout", "文件读取超时，请稍后重试。") from error
         except BlockingIOExecutorClosed as error:

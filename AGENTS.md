@@ -80,7 +80,9 @@ The usage guides are not implementation guides.
   its manual enablement unchanged.
 - Project browsing must use current-directory identity, bounded descriptor-relative
   reads and inert previews, remain separate from exact-Turn Files, and expose no
-  download endpoint. Its HEAD diff (ADR 0095) persists no Git state and runs only the
+  download endpoint. Answer-link directory roots (ADR 0098) follow the same read rules;
+  Admin file viewing reaches whatever the service account can read, so do not add
+  secret-path denylists. Its HEAD diff (ADR 0095) persists no Git state and runs only the
   isolated read-only Git commands with lazy fetch and transports disabled; viewing
   must never execute repository-configured programs.
 - Preserve exact Scope/Binding-to-native-Thread identity. Existing running input

@@ -1,12 +1,15 @@
 """Independent answer previews for a read-only native conversation page.
 
-Paths only match final Markdown references to the same Turn's generated images.
+Image paths match final Markdown references to the same Turn's generated images.
+Answer file links identify directory roots using string parsing only.
 No filesystem, network, history cache or additional native request is involved.
 """
 from __future__ import annotations
 
 import base64
 import json
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from urllib.parse import unquote, urlsplit
 
@@ -60,10 +63,10 @@ def render_conversation_page(page: NativeConversationPage, *, preview: bool = Tr
                     item.update(render_answer_preview(NativeLatestAnswer(
                         page.thread_id, turn.turn_id, turn.status, turn.answer,
                         images=turn.images,
-                    )))
+                    ), answer_link=answer_file_link))
                 else:
                     item["markdownHtml"] = render_markdown(
-                        turn.answer, inert_image_reason="更早轮次不加载图片",
+                        turn.answer, inert_image_reason="更早轮次不加载图片", answer_link=answer_file_link,
                     )
             except PreviewUnavailable:
                 item["previewMessage"] = "回答超出排版预览限制，已显示原文。"
@@ -97,7 +100,55 @@ def _reference_path(value: str) -> str | None:
         return None
 
 
-def render_answer_preview(answer: NativeLatestAnswer) -> dict:
+def answer_file_link(href: str) -> dict[str, str] | None:
+    """Identify absolute links without resolving or testing filesystem paths."""
+    try:
+        parts = urlsplit(href)
+        if parts.scheme or parts.netloc or parts.query:
+            return None
+        if not parts.path.startswith("/") or parts.path.startswith("//"):
+            return None
+        fragment = re.fullmatch(r"L([1-9]\d*)(C\d+)?(-L?\d+(C\d+)?)?", parts.fragment)
+        line = fragment[1] if fragment else None
+        path = unquote(parts.path, errors="strict")
+        if unquote(path, errors="strict") != path:
+            return None
+        if line is None and (suffix := re.fullmatch(r"(.+?):([1-9]\d*)((:|-)\d+)?", path)):
+            path, line = suffix[1], suffix[2]
+        directory = path.endswith("/")
+        if directory:
+            path, line = path[:-1], None
+        if not _absolute_path(path):
+            return None
+    except (ValueError, UnicodeError):
+        return None
+    # Avoid converting arbitrarily long digit strings from a fragment.
+    digits = line.lstrip("0") if line is not None else ""
+    number = int(digits or "0") if line is not None and len(digits) <= 5 else None
+    line = str(number) if number is not None and number <= 10_000 else None
+    segments = path.split("/")[1:]
+    reason = None
+    if any(part.casefold() == ".git" for part in segments):
+        reason = ".git 目录不开放"
+    elif segments[0].casefold() in {"proc", "sys", "dev"}:
+        reason = "系统目录 /proc、/sys、/dev 不开放"
+    if reason:
+        return {"class": "answer-file-link-unavailable", "title": f"{reason}：{path}"}
+    attributes = {
+        "href": "#", "data-answer-file-root": path if directory else path.rsplit("/", 1)[0] or "/",
+        "title": f"{path}:{line}" if line else path,
+    }
+    if not directory:
+        attributes["data-answer-file-name"] = segments[-1]
+    if line:
+        attributes["data-answer-file-line"] = line
+    return attributes
+
+
+def render_answer_preview(
+    answer: NativeLatestAnswer, *,
+    answer_link: Callable[[str], Mapping[str, str] | None] | None = None,
+) -> dict:
     """Validate only referenced images; failures preserve the complete text."""
     candidates: dict[str, str | None] = {}
     if answer.status == "completed":
@@ -154,7 +205,8 @@ def render_answer_preview(answer: NativeLatestAnswer) -> dict:
         selected[path] = slot
         return slot
 
-    html = render_markdown(answer.answer or "", answer_image=select, max_images=MAX_ANSWER_IMAGES)
+    html = render_markdown(answer.answer or "", answer_image=select, max_images=MAX_ANSWER_IMAGES,
+                           answer_link=answer_link)
     preview = {"markdownHtml": html, "images": images}
     # Include text plus HTML and leave room for the fixed identity/time envelope.
     # This budget does not truncate the pre-existing text-only response.
@@ -165,7 +217,8 @@ def render_answer_preview(answer: NativeLatestAnswer) -> dict:
     response_size = len(json.dumps(envelope, ensure_ascii=True)) + sum(len(image["data"]) for image in images)
     if images and response_size + 4096 > MAX_IMAGE_RESPONSE_BYTES:
         return {
-            "markdownHtml": render_markdown(answer.answer or "", answer_image=lambda _: None),
+            "markdownHtml": render_markdown(answer.answer or "", answer_image=lambda _: None,
+                                             answer_link=answer_link),
             "images": [],
             "previewMessage": "图片超过预览总量限制，已保留正文。",
         }

@@ -5742,6 +5742,15 @@ answerNode("close").addEventListener("click", closeConversation);
 answerNode("drawer").addEventListener("cancel", (event) => { event.preventDefault(); closeConversation(); });
 answerNode("refresh").addEventListener("click", refreshConversation);
 answerNode("earlier").addEventListener("click", loadEarlierConversation);
+answerNode("content").addEventListener("click", (event) => {
+  const anchor = event.target.closest?.("a[data-answer-file-root]");
+  if (!anchor) return;
+  event.preventDefault();
+  if (state.authExpired) return;
+  anchor.focus(); // Safari does not focus links on click; returnFocus needs it.
+  window.NetizenPathFiles?.open({ root: anchor.dataset.answerFileRoot,
+    file: anchor.dataset.answerFileName || null, line: Number(anchor.dataset.answerFileLine) || null });
+});
 answerNode("toggle").addEventListener("click", () => {
   if (!conversationView) return;
   const position = captureConversationPosition(conversationView);
@@ -5789,6 +5798,7 @@ window.NetizenWorktrees?.init({ api, actionPayload, setStatus, queryProjectOptio
 const fileBrowser = window.NetizenFileBrowser?.create({ container: document.querySelector("#file-browser-drawer"), api, isExpired: () => state.authExpired });
 window.NetizenProjectFiles?.init({ browser: fileBrowser });
 window.NetizenAttachmentFiles?.init({ browser: fileBrowser, api, isExpired: () => state.authExpired });
+window.NetizenPathFiles?.init({ browser: fileBrowser });
 document.querySelector("#attachment-files-open")?.addEventListener("click", () => window.NetizenAttachmentFiles?.open());
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));

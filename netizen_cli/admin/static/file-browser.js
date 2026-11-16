@@ -167,6 +167,7 @@ window.NetizenFileBrowser = {
     view.navigation += 1;
     view.tree.clear();
     view.identity = null;
+    view.cwd = null;
     view.changes = null;
     view.changesLoading = false;
     view.changesMap = new Map();
@@ -222,7 +223,7 @@ window.NetizenFileBrowser = {
     if (!dependencies.isExpired() && view.returnFocus?.isConnected !== false) view.returnFocus?.focus();
   }
   function url(view, operation, path) {
-    return view.provider.url(operation, { rootId: view.rootId, identity: view.identity, path });
+    return view.provider.url(operation, { rootId: view.rootId, identity: view.identity, path, cwd: view.cwd });
   }
   async function request(view, slot, url) {
     stop(view, slot);
@@ -695,6 +696,7 @@ window.NetizenFileBrowser = {
       return;
     }
     if (file && !branch.entries.some((entry) => entry.path === file)) {
+      if (branch.truncated) return content(view, file, mode);
       view.desiredFile = null;
       view.selectedPath = path;
       await directory(view, path);
@@ -1155,6 +1157,8 @@ window.NetizenFileBrowser = {
   }
   async function renderMode(view, mode = view.mode) {
     if (!active(view) || !view.desiredFile) return;
+    const pendingLine = mode === "source" && view.initialLine?.path === view.desiredFile ? view.initialLine.line : null;
+    view.initialLine = null;
     view.mode = mode;
     const sequence = ++view.modeSequence;
     const selected = view.fileSequence;
@@ -1210,6 +1214,7 @@ window.NetizenFileBrowser = {
       editor.session.setMode(`ace/mode/${modes.has(data.language) ? data.language : "text"}`);
       editor.session.setUseWrapMode(view.wrap);
       editor.setValue(data.text, -1);
+      if (pendingLine) editor.gotoLine(pendingLine, 0, true);
       editor.commands.addCommand({ name: "find", bindKey: { win: "Ctrl-F", mac: "Command-F" },
         exec: () => node("search").focus(), readOnly: true });
       node("wrap").setAttribute("aria-pressed", String(view.wrap));
@@ -1263,6 +1268,7 @@ window.NetizenFileBrowser = {
       const data = await request(view, "root", url(view, "root"));
       if (!data) return;
       view.identity = data.identity;
+      view.cwd = data.cwd;
       node("cwd").textContent = data.cwd;
       if (view.provider.changes) void loadChanges(view);
       await directory(view, "");
@@ -1302,7 +1308,9 @@ window.NetizenFileBrowser = {
   async function open(provider) {
     if (dependencies.isExpired()) return;
     close();
+    const initial = provider.initial || null;
     const view = current = { provider, rootId: provider.rootId, identity: null, path: "", file: null,
+      initialLine: null, cwd: null,
       selectedFile: null, desiredFile: null, requests: {}, deleting: false, deleteUncertain: false,
       rootIds: new Set(), nextCursor: null, wrap: true, editor: null, returnFocus: document.activeElement,
       tree: new Map(), treeEpoch: 0, navigation: 0, selectedPath: "", focusedPath: "", filter: "", screen: "directory", diffLayout: diffLayout() };
@@ -1323,6 +1331,15 @@ window.NetizenFileBrowser = {
     document.body.classList.toggle("file-browser-open", true);
     node(provider.roots ? "root" : "filter").focus();
     await Promise.all([chooseRoot(view), moreRoots(view)]);
+    // Compact directory navigation can leave selectedPath empty; path records it.
+    if (initial && active(view) && view.identity && !view.desiredFile && !view.selectedPath && !view.path) {
+      const entry = treeEntries(view, "").find((item) => item.name === initial.file);
+      if (entry?.kind === "directory") await directory(view, initial.file);
+      else {
+        view.initialLine = initial.line ? { path: initial.file, line: initial.line } : null;
+        await content(view, initial.file);
+      }
+    }
   }
   async function copy() {
     const view = current;

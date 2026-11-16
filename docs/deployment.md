@@ -1422,7 +1422,12 @@ Admin 使用同一应用的飞书登录，管理员名单与用户凭证分别�
 `0400`；原子替换。在线由服务统一修改，离线 setup 持有维护锁和 lifetime lock。
 用户凭证只在实际使用时读取当前用户文件，不启动全量读取或保留 token 缓存；单用户
 文件损坏不会阻止服务启动，也不会影响其他用户的凭证读取。不要在服务运行时直接编辑
-名单或 token 文件。首次无 TTY 安装可以完成浏览器初始化：
+名单或 token 文件。
+
+Admin 文件查看以服务账号的读权限为界（[ADR 0098](adr/0098-open-answer-file-links-in-directory-roots.md)），
+管理员可以读到实例凭据和 Codex 登录信息；只把管理员身份授予可信的主机运维者。
+
+首次无 TTY 安装可以完成浏览器初始化：
 
 ```bash
 netizen setup --root "<NETIZEN_ROOT>" </dev/null  # 按输出逐次转交应用绑定/管理员登录链接

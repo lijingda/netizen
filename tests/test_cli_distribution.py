@@ -127,23 +127,24 @@ class DistributionContractTest(unittest.TestCase):
 
     def test_new_admin_assets_are_required_in_both_artifact_types(self) -> None:
         self.build()
-        missing = "netizen_cli/admin/static/attachment-files.js"
-        original_wheel = next(self.output.glob("*.whl"))
-        incomplete_wheel = self.directory / "incomplete-assets.whl"
-        with zipfile.ZipFile(original_wheel) as source, zipfile.ZipFile(incomplete_wheel, "w") as target:
-            for name in source.namelist():
-                if name != missing:
-                    target.writestr(name, source.read(name))
-        with self.assertRaisesRegex(distribution.DistributionError, "runtime resources"):
-            distribution.verify_wheel(incomplete_wheel, "1.2.3")
-        original_sdist = next(self.output.glob("*.tar.gz"))
-        incomplete_sdist = self.directory / "incomplete-assets.tar.gz"
-        with tarfile.open(original_sdist) as source, tarfile.open(incomplete_sdist, "w:gz") as target:
-            for member in source.getmembers():
-                if not member.name.endswith("/" + missing):
-                    target.addfile(member, source.extractfile(member))
-        with self.assertRaisesRegex(distribution.DistributionError, "package or build resources"):
-            distribution.verify_sdist(incomplete_sdist, "1.2.3")
+        for missing in ("netizen_cli/admin/static/attachment-files.js", "netizen_cli/admin/static/path-files.js"):
+            with self.subTest(missing=missing):
+                original_wheel = next(self.output.glob("*.whl"))
+                incomplete_wheel = self.directory / "incomplete-assets.whl"
+                with zipfile.ZipFile(original_wheel) as source, zipfile.ZipFile(incomplete_wheel, "w") as target:
+                    for name in source.namelist():
+                        if name != missing:
+                            target.writestr(name, source.read(name))
+                with self.assertRaisesRegex(distribution.DistributionError, "runtime resources"):
+                    distribution.verify_wheel(incomplete_wheel, "1.2.3")
+                original_sdist = next(self.output.glob("*.tar.gz"))
+                incomplete_sdist = self.directory / "incomplete-assets.tar.gz"
+                with tarfile.open(original_sdist) as source, tarfile.open(incomplete_sdist, "w:gz") as target:
+                    for member in source.getmembers():
+                        if not member.name.endswith("/" + missing):
+                            target.addfile(member, source.extractfile(member))
+                with self.assertRaisesRegex(distribution.DistributionError, "package or build resources"):
+                    distribution.verify_sdist(incomplete_sdist, "1.2.3")
 
 
 class ReleaseWorkflowContractTest(unittest.TestCase):
