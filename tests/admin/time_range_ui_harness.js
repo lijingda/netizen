@@ -20,16 +20,36 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 // SHIPPED_ADMIN_PAGE
 (async () => {
   await flush();
+  function customRangeFromControl(startValue, endValue) {
+    const root = document.querySelector("[data-time-range]");
+    const part = (name) => root.querySelector(`[data-time-range-${name}]`);
+    part("trigger").click();
+    part("start").value = startValue;
+    part("end").value = endValue;
+    part("end").dispatch("input");
+    const error = part("error").textContent;
+    const invalid = ["start", "end"].find((name) => part(name).getAttribute("aria-invalid") === "true") || null;
+    let range = null;
+    if (!part("done").disabled) {
+      part("done").click();
+      range = { from: part("from").value, before: part("before").value,
+        summary: part("trigger").title.split("\n时区：")[0] };
+    } else {
+      part("cancel").click();
+    }
+    part("quick-clear").click();
+    return { range, error, invalid };
+  }
   const now = new Date("2026-09-02T08:20:30.456Z");
-  const today = presetTimeRange("today", now);
-  const rolling = presetTimeRange("last-24-hours", now);
-  const exactMinute = presetTimeRange("last-24-hours", new Date("2026-09-02T08:20:00Z"));
-  const updated = presetTimeRange("last-3-months", now, true);
-  const crossYear = presetTimeRange("last-3-months", new Date("2026-01-02T08:20:30Z"));
-  const custom = customTimeRange("2026-08-27T00:00", "2026-09-02T23:59");
-  const reversed = customTimeRange("2026-09-02T10:00", "2026-09-02T09:59");
-  const gap = customTimeRange("2026-03-08T02:30", "2026-03-08T03:30");
-  const fold = customTimeRange("2026-11-01T01:30", "2026-11-01T02:30");
+  const today = window.NetizenTimeRange.presetTimeRange("today", now);
+  const rolling = window.NetizenTimeRange.presetTimeRange("last-24-hours", now);
+  const exactMinute = window.NetizenTimeRange.presetTimeRange("last-24-hours", new Date("2026-09-02T08:20:00Z"));
+  const updated = window.NetizenTimeRange.presetTimeRange("last-3-months", now, true);
+  const crossYear = window.NetizenTimeRange.presetTimeRange("last-3-months", new Date("2026-01-02T08:20:30Z"));
+  const custom = customRangeFromControl("2026-08-27T00:00", "2026-09-02T23:59");
+  const reversed = customRangeFromControl("2026-09-02T10:00", "2026-09-02T09:59");
+  const gap = customRangeFromControl("2026-03-08T02:30", "2026-03-08T03:30");
+  const fold = customRangeFromControl("2026-11-01T01:30", "2026-11-01T02:30");
 
   // Verify the initialized controls, not the template's spelling or controller names.
   const roots = document.querySelectorAll("[data-time-range]");
@@ -118,7 +138,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   const dialogPathAvailable = !main.hasAttribute("inert")
     && !root.hasAttribute("inert") && !popover.hasAttribute("inert")
     && !backdrop.hasAttribute("inert");
-  timeRangeControllers.get(otherRoot).cancel({ restoreFocus: false });
+  window.NetizenTimeRange.controllerFor(otherRoot).cancel({ restoreFocus: false });
   const unaffectedByClosedPeer = bodyClasses.has("time-range-modal-open")
     && trigger.parentElement.hasAttribute("inert");
   root.querySelector("[data-time-range-cancel]").click();

@@ -194,7 +194,7 @@ _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 _AUTO_PORTS = range(8787, 8887)
 _CONTENT_VIEWER_ASSETS = (
-    "content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js", "conversation.js",
+    "content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js", "conversation.js", "time-range.js",
     "vendor/ace/ace.js",
     "vendor/ace/ext-diff.js",
     "vendor/ace/mode-python.js", "vendor/ace/mode-javascript.js",

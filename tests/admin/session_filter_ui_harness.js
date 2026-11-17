@@ -44,7 +44,7 @@ async function fetch(path) {
   assert.match(updatedRoot.querySelector("[data-time-range-summary]").textContent, /最近 3 个月/);
   for (const [year, month, day, expected] of [[2026, 4, 31, [2026, 1, 28]], [2024, 4, 31, [2024, 1, 29]], [2026, 11, 31, [2026, 8, 30]]]) {
     const now = new Date(year, month, day, 12, 34, 56);
-    const range = presetTimeRange("last-3-months", now);
+    const range = window.NetizenTimeRange.presetTimeRange("last-3-months", now);
     const start = new Date(range.from);
     assert.deepEqual([start.getFullYear(), start.getMonth(), start.getDate()], expected);
     assert.equal(start.getHours(), 12);
@@ -452,8 +452,8 @@ async function fetch(path) {
   sessionMultiFilters.get("project").setValues(["netizen"]);
   sessionMultiFilters.get("scopeKind").setValues(["group"]);
   sessionMultiFilters.get("current").setValues(["true"]);
-  timeRangeControllers.get(rangeRoot).setBounds("2026-10-01T00:00:00Z", "2026-10-03T00:00:00Z");
-  timeRangeControllers.get(updatedRoot).reset("all");
+  window.NetizenTimeRange.controllerFor(rangeRoot).setBounds("2026-10-01T00:00:00Z", "2026-10-03T00:00:00Z");
+  window.NetizenTimeRange.controllerFor(updatedRoot).reset("all");
   assert.equal(more.textContent, "更多筛选（0）", "drafts never affect the applied count");
   form.dispatch("submit"); await flush();
   assert.equal(more.textContent, "更多筛选（4）");

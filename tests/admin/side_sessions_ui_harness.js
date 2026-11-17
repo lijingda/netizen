@@ -153,7 +153,7 @@ function clickConversationMenu(bindingId) {
   sideMultiFilters.get("project").setValues(["netizen"]);
   sideMultiFilters.get("state").setValues(["closed"]);
   const sideDates = document.querySelector("#side-filter").querySelector("[data-time-range]");
-  timeRangeControllers.get(sideDates).setBounds("2026-10-01T00:00:00Z", "2026-10-12T23:59:00Z");
+  window.NetizenTimeRange.controllerFor(sideDates).setBounds("2026-10-01T00:00:00Z", "2026-10-12T23:59:00Z");
   document.querySelector("#side-filter").dispatch("submit"); await flush();
   assert.equal(document.querySelector("#side-more-filters").textContent, "更多筛选（1）");
   sideMultiFilters.get("project").setValues(["docs"]);
