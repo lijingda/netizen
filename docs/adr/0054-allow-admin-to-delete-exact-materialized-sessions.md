@@ -3,10 +3,14 @@ status: accepted
 date: 2026-09-03
 amends: 0031, 0037
 related: 0038, 0049
-amended_by: 0060
+amended_by: 0060, 0100
 ---
 
 # 允许 Admin 删除 exact materialized 会话
+
+> 后续修订：[ADR 0100](0100-batch-archive-and-delete-selected-admin-sessions.md)
+> 开放当前页显式勾选的普通会话批量归档与删除，经既有单项端点顺序执行；
+> 任意筛选结果、跨页和服务端批量仍不开放。以下历史正文保持原决策记录。
 
 > [ADR 0060](0060-delete-projects-with-exact-session-inventory.md) 增加完整清单确认的
 > Project 及关联 Sessions 删除，复用本文的 exact primitive；下文禁止任意批量删除、
