@@ -536,7 +536,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   const applied = href();
   assert.equal(new URLSearchParams(window.location.search).get("project"), "docs");
   sessionMultiFilters.get("project").setValues(["netizen"]);
-  await sortSessionPage("session", "createdAt");
+  await sessionLists.session.sort("createdAt");
   assert.equal(lastQuery("/api/v1/sessions").get("project"), "docs");
   assert.equal(new URLSearchParams(window.location.search).get("sortBy"), "createdAt");
   window.history.go(-1); await flush();
@@ -560,7 +560,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(href(), unlimitedUrl);
   assert.equal(updatedRange.querySelector("[data-time-range-summary]").textContent, "全部时间");
   assert(!lastQuery("/api/v1/sessions").has("updatedFrom"));
-  await resetSessionFilters();
+  await sessionLists.session.reset();
   assert(lastQuery("/api/v1/sessions").get("updatedFrom"));
   assert.match(updatedRange.querySelector("[data-time-range-summary]").textContent, /最近 3 个月/);
 

@@ -33,7 +33,7 @@
       assert(applied.get("updatedFrom"));
       assert(!applied.has("updatedBefore"), "refresh must include updates made after the first page load");
     }
-    assert.equal(state[`${kind}RefreshedAt`], Date.now());
+    assert.equal(sessionLists[kind].snapshot().refreshedAt, Date.now());
     assert(!requests.some((request) => request.path === "/api/v1/runtime-snapshots"));
 
     // Actions retain their exact grants and refresh even if the server rejects
@@ -62,8 +62,8 @@
         assert.equal(statusNode.querySelector("b"), null);
       }
       assert.equal(requests.filter((request) => request.path === endpoint).length, readsBefore + 1);
-      assert.equal(state[dataKey].items[0].runtime[kind === "side" ? "turnState" : "primaryStatus"], failure ? "idle" : "running");
-      assert.equal(state[`${kind}RefreshedAt`], Date.now());
+      assert.equal(sessionLists[kind].snapshot().items[0].runtime[kind === "side" ? "turnState" : "primaryStatus"], failure ? "idle" : "running");
+      assert.equal(sessionLists[kind].snapshot().refreshedAt, Date.now());
     }
     actionFailure = false;
     actionMessage = "操作完成";

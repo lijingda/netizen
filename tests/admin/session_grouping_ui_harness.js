@@ -38,8 +38,12 @@ function choose(config, value) {
 }
 function all(config, operation) { document.querySelector(`#${config.kind}-groups-${operation}`).click(); }
 function snapshot(config) {
-  return { data: state[config.name], page: state[`${config.kind}Page`],
-    refreshedAt: state[`${config.kind}RefreshedAt`], requests: requests.length,
+  // Name enrichment may change only these display fields, never identities or grants.
+  const data = sessionLists[config.kind].snapshot().items.map((item) => Object.fromEntries(
+    Object.entries(item).filter(([key]) => !["chatLabel", "chatLabelResolved", "chatMode", "chatType", "chatOpenUrl"].includes(key)),
+  ));
+  return { data, page: sessionLists[config.kind].snapshot().page,
+    refreshedAt: sessionLists[config.kind].snapshot().refreshedAt, requests: requests.length,
     pagination: document.querySelector(`#${config.name}-page`).textContent,
     freshness: document.querySelector("#sessions-refreshed-at").textContent };
 }
@@ -116,13 +120,13 @@ async function checkCollapse() {
     const pageTwo = [items[0], sample(config, "c", { chatId: "chat-c", projectAlias: "new" })];
     reader(config, async () => ({ items: structuredClone(
       requests.findLast((request) => request.path === config.path).query.has("cursor") ? pageTwo : items), nextCursor: "second-page" }));
-    await moveSessionPage("next", config.kind); await flush();
-    assert.equal(state[`${config.kind}Page`].number, 2);
+    await sessionLists[config.kind].move("next"); await flush();
+    assert.match(document.querySelector(`#${config.name}-page`).textContent, /^第 2 页/);
     assert.deepEqual(rows(config).map((row) => row.hidden), [true, false], "known groups retain state; new groups default open");
     const saved = snapshot(config);
     all(config, "expand");
     assert.deepEqual(snapshot(config), saved, "expand all sends no request");
-    await moveSessionPage("previous", config.kind); await flush();
+    await sessionLists[config.kind].move("previous"); await flush();
     assert.deepEqual(rows(config).map((row) => row.hidden), [false, true], "expand all affects only current-page groups");
     choose(config, "project");
     assert.deepEqual(rows(config).map((row) => row.hidden), [false, true]);
@@ -145,7 +149,7 @@ async function checkCollapse() {
   assert.equal(headings(config).length, 1);
   reader(config, async () => { throw new Error("new project unavailable"); });
   await openProjectSessions("docs"); await flush();
-  assert.equal(state.sessions, null);
+  assert.deepEqual(sessionLists.session.snapshot().items, []);
   assert.equal(body(config).children.length, 0, "failed navigation does not retain old rows or group headings");
   assert(document.querySelector("#session-groups-expand").disabled);
   assert(document.querySelector("#session-groups-collapse").disabled);

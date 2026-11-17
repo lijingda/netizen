@@ -4,22 +4,20 @@ const state = {
   tab: "projects",
   sessionTab: "ordinary",
   projects: null,
-  sessions: null,
-  sides: null,
   updates: null,
   schedules: null,
   defaults: null,
   projectPage: firstSessionPage(),
-  sidePage: firstSessionPage(),
-  sessionPage: firstSessionPage(),
 };
 
 // Explicit page participants own their resources; hooks are optional and synchronous.
-const pageParticipants = [window.NetizenConversation, window.NetizenTimeRange];
+// Keep list invalidation at its original point, separately from drawer cleanup.
+const pageParticipants = { lists: [window.NetizenSessionLists],
+  views: [window.NetizenConversation, window.NetizenTimeRange] };
 
 /** @param {"leave" | "expire" | "pageHide"} event */
-function dispatchPageLifecycle(event) {
-  for (const participant of pageParticipants) participant[event]?.();
+function dispatchPageLifecycle(event, stage = "views") {
+  for (const participant of pageParticipants[stage]) participant[event]?.();
 }
 
 const statusNode = document.querySelector("#status");
@@ -78,7 +76,7 @@ function expireAdminSession() {
   state.authExpired = true;
   const batchMessage = expireSessionBatch();
   clearSessionSelection();
-  invalidateSessionListRequest();
+  dispatchPageLifecycle("expire", "lists");
   stopUpdatePolling();
   closeSessionRenameEditor({ expired: true });
   closeProjectDeleteDialog();
@@ -1372,7 +1370,7 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
     const search = query.get("searchTerm")?.trim();
     if (search) query.set("searchTerm", search); else query.delete("searchTerm");
     // Exact links remain targeted while the user changes state or date filters.
-    const identity = new URLSearchParams(state.sessionPage?.query || "").get("identity");
+    const identity = new URLSearchParams(sessionLists.session.appliedQuery() || "").get("identity");
     if (identity) query.set("identity", identity);
     if (query.get("inventoryState") === "lazy") {
       for (const key of ["createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange"]) query.delete(key);
@@ -1687,121 +1685,6 @@ function moveListPage(tab, direction) {
   if (next) return refresh(tab, next);
 }
 
-function sessionSort(kind) {
-  const query = new URLSearchParams(state[`${kind}Page`]?.query || "");
-  return { by: query.get("sortBy") || "updatedAt", direction: query.get("sortDirection") || "desc" };
-}
-
-function sessionFilterPage(kind = "session", { resetSort = false } = {}) {
-  const query = formQuery(document.querySelector(`#${kind}-filter`), "20");
-  const sort = resetSort ? { by: "updatedAt", direction: "desc" } : sessionSort(kind);
-  query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : sort.by);
-  query.set("sortDirection", sort.direction);
-  return firstSessionPage(query.toString());
-}
-
-function appliedSessionConditions(kind, query) {
-  const labels = { searchTerm: "搜索", inventoryState: "会话状态", project: "Project", chatId: "群聊",
-    scopeKind: "Scope", current: "当前指针", identity: "会话 ID", topicId: "话题 ID", state: "会话状态" };
-  const conditions = [];
-  for (const [key, label] of Object.entries(labels)) {
-    const values = query.getAll(key);
-    if (!values.length || (key === "inventoryState" && values[0] === "active")
-      || (key === "state" && [...values].sort().join(",") === "creating,open")) continue;
-    const names = values.map((value) => key === "inventoryState" ? catalogStateLabel(value)
-      : key === "current" ? value === "true" ? "当前" : "非当前"
-        : key === "scopeKind" ? ({ direct: "单聊", group: "群聊", topic: "话题" }[value] || value)
-          : key === "state" ? value === "all" ? "全部" : sideStateLabel(value) : value);
-    conditions.push({ key, label: `${label}：${names.join("、")}`, advanced: ["scopeKind", "current"].includes(key) });
-  }
-  for (const field of kind === "side" ? ["created"] : ["created", "updated"]) {
-    const from = query.get(`${field}From`) || "", before = query.get(`${field}Before`) || "";
-    const preset = query.get(`${field}Range`) || "custom";
-    if (field === "created" && !from && !before) continue;
-    if (field === "updated" && (query.get("inventoryState") === "lazy" || (preset === "last-3-months" && !before))) continue;
-    conditions.push({ key: field, label: `${field === "created" ? "创建时间" : "更新时间"}：${window.NetizenTimeRange.compactTimeRange(from, before, preset)}`,
-      title: window.NetizenTimeRange.timeRangeSummary(from, before, preset), advanced: true });
-  }
-  return conditions;
-}
-
-function renderAppliedSessionFilters(kind) {
-  const query = new URLSearchParams(state[`${kind}Page`].query || "");
-  const conditions = appliedSessionConditions(kind, query);
-  const chips = document.querySelector(`#${kind}-filter-chips`);
-  chips.replaceChildren();
-  for (const condition of conditions) {
-    const button = document.createElement("button"); button.type = "button"; button.className = "filter-chip";
-    button.dataset.filterKey = condition.key;
-    button.textContent = `${condition.label} ×`;
-    button.title = condition.title || condition.label;
-    button.setAttribute("aria-label", `移除${condition.label}`);
-    button.addEventListener("click", () => removeSessionCondition(kind, condition.key));
-    chips.append(button);
-  }
-  chips.hidden = !conditions.length;
-  document.querySelector(`#${kind}-more-filters`).textContent = `更多筛选（${conditions.filter((item) => item.advanced).length}）`;
-}
-
-function removeSessionCondition(kind, key) {
-  if (state.authExpired) return;
-  const query = new URLSearchParams(state[`${kind}Page`].query);
-  const defaults = pageQuery("sessions", kind === "side" ? "temporary" : "ordinary");
-  const fields = ["created", "updated"].includes(key) ? [`${key}From`, `${key}Before`, `${key}Range`] : [key];
-  for (const field of fields) {
-    query.delete(field);
-    for (const value of defaults.getAll(field)) query.append(field, value);
-  }
-  // Reset only the removed field's draft. Other unsubmitted inputs stay intact.
-  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
-  if (filters.has(key)) filters.get(key).reset();
-  else if (["created", "updated"].includes(key)) {
-    const root = [...document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")]
-      .find((root) => (root.dataset.timeRangeField || "created") === key);
-    window.NetizenTimeRange.controllerFor(root).setBounds(query.get(`${key}From`) || "", query.get(`${key}Before`) || "", query.get(`${key}Range`) || "all");
-  } else if (key === "chatId") {
-    (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
-    document.querySelector(`#${kind}-chat-filter`).value = "";
-  } else if (key === "searchTerm") document.querySelector("#session-search").value = "";
-  else if (key === "inventoryState") {
-    document.querySelector("#session-inventory-state").value = "active";
-    updateSessionDateFilters();
-    // Leaving lazy restores the default date query without submitting date drafts.
-    if (!query.has("updatedFrom") && !query.has("updatedBefore") && !query.has("updatedRange")) {
-      query.set("updatedFrom", defaults.get("updatedFrom")); query.set("updatedRange", "last-3-months");
-    }
-  }
-  return refresh("sessions", firstSessionPage(query.toString()));
-}
-
-function resizeSessionPage(kind) {
-  const query = new URLSearchParams(state[`${kind}Page`].query || pageQuery("sessions", kind === "side" ? "temporary" : "ordinary"));
-  query.set("pageSize", document.querySelector(`#${kind}-page-size`).value);
-  return refresh("sessions", firstSessionPage(query.toString()));
-}
-
-function renderSessionSort(kind) {
-  const sort = sessionSort(kind);
-  const applied = new URLSearchParams(state[`${kind}Page`]?.query || "");
-  const lazy = kind === "session" && applied.get("inventoryState") === "lazy";
-  for (const button of document.querySelectorAll("[data-session-sort]")) {
-    if (button.dataset.sessionSort !== kind) continue;
-    const selected = button.dataset.sortBy === sort.by;
-    const descending = selected && sort.direction === "desc";
-    const label = button.dataset.sortBy === "createdAt" ? lazy ? "登记时间" : "创建时间" : "最近更新";
-    button.disabled = lazy && button.dataset.sortBy === "updatedAt";
-    const labelNode = button.querySelector(".sort-label");
-    if (labelNode) {
-      labelNode.textContent = label;
-      button.title = lazy ? "Netizen 登记时间；此时尚无 Codex 创建时间" : "Codex 会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示";
-    }
-    button.parentElement.setAttribute("aria-sort", selected ? descending ? "descending" : "ascending" : "none");
-    button.setAttribute("aria-label", `按${label}${descending ? "由远及近" : "由近及远"}排序`
-      + (selected ? `（当前${descending ? "由近及远" : "由远及近"}）` : ""));
-    button.querySelector(".sort-indicator").textContent = selected ? descending ? "↓" : "↑" : "↕";
-  }
-}
-
 function updateSessionDateFilters() {
   const lazy = document.querySelector("#session-inventory-state").value === "lazy";
   document.querySelector("#session-search").disabled = lazy;
@@ -1811,158 +1694,11 @@ function updateSessionDateFilters() {
   }
 }
 
-function renderSessionFreshness() {
-  const kind = state.sessionTab === "temporary" ? "side" : "session";
-  window.NetizenList.freshness("sessions", state[`${kind}RefreshedAt`] ?? null);
+async function loadSessionsResult(page) {
+  return sessionLists.session.load(page);
 }
 
-async function sortSessionPage(kind, by) {
-  const page = state[`${kind}Page`];
-  // Sorting operates on the displayed result, not unsubmitted filter drafts.
-  const query = new URLSearchParams(page.query ?? sessionFilterPage(kind).query);
-  if (kind === "session" && query.get("inventoryState") === "lazy" && by === "updatedAt") return false;
-  const previous = sessionSort(kind);
-  query.set("sortBy", by);
-  query.set("sortDirection", previous.by === by && previous.direction === "desc" ? "asc" : "desc");
-  return refresh("sessions", firstSessionPage(query.toString()));
-}
-
-function renderSessionPagination(kind = "session") {
-  const name = kind === "side" ? "sides" : "sessions";
-  const page = state[`${kind}Page`];
-  document.querySelector(`#${name}-previous`).disabled = page.previousCursors.length === 0;
-  document.querySelector(`#${name}-next`).disabled = !page.nextCursor;
-  document.querySelector(`#${name}-page`).textContent = `第 ${page.number} 页 · ${state[name]?.items?.length || 0} 条`;
-}
-
-function resetSessionFilters(kind = "session") {
-  const form = document.querySelector(`#${kind}-filter`);
-  form.reset();
-  document.querySelector(`#${kind}-page-size`).value = "20";
-  if (kind === "session") updateSessionDateFilters();
-  (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
-  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
-  for (const controller of filters.values()) controller.reset();
-  for (const root of form.querySelectorAll("[data-time-range]")) {
-    window.NetizenTimeRange.controllerFor(root)?.reset();
-  }
-  const page = kind === "session" ? firstSessionPage(defaultSessionQuery().toString())
-    : sessionFilterPage(kind, { resetSort: true });
-  const query = new URLSearchParams(page.query);
-  query.delete("identity");
-  if (kind === "session") restoreSessionFilterControls(kind, query);
-  page.query = query.toString();
-  return refresh("sessions", page);
-}
-
-let pendingSessionChatLabels = null;
-
-function invalidateSessionListRequest() {
-  state.sessionListRequest = (state.sessionListRequest || 0) + 1;
-  // A failed replacement read can leave these same rows on screen. Their old
-  // enrichment must stop showing a loading placeholder when it is invalidated.
-  pendingSessionChatLabels?.();
-  pendingSessionChatLabels = null;
-}
-
-async function loadSessionChatLabels(kind, data, page, request) {
-  const name = kind === "side" ? "sides" : "sessions";
-  const isCurrent = () => !state.authExpired && request === state.sessionListRequest
-    && state.tab === "sessions" && state.sessionTab === (kind === "side" ? "temporary" : "ordinary")
-    && state[name] === data && state[`${kind}Page`] === page;
-  if (!isCurrent()) return;
-  const body = document.querySelector(`#${name}-body`);
-  const identity = kind === "side" ? "sideId" : "bindingId";
-  const rows = new Map([...body.children].filter((row) => row.dataset[identity])
-    .map((row) => [row.dataset[identity], row]));
-  const targets = data.items.flatMap((item) => item.chatLabelResolved || !item.chatId
-    ? [] : [{ item, cell: rows.get(item[identity])?.querySelector(".session-location") }])
-    .filter(({ cell }) => cell);
-  if (!targets.length) return;
-  const showIdentity = kind !== "side";
-  const finish = () => {
-    for (const { item, cell } of targets) updateSessionLocationCell(cell, item, { showIdentity });
-    updateSessionGroupLabels(kind);
-  };
-  pendingSessionChatLabels = finish;
-  for (const { item, cell } of targets) updateSessionLocationCell(cell, item, { showIdentity, loading: true });
-  try {
-    const query = new URLSearchParams({ chatIds: [...new Set(targets.map(({ item }) => item.chatId))].join(",") });
-    const labels = await api(`/api/v1/chat-labels?${query}`);
-    if (!isCurrent()) return;
-    const byChat = new Map(labels.items.map((label) => [label.chatId, label]));
-    for (const { item } of targets) {
-      const label = byChat.get(item.chatId);
-      if (!label) continue;
-      // Enrichment changes display facts only; retain exact identities, topic
-      // links, runtime and action grants from the successful list response.
-      for (const field of ["chatLabel", "chatLabelResolved", "chatMode", "chatType", "chatOpenUrl"]) {
-        if (Object.hasOwn(label, field)) item[field] = label[field];
-      }
-    }
-  } catch {
-    // Name failures are local to the location cells. Authentication expiry is
-    // already handled by api(), and list status/freshness stay unchanged.
-  } finally {
-    if (isCurrent()) finish();
-    if (pendingSessionChatLabels === finish) pendingSessionChatLabels = null;
-  }
-}
-
-// Detailed outcomes are for callers that must distinguish supersession from failure.
-// The public list/refresh wrappers retain their boolean success contract.
-async function loadSessionPageResult(kind, page, render) {
-  invalidateSessionListRequest();
-  const request = state.sessionListRequest;
-  const isCurrent = () => request === state.sessionListRequest;
-  const name = kind === "side" ? "sides" : "sessions";
-  try {
-    const query = page.query == null
-      ? formQuery(document.querySelector(`#${kind}-filter`), "20")
-      : new URLSearchParams(page.query);
-    if (!query.has("sortBy")) query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : "updatedAt");
-    if (!query.has("sortDirection")) query.set("sortDirection", "desc");
-    const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
-    await loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent);
-    if (!isCurrent()) return "superseded";
-    for (const field of ["created", "updated"]) query.delete(`${field}Range`);
-    if (page.cursor) query.set("cursor", page.cursor);
-    const data = await api(`/api/v1/${kind === "side" ? "side-topics" : "sessions"}?${query}`);
-    if (!isCurrent()) return "superseded";
-    // Rows and their applied query/cursor stack are one successful result.
-    // Draft edits made while awaiting the response remain in the form.
-    state[name] = data;
-    state[`${kind}Page`] = { ...candidate, nextCursor: data.nextCursor };
-    state[`${kind}RefreshedAt`] = Date.now();
-    window.NetizenList.error(name, "");
-    renderSessionSort(kind);
-    render(data);
-    renderAppliedSessionFilters(kind);
-    renderSessionPagination(kind);
-    renderSessionFreshness();
-    for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
-      window.NetizenTimeRange.controllerFor(root)?.refreshSummary();
-    }
-    syncPageUrl();
-    window.NetizenList.error(name, "");
-    void loadSessionChatLabels(kind, data, state[`${kind}Page`], request);
-    return "applied";
-  } catch (error) {
-    if (isCurrent() && !state.authExpired) window.NetizenList.error(name, error.message + (state[name] ? " 当前仍显示上次成功读取的结果。" : ""), () => loadSessionPage(kind, page, render));
-    return isCurrent() ? "failed" : "superseded";
-  }
-}
-
-async function loadSessionPage(kind, page, render) {
-  return await loadSessionPageResult(kind, page, render) === "applied";
-}
-
-async function loadSessionsResult(page = state.sessionPage) {
-  ensureSessionChatFilter();
-  return loadSessionPageResult("session", page, renderSessions);
-}
-
-async function loadSessions(page = state.sessionPage) {
+async function loadSessions(page) {
   return await loadSessionsResult(page) === "applied";
 }
 
@@ -1970,8 +1706,7 @@ async function refreshAfterMutation(tab) {
   if (state.authExpired) return "failed";
   if (tab === "sessions") {
     if (state.sessionTab !== "temporary") return loadSessionsResult();
-    ensureSideChatFilter();
-    return loadSessionPageResult("side", state.sidePage, renderSides);
+    return sessionLists.side.load();
   }
   return await refresh(tab) ? "applied" : "failed";
 }
@@ -1980,9 +1715,9 @@ async function refreshAfterMutation(tab) {
 const sessionSelection = { page: null, ids: new Set() };
 let sessionBatch = null;
 const batchNode = (name) => document.querySelector(`#session-batch-${name}`);
-const sessionPageIdentity = () => JSON.stringify([state.sessionPage.query, state.sessionPage.cursor]);
+const sessionPageIdentity = () => sessionLists.session.pageIdentity();
 
-function sessionBatchActions(query = new URLSearchParams(state.sessionPage.query || "")) {
+function sessionBatchActions(query = new URLSearchParams(sessionLists.session.appliedQuery() || "")) {
   const inventory = query.get("inventoryState") || "active";
   return {
     archive: inventory === "active" ? { key: "archive", path: "/api/v1/sessions/archive", label: "归档" } : null,
@@ -2029,7 +1764,7 @@ function sessionSelectionCell(row, session) {
 }
 
 function renderSessionSelection(actions = sessionBatchActions()) {
-  const items = state.sessions?.items || [];
+  const items = sessionLists.session.snapshot().items;
   const available = new Set(items.filter((item) => sessionBatchSelectable(item, actions)).map((item) => item.bindingId));
   const busy = Boolean(sessionBatch && sessionBatch.phase !== "finished");
   let hidden = 0;
@@ -2164,7 +1899,7 @@ async function runSessionBatch(operation, trigger) {
   const action = sessionBatchActions()[operation];
   if (!action) return;
   const selected = new Set(sessionSelection.ids);
-  const page = state.sessionPage, identity = sessionPageIdentity();
+  const page = sessionLists.session.snapshot().page, identity = sessionPageIdentity();
   const isCurrentPage = () => state.tab === "sessions" && state.sessionTab === "ordinary" && identity === sessionPageIdentity();
   const batch = { action, trigger, phase: "preparing", stopped: false, results: [], index: 0 };
   batch.stop = new Promise((resolve) => { batch.wake = resolve; });
@@ -2182,7 +1917,7 @@ async function runSessionBatch(operation, trigger) {
       setStatus("刷新当前页失败，未执行任何操作。", true);
       return;
     }
-    const remaining = state.sessions.items.filter((item) => selected.has(item.bindingId));
+    const remaining = sessionLists.session.snapshot().items.filter((item) => selected.has(item.bindingId));
     const byId = new Map(remaining.map((item) => [item.bindingId, item]));
     const targets = [...document.querySelector("#sessions-body").children]
       .map((row) => byId.get(row.dataset.bindingId)).filter((item) => item?.actions?.[action.key]);
@@ -2235,7 +1970,7 @@ async function runSessionBatch(operation, trigger) {
     renderSessionBatch(batch);
     if (batch.detached) return;
     if (isCurrentPage()) {
-      const refreshed = await loadSessionsResult(state.sessionPage);
+      const refreshed = await loadSessionsResult(sessionLists.session.snapshot().page);
       batch.refreshFailed = isCurrentPage() && refreshed === "failed";
     }
     if (state.authExpired || batch.detached) return;
@@ -2256,125 +1991,8 @@ async function runSessionBatch(operation, trigger) {
   }
 }
 
-// Presentation choices live only in this page, independently for each list and
-// grouping mode. Keep current rows so folding never recreates action grants.
-const sessionGroupViews = Object.fromEntries(["session", "side"].map((kind) => [kind, {
-  project: new Set(), chat: new Set(), layout: "compact", groups: [],
-}]));
-
-function updateSessionGroupLabels(kind) {
-  const view = sessionGroupViews[kind];
-  if (view.layout !== "chat") return;
-  for (const group of view.groups) {
-    const first = group.items[0];
-    const named = group.items.find((item) => item.chatLabelResolved && item.chatLabel?.trim());
-    const known = group.items.find((item) => item.chatMode || item.chatType) || first;
-    group.title.textContent = named?.chatLabel || shortIdentity(first.chatId)
-      || `聊天不可用 · ${shortIdentity(first.bindingId || first.sideId)}`;
-    group.type.textContent = chatModeLabel(known.chatMode || known.chatType, known.scopeKind);
-    group.button.title = [group.title.textContent, first.chatId, first.appId].filter(Boolean).join("\n");
-  }
-}
-
-function updateSessionGroupControls(kind) {
-  const view = sessionGroupViews[kind];
-  document.querySelector(`#${kind}-group-actions`).hidden = view.layout === "compact";
-  document.querySelector(`#${kind}-groups-expand`).disabled = state.authExpired
-    || !view.groups.some((group) => view[view.layout].has(group.key));
-  document.querySelector(`#${kind}-groups-collapse`).disabled = state.authExpired
-    || !view.groups.some((group) => !view[view.layout].has(group.key));
-}
-
-function setSessionGroupsExpanded(kind, expanded, groups = sessionGroupViews[kind].groups) {
-  const view = sessionGroupViews[kind];
-  if (state.authExpired || view.layout === "compact") return;
-  for (const group of groups) {
-    if (expanded) view[view.layout].delete(group.key);
-    else view[view.layout].add(group.key);
-    group.button.setAttribute("aria-expanded", String(expanded));
-    for (const row of group.rows) row.hidden = !expanded;
-  }
-  updateSessionGroupControls(kind);
-  if (kind === "session") renderSessionSelection();
-}
-
-function applySessionLayout(kind, batchActions) {
-  if (state.authExpired) return;
-  const name = kind === "side" ? "sides" : "sessions";
-  const identity = kind === "side" ? "sideId" : "bindingId";
-  const body = document.querySelector(`#${name}-body`);
-  const view = sessionGroupViews[kind];
-  const selected = document.querySelector(`#${kind}-layout`).value;
-  const layout = ["project", "chat"].includes(selected) ? selected : "compact";
-  const grouped = layout !== "compact";
-  view.layout = layout;
-  view.groups = [];
-  document.querySelector(`#${kind}-group-note`).hidden = !grouped;
-  const rows = new Map([...body.children].filter((row) => row.dataset[identity])
-    .map((row) => [row.dataset[identity], row]));
-  const items = state[name]?.items || [];
-  const groups = new Map();
-  for (const item of items) {
-    const key = layout === "chat"
-      ? JSON.stringify(item.chatId ? ["chat", item.appId || "", item.chatId] : ["missing", item[identity]])
-      : layout === "project" ? JSON.stringify(item.projectAlias || null) : "";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  }
-  body.replaceChildren();
-  if (state[name] && !items.length && document.querySelector(`#${name}-error`).hidden) {
-    window.NetizenList.empty(body, kind === "side" ? 7 : 9,
-      `当前范围内没有${kind === "side" ? "临时" : "普通"}会话，可调整或重置筛选。`, "重置", () => resetSessionFilters(kind));
-  }
-  for (const [key, groupItems] of groups) {
-    const groupRows = groupItems.map((item) => rows.get(item[identity])).filter(Boolean);
-    const expanded = !grouped || !view[layout].has(key);
-    if (grouped) {
-      const heading = document.createElement("tr");
-      heading.className = "session-group-row";
-      const label = document.createElement("th");
-      label.setAttribute("colspan", kind === "side" ? "7" : "9");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "session-group-toggle";
-      button.setAttribute("aria-expanded", String(expanded));
-      button.disabled = Boolean(state.authExpired);
-      const chevron = document.createElement("span");
-      chevron.className = "session-group-chevron";
-      chevron.setAttribute("aria-hidden", "true");
-      const title = document.createElement("span");
-      title.className = "session-group-title";
-      title.textContent = groupItems[0].projectAlias || "项目不可用";
-      const type = document.createElement("span");
-      type.className = "badge session-group-type";
-      type.hidden = layout !== "chat";
-      const count = document.createElement("span");
-      count.className = "session-group-count";
-      count.textContent = `本页 ${groupItems.length} 条`;
-      button.append(chevron, title, type, count);
-      const group = { key, items: groupItems, rows: groupRows, button, title, type };
-      view.groups.push(group);
-      button.addEventListener("click", () => setSessionGroupsExpanded(kind,
-        button.getAttribute("aria-expanded") !== "true", [group]));
-      label.append(button);
-      heading.append(label);
-      body.append(heading);
-    }
-    for (const row of groupRows) {
-      row.hidden = !expanded;
-      body.append(row);
-    }
-  }
-  window.NetizenList.labelRows(body);
-  updateSessionGroupLabels(kind);
-  updateSessionGroupControls(kind);
-  if (kind === "session") renderSessionSelection(batchActions);
-}
-
-function renderSessions(data) {
-  const query = new URLSearchParams(state.sessionPage.query || "");
-  const batchActions = sessionBatchActions(query);
-  reconcileSessionSelection(data.items, batchActions);
+function renderSessions(data, batchActions) {
+  const query = new URLSearchParams(sessionLists.session.appliedQuery() || "");
   document.querySelector("#sessions-lazy-notice").hidden = batchActions.delete?.key !== "deleteLazy";
   document.querySelector("#sessions-identity-notice").hidden = !query.has("identity");
   window.NetizenMenu.close();
@@ -2410,8 +2028,6 @@ function renderSessions(data) {
     wireSessionActions(actions, session);
     body.append(row);
   }
-  applySessionLayout("session", batchActions);
-  observeSessionPreviews(body);
 }
 
 function wireSessionActions(actions, session) {
@@ -2441,9 +2057,8 @@ function wireSessionActions(actions, session) {
   actions.append(window.NetizenMenu.create([...secondary.children], `更多操作 · ${session.shortId}`));
 }
 
-async function loadSides(page = state.sidePage) {
-  ensureSideChatFilter();
-  return loadSessionPage("side", page, renderSides);
+async function loadSides(page) {
+  return await sessionLists.side.load(page) === "applied";
 }
 
 function renderSides(data) {
@@ -2495,20 +2110,6 @@ function renderSides(data) {
     if (side.actions.close) actions.append(actionButton("结束临时会话", async () => await window.NetizenConfirm.ask({ body: "结束此临时会话？结束后无法恢复。", danger: true }) && mutate("/api/v1/side-topics/close", side.actions.close), true));
     body.append(row);
   }
-  applySessionLayout("side");
-}
-
-function resetSideFilters() {
-  return resetSessionFilters("side");
-}
-
-async function moveSidePage(direction) {
-  return moveSessionPage(direction, "side");
-}
-
-async function moveSessionPage(direction, kind = "session") {
-  const candidate = stepCursorPage(state[`${kind}Page`], direction);
-  if (candidate) return refresh("sessions", candidate);
 }
 
 function sideStateLabel(value) {
@@ -4964,14 +4565,14 @@ async function confirmPageNavigation(route, targetIndex) {
     request: ++historyNavigation };
   // A modal confirmation yields to list reads. Keep their applied query and
   // URL together by discarding reads that straddle this navigation decision.
-  invalidateSessionListRequest();
+  window.NetizenSessionLists.invalidate();
   scheduleListSerial += 1;
   navigationConfirmations += 1;
   try {
     const allowed = await confirmDiscardEditors({ preservePageDrafts: true });
     return navigation.request === historyNavigation ? { ...navigation, allowed } : null;
   } finally {
-    invalidateSessionListRequest();
+    window.NetizenSessionLists.invalidate();
     scheduleListSerial += 1;
     navigationConfirmations -= 1;
   }
@@ -5053,7 +4654,7 @@ function currentPageUrl(tab = state.tab, sessionTab = state.sessionTab) {
   let query = "";
   if (tab === "sessions") {
     const kind = sessionTab === "temporary" ? "side" : "session";
-    query = state[`${kind}Page`].query || "";
+    query = sessionLists[kind].appliedQuery() || "";
   } else if (tab === "schedules") {
     query = new URLSearchParams(scheduleListQuery || "");
     if (scheduleListQuery !== null && !query.has("ended")) query.set("ended", "all");
@@ -5114,16 +4715,7 @@ function restorePageFilters(route) {
   const { tab, sessionTab, query } = route;
   if (tab === "sessions") {
     const kind = sessionTab === "temporary" ? "side" : "session";
-    restoreSessionFilterControls(kind, query);
-    state[`${kind}Page`] = firstSessionPage(query.toString());
-    const name = kind === "side" ? "sides" : "sessions";
-    state[name] = null;
-    state[`${kind}RefreshedAt`] = null;
-    document.querySelector(`#${name}-body`).replaceChildren();
-    applySessionLayout(kind);
-    renderAppliedSessionFilters(kind);
-    renderSessionPagination(kind);
-    renderSessionSort(kind);
+    sessionLists[kind].restore(query);
   } else if (tab === "schedules") {
     for (const [name, filter] of scheduleFilters) filter.setValues(query.getAll(name).filter((value) => value !== "all"));
     const apiQuery = new URLSearchParams(query);
@@ -5223,7 +4815,7 @@ function renderSessionTabs() {
     document.querySelector(`#sessions-${name}`).hidden = name !== state.sessionTab;
   }
   document.querySelector("#sessions-heading").textContent = state.sessionTab === "temporary" ? "临时会话" : "普通会话";
-  renderSessionFreshness();
+  sessionLists[state.sessionTab === "temporary" ? "side" : "session"].renderFreshness();
 }
 
 function selectSessionTab(name) {
@@ -5279,7 +4871,7 @@ async function selectTab(name, sessionTab = state.sessionTab || "ordinary", { pr
     stopSessionBatch();
     if (sessionBatch?.phase === "confirming") window.NetizenConfirm.cancel();
   }
-  invalidateSessionListRequest();
+  dispatchPageLifecycle("leave", "lists");
   state.projectListRequest = (state.projectListRequest || 0) + 1;
   scheduleListSerial += 1;
   state.refreshRequest = (state.refreshRequest || 0) + 1;
@@ -5316,15 +4908,11 @@ for (const button of document.querySelectorAll("[data-refresh]")) {
   button.addEventListener("click", () => refresh(button.dataset.refresh));
 }
 
-for (const button of document.querySelectorAll("[data-session-sort]")) {
-  button.addEventListener("click", () => sortSessionPage(button.dataset.sessionSort, button.dataset.sortBy));
-}
-
 document.querySelector("#session-select-page").addEventListener("change", (event) => {
   if (event.target.disabled) return;
   const actions = sessionBatchActions();
   sessionSelection.ids.clear();
-  if (event.target.checked) for (const item of state.sessions?.items || []) {
+  if (event.target.checked) for (const item of sessionLists.session.snapshot().items) {
     if (sessionBatchSelectable(item, actions)) sessionSelection.ids.add(item.bindingId);
   }
   renderSessionSelection(actions);
@@ -5372,16 +4960,72 @@ for (const button of document.querySelectorAll("[data-project-mode]")) {
   button.addEventListener("click", () => selectProjectMode(button.dataset.projectMode));
 }
 
+function resetSessionFilterDrafts(kind) {
+  const form = document.querySelector(`#${kind}-filter`);
+  form.reset();
+  document.querySelector(`#${kind}-page-size`).value = "20";
+  if (kind === "session") updateSessionDateFilters();
+  (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
+  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+  for (const controller of filters.values()) controller.reset();
+  for (const root of form.querySelectorAll("[data-time-range]")) {
+    window.NetizenTimeRange.controllerFor(root)?.reset();
+  }
+}
+
+function resetSessionFilterCondition(kind, key, query) {
+  // Reset only the removed field's draft. Other unsubmitted inputs stay intact.
+  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+  if (filters.has(key)) filters.get(key).reset();
+  else if (["created", "updated"].includes(key)) {
+    const root = [...document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")]
+      .find((root) => (root.dataset.timeRangeField || "created") === key);
+    window.NetizenTimeRange.controllerFor(root).setBounds(query.get(`${key}From`) || "", query.get(`${key}Before`) || "", query.get(`${key}Range`) || "all");
+  } else if (key === "chatId") {
+    (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
+    document.querySelector(`#${kind}-chat-filter`).value = "";
+  } else if (key === "searchTerm") document.querySelector("#session-search").value = "";
+  else if (key === "inventoryState") {
+    document.querySelector("#session-inventory-state").value = "active";
+    updateSessionDateFilters();
+  }
+}
+
+const sessionLists = window.NetizenSessionLists.init({
+  api, isExpired: () => state.authExpired,
+  isVisible: (kind) => state.tab === "sessions" && state.sessionTab === (kind === "side" ? "temporary" : "ordinary"),
+  navigate: (page) => refresh("sessions", page), onApplied: syncPageUrl,
+  renderFreshness: () => sessionLists[state.sessionTab === "temporary" ? "side" : "session"].renderFreshness(),
+  firstSessionPage, stepCursorPage, catalogStateLabel, sideStateLabel,
+  updateSessionLocationCell, shortIdentity, chatModeLabel,
+  list: window.NetizenList, timeRange: window.NetizenTimeRange,
+  ...Object.fromEntries(["session", "side"].map((kind) => [kind, {
+    endpoint: kind === "side" ? "/api/v1/side-topics" : "/api/v1/sessions",
+    ensureChatFilter: kind === "side" ? ensureSideChatFilter : ensureSessionChatFilter,
+    draftQuery: () => formQuery(document.querySelector(`#${kind}-filter`), "20"),
+    defaultQuery: () => pageQuery("sessions", kind === "side" ? "temporary" : "ordinary"),
+    loadProjectOptions: (isCurrent) => loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent),
+    resetDrafts: () => resetSessionFilterDrafts(kind),
+    resetCondition: (key, query) => resetSessionFilterCondition(kind, key, query),
+    restoreControls: (query) => restoreSessionFilterControls(kind, query),
+    render: kind === "side" ? renderSides : renderSessions,
+    ...(kind === "session" ? {
+      beforeRender: (items) => {
+        const actions = sessionBatchActions();
+        reconcileSessionSelection(items, actions);
+        return actions;
+      },
+      onLayout: (actions) => renderSessionSelection(actions),
+      afterRender: () => observeSessionPreviews(document.querySelector("#sessions-body")),
+    } : {}),
+  }])),
+});
+
 window.NetizenConversation.init({
   api, isExpired: () => state.authExpired, nativeSessionDateLabel, sessionDateLabel,
   openPathFiles: (target) => window.NetizenPathFiles?.open(target),
 });
-for (const control of document.querySelectorAll("[data-session-layout]")) {
-  control.addEventListener("change", () => applySessionLayout(control.dataset.sessionLayout));
-}
 for (const kind of ["session", "side"]) {
-  document.querySelector(`#${kind}-groups-expand`).addEventListener("click", () => setSessionGroupsExpanded(kind, true));
-  document.querySelector(`#${kind}-groups-collapse`).addEventListener("click", () => setSessionGroupsExpanded(kind, false));
   const trigger = document.querySelector(`#${kind}-more-filters`);
   const advanced = document.querySelector(`#${kind}-advanced-filters`);
   trigger.addEventListener("click", () => {
@@ -5394,21 +5038,6 @@ for (const kind of ["session", "side"]) {
 }
 
 document.querySelector("#session-inventory-state").addEventListener("change", updateSessionDateFilters);
-document.querySelector("#session-filter").addEventListener("submit", (event) => {
-  event.preventDefault();
-  refresh("sessions", sessionFilterPage());
-});
-document.querySelector("#session-filter-reset").addEventListener("click", () => resetSessionFilters());
-document.querySelector("#session-page-size").addEventListener("change", () => {
-  resizeSessionPage("session");
-});
-document.querySelector("#side-filter").addEventListener("submit", (event) => {
-  event.preventDefault(); refresh("sessions", sessionFilterPage("side"));
-});
-document.querySelector("#side-filter-reset").addEventListener("click", resetSideFilters);
-document.querySelector("#side-page-size").addEventListener("change", () => {
-  resizeSessionPage("side");
-});
 document.querySelector("#projects-previous").addEventListener("click", () => moveListPage("projects", "previous"));
 document.querySelector("#projects-next").addEventListener("click", () => moveListPage("projects", "next"));
 window.NetizenWorktrees?.init({ api, actionPayload, setStatus, queryProjectOptions, isExpired: () => state.authExpired });
@@ -5417,10 +5046,6 @@ window.NetizenProjectFiles?.init({ browser: fileBrowser });
 window.NetizenAttachmentFiles?.init({ browser: fileBrowser, api, isExpired: () => state.authExpired });
 window.NetizenPathFiles?.init({ browser: fileBrowser });
 document.querySelector("#attachment-files-open")?.addEventListener("click", () => window.NetizenAttachmentFiles?.open());
-document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
-document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
-document.querySelector("#sides-previous").addEventListener("click", () => moveSidePage("previous"));
-document.querySelector("#sides-next").addEventListener("click", () => moveSidePage("next"));
 sessionSettingsInput("cancel").addEventListener("click", closeSessionSettingsEditor);
 sessionRenameInput("cancel").addEventListener("click", closeSessionRenameEditor);
 projectDeleteInput("cancel").addEventListener("click", () => closeProjectDeleteDialog());

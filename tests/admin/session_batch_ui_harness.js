@@ -74,8 +74,7 @@ function answer(items, cursor = "next") {
 async function show(items, inventory = "active") {
   answer(items);
   const query = `inventoryState=${inventory}&pageSize=100&sortBy=updatedAt&sortDirection=desc`;
-  state.sessionPage = firstSessionPage(query);
-  restoreSessionFilterControls("session", new URLSearchParams(query));
+  sessionLists.session.restore(new URLSearchParams(query));
   await selectSessionTab("ordinary"); await flush();
 }
 function layout(value) {
@@ -137,8 +136,8 @@ async function selectionScenario() {
   await flush(); assert.deepEqual(selected(), ["a"]);
   assert(rows()[0].textContent.includes("补读的名称"));
   for (const change of [
-    () => moveSessionPage("next", "session"),
-    () => sortSessionPage("session", "createdAt"),
+    () => sessionLists.session.move("next"),
+    () => sessionLists.session.sort("createdAt"),
     () => { const input = document.querySelector("#session-search"); input.value = "搜索"; document.querySelector("#session-filter").dispatch("submit"); },
     () => { const input = document.querySelector("#session-page-size"); input.value = "50"; input.dispatch("change"); },
     () => { const input = document.querySelector("#session-inventory-state"); input.value = "archived"; input.dispatch("change"); document.querySelector("#session-filter").dispatch("submit"); },
@@ -163,7 +162,7 @@ async function selectionScenario() {
 
 async function confirmationScenario() {
   await show([sample("dropped"), sample("unsupported"), sample("running"), sample("archived")]);
-  await moveSessionPage("next", "session"); all().click();
+  await sessionLists.session.move("next"); all().click();
   const fresh = [sample("running", { nativeTitle: "<b>新标题</b>", pointerState: "current",
     runtime: { primaryStatus: "running", primaryStatusResolution: "deferred" } }, "fresh"),
     sample("unsupported", { actions: {} }), sample("archived", {
@@ -279,12 +278,12 @@ async function stopScenario(outcome) {
   assert.equal(posts().length, 2); assert.equal(reads().length, 3);
   assert.equal(summary(), "已完成 1 项，结果未确认 1 项，未执行 1 项。");
   assert.match(details()[1], /结果未确认（已停止等待，服务端可能仍在完成）/);
-  const saved = { summary: summary(), details: details(), status: statusNode.textContent, data: state.sessions, requests: requests.length };
+  const saved = { summary: summary(), details: details(), status: statusNode.textContent, data: sessionLists.session.snapshot().items, requests: requests.length };
   if (outcome !== "401") { finish(); checks()[0].click(); }
   if (outcome === "network") wait.reject(new TypeError("late offline"));
   else wait.resolve(outcome === "parsing" ? { message: "late parsed" } : response(Number(outcome)));
   await flush();
-  assert.deepEqual({ summary: summary(), details: details(), data: state.sessions, requests: requests.length },
+  assert.deepEqual({ summary: summary(), details: details(), data: sessionLists.session.snapshot().items, requests: requests.length },
     { summary: saved.summary, details: saved.details, data: saved.data, requests: saved.requests });
   if (outcome === "401") {
     assert(state.authExpired, "late 401 still expires the global login");
@@ -431,7 +430,7 @@ async function stagedExpiryScenario(stage) {
 }
 
 async function supersededPreparationScenario() {
-  for (const change of [() => sortSessionPage("session", "createdAt"), () => refresh("sessions")]) {
+  for (const change of [() => sessionLists.session.sort("createdAt"), () => refresh("sessions")]) {
     await show([sample("a")]); all().click();
     const wait = deferred(); ordinaryAnswer = () => wait.promise;
     start(); await flush();
@@ -439,7 +438,7 @@ async function supersededPreparationScenario() {
     wait.resolve({ items: [sample("a", { nativeTitle: "旧读取" })], nextCursor: null }); await flush();
     assert.equal(statusNode.textContent, "列表已变化，批量操作未执行。");
     assert.equal(posts().length, 0); assert(!document.querySelector("#admin-confirm").open);
-    assert.equal(state.sessions.items[0].nativeTitle, "新读取");
+    assert(rows()[0].textContent.includes("新读取"));
   }
 }
 
@@ -464,7 +463,7 @@ async function supersededEndingScenario() {
   wait.resolve({ items: [sample("a", { nativeTitle: "过期结果" })], nextCursor: null }); await flush();
   assert.equal(summary(), "已完成 1 项。"); assert(node("note").hidden);
   assert.equal(statusNode.textContent, summary()); assert.equal(statusError, false);
-  assert.equal(state.sessions.items[0].nativeTitle, "新读取结果");
+  assert(rows()[0].textContent.includes("新读取结果"));
   assert.equal(reads().length, 4); assert.equal(posts().length, 1); finish();
 }
 
@@ -546,16 +545,14 @@ async function resultPresentationScenario() {
 
 async function queryBudgetScenario() {
   await show(Array.from({ length: 100 }, (_, i) => sample(String(i))));
-  const Original = URLSearchParams;
-  let inventoryReads = 0;
-  URLSearchParams = class extends Original {
-    get(name) { if (name === "inventoryState") inventoryReads += 1; return super.get(name); }
-  };
+  const original = sessionBatchActions;
+  let actionCalculations = 0;
+  sessionBatchActions = (...args) => { actionCalculations += 1; return original(...args); };
   try {
-    renderSessions(state.sessions); assert.equal(inventoryReads, 1, "one inventory lookup for rendering 100 rows and their selection controls");
-    inventoryReads = 0; all().click(); assert.equal(inventoryReads, 1, "select-all shares its action calculation with the toolbar render");
+    await loadSessions(); assert.equal(actionCalculations, 1, "100 rows and their selection controls share one action calculation");
+    actionCalculations = 0; all().click(); assert.equal(actionCalculations, 1, "select-all shares its action calculation with the toolbar render");
     assert.equal(selected().length, 100);
-  } finally { URLSearchParams = Original; }
+  } finally { sessionBatchActions = original; }
 }
 
 (async () => {

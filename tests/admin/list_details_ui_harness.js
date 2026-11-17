@@ -20,6 +20,7 @@ const session = {
       operation_max_chars: 240, organization: "time" } },
 };
 const requests = [];
+let sessionAnswer = () => ({ items: [], nextCursor: null });
 const plan = (id) => ({
   id, name: `<b>${id}</b>`, revision: 7, enabled: true, chat_id: "oc_target", target_kind: "binding",
   target_binding_id: "binding-target", target_label: "原会话", instructions: "<img src=x onerror=alert(1)>\n计划指令",
@@ -43,7 +44,8 @@ async function fixtureResponse(path, options = {}) {
   if (url.pathname === "/api/v1/sessions/options") return {
     models: [], model_catalog_error: null, context_mode_available: true,
   };
-  if (url.pathname === "/api/v1/projects/options" || url.pathname === "/api/v1/sessions") return { items: [], nextCursor: null };
+  if (url.pathname === "/api/v1/sessions") return sessionAnswer();
+  if (url.pathname === "/api/v1/projects/options") return { items: [], nextCursor: null };
   assert.equal(url.pathname, "/api/v1/schedules");
   if (url.searchParams.get("mode") === "list") return { plans: [], default_timezone: "UTC", actions: { create: { actionToken: "create" } } };
   if (url.searchParams.get("mode") === "options") return { models: [], context_mode_available: true };
@@ -287,8 +289,8 @@ async function fetch(path, options = {}) {
   };
   const listed = { ...session, runtime: { primaryStatus: "idle", primaryStatusResolution: "local" } };
   const previewPage = { items: [listed, { ...listed, bindingId: "binding-without-preview", nativePreview: null }], nextCursor: null };
-  state.sessions = previewPage;
-  renderSessions(previewPage);
+  sessionAnswer = () => previewPage;
+  await loadSessions();
   assert.equal(observers.length, 1);
   assert.equal(observers[0].targets.length, 1, "only rows with a preview are observed");
   const observed = observers[0].targets[0];
@@ -299,8 +301,8 @@ async function fetch(path, options = {}) {
   observed.clientHeight = 40; observed.scrollHeight = 80;
   observers[0].callback([{ target: observed }]);
   assert(!observedToggle.hidden);
-  state.sessions = { items: [listed], nextCursor: null };
-  renderSessions(state.sessions);
+  sessionAnswer = () => ({ items: [listed], nextCursor: null });
+  await loadSessions();
   assert(!observers[0].connected, "re-rendering must release the previous page's observer");
   assert.equal(observers.length, 2);
   assert(observers[1].connected);

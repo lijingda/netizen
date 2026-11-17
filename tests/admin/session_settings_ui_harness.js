@@ -129,7 +129,7 @@ async function submit() {
   await flush();
 }
 function assertPageRetained(page) {
-  assert.deepEqual(state.sessionPage, page);
+  assert.deepEqual(sessionLists.session.snapshot().page, page);
   const query = new URL(gets.filter((path) => path.startsWith("/api/v1/sessions?")).at(-1), "http://admin").searchParams;
   assert.equal(query.get("cursor"), page.cursor);
   assert.deepEqual(query.getAll("inventoryState"), ["active"]);
@@ -189,8 +189,8 @@ const cases = {
     await loadSessions();
     assert.match(document.querySelector("#sessions-body").textContent,
       /补齐未读上下文.*model-one.*推理 high.*速度 priority/);
-    const page = structuredClone(state.sessionPage);
-    const session = state.sessions.items[0];
+    const page = structuredClone(sessionLists.session.snapshot().page);
+    const session = sessionLists.session.snapshot().items[0];
     const action = structuredClone(session.actions.configure);
     await openFromList();
     assert(field("drawer").open);
@@ -481,7 +481,7 @@ const cases = {
   },
   async duplicate_save_and_failure() {
     await loadSessions();
-    const page = structuredClone(state.sessionPage);
+    const page = structuredClone(sessionLists.session.snapshot().page);
     const button = await openFromList();
     change("progress", true);
     const draft = structuredClone(sessionSettingsEditor.settings);
@@ -512,7 +512,7 @@ const cases = {
     assert.equal(field("progress").checked, true);
     assert.equal(field("fields").disabled, false);
     assert.equal(sessionSettingsEditor.action, null);
-    assert.equal(state.sessions.items[0].actions.configure, null);
+    assert.equal(sessionLists.session.snapshot().items[0].actions.configure, null);
     assert(field("save").disabled);
     assert(button.disabled);
     assert.match(field("note").textContent, /保存结果未确认.*重新打开/);
@@ -538,7 +538,7 @@ const cases = {
       ...baseSettings, turn_settings: { model_id: "model-two", effort_id: "high", service_tier_id: "default" },
     }));
     await loadSessions();
-    const original = structuredClone(state.sessions.items[0].actions.configure);
+    const original = structuredClone(sessionLists.session.snapshot().items[0].actions.configure);
     const oldGate = {};
     optionsGate = oldGate;
     const button = await openFromList();
@@ -551,7 +551,7 @@ const cases = {
     assert(cancel.prevented);
     assert.equal(field("drawer").open, false);
     assert.equal(document.activeElement, button);
-    assert.deepEqual(state.sessions.items[0].actions.configure, original);
+    assert.deepEqual(sessionLists.session.snapshot().items[0].actions.configure, original);
     optionsGate = null;
     models = [catalog[1]];
     await openFromList("binding-second");
@@ -587,7 +587,7 @@ const cases = {
   },
   async saved_refresh_failure() {
     await loadSessions();
-    const page = structuredClone(state.sessionPage);
+    const page = structuredClone(sessionLists.session.snapshot().page);
     const button = await openFromList();
     change("completion-mention", false);
     listFailure = true;
@@ -653,10 +653,10 @@ const cases = {
 };
 (async () => {
   await flush();
-  state.sessionPage = {
-    cursor: "page-two", nextCursor: "page-three", previousCursors: [null], number: 2,
+  await sessionLists.session.load({
+    cursor: "page-two", previousCursors: [null], number: 2,
     query: "project=netizen&scopeKind=group&inventoryState=active&pageSize=20",
-  };
+  });
   const name = process.argv[2];
   assert.equal(typeof cases[name], "function", "Unknown case: " + name);
   await cases[name]();

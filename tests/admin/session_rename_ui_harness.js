@@ -108,7 +108,7 @@ const cases = {
     assert.match(document.querySelector("#sessions-error").textContent, /list read failed/);
   },
   async generate_edit_save() {
-    const page = structuredClone(state.sessionPage);
+    const page = structuredClone(sessionLists.session.snapshot().page);
     open();
     assert.equal(document.activeElement, field("name"));
     assert.equal(field("name").value, "Original name");
@@ -131,7 +131,7 @@ const cases = {
     assert.notEqual(posts[1].body.actionToken, firstToken);
     const retryQuery = new URL(gets.at(-1), "http://admin").searchParams;
     assert.equal(retryQuery.get("identity"), "binding-exact");
-    assert.deepEqual(state.sessionPage, page);
+    assert.deepEqual(sessionLists.session.snapshot().page, page);
     change("Edited candidate");
     saveGate = {};
     submit(); submit();
@@ -143,7 +143,7 @@ const cases = {
     assert(!field("dialog").open);
     assert.equal(sessionRenameEditor, null);
     assert.match(statusNode.textContent, /已保存/);
-    assert.deepEqual(state.sessionPage, page);
+    assert.deepEqual(sessionLists.session.snapshot().page, page);
   },
   async failure_and_retry() {
     open(); change("draft"); generateFailure = true;

@@ -170,10 +170,10 @@ async function fetch(path) {
   assert.equal(query().get("createdRange"), "today");
   assert.match(rangeRoot.querySelector("[data-time-range-trigger]").title.split("\n").slice(0, 2).join("\n"), /^今天 · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
   document.querySelector("#session-page-size").value = "100";
-  state.sessionPage = { cursor: "later", nextCursor: "next", previousCursors: [null], number: 2 };
-  const displayedPage = state.sessionPage;
+  await sessionLists.session.load({ ...firstSessionPage(), cursor: "later", previousCursors: [null], number: 2 });
+  const displayedPage = sessionLists.session.snapshot().page;
   failSessionReads = true;
-  await resetSessionFilters();
+  await sessionLists.session.reset();
   failSessionReads = false;
   assert.match(document.querySelector("#sessions-error").textContent, /catalog unavailable/);
   assert.deepEqual(query().getAll("inventoryState"), ["active"]);
@@ -181,7 +181,7 @@ async function fetch(path) {
   for (const key of ["project", "scopeKind", "current", "createdFrom", "createdBefore"]) {
     assert(!query().has(key), `${key} should be reset`);
   }
-  assert.equal(state.sessionPage, displayedPage, "reset drafts do not replace a result before a successful load");
+  assert.deepEqual(sessionLists.session.snapshot().page, displayedPage, "reset drafts do not replace a result before a successful load");
   assert.equal(rangeRoot.querySelector("[data-time-range-summary]").textContent, "全部时间");
   assert.match(updatedRoot.querySelector("[data-time-range-summary]").textContent, /最近 3 个月/);
   const updatedBounds = query().get("updatedFrom");
@@ -197,12 +197,12 @@ async function fetch(path) {
   selectState("lazy");
   updateSessionDateFilters();
   assert(rangeRoot.disabled && updatedRoot.disabled);
-  assert.equal(sessionFilterPage().query.includes("sortBy=createdAt"), true);
+  assert.equal(sessionLists.session.filterPage().query.includes("sortBy=createdAt"), true);
   for (const key of ["createdFrom", "createdBefore", "updatedFrom", "updatedBefore"]) assert(!query().has(key));
   selectState("active");
   updateSessionDateFilters();
   assert(!rangeRoot.disabled && !updatedRoot.disabled);
-  await resetSessionFilters();
+  await sessionLists.session.reset();
 
   // A deleted option stays removable, and options refresh never silently changes a selection.
   checkbox("project", "netizen").click();
@@ -221,8 +221,7 @@ async function fetch(path) {
 
   // Pagination reuses the applied repeated values and absolute UTC bounds.
   // Checkbox/time changes remain drafts until explicit 筛选/reset/page-size submission.
-  await resetSessionFilters();
-  state.sessionPage = firstSessionPage();
+  await sessionLists.session.reset();
   const sessionQueries = [];
   useSessionAnswers = true;
   let failNextPage = false;
@@ -242,8 +241,8 @@ async function fetch(path) {
     rangeRoot.querySelector("[data-time-range-done]").click();
   };
   applyTimePreset("today");
-  await loadSessions();
-  const applied = state.sessionPage.query;
+  await loadSessions(firstSessionPage());
+  const applied = sessionLists.session.snapshot().page.query;
   const apiApplied = new URLSearchParams(applied);
   for (const field of ["created", "updated"]) apiApplied.delete(`${field}Range`);
   const bounds = sessionQueries.at(-1).get("createdFrom");
@@ -253,25 +252,25 @@ async function fetch(path) {
   applyTimePreset("yesterday");
   assert.deepEqual(query().getAll("inventoryState"), ["archived"]);
   assert.notEqual(query().get("createdFrom"), bounds);
-  await moveSessionPage("next");
+  await sessionLists.session.move("next");
   assert.equal(sessionQueries.at(-1).get("cursor"), "page-two");
   assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["active"]);
   assert.equal(sessionQueries.at(-1).get("createdFrom"), bounds);
   assert(!sessionQueries.at(-1).has("project"));
   assert(!sessionQueries.at(-1).has("scopeKind"));
-  assert.equal(state.sessionPage.query, applied);
-  await moveSessionPage("previous");
+  assert.equal(sessionLists.session.snapshot().page.query, applied);
+  await sessionLists.session.move("previous");
   assert(!sessionQueries.at(-1).has("cursor"));
   assert.equal(sessionQueries.at(-1).toString(), apiApplied.toString());
   await refresh("sessions");
   assert.equal(sessionQueries.at(-1).toString(), apiApplied.toString());
   failNextPage = true;
-  await moveSessionPage("next");
-  assert.equal(state.sessionPage.cursor, null);
-  assert.equal(state.sessionPage.query, applied);
-  assert.equal(state.sessionPage.number, 1);
+  await sessionLists.session.move("next");
+  assert.equal(sessionLists.session.snapshot().page.cursor, null);
+  assert.equal(sessionLists.session.snapshot().page.query, applied);
+  assert.match(document.querySelector("#sessions-page").textContent, /^第 1 页/);
   failNextPage = false;
-  await loadSessions(sessionFilterPage());
+  await loadSessions(sessionLists.session.filterPage());
   assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["archived"]);
   assert.deepEqual(sessionQueries.at(-1).getAll("project"), ["netizen"]);
   assert.deepEqual(sessionQueries.at(-1).getAll("scopeKind"), ["topic"]);
@@ -293,7 +292,7 @@ async function fetch(path) {
   let sessionResponse = { items: [unknown], nextCursor: null };
   answer = (path) => path.startsWith("/api/v1/projects/options?")
     ? { items: [], nextCursor: null } : sessionResponse;
-  await loadSessions(sessionFilterPage());
+  await loadSessions(sessionLists.session.filterPage());
   const rows = document.querySelector("#sessions-body");
   assert.match(rows.textContent, /Read summary.*状态未确认.*运行中/);
   assert.doesNotMatch(rows.textContent, /Lazy Session|Codex 会话缺失/);
@@ -316,7 +315,7 @@ async function fetch(path) {
   };
   createSchedule.click();
   await flush();
-  assert.equal(scheduleEditor.targetSession, state.sessions.items[0]);
+  assert.deepEqual(scheduleEditor.targetSession, sessionLists.session.snapshot().items[0]);
   assert.equal(scheduleEditor.targetSession.bindingId, unknown.bindingId);
   assert.equal(scheduleEditor.returnFocus, createSchedule.menuTrigger);
   await closeScheduleEditor({ confirmed: true });
@@ -395,13 +394,13 @@ async function fetch(path) {
   assert.equal(document.querySelector("#session-chat-filter").value, "oc_selected");
   assert.equal(pickerRoot.querySelector(".chat-picker-selected-avatar").querySelector("img").src,
     "https://example.feishucdn.com/sessions.jpg");
-  state.sessionPage = { cursor: "page-three", number: 3, nextCursor: "page-four", previousCursors: [null, "page-two"], query: "pageSize=20" };
+  await sessionLists.session.load({ cursor: "page-three", number: 3, previousCursors: [null, "page-two"], query: "pageSize=20" });
   form.dispatch("submit");
   await flush();
-  assert.equal(state.sessionPage.number, 1);
-  assert.equal(state.sessionPage.cursor, null);
-  assert.deepEqual(state.sessionPage.previousCursors, []);
-  assert.equal(new URLSearchParams(state.sessionPage.query).get("chatId"), "oc_selected");
+  assert.match(document.querySelector("#sessions-page").textContent, /^第 1 页/);
+  assert.equal(sessionLists.session.snapshot().page.cursor, null);
+  assert.deepEqual(sessionLists.session.snapshot().page.previousCursors, []);
+  assert.equal(new URLSearchParams(sessionLists.session.snapshot().page.query).get("chatId"), "oc_selected");
   const filterRequest = new URL(requests.filter((path) => path.startsWith("/api/v1/sessions?")).at(-1), "https://admin");
   assert.equal(filterRequest.searchParams.get("chatId"), "oc_selected");
   assert.equal(filterRequest.searchParams.has("cursor"), false);
@@ -418,30 +417,30 @@ async function fetch(path) {
   assert.equal(requests.filter((path) => path.startsWith("/api/v1/sessions?")).length, requestsBeforeSearch);
   form.dispatch("submit");
   await flush();
-  assert.equal(new URLSearchParams(state.sessionPage.query).get("chatId"), "oc_selected");
+  assert.equal(new URLSearchParams(sessionLists.session.snapshot().page.query).get("chatId"), "oc_selected");
   document.querySelector("#session-group").click();
   pickerRoot.querySelector(".chat-picker-empty-option").click();
   assert.equal(document.querySelector("#session-chat-filter").value, "");
   assert.equal(pickerRoot.querySelector(".chat-picker-summary").textContent, "全部");
-  assert.equal(new URLSearchParams(state.sessionPage.query).get("chatId"), "oc_selected",
+  assert.equal(new URLSearchParams(sessionLists.session.snapshot().page.query).get("chatId"), "oc_selected",
     "choosing all changes the draft only until the filter form is submitted");
   form.dispatch("submit");
   await flush();
-  assert.equal(new URLSearchParams(state.sessionPage.query).has("chatId"), false);
+  assert.equal(new URLSearchParams(sessionLists.session.snapshot().page.query).has("chatId"), false);
   await fetchChatPage({ query: "研发 & 测试", cursor: "later+page" });
   const chatQuery = new URL(requests.at(-1), "https://admin").searchParams;
   assert.equal(chatQuery.get("query"), "研发 & 测试");
   assert.equal(chatQuery.get("cursor"), "later+page");
   sessionChatPicker.setSelection({ chatId: "oc_selected", name: "研发群" });
   document.querySelector("#session-chat-filter").value = "oc_selected";
-  await resetSessionFilters();
+  await sessionLists.session.reset();
   assert.equal(document.querySelector("#session-chat-filter").value, "");
   assert.equal(searchInput.value, "");
   assert.equal(sessionChatPicker.getSelection(), null);
-  assert.equal(new URLSearchParams(state.sessionPage.query).has("chatId"), false);
+  assert.equal(new URLSearchParams(sessionLists.session.snapshot().page.query).has("chatId"), false);
   {
   // Chips represent the displayed query; edits to other fields remain drafts.
-  await selectSessionTab("ordinary"); await resetSessionFilters();
+  await selectSessionTab("ordinary"); await sessionLists.session.reset();
   const chips = document.querySelector("#session-filter-chips");
   const more = document.querySelector("#session-more-filters");
   const advanced = document.querySelector("#session-advanced-filters");
@@ -460,13 +459,13 @@ async function fetch(path) {
   assert.equal(chips.children.length, 5);
   assert(!rangeRoot.querySelector("[data-time-range-summary]").textContent.includes("\n"));
   assert.match(rangeRoot.querySelector("[data-time-range-trigger]").title, /UTC/);
-  const applied = new URLSearchParams(state.sessionPage.query);
+  const applied = new URLSearchParams(sessionLists.session.snapshot().page.query);
   const search = document.querySelector("#session-search");
   search.value = "尚未提交的搜索";
   sessionMultiFilters.get("project").setValues(["draft-project"]);
   const chip = (key) => [...chips.children].find((button) => button.dataset.filterKey === key);
   chip("scopeKind").click(); await flush();
-  let after = new URLSearchParams(state.sessionPage.query);
+  let after = new URLSearchParams(sessionLists.session.snapshot().page.query);
   assert(!after.has("scopeKind"));
   assert.deepEqual(after.getAll("project"), ["netizen"]);
   assert(!after.has("searchTerm"));
@@ -474,40 +473,40 @@ async function fetch(path) {
   assert.deepEqual(sessionMultiFilters.get("project").values(), ["draft-project"]);
   assert.equal(search.value, "尚未提交的搜索");
   assert.equal(more.textContent, "更多筛选（3）");
-  assert.equal(state.sessionPage.number, 1);
+  assert.match(document.querySelector("#sessions-page").textContent, /^第 1 页/);
   assert.equal(after.get("createdFrom"), applied.get("createdFrom"));
   const size = document.querySelector("#session-page-size");
   size.value = "50"; size.dispatch("change"); await flush();
-  after = new URLSearchParams(state.sessionPage.query);
+  after = new URLSearchParams(sessionLists.session.snapshot().page.query);
   assert.equal(after.get("pageSize"), "50");
   assert.deepEqual(after.getAll("project"), ["netizen"]);
   assert(!after.has("searchTerm"));
   assert.equal(search.value, "尚未提交的搜索");
   assert.equal(after.get("sortBy"), applied.get("sortBy"));
   chip("updated").click(); await flush();
-  after = new URLSearchParams(state.sessionPage.query);
+  after = new URLSearchParams(sessionLists.session.snapshot().page.query);
   assert.equal(after.get("updatedRange"), "last-3-months");
   assert.equal(more.textContent, "更多筛选（2）");
   assert.equal(updatedRoot.querySelector("[data-time-range-summary]").textContent, "最近 3 个月");
   chip("created").click(); await flush();
-  assert.equal(new URLSearchParams(state.sessionPage.query).has("createdFrom"), false);
+  assert.equal(new URLSearchParams(sessionLists.session.snapshot().page.query).has("createdFrom"), false);
   assert.equal(rangeRoot.querySelector("[data-time-range-summary]").textContent, "全部时间");
   chip("project").click(); await flush();
   assert.deepEqual(sessionMultiFilters.get("project").values(), []);
   assert.equal(search.value, "尚未提交的搜索");
   more.click(); assert.equal(advanced.hidden, true);
-  const beforeFailure = structuredClone(state.sessionPage);
+  const beforeFailure = structuredClone(sessionLists.session.snapshot().page);
   const chipText = chips.textContent;
   failSessionReads = true;
   chip("current").click(); await flush();
-  assert.deepEqual(state.sessionPage, beforeFailure, "failed chip read keeps the displayed query and cursor");
+  assert.deepEqual(sessionLists.session.snapshot().page, beforeFailure, "failed chip read keeps the displayed query and cursor");
   assert.equal(chips.textContent, chipText);
   assert.equal(search.value, "尚未提交的搜索");
   assert.deepEqual(sessionMultiFilters.get("current").values(), []);
   assert.equal(document.querySelector("#sessions-error").hidden, false);
   failSessionReads = false;
   chip("current").click(); await flush();
-  assert.equal(new URLSearchParams(state.sessionPage.query).has("current"), false);
+  assert.equal(new URLSearchParams(sessionLists.session.snapshot().page.query).has("current"), false);
   assert.equal(chips.children.length, 0);
   }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
