@@ -1,5 +1,4 @@
 window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 window.prompt = () => { throw new Error("Rename must use a dialog"); };
 confirmResponder = () => true;
@@ -12,12 +11,14 @@ const expiredTokens = new Set();
 let serial = 0;
 let generateGate = null;
 let saveGate = null;
+let listGate = null;
+let listFailure = false;
 let generateFailure = false;
 let saveFailure = false;
 let changedTarget = false;
 let generatedName = "<b>Generated candidate</b>";
-const grant = (kind) => ({ actionKind: `sessions.${kind}`, actionToken: `${kind}-${serial}`,
-  csrfToken: `csrf-${serial}`, target: { resource: "binding", targetId: "binding-exact", scopeKey: "scope-exact" } });
+const grant = (kind) => fixtureAction(`sessions.${kind}`, { actionToken: `${kind}-${serial}`,
+  csrfToken: `csrf-${serial}`, resource: "binding", targetId: "binding-exact", scopeKey: "scope-exact" });
 const fixtureSession = () => ({
   bindingId: "binding-exact", shortId: "exact", scopeKey: "scope-exact", scopeKind: "group", chatMode: "group",
   projectAlias: "netizen", chatId: "oc_group", chatName: "Group", sessionType: "message", topicId: null,
@@ -32,6 +33,9 @@ const paused = (gate, result) => new Promise((resolve, reject) => {
   gate.reject = (message) => reject(new Error(message));
 });
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   try {
     let data;
     if (options.method === "POST") {
@@ -57,6 +61,8 @@ async function fetch(path, options = {}) {
         assert(path.startsWith("/api/v1/sessions?"), "Unexpected GET: " + path);
         serial += 1;
         data = { items: [fixtureSession()], nextCursor: null };
+        if (listFailure) throw new Error("list read failed");
+        if (listGate) data = await paused(listGate, data);
       }
     }
     return { ok: true, status: 200, json: async () => data };
@@ -77,8 +83,32 @@ function open() {
 function change(value) { field("name").value = value; field("name").dispatch("input"); }
 function submit() { assert(field("editor").dispatch("submit").prevented); }
 const cases = {
+  async superseded_refresh() {
+    for (const newerFails of [false, true]) {
+      listGate = null; listFailure = false;
+      await loadSessions();
+      open(); change("saved name");
+      const obsolete = listGate = {};
+      submit(); await flush();
+      assert(obsolete.resolve, "save must start a list refresh");
+      const newest = listGate = {};
+      const replacement = refresh("sessions"); await flush();
+      obsolete.resolve(); await flush();
+      assert.equal(statusNode.textContent, "会话名称已保存。");
+      if (newerFails) newest.reject("replacement failed"); else newest.resolve();
+      assert.equal(await replacement, !newerFails);
+      assert.equal(statusNode.textContent, "会话名称已保存。");
+      if (newerFails) assert.match(document.querySelector("#sessions-error").textContent, /replacement failed/);
+    }
+  },
+  async refresh_failure() {
+    open(); change("saved name"); listFailure = true;
+    submit(); await flush();
+    assert.match(statusNode.textContent, /会话名称已保存.*列表刷新失败/);
+    assert.match(document.querySelector("#sessions-error").textContent, /list read failed/);
+  },
   async generate_edit_save() {
-    const page = structuredClone(state.sessionPage);
+    const page = structuredClone(sessionLists.session.snapshot().page);
     open();
     assert.equal(document.activeElement, field("name"));
     assert.equal(field("name").value, "Original name");
@@ -101,7 +131,7 @@ const cases = {
     assert.notEqual(posts[1].body.actionToken, firstToken);
     const retryQuery = new URL(gets.at(-1), "http://admin").searchParams;
     assert.equal(retryQuery.get("identity"), "binding-exact");
-    assert.deepEqual(state.sessionPage, page);
+    assert.deepEqual(sessionLists.session.snapshot().page, page);
     change("Edited candidate");
     saveGate = {};
     submit(); submit();
@@ -113,7 +143,7 @@ const cases = {
     assert(!field("dialog").open);
     assert.equal(sessionRenameEditor, null);
     assert.match(statusNode.textContent, /已保存/);
-    assert.deepEqual(state.sessionPage, page);
+    assert.deepEqual(sessionLists.session.snapshot().page, page);
   },
   async failure_and_retry() {
     open(); change("draft"); generateFailure = true;

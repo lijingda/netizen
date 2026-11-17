@@ -48,9 +48,9 @@ window.webComponent = {
   async config() { selectorConfigs += 1; },
   render(_name, options) { selectorRenders += 1; selectorOnSelect = options.onSelect; return { unmount() { selectorUnmounts += 1; } }; },
 };
-const adminGrant = { actionToken: "fixture-selector", csrfToken: "fixture-csrf", target: {} };
+const adminGrant = fixtureAction("admin-users.selector-config", { resource: "admin-users", targetId: "app-one", actionToken: "fixture-selector", csrfToken: "fixture-csrf" });
 if (typeof navigationRace !== "undefined") {
-  ordinary.actions.configure = adminGrant;
+  ordinary.actions.configure = ordinaryGrant("configure", adminGrant.actionToken);
   Object.assign(ordinary.sessionSettings, { reaction_pulse_enabled: false, progress_card_enabled: false,
     completion_mention_enabled: false, progress_card_settings: null });
 }
@@ -536,7 +536,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   const applied = href();
   assert.equal(new URLSearchParams(window.location.search).get("project"), "docs");
   sessionMultiFilters.get("project").setValues(["netizen"]);
-  await sortSessionPage("session", "createdAt");
+  await sessionLists.session.sort("createdAt");
   assert.equal(lastQuery("/api/v1/sessions").get("project"), "docs");
   assert.equal(new URLSearchParams(window.location.search).get("sortBy"), "createdAt");
   window.history.go(-1); await flush();
@@ -560,7 +560,7 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(href(), unlimitedUrl);
   assert.equal(updatedRange.querySelector("[data-time-range-summary]").textContent, "全部时间");
   assert(!lastQuery("/api/v1/sessions").has("updatedFrom"));
-  await resetSessionFilters();
+  await sessionLists.session.reset();
   assert(lastQuery("/api/v1/sessions").get("updatedFrom"));
   assert.match(updatedRange.querySelector("[data-time-range-summary]").textContent, /最近 3 个月/);
 

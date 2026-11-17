@@ -1,5 +1,4 @@
 window.location = { pathname: "/schedules", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 const windowListeners = new Map();
 window.addEventListener = (name, callback) => windowListeners.set(name, callback);
@@ -134,6 +133,9 @@ async function fixtureResponse(path, options = {}) {
     default_timezone: "Asia/Shanghai", actions: { create: createGrant } };
 }
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   try {
     const data = await fixtureResponse(path, options);
     return { ok: true, status: 200, json: async () => data };
@@ -173,7 +175,7 @@ async function chooseScheduleTarget(value) {
 }
 (async () => {
   await flush();
-  state.sessionPage = { ...state.sessionPage, cursor: "sessions-page-three", number: 3 };
+  await sessionLists.session.load({ ...firstSessionPage(), cursor: "sessions-page-three", number: 3 });
   await loadSchedules();
   const rows = document.querySelector("#schedules-body").querySelectorAll("tr");
   assert.equal(rows.length, 1);
@@ -1026,7 +1028,7 @@ async function chooseScheduleTarget(value) {
   state.tab = "sessions";
   const opener = document.createElement("button");
   document.body.append(opener);
-  const position = structuredClone(state.sessionPage);
+  const position = structuredClone(sessionLists.session.snapshot().page);
   createGrant = { ...envelope("create"), actionToken: "fresh-session-create-grant" };
   const beforeTargetOpen = gets.length;
   await openScheduleForSession(targetSession, opener);
@@ -1043,7 +1045,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(posts.at(-1).body.actionToken, "fresh-session-create-grant");
   assert.equal(gets.length, beforeBindingSave, "saving from Sessions must not reload or move its list");
   assert.equal(state.tab, "sessions");
-  assert.deepEqual(state.sessionPage, position);
+  assert.deepEqual(sessionLists.session.snapshot().page, position);
   assert.equal(document.activeElement, opener);
   assert.equal(document.querySelector("#session-schedule-saved").hidden, false);
   document.querySelector("#session-schedule-view").click(); await flush();

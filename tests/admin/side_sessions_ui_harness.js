@@ -1,6 +1,5 @@
 window.location = { search: initialSearch, assign() {} };
 confirmResponder = () => true;
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 let now = 0;
 let nextTimer = 0;
@@ -23,7 +22,10 @@ const ordinary = {
   runtime: { bindingId: "binding-parent", primaryStatus: "idle", primaryStatusResolution: "local" }, actions: {},
 };
 if (initialSearch.includes("inventoryState=archived")) ordinary.catalogState = "archived";
-const grant = (action) => ({ actionToken: action, csrfToken: "csrf", target: { resource: "side", sideId: "side-a" } });
+const grant = (action) => fixtureAction(`side-topics.${action}`, {
+  resource: "side", targetId: "side-a", actionToken: action, csrfToken: "csrf" });
+const ordinaryGrant = (action, actionToken = action) => fixtureAction(`sessions.${action}`, {
+  resource: "binding", targetId: ordinary.bindingId, scopeKey: "scope-parent", actionToken, csrfToken: "csrf" });
 const side = {
   sideId: "side-a", parentBindingId: "binding-parent", parentSession: { bindingId: "binding-parent", title: "普通会话标题", available: true },
   chatId: "oc_side", chatLabel: "研发群", chatLabelResolved: true, chatMode: "group", topicId: "omt_side",
@@ -38,7 +40,11 @@ let sideAnswer;
 let ordinaryAnswer;
 let failSide = false;
 let actionFailure = false;
+let actionMessage = "操作完成";
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   const url = new URL(path, "https://admin");
   requests.push({ path: url.pathname, query: url.searchParams, options });
   let data;
@@ -51,7 +57,7 @@ async function fetch(path, options = {}) {
     data = sideAnswer ? await sideAnswer() : { items: structuredClone(listItems), nextCursor: url.searchParams.has("cursor") ? null : "side-next" };
   } else if (url.pathname.endsWith("/stop") || url.pathname.endsWith("/close")) {
     if (actionFailure) return { ok: false, status: 409, json: async () => ({ message: "会话状态已变化，请重试" }) };
-    data = { message: "操作完成" };
+    data = { message: actionMessage };
   }
   else throw new Error(`Unexpected request ${path}`);
   return { ok: true, status: 200, json: async () => data };
@@ -78,6 +84,24 @@ async function advanceTime(duration) {
   now = end;
   await flush();
 }
+// Exercise the row's public menu, including its portal and focus behavior.
+function clickConversationMenu(bindingId) {
+  const row = document.querySelector("#sessions-body").children.find((item) => item.dataset.bindingId === bindingId);
+  assert(row, `missing session row ${bindingId}`);
+  const more = row.querySelectorAll("button").find((button) => button.textContent === "更多");
+  assert(more);
+  more.focus(); more.click();
+  const menu = document.querySelector(`#${more.getAttribute("aria-controls")}`);
+  assert.equal(menu.hidden, false);
+  const read = menu.querySelectorAll("button").find((button) => button.textContent === "查看对话记录");
+  assert(read, "materialized session exposes conversation history in More");
+  read.focus();
+  // The DOM port only bubbles events. Deliver the menu's native capture phase
+  // before the item's handler so the drawer observes the real return-focus node.
+  menu.dispatch("click", { target: read });
+  read.click();
+  return more;
+}
 // SHIPPED_ADMIN_PAGE
 (async () => {
   await flush();
@@ -100,7 +124,7 @@ async function advanceTime(duration) {
     inventory.value = "archived"; inventory.dispatch("change");
     document.querySelector("#session-filter").dispatch("submit"); await flush();
     assert.equal(requests.findLast((request) => request.path === "/api/v1/sessions").query.get("identity"), "binding-parent");
-    await resetSessionFilters();
+    await sessionLists.session.reset();
     assert(!requests.findLast((request) => request.path === "/api/v1/sessions").query.has("identity"));
     assert.equal(document.querySelector("#sessions-identity-notice").hidden, true);
     return;
@@ -114,7 +138,7 @@ async function advanceTime(duration) {
   assert.deepEqual(ordinaryQuery.getAll("inventoryState"), ["active"]);
   assert.equal(ordinaryQuery.get("pageSize"), "20");
   const ordinaryText = document.querySelector("#sessions-body").textContent;
-  const ordinaryPage = state.sessionPage;
+  const ordinaryPage = sessionLists.session.snapshot().page;
   await selectSessionTab("temporary");
   assert.equal(document.querySelector("#sessions-ordinary").hidden, true);
   assert.equal(document.querySelector("#sessions-temporary").hidden, false);
@@ -129,7 +153,7 @@ async function advanceTime(duration) {
   sideMultiFilters.get("project").setValues(["netizen"]);
   sideMultiFilters.get("state").setValues(["closed"]);
   const sideDates = document.querySelector("#side-filter").querySelector("[data-time-range]");
-  timeRangeControllers.get(sideDates).setBounds("2026-10-01T00:00:00Z", "2026-10-12T23:59:00Z");
+  window.NetizenTimeRange.controllerFor(sideDates).setBounds("2026-10-01T00:00:00Z", "2026-10-12T23:59:00Z");
   document.querySelector("#side-filter").dispatch("submit"); await flush();
   assert.equal(document.querySelector("#side-more-filters").textContent, "更多筛选（1）");
   sideMultiFilters.get("project").setValues(["docs"]);
@@ -147,7 +171,7 @@ async function advanceTime(duration) {
   assert.deepEqual(sideQuery().getAll("state"), ["creating", "open"]);
   assert.deepEqual(sideMultiFilters.get("state").values(), ["creating", "open"]);
   assert.equal(document.querySelector("#side-more-filters").textContent, "更多筛选（0）");
-  await resetSideFilters();
+  await sessionLists.side.reset();
   assert.equal(row().children[0].querySelector("a").href, side.topicOpenUrl);
   assert(!row().children[0].textContent.includes(side.chatId));
   assert.equal(row().children[1].querySelector("span").textContent, "普通会话标题");
@@ -192,25 +216,25 @@ async function advanceTime(duration) {
   assert.deepEqual(sideQuery().getAll("project"), ["docs"]);
   assert.equal(sideQuery().get("chatId"), "oc_selected");
   assert(sideQuery().get("createdFrom"));
-  const applied = state.sidePage.query;
+  const applied = sessionLists.side.snapshot().page.query;
   projectRoot.querySelectorAll("input").find((input) => input.value === "netizen").click();
-  await moveSidePage("next");
-  assert.equal(state.sidePage.number, 2);
+  await sessionLists.side.move("next");
+  assert.match(document.querySelector("#sides-page").textContent, /^第 2 页/);
   assert.equal(sideQuery().get("cursor"), "side-next");
   assert.deepEqual(sideQuery().getAll("project"), ["docs"], "paging retains applied filters");
   await selectSessionTab("ordinary");
-  assert.deepEqual(state.sessionPage, ordinaryPage);
+  assert.deepEqual(sessionLists.session.snapshot().page, ordinaryPage);
   assert.equal(document.querySelector("#sessions-body").textContent, ordinaryText);
   await selectSessionTab("temporary");
-  assert.equal(state.sidePage.query, applied);
-  assert.equal(state.sidePage.number, 2);
-  await moveSidePage("previous");
-  assert.equal(state.sidePage.number, 1);
+  assert.equal(sessionLists.side.snapshot().page.query, applied);
+  assert.match(document.querySelector("#sides-page").textContent, /^第 2 页/);
+  await sessionLists.side.move("previous");
+  assert.match(document.querySelector("#sides-page").textContent, /^第 1 页/);
   failSide = true;
-  await moveSidePage("next");
-  assert.equal(state.sidePage.number, 1, "failed page requests retain the displayed cursor stack");
+  await sessionLists.side.move("next");
+  assert.match(document.querySelector("#sides-page").textContent, /^第 1 页/, "failed page requests retain the displayed cursor stack");
   failSide = false;
-  await resetSideFilters();
+  await sessionLists.side.reset();
   assert.equal(sidePickerRoot.querySelector(".chat-picker-summary").textContent, "全部");
   assert.equal(sideChatPicker.getSelection(), null);
   assert.equal(sideQuery().get("pageSize"), "20");
@@ -223,12 +247,12 @@ async function advanceTime(duration) {
   // A pending inactive-tab response cannot overwrite its saved page or current status.
   const slow = deferred();
   sideAnswer = () => slow.promise;
-  const savedSides = state.sides;
+  const savedSides = sessionLists.side.snapshot().items;
   const oldRefresh = refresh("sessions"); await flush();
   await selectSessionTab("ordinary");
   const statusBefore = statusNode.textContent;
   slow.resolve({ items: [], nextCursor: null }); await oldRefresh;
-  assert.equal(state.sides, savedSides);
+  assert.deepEqual(sessionLists.side.snapshot().items, savedSides);
   assert.equal(statusNode.textContent, statusBefore);
   sideAnswer = null;
 
@@ -251,8 +275,9 @@ async function advanceTime(duration) {
   assert.equal(document.querySelector("#sessions-ordinary").hidden, false);
   await checkAtomicSessionLists();
   await checkSessionSorting();
+  await checkListOwnership();
   await selectSessionTab("ordinary");
-  await resetSessionFilters();
+  await sessionLists.session.reset();
   const inventory = document.querySelector("#session-inventory-state");
   inventory.value = "lazy"; inventory.dispatch("change");
   const ranges = document.querySelector("#session-filter").querySelectorAll("[data-time-range]");
@@ -274,13 +299,13 @@ async function advanceTime(duration) {
   assert.equal(lazyRow.children.find((cell) => cell.dataset.label === "登记时间").textContent, sessionDateLabel(registeredAt));
   assert.equal(lazyRow.children.find((cell) => cell.dataset.label === "最近更新").textContent, "尚未开始");
   const beforeSort = requests.length;
-  await sortSessionPage("session", "updatedAt");
+  await sessionLists.session.sort("updatedAt");
   assert.equal(requests.length, beforeSort, "Lazy cannot claim to sort unknown native update times");
   lazyCreated.click(); await flush();
   assert.equal(requests.findLast((request) => request.path === "/api/v1/sessions").query.get("sortDirection"), "asc");
   inventory.value = "active"; inventory.dispatch("change");
   assert(ranges.every((root) => !root.disabled));
-  await resetSessionFilters();
+  await sessionLists.session.reset();
   assert(!lazyUpdated.disabled);
   assert.equal(lazyCreated.querySelector(".sort-label").textContent, "创建时间");
   function confirmationIncludes(text) { return confirmations.some((message) => message.includes(text)); }
@@ -288,7 +313,6 @@ async function advanceTime(duration) {
 
 async function checkAtomicSessionLists() {
   for (const [kind, view, dataKey] of [["session", "ordinary", "sessions"], ["side", "temporary", "sides"]]) {
-    const pageKey = `${kind}Page`;
     const form = document.querySelector(`#${kind}-filter`);
     const size = document.querySelector(`#${kind}-page-size`);
     const chat = document.querySelector(`#${kind}-chat-filter`);
@@ -299,21 +323,21 @@ async function checkAtomicSessionLists() {
         : { ...structuredClone(ordinary), nativeTitle: name }], nextCursor,
     });
     const answerWith = (answer) => { if (kind === "side") sideAnswer = answer; else ordinaryAnswer = answer; };
-    const snapshot = () => ({ page: structuredClone(state[pageKey]), data: structuredClone(state[dataKey]),
+    const snapshot = () => ({ page: structuredClone(sessionLists[kind].snapshot().page), data: structuredClone(sessionLists[kind].snapshot().items),
       body: body.textContent, pagination: pagination.textContent,
-      refreshedAt: state[`${kind}RefreshedAt`],
+      refreshedAt: sessionLists[kind].snapshot().refreshedAt,
       freshness: document.querySelector("#sessions-refreshed-at").textContent });
     answerWith(async () => reply("original"));
     await selectSessionTab(view);
-    await resetSessionFilters(kind);
-    await moveSessionPage("next", kind);
+    await sessionLists[kind].reset();
+    await sessionLists[kind].move("next");
     const saved = snapshot();
 
     // Failed filter/page-size requests retain data + applied query + pagination,
     // including edits made to the form after the request was submitted.
     chat.value = "oc_submitted";
     const filter = deferred(); answerWith(() => filter.promise);
-    const applying = refresh("sessions", sessionFilterPage(kind)); await flush();
+    const applying = refresh("sessions", sessionLists[kind].filterPage()); await flush();
     assert.deepEqual(snapshot(), saved);
     chat.value = "oc_edited_during_request";
     filter.reject(new Error("filter unavailable")); await applying;
@@ -327,7 +351,7 @@ async function checkAtomicSessionLists() {
     assert.equal(size.value, "100");
 
     // A failed reset also keeps the result, while resetting the draft controls.
-    await resetSessionFilters(kind);
+    await sessionLists[kind].reset();
     assert.deepEqual(snapshot(), saved);
     assert.equal(size.value, "20");
     assert.equal(chat.value, "");
@@ -335,23 +359,23 @@ async function checkAtomicSessionLists() {
     // Successful submission applies its captured query, never later draft edits.
     const success = deferred(); answerWith(() => success.promise);
     chat.value = "oc_submitted";
-    const submitting = refresh("sessions", sessionFilterPage(kind)); await flush();
+    const submitting = refresh("sessions", sessionLists[kind].filterPage()); await flush();
     chat.value = "oc_later_draft";
     success.resolve(reply("new query")); await submitting;
-    assert.equal(state[pageKey].number, 1);
-    assert.deepEqual(state[pageKey].previousCursors, []);
-    assert.equal(new URLSearchParams(state[pageKey].query).get("chatId"), "oc_submitted");
+    assert.match(document.querySelector(`#${dataKey}-page`).textContent, /^第 1 页/);
+    assert.deepEqual(sessionLists[kind].snapshot().page.previousCursors, []);
+    assert.equal(new URLSearchParams(sessionLists[kind].snapshot().page.query).get("chatId"), "oc_submitted");
     assert.equal(chat.value, "oc_later_draft");
 
     // An older paging failure cannot roll back a newer successful paging result.
     const old = deferred(); answerWith(() => old.promise);
-    const oldMove = moveSessionPage("next", kind); await flush();
-    assert.equal(state[pageKey].number, 1);
+    const oldMove = sessionLists[kind].move("next"); await flush();
+    assert.match(document.querySelector(`#${dataKey}-page`).textContent, /^第 1 页/);
     answerWith(async () => reply("new page", null));
-    await moveSessionPage("next", kind);
+    await sessionLists[kind].move("next");
     const newPage = snapshot();
     const newStatus = statusNode.textContent;
-    assert.equal(state[pageKey].number, 2);
+    assert.match(document.querySelector(`#${dataKey}-page`).textContent, /^第 2 页/);
     old.reject(new Error("old page failed")); await oldMove;
     assert.deepEqual(snapshot(), newPage);
     assert.equal(statusNode.textContent, newStatus);
@@ -369,10 +393,49 @@ async function checkAtomicSessionLists() {
   }
 }
 
+async function checkListOwnership() {
+  ordinaryAnswer = sideAnswer = null;
+  await selectSessionTab("ordinary");
+  const saved = sessionLists.session.snapshot();
+  assert(Object.isFrozen(saved) && Object.isFrozen(saved.items) && Object.isFrozen(saved.page.previousCursors));
+  assert.equal(Reflect.set(saved.page, "cursor", "not-a-server-cursor"), false);
+  assert.equal(Reflect.set(saved.items[0].runtime, "primaryStatus", "fake"), false);
+  assert.deepEqual(sessionLists.session.snapshot(), saved, "callers cannot rewrite the owner's committed result");
+  for (let index = 0; index < 5; index += 1) {
+    assert.equal(sessionLists.session.snapshot(), saved, "unchanged results reuse the deeply frozen snapshot");
+  }
+
+  // Even direct reads from the two controllers share one commit generation.
+  // Navigation invalidation is deliberately not involved in this race.
+  const pending = deferred();
+  ordinaryAnswer = () => pending.promise;
+  const old = sessionLists.session.load(); await flush();
+  assert.equal(await sessionLists.side.load(), "applied");
+  pending.resolve({ items: [], nextCursor: "obsolete" });
+  assert.equal(await old, "superseded");
+  assert.deepEqual(sessionLists.session.snapshot(), saved);
+  assert(document.querySelector("#sessions-body").textContent.includes(ordinary.nativeTitle));
+  ordinaryAnswer = async () => { throw new Error("latest list failed"); };
+  assert.equal(await sessionLists.session.load(), "failed");
+  assert.deepEqual(sessionLists.session.snapshot(), saved);
+  assert.equal(sessionLists.session.snapshot(), saved, "failed and superseded reads retain the cached snapshot");
+  ordinaryAnswer = null;
+  assert.equal(await sessionLists.session.load(), "applied");
+  const replaced = sessionLists.session.snapshot();
+  assert.notEqual(replaced, saved, "a committed read publishes a new snapshot");
+  assert(Object.isFrozen(replaced.items[0].runtime));
+  assert.equal(sessionLists.session.snapshot(), replaced);
+  sessionLists.session.restore(new URLSearchParams(replaced.page.query));
+  const restored = sessionLists.session.snapshot();
+  assert.notEqual(restored, replaced, "URL restoration replaces the snapshot");
+  assert(Object.isFrozen(restored) && Object.isFrozen(restored.items));
+  assert.deepEqual(restored.items, []);
+  assert.equal(sessionLists.session.snapshot(), restored);
+}
+
 async function checkSessionSorting() {
   const freshness = document.querySelector("#sessions-refreshed-at");
   for (const [kind, view, dataKey] of [["session", "ordinary", "sessions"], ["side", "temporary", "sides"]]) {
-    const pageKey = `${kind}Page`;
     const form = document.querySelector(`#${kind}-filter`);
     const chat = document.querySelector(`#${kind}-chat-filter`);
     const buttons = document.querySelectorAll("[data-session-sort]").filter((button) => button.dataset.sessionSort === kind);
@@ -384,7 +447,7 @@ async function checkSessionSorting() {
     const row = () => document.querySelector(`#${dataKey}-body`).children[0];
     listItems = [structuredClone(side)];
     await selectSessionTab(view);
-    await resetSessionFilters(kind);
+    await sessionLists[kind].reset();
     assert.equal(query().get("sortBy"), "updatedAt");
     assert.equal(query().get("sortDirection"), "desc");
     assert.equal(updated.parentElement.getAttribute("aria-sort"), "descending");
@@ -400,8 +463,8 @@ async function checkSessionSorting() {
 
     chat.value = "oc_applied";
     form.dispatch("submit"); await flush();
-    await moveSessionPage("next", kind);
-    assert.equal(state[pageKey].number, 2);
+    await sessionLists[kind].move("next");
+    assert.match(document.querySelector(`#${dataKey}-page`).textContent, /^第 2 页/);
     chat.value = "oc_unsubmitted";
     await advanceTime(1000);
     updated.click(); await flush();
@@ -410,8 +473,8 @@ async function checkSessionSorting() {
     assert.equal(query().get("chatId"), "oc_applied", "sort must preserve applied filters, not submit drafts");
     assert.equal(chat.value, "oc_unsubmitted");
     assert(!query().has("cursor"));
-    assert.equal(state[pageKey].number, 1);
-    assert.deepEqual(state[pageKey].previousCursors, []);
+    assert.match(document.querySelector(`#${dataKey}-page`).textContent, /^第 1 页/);
+    assert.deepEqual(sessionLists[kind].snapshot().page.previousCursors, []);
     assert.equal(updated.parentElement.getAttribute("aria-sort"), "ascending");
     assert.equal(updated.querySelector(".sort-indicator").textContent, "↑");
 
@@ -427,18 +490,18 @@ async function checkSessionSorting() {
     assert.equal(query().get("chatId"), "oc_unsubmitted");
     assert.equal(query().get("sortBy"), "createdAt");
     assert.equal(query().get("sortDirection"), "asc", "filtering retains the selected sort");
-    await moveSessionPage("next", kind);
+    await sessionLists[kind].move("next");
     assert.equal(query().get("sortDirection"), "asc", "paging retains the selected sort");
-    const savedPage = structuredClone(state[pageKey]);
+    const savedPage = structuredClone(sessionLists[kind].snapshot().page);
     const savedTime = freshness.textContent;
-    const savedRefreshedAt = state[`${kind}RefreshedAt`];
+    const savedRefreshedAt = sessionLists[kind].snapshot().refreshedAt;
     const savedRows = document.querySelector(`#${dataKey}-body`).textContent;
     await advanceTime(1000);
     answerWith(async () => { throw new Error("sorting unavailable"); });
     updated.click(); await flush();
-    assert.deepEqual(state[pageKey], savedPage);
+    assert.deepEqual(sessionLists[kind].snapshot().page, savedPage);
     assert.equal(freshness.textContent, savedTime);
-    assert.equal(state[`${kind}RefreshedAt`], savedRefreshedAt);
+    assert.equal(sessionLists[kind].snapshot().refreshedAt, savedRefreshedAt);
     assert.equal(document.querySelector(`#${dataKey}-body`).textContent, savedRows);
     assert.equal(created.parentElement.getAttribute("aria-sort"), "ascending", "failed sorting must retain the displayed sort");
     assert.equal(updated.parentElement.getAttribute("aria-sort"), "none");
@@ -447,11 +510,11 @@ async function checkSessionSorting() {
     const other = kind === "side" ? "ordinary" : "temporary";
     await selectSessionTab(other);
     await selectSessionTab(view);
-    assert.deepEqual(state[pageKey], savedPage, "each Tab retains its applied sort and page");
+    assert.deepEqual(sessionLists[kind].snapshot().page, savedPage, "each Tab retains its applied sort and page");
     const unchangedFreshness = freshness.textContent;
     setStatus("unrelated operation message");
     assert.equal(freshness.textContent, unchangedFreshness);
-    await resetSessionFilters(kind);
+    await sessionLists[kind].reset();
     assert.equal(query().get("sortBy"), "updatedAt");
     assert.equal(query().get("sortDirection"), "desc");
     assert.equal(updated.parentElement.getAttribute("aria-sort"), "descending");

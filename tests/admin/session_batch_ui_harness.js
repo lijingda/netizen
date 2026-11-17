@@ -58,8 +58,10 @@ const reads = () => requests.filter((request) => request.path === "/api/v1/sessi
 const summary = () => node("progress").textContent;
 const details = () => node("results").children.map((item) => item.textContent);
 const selected = () => rows().filter((row) => row.querySelector(".session-select").checked).map((row) => row.dataset.bindingId);
-const exact = (id, action, revision) => ({ actionToken: `${revision}-${action}-${id}`,
-  csrfToken: `csrf-${revision}-${id}`, target: { resource: "binding", bindingId: id, nativeThreadId: `native-${id}` } });
+const exact = (id, action, revision) => fixtureAction(
+  `sessions.${{ delete: "delete-materialized", lazy: "delete-lazy" }[action] || action}`,
+  { resource: "binding", targetId: id, scopeKey: `scope-${id}`,
+    actionToken: `${revision}-${action}-${id}`, csrfToken: `csrf-${revision}-${id}` });
 function sample(id, properties = {}, revision = "old") {
   return { ...structuredClone(ordinary), bindingId: id, shortId: `short-${id}`, nativeTitle: `会话 ${id}`,
     runtime: { primaryStatus: "idle", primaryStatusResolution: "resolved" },
@@ -72,8 +74,7 @@ function answer(items, cursor = "next") {
 async function show(items, inventory = "active") {
   answer(items);
   const query = `inventoryState=${inventory}&pageSize=100&sortBy=updatedAt&sortDirection=desc`;
-  state.sessionPage = firstSessionPage(query);
-  restoreSessionFilterControls("session", new URLSearchParams(query));
+  sessionLists.session.restore(new URLSearchParams(query));
   await selectSessionTab("ordinary"); await flush();
 }
 function layout(value) {
@@ -131,12 +132,20 @@ async function selectionScenario() {
   const label = deferred(); labelsAnswer = () => label.promise;
   answer([sample("a", { chatLabelResolved: false, chatLabel: null })]);
   await refresh("sessions");
+  const beforeLabels = sessionLists.session.snapshot();
+  assert.equal(sessionLists.session.snapshot(), beforeLabels);
   label.resolve({ items: [{ chatId: ordinary.chatId, chatLabel: "补读的名称", chatLabelResolved: true }] });
   await flush(); assert.deepEqual(selected(), ["a"]);
+  const afterLabels = sessionLists.session.snapshot();
+  assert.notEqual(afterLabels, beforeLabels, "name enrichment replaces the cached snapshot");
+  assert.equal(beforeLabels.items[0].chatLabel, null, "previous snapshots remain unchanged");
+  assert.equal(afterLabels.items[0].chatLabel, "补读的名称");
+  assert(Object.isFrozen(afterLabels.items[0].actions.archive.target));
+  assert.equal(sessionLists.session.snapshot(), afterLabels);
   assert(rows()[0].textContent.includes("补读的名称"));
   for (const change of [
-    () => moveSessionPage("next", "session"),
-    () => sortSessionPage("session", "createdAt"),
+    () => sessionLists.session.move("next"),
+    () => sessionLists.session.sort("createdAt"),
     () => { const input = document.querySelector("#session-search"); input.value = "搜索"; document.querySelector("#session-filter").dispatch("submit"); },
     () => { const input = document.querySelector("#session-page-size"); input.value = "50"; input.dispatch("change"); },
     () => { const input = document.querySelector("#session-inventory-state"); input.value = "archived"; input.dispatch("change"); document.querySelector("#session-filter").dispatch("submit"); },
@@ -146,7 +155,7 @@ async function selectionScenario() {
     if (state.tab !== "sessions" || state.sessionTab !== "ordinary") await selectSessionTab("ordinary");
     if (!checks()[0].checked) checks()[0].click();
     await change(); await flush();
-    assert.equal(sessionSelection.ids.size, 0, "a successful new page or navigation clears selection");
+    assert.equal(selected().length, 0, "a successful new page or navigation clears selection");
   }
   await selectSessionTab("temporary"); layout("compact");
   const sides = document.querySelector("#sides-body");
@@ -156,12 +165,12 @@ async function selectionScenario() {
   sideAnswer = async () => ({ items: [], nextCursor: null }); await refresh("sessions");
   assert.equal(sides.querySelector("td").colSpan, 7);
   await show([sample("a")]); all().click(); expireAdminSession();
-  assert.equal(sessionSelection.ids.size, 0); assert(!checks()[0].checked); assert(checks()[0].disabled);
+  assert.equal(selected().length, 0); assert(!checks()[0].checked); assert(checks()[0].disabled);
 }
 
 async function confirmationScenario() {
   await show([sample("dropped"), sample("unsupported"), sample("running"), sample("archived")]);
-  await moveSessionPage("next", "session"); all().click();
+  await sessionLists.session.move("next"); all().click();
   const fresh = [sample("running", { nativeTitle: "<b>新标题</b>", pointerState: "current",
     runtime: { primaryStatus: "running", primaryStatusResolution: "deferred" } }, "fresh"),
     sample("unsupported", { actions: {} }), sample("archived", {
@@ -184,7 +193,7 @@ async function confirmationScenario() {
   assert(!document.querySelector("#admin-confirm-submit").className.includes("danger"));
   const n = reads().length;
   document.querySelector("#admin-confirm-submit").click(); await flush();
-  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body)), [fresh[2].actions.archive, fresh[0].actions.archive]);
+  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body)), [fresh[2].actions.archive, fresh[0].actions.archive].map(fixtureActionPayload));
   assert(posts().every((item) => item.path === "/api/v1/sessions/archive"));
   assert.equal(reads().length, n + 1); assert.equal(selected().length, 0);
   assert.equal(summary(), "已完成 2 项。"); assert.equal(statusNode.textContent, summary());
@@ -228,7 +237,7 @@ async function sequentialScenario() {
     assert.equal(posts().length, index + 1);
     waits[index].resolve(response(status, `服务端原因 ${status}`)); await flush();
   }
-  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body).target.bindingId), ["a", "b", "c", "d"]);
+  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body).target.targetId), ["a", "b", "c", "d"]);
   assert.equal(reads().length, before + 1);
   assert.equal(summary(), "已完成 2 项，未完成 2 项。");
   assert.match(details()[1], /未完成（服务端原因 409）/); assert.match(details()[2], /未完成（服务端原因 404）/);
@@ -258,7 +267,7 @@ async function expiryScenario() {
   await confirm();
   assert(state.authExpired); assert.equal(posts().length, 2); assert.equal(reads().length, 2);
   assert(!node("dialog").open); assert.equal(document.querySelector("#auth-expired").hidden, false);
-  assert.equal(sessionSelection.ids.size, 0);
+  assert.equal(selected().length, 0);
   assert.equal(statusNode.textContent, "登录已过期，批量操作已停止：已完成 1 项，请重新登录后刷新核对。");
   assert.equal(statusError, true);
   setStatus("另一个操作的晚到提示");
@@ -277,12 +286,12 @@ async function stopScenario(outcome) {
   assert.equal(posts().length, 2); assert.equal(reads().length, 3);
   assert.equal(summary(), "已完成 1 项，结果未确认 1 项，未执行 1 项。");
   assert.match(details()[1], /结果未确认（已停止等待，服务端可能仍在完成）/);
-  const saved = { summary: summary(), details: details(), status: statusNode.textContent, data: state.sessions, requests: requests.length };
+  const saved = { summary: summary(), details: details(), status: statusNode.textContent, data: sessionLists.session.snapshot().items, requests: requests.length };
   if (outcome !== "401") { finish(); checks()[0].click(); }
   if (outcome === "network") wait.reject(new TypeError("late offline"));
   else wait.resolve(outcome === "parsing" ? { message: "late parsed" } : response(Number(outcome)));
   await flush();
-  assert.deepEqual({ summary: summary(), details: details(), data: state.sessions, requests: requests.length },
+  assert.deepEqual({ summary: summary(), details: details(), data: sessionLists.session.snapshot().items, requests: requests.length },
     { summary: saved.summary, details: saved.details, data: saved.data, requests: saved.requests });
   if (outcome === "401") {
     assert(state.authExpired, "late 401 still expires the global login");
@@ -360,12 +369,12 @@ async function nativeCloseScenario() {
   assert.equal(summary(), "已完成 1 项。");
   node("dialog").close(); await flush();
   assert(!node("dialog").open); assert(!bodyClasses.has("session-batch-open"));
-  assert.equal(sessionBatch, null); assert.equal(document.activeElement, node("archive"));
+  assert(!node("archive").disabled, "finished/cancelled batches release the action controls"); assert.equal(document.activeElement, node("archive"));
   // The previous close event must not leave the next batch blocked or reopen it.
   all().click(); confirmResponder = null; start(); await flush();
   assert(document.querySelector("#admin-confirm").open);
   document.querySelector("#admin-confirm-cancel").click(); await flush();
-  assert.equal(sessionBatch, null);
+  assert(!node("archive").disabled, "finished/cancelled batches release the action controls");
 }
 
 async function navigationScenario(temporary) {
@@ -390,10 +399,14 @@ async function navigationScenario(temporary) {
   const focus = Element.prototype.focus;
   Element.prototype.focus = function (...args) { focused.push(this); return focus.apply(this, args); };
   finish(); await flush(); Element.prototype.focus = focus;
-  assert(!bodyClasses.has("session-batch-open")); assert.equal(sessionBatch, null);
+  assert(!bodyClasses.has("session-batch-open")); assert(!node("archive").disabled, "finished/cancelled batches release the action controls");
   assert(!focused.includes(node("archive")), "never force focus into a hidden panel");
   if (temporary) assert.equal(document.activeElement, document.querySelectorAll("[data-refresh]").find((button) => button.dataset.refresh === "sessions"));
   else assert(!focused.some((button) => button.dataset.refresh === "sessions"), "hidden refresh control is not focused either");
+  await selectSessionTab("ordinary"); all().click(); confirmResponder = null; start(); await flush();
+  assert(document.querySelector("#admin-confirm").open, "closing the navigated result releases the batch for another operation");
+  document.querySelector("#admin-confirm-cancel").click(); await flush();
+  assert.equal(posts().length, 1, "returning never resumes the stopped batch");
 }
 
 async function lostGrantScenario() {
@@ -417,10 +430,17 @@ async function stagedExpiryScenario(stage) {
     confirmResponder = null; start(); await flush();
   } else await confirm();
   const saved = details(), result = summary();
-  assert.equal(sessionBatch.phase, stage);
+  if (stage === "preparing") {
+    assert(node("archive").disabled); assert(!node("dialog").open); assert(!document.querySelector("#admin-confirm").open);
+    assert.equal(reads().length, 2); assert.equal(posts().length, 0);
+  } else if (stage === "confirming") {
+    assert(document.querySelector("#admin-confirm").open); assert.equal(posts().length, 0);
+  } else {
+    assert(node("dialog").open); assert(!node("close").hidden); assert.equal(summary(), "已完成 1 项。");
+  }
   expireAdminSession(); await flush();
   assert(!node("dialog").open); assert(!document.querySelector("#admin-confirm").open);
-  assert(!bodyClasses.has("session-batch-open")); assert.equal(sessionSelection.ids.size, 0);
+  assert(!bodyClasses.has("session-batch-open")); assert.equal(selected().length, 0);
   assert.equal(document.querySelector("#auth-expired").hidden, false);
   assert.equal(statusNode.textContent, stage === "finished" ? `登录已过期。批量结果：${result}` : "登录已过期，批量操作未执行。");
   assert.equal(posts().length, stage === "finished" ? 1 : 0);
@@ -429,7 +449,7 @@ async function stagedExpiryScenario(stage) {
 }
 
 async function supersededPreparationScenario() {
-  for (const change of [() => sortSessionPage("session", "createdAt"), () => refresh("sessions")]) {
+  for (const change of [() => sessionLists.session.sort("createdAt"), () => refresh("sessions")]) {
     await show([sample("a")]); all().click();
     const wait = deferred(); ordinaryAnswer = () => wait.promise;
     start(); await flush();
@@ -437,7 +457,7 @@ async function supersededPreparationScenario() {
     wait.resolve({ items: [sample("a", { nativeTitle: "旧读取" })], nextCursor: null }); await flush();
     assert.equal(statusNode.textContent, "列表已变化，批量操作未执行。");
     assert.equal(posts().length, 0); assert(!document.querySelector("#admin-confirm").open);
-    assert.equal(state.sessions.items[0].nativeTitle, "新读取");
+    assert(rows()[0].textContent.includes("新读取"));
   }
 }
 
@@ -457,12 +477,12 @@ async function supersededEndingScenario() {
   await show([sample("a")]); all().click();
   const wait = deferred();
   mutationAnswer = async () => { ordinaryAnswer = () => wait.promise; return response(); };
-  await confirm(); assert.equal(sessionBatch.phase, "refreshing");
+  await confirm(); assert.equal(summary(), "正在刷新列表…"); assert(node("stop").disabled);
   answer([sample("a", { nativeTitle: "新读取结果" })]); await refresh("sessions");
   wait.resolve({ items: [sample("a", { nativeTitle: "过期结果" })], nextCursor: null }); await flush();
   assert.equal(summary(), "已完成 1 项。"); assert(node("note").hidden);
   assert.equal(statusNode.textContent, summary()); assert.equal(statusError, false);
-  assert.equal(state.sessions.items[0].nativeTitle, "新读取结果");
+  assert(rows()[0].textContent.includes("新读取结果"));
   assert.equal(reads().length, 4); assert.equal(posts().length, 1); finish();
 }
 
@@ -525,7 +545,7 @@ async function groupedOrderScenario(mode) {
   const lines = document.querySelector("#admin-confirm").querySelector("ul").children;
   assert.deepEqual(lines.map((item) => item.textContent.split(" · ")[0]), expected.map((id) => `会话 ${id}`));
   document.querySelector("#admin-confirm-submit").click(); await flush();
-  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body).target.bindingId), expected);
+  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body).target.targetId), expected);
   assert.deepEqual(details().map((item) => item.split(" · ")[0]), expected.map((id) => `会话 ${id}`)); finish();
 }
 
@@ -544,16 +564,28 @@ async function resultPresentationScenario() {
 
 async function queryBudgetScenario() {
   await show(Array.from({ length: 100 }, (_, i) => sample(String(i))));
-  const Original = URLSearchParams;
-  let inventoryReads = 0;
-  URLSearchParams = class extends Original {
-    get(name) { if (name === "inventoryState") inventoryReads += 1; return super.get(name); }
+  // Count real query parsing only inside the public batch render hooks. Other
+  // list/URL rendering also parses queries, but is outside the batch budget.
+  const original = globalThis.URLSearchParams;
+  const batch = window.NetizenSessionBatch;
+  const hooks = { beforeRender: batch.beforeRender, onLayout: batch.onLayout, selectionCell: batch.selectionCell };
+  let observing = false, parses = 0;
+  globalThis.URLSearchParams = class extends original {
+    constructor(...args) { super(...args); if (observing) parses += 1; }
+  };
+  for (const [key, callback] of Object.entries(hooks)) batch[key] = (...args) => {
+    observing = true;
+    try { return callback(...args); } finally { observing = false; }
   };
   try {
-    renderSessions(state.sessions); assert.equal(inventoryReads, 1, "one inventory lookup for rendering 100 rows and their selection controls");
-    inventoryReads = 0; all().click(); assert.equal(inventoryReads, 1, "select-all shares its action calculation with the toolbar render");
+    await loadSessions(); assert.equal(parses, 1, "100 rows and their selection controls share one query parse");
+    parses = 0; observing = true; all().click(); observing = false;
+    assert.equal(parses, 1, "select-all shares its action calculation with the toolbar render");
     assert.equal(selected().length, 100);
-  } finally { URLSearchParams = Original; }
+  } finally {
+    globalThis.URLSearchParams = original;
+    Object.assign(batch, hooks);
+  }
 }
 
 (async () => {

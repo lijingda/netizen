@@ -30,7 +30,7 @@ class UpdateUiTest(unittest.TestCase):
         )
         after = contract + after
         script = harness_source(
-            "index.html", ("chat-picker.js", "admin.js"), before, after,
+            "index.html", None, before, after,
         )
         result = run_harness(self, script, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

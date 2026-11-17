@@ -1,7 +1,6 @@
 const flush = async () => { for (let index = 0; index < 15; index += 1) await Promise.resolve(); };
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 const mutations = [];
 const confirmations = [];
@@ -21,6 +20,7 @@ const session = {
       operation_max_chars: 240, organization: "time" } },
 };
 const requests = [];
+let sessionAnswer = () => ({ items: [], nextCursor: null });
 const plan = (id) => ({
   id, name: `<b>${id}</b>`, revision: 7, enabled: true, chat_id: "oc_target", target_kind: "binding",
   target_binding_id: "binding-target", target_label: "原会话", instructions: "<img src=x onerror=alert(1)>\n计划指令",
@@ -44,7 +44,8 @@ async function fixtureResponse(path, options = {}) {
   if (url.pathname === "/api/v1/sessions/options") return {
     models: [], model_catalog_error: null, context_mode_available: true,
   };
-  if (url.pathname === "/api/v1/projects/options" || url.pathname === "/api/v1/sessions") return { items: [], nextCursor: null };
+  if (url.pathname === "/api/v1/sessions") return sessionAnswer();
+  if (url.pathname === "/api/v1/projects/options") return { items: [], nextCursor: null };
   assert.equal(url.pathname, "/api/v1/schedules");
   if (url.searchParams.get("mode") === "list") return { plans: [], default_timezone: "UTC", actions: { create: { actionToken: "create" } } };
   if (url.searchParams.get("mode") === "options") return { models: [], context_mode_available: true };
@@ -52,6 +53,9 @@ async function fixtureResponse(path, options = {}) {
   return respond(url.searchParams);
 }
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   try {
     const data = await fixtureResponse(path, options);
     return { ok: true, status: 200, json: async () => data };
@@ -285,8 +289,8 @@ async function fetch(path, options = {}) {
   };
   const listed = { ...session, runtime: { primaryStatus: "idle", primaryStatusResolution: "local" } };
   const previewPage = { items: [listed, { ...listed, bindingId: "binding-without-preview", nativePreview: null }], nextCursor: null };
-  state.sessions = previewPage;
-  renderSessions(previewPage);
+  sessionAnswer = () => previewPage;
+  await loadSessions();
   assert.equal(observers.length, 1);
   assert.equal(observers[0].targets.length, 1, "only rows with a preview are observed");
   const observed = observers[0].targets[0];
@@ -297,8 +301,8 @@ async function fetch(path, options = {}) {
   observed.clientHeight = 40; observed.scrollHeight = 80;
   observers[0].callback([{ target: observed }]);
   assert(!observedToggle.hidden);
-  state.sessions = { items: [listed], nextCursor: null };
-  renderSessions(state.sessions);
+  sessionAnswer = () => ({ items: [listed], nextCursor: null });
+  await loadSessions();
   assert(!observers[0].connected, "re-rendering must release the previous page's observer");
   assert.equal(observers.length, 2);
   assert(observers[1].connected);

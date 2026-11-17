@@ -44,6 +44,7 @@ from netizen_cli.admin.queries import (
     _updated_range_query,
 )
 from netizen_cli.admin.web import (
+    AdminActionTarget,
     AdminWebRunner,
     _batches,
     accepted_authorities,
@@ -1429,6 +1430,157 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["code"], "stale_or_consumed")
         call = next(value for name, value in self.management.calls if name == "set-enabled")
         self.assertEqual(call["expected_revision"], 1)
+
+    async def assert_page_grants_atomic(self, session, path, count):
+        """Leave room for all but one new grant, then check both capacity gates."""
+        before = dict(self.auth._actions)
+        index_before = {key: set(value) for key, value in self.auth._actions_by_session.items()}
+        for bound in ("global", "session"):
+            capacity = len(before) + count - 1
+            limits = replace(
+                self.auth._limits,
+                max_actions=capacity if bound == "global" else capacity + 100,
+                max_actions_per_session=capacity,
+            )
+            with self.subTest(path=path, bound=bound), patch.object(self.auth, "_limits", limits):
+                status, _, error = await self.json_get(path, session)
+                self.assertEqual(status, 503, error)
+                self.assertEqual(error["code"], "action_capacity")
+                self.assertEqual(self.auth._actions, before)
+                self.assertEqual(self.auth._actions_by_session, index_before)
+
+    async def test_session_lists_issue_atomic_pages_and_redeem_unchanged_envelopes(self):
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.side_runtime = replace(
+            self.management.side_runtime, turn_id="physical-turn", turn_state=ActiveState.RUNNING,
+        )
+        # Multiple rows catch partial issuance both within and between rows.
+        active = await self.management.query_sessions(query=SimpleNamespace(inventory_state=SessionInventoryState.ACTIVE))
+        first = active.items[0]
+        second_binding = replace(self.management.native, id="binding-second")
+        self.management.runtime_by_id[second_binding.id] = replace(
+            self.management.runtime_by_id[self.management.native.id], binding_id=second_binding.id,
+        )
+        self.management.session_items_override = (first, replace(
+            first, record=replace(first.record, binding=second_binding),
+        ))
+        side_page = await self.management.query_side_topics()
+        first_side = side_page.items[0]
+        second_side = replace(
+            first_side,
+            record=replace(first_side.record, side_topic=replace(self.management.side_record, id="side-2")),
+            runtime=replace(self.management.side_runtime, side_id="side-2"),
+        )
+        with patch.object(self.management, "query_side_topics", return_value=SideTopicInventoryPage(
+            (first_side, second_side), None,
+        )):
+            for route, id_key, resource in (("sessions", "bindingId", "binding"), ("side-topics", "sideId", "side")):
+                path = f"/api/v1/{route}"
+                for _ in range(3):
+                    before = self.auth.state_counts().actions
+                    with patch.object(self.auth, "issue_actions", wraps=self.auth.issue_actions) as issue:
+                        status, _, page = await self.json_get(path, session)
+                    self.assertEqual(status, 200, page)
+                    issue.assert_called_once()
+                    self.assertEqual(len(page["items"]), 2)
+                    count = sum(len(row["actions"]) for row in page["items"])
+                    self.assertGreaterEqual(count, 4)
+                    self.assertEqual(self.auth.state_counts().actions, before + count)
+                    for row in page["items"]:
+                        for envelope in row["actions"].values():
+                            self.assertEqual(set(envelope), {"actionKind", "csrfToken", "actionToken", "target"})
+                            expected_target = {"resource": resource, "targetId": row[id_key],
+                                               "scopeKey": row.get("scopeKey")}
+                            self.assertEqual(envelope["target"], expected_target)
+                            self.assertTrue(envelope["actionKind"].startswith(route + "."))
+                            self.assertRegex(envelope["csrfToken"], r"^[A-Za-z0-9_-]{43}$")
+                            self.assertRegex(envelope["actionToken"], r"^[A-Za-z0-9_-]{43}$")
+                            redeemed = self.auth.redeem_action(
+                                session, csrf_token=envelope["csrfToken"], action_token=envelope["actionToken"],
+                                action_kind=envelope["actionKind"],
+                                target=AdminActionTarget(resource, row[id_key], row.get("scopeKey")),
+                            )
+                            self.assertEqual(redeemed.action_kind, envelope["actionKind"])
+                await self.assert_page_grants_atomic(session, path, count)
+
+    async def test_other_multi_grant_responses_leave_no_capacity_residue(self):
+        self.runner.open_admission()
+        session = await self.login()
+        default = {"id": "rule", "revision": 3, "chat_id": "oc_chat"}
+        schedule = {"id": "plan", "revision": 2, "chat_id": "oc_chat", "can_run_now": True}
+        self.management.worktrees = SimpleNamespace(query=AsyncMock(return_value={
+            "items": [{"id": "worktree-1"}, {"id": "worktree-2"}], "nextCursor": None,
+        }))
+        self.users.add(AdminIdentity("cli_test", "ou_second"), actor=self.member.identity,
+                       expected_revision=self.users.revision, name="Second", avatar_url=None)
+        cases = (
+            ("/api/v1/projects", 4, None),
+            ("/api/v1/worktrees", 2, None),
+            ("/api/v1/admin-users", 4, None),
+            ("/api/v1/defaults", 3, {"items": [default]}),
+            ("/api/v1/defaults?kind=group_name", 4, {"items": [default], "order_revision": 1}),
+            ("/api/v1/defaults?mode=view&chat_id=oc_chat", 3, {"exact": default}),
+            ("/api/v1/schedules", 4, {"ok": True, "plans": [schedule]}),
+            ("/api/v1/schedules?mode=view&plan_id=plan", 3, {"ok": True, "plan": schedule}),
+        )
+        for path, count, result in cases:
+            with self.subTest(path=path):
+                if "defaults" in path:
+                    self.management.defaults = SimpleNamespace(manage=AsyncMock(return_value=result))
+                if "schedules" in path:
+                    self.management.schedules = SimpleNamespace(manage=AsyncMock(return_value=result))
+                before = self.auth.state_counts().actions
+                status, _, page = await self.json_get(path, session)
+                self.assertEqual(status, 200, page)
+                self.assertEqual(self.auth.state_counts().actions, before + count)
+                await self.assert_page_grants_atomic(session, path, count)
+
+    async def test_project_preview_grants_are_atomic_after_consuming_input(self):
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.preview_project_delete = AsyncMock(return_value=SimpleNamespace(
+            project=self.management.project_record, bindings=(), sides=(), scheduled_plans=(),
+            scheduled_runs=(), worktrees=(), fingerprint="exact-inventory",
+        ))
+        for bound in ("global", "session"):
+            with self.subTest(bound=bound):
+                _, _, page = await self.json_get("/api/v1/projects", session)
+                payload = _action_payload(page["items"][0]["actions"]["previewDelete"])
+                before = set(self.auth._actions)
+                index_before = {key: set(value) for key, value in self.auth._actions_by_session.items()}
+                capacity = len(before) + 1
+                limits = replace(self.auth._limits, max_actions=capacity if bound == "global" else capacity + 100,
+                                 max_actions_per_session=capacity)
+                with patch.object(self.auth, "_limits", limits):
+                    status, _, error = await self.json_post("/api/v1/projects/delete-preview", session, payload)
+                self.assertEqual(status, 503, error)
+                self.assertEqual(error["code"], "action_capacity")
+                self.assertEqual(set(self.auth._actions), before)
+                self.assertEqual(self.auth._actions_by_session, index_before)
+                # The original preview grant stays consumed; failed responses are not replayed.
+                status, _, error = await self.json_post("/api/v1/projects/delete-preview", session, payload)
+                self.assertEqual(status, 409, error)
+
+    async def test_deleting_projects_do_not_issue_hidden_actions(self):
+        self.runner.open_admission()
+        session = await self.login()
+        page = await self.management.query_projects()
+        with patch.object(self.management, "query_projects", return_value=replace(
+            page, items=(replace(page.items[0], deleting=True),),
+        )):
+            status, _, result = await self.json_get("/api/v1/projects", session)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["items"][0]["actions"], {})
+        self.assertEqual(self.auth.state_counts().actions, 2)
+
+    async def test_session_list_late_read_failure_does_not_issue_grants(self):
+        self.runner.open_admission()
+        session = await self.login()
+        with patch.object(self.management, "binding_statuses_exact", side_effect=ThreadCatalogError("failed")):
+            status, _, _ = await self.json_get("/api/v1/sessions", session)
+        self.assertEqual(status, 503)
+        self.assertEqual(self.auth.state_counts().actions, 0)
 
     async def test_disconnect_does_not_cancel_redeemed_mutation(self) -> None:
         self.runner.open_admission()
@@ -3272,113 +3424,57 @@ class _AdminAssetParser(HTMLParser):
 
 
 class AdminStaticAssetsTest(unittest.TestCase):
-    def test_static_ui_has_management_pages_external_assets_and_safe_text_sinks(self) -> None:
+    def test_static_ui_has_management_pages_and_external_assets(self) -> None:
         root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
-        html = (root / "index.html").read_text(encoding="utf-8")
-        javascript = (root / "admin.js").read_text(encoding="utf-8")
         parser = _AdminAssetParser()
-        parser.feed(html)
+        parser.feed((root / "index.html").read_text(encoding="utf-8"))
 
-        self.assertEqual(parser.scripts, ["/static/admin-ui.js", "/static/chat-picker.js", "/static/identity.js",
-                                          "/static/config-editor.js", "/static/session-access.js", "/static/group-access.js", "/static/progress-card.js", "/static/question-notifications.js", "/static/worktrees.js",
-                                          "/static/content-preview.js", "/static/file-browser.js", "/static/project-files.js",
-                                          "/static/attachment-files.js", "/static/path-files.js", "/static/admin.js"])
-        self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css", "/static/content-preview.css"])
+        self.assertTrue(parser.scripts)
+        self.assertTrue(parser.stylesheets)
+        self.assertEqual(parser.scripts[-1], "/static/admin.js")
         self.assertFalse(parser.inline_script_text.strip())
-        self.assertTrue({"projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates"} <= parser.ids)
-        self.assertNotIn("side-topics", parser.ids)
-        self.assertIn("service-restart", parser.ids)
-        self.assertNotIn("update-install", parser.ids)
-        self.assertNotIn("update-check", parser.ids)
-        self.assertTrue(
-            {
-                "session-page-size",
-                "sessions-previous",
-                "sessions-page",
-                "sessions-next",
-            }
-            <= parser.ids
-        )
-        for option in ('value="10"', 'value="20" selected', 'value="50"', 'value="100"'):
-            self.assertIn(option, html)
-        self.assertNotIn('name="materialized"', html)
-        self.assertNotIn('name="nativeState"', html)
-        for unsafe in (
-            "innerHTML",
-            "outerHTML",
-            "insertAdjacentHTML",
-            "document.write",
-            "eval(",
-        ):
-            self.assertNotIn(unsafe, javascript)
-        self.assertIn("textContent", javascript)
-        self.assertIn("runtime.primaryStatus", javascript)
-        self.assertIn("runtime.subscriptionState", javascript)
-        self.assertIn("session.pointerState", javascript)
-        self.assertIn("session.catalogState", javascript)
-        self.assertNotIn("session.nativeState", javascript)
-        self.assertIn("result?.message", javascript)
-        self.assertNotIn("if (runtime.turn)", javascript)
-        self.assertNotIn("if (runtime.goal)", javascript)
-        self.assertIn("sessionLocationCell", javascript)
-        self.assertIn('link.rel = "noopener noreferrer"', javascript)
-        self.assertIn("await refresh(state.tab)", javascript)
-        self.assertIn('state.tab === "sessions"', javascript)
-        self.assertIn('state.sessionTab === "temporary"', javascript)
+        for asset in [*parser.scripts, *parser.stylesheets]:
+            with self.subTest(asset=asset):
+                self.assertIsNotNone(asset, "scripts must be external")
+                self.assertTrue(asset.startswith("/static/"))
+                path = (root / asset.removeprefix("/static/")).resolve()
+                self.assertTrue(path.is_relative_to(root.resolve()))
+                self.assertTrue(path.is_file())
+        # BuiltArtifactTests checks every static file's bytes in the wheel, then
+        # compares the rebuilt sdist wheel. Do not duplicate package builds here.
+        self.assertTrue({
+            "projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates",
+            "service-restart", "session-page-size", "sessions-previous", "sessions-page", "sessions-next",
+            "sessions-body", "sides-body", "session-filter", "side-filter", "time-range-template",
+            *(f"session-answer-{name}" for name in (
+                "drawer", "title", "identity", "close", "scroll", "content", "earlier",
+                "refresh", "toggle", "note", "preview-note", "metadata", "details",
+            )),
+        } <= parser.ids)
+        for obsolete in ("side-topics", "update-install", "update-check"):
+            self.assertNotIn(obsolete, parser.ids)
 
-    def test_time_range_filter_is_shared_accessible_and_uses_utc_bounds(self) -> None:
+    def test_first_party_javascript_keeps_unsafe_text_sinks_outside_trusted_preview(self) -> None:
         root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
-        html = (root / "index.html").read_text(encoding="utf-8")
-        javascript = (root / "admin.js").read_text(encoding="utf-8")
+        paths = [path for path in root.rglob("*.js") if "vendor" not in path.relative_to(root).parts]
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(asset=path.relative_to(root)):
+                javascript = path.read_text(encoding="utf-8")
+                if path.relative_to(root).as_posix() == "content-preview.js":
+                    # Existing bounded server-rendered Markdown sink (ADR 0089/0096).
+                    # Permit only this exact statement, not this file or other sinks.
+                    trusted_sink = 'if (typeof html === "string") target.innerHTML = html;'
+                    self.assertEqual(javascript.count(trusted_sink), 1)
+                    javascript = javascript.replace(trusted_sink, "")
+                for unsafe in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+                    self.assertNotIn(unsafe, javascript)
+
+    def test_time_range_styles_support_popover_and_mobile_modal(self) -> None:
+        # CSS structure is outside the Node DOM port; retain these presentation
+        # guards. Controller semantics and accessibility are exercised below.
+        root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         stylesheet = (root / "admin.css").read_text(encoding="utf-8")
-
-        self.assertEqual(html.count('class="time-range-filter" data-time-range'), 3)
-        self.assertIn('id="time-range-template"', html)
-        self.assertIn('name="createdFrom" data-time-range-from', html)
-        self.assertIn('name="createdBefore" data-time-range-before', html)
-        time_range_template = html.split('<template id="time-range-template">', 1)[1].split("</template>", 1)[0]
-        self.assertEqual(time_range_template.count('type="datetime-local"'), 2)
-        self.assertIn('role="dialog"', html)
-        self.assertIn('role="alert" aria-live="polite"', html)
-        self.assertNotIn("ISO-8601", html)
-        for preset in (
-            "all",
-            "today",
-            "yesterday",
-            "last-24-hours",
-            "last-7-days",
-            "last-30-days",
-            "last-3-months",
-        ):
-            self.assertIn(f'data-time-range-preset="{preset}"', html)
-        for label in ("清除", "取消", "完成"):
-            self.assertIn(f">{label}</button>", html)
-
-        self.assertIn('document.querySelectorAll("[data-time-range]")', javascript)
-        self.assertIn("initializeTimeRangeFilter(root)", javascript)
-        self.assertIn("Intl.DateTimeFormat().resolvedOptions().timeZone", javascript)
-        self.assertIn("function canonicalUtc(value)", javascript)
-        self.assertIn('000+00:00`', javascript)
-        self.assertIn("function customTimeRange(startValue, endValue)", javascript)
-        self.assertIn("parsedEnd.date.getTime() + 60 * 1000", javascript)
-        self.assertIn('popover.setAttribute("aria-modal", "true")', javascript)
-        self.assertIn("function setTimeRangeModalIsolation", javascript)
-        self.assertIn('sibling.setAttribute("inert", "")', javascript)
-        self.assertIn("timeRangeModalOwner !== controller", javascript)
-        self.assertIn('event.key === "Escape"', javascript)
-        self.assertIn('trigger.setAttribute("aria-expanded", "false")', javascript)
-        self.assertIn('zone.id = `${identity}-zone`', javascript)
-        self.assertIn(
-            'start.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`)',
-            javascript,
-        )
-        self.assertIn(
-            'end.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`)',
-            javascript,
-        )
-        self.assertIn("root.getBoundingClientRect()", javascript)
-        self.assertIn("window.innerWidth - margin - width", javascript)
-
         self.assertIn(".time-range-popover", stylesheet)
         self.assertIn(".time-range-backdrop", stylesheet)
         self.assertIn("@media (max-width: 650px)", stylesheet)
@@ -3388,7 +3484,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         from tests.admin.ui_harness import harness_source, read_fixture, run_harness
 
         before, after = read_fixture("time_range_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
-        harness = harness_source("index.html", ("chat-picker.js", "admin.js"), before, after)
+        harness = harness_source("index.html", None, before, after)
 
         def run(timezone: str) -> dict:
             completed = run_harness(

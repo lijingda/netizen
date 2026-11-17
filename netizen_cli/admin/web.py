@@ -194,7 +194,7 @@ _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 _AUTO_PORTS = range(8787, 8887)
 _CONTENT_VIEWER_ASSETS = (
-    "content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js",
+    "content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js", "conversation.js", "time-range.js", "session-lists.js", "session-batch.js",
     "vendor/ace/ace.js",
     "vendor/ace/ext-diff.js",
     "vendor/ace/mode-python.js", "vendor/ace/mode-javascript.js",
@@ -294,6 +294,43 @@ class _RequestContext:
 
 
 T = TypeVar("T")
+
+
+class _ActionGrantPlan:
+    """Keep response placeholders local until all exact facts have been read."""
+
+    def __init__(self, auth: AdminAuth, session_token: object) -> None:
+        self._auth = auth
+        self._session_token = session_token
+        self._actions: list[tuple[str, AdminActionTarget, AdminActionPreconditions]] = []
+        self._placeholders: list[dict[str, object]] = []
+
+    def add(
+        self,
+        action_kind: str,
+        target: AdminActionTarget,
+        preconditions: AdminActionPreconditions,
+    ) -> dict[str, object]:
+        placeholder: dict[str, object] = {
+            "actionKind": action_kind,
+            "target": _action_target_json(target),
+        }
+        self._actions.append((action_kind, target, preconditions))
+        self._placeholders.append(placeholder)
+        return placeholder
+
+    def issue(self) -> None:
+        try:
+            issued = self._auth.issue_actions(self._session_token, self._actions)
+        except AuthCapacityExceeded:
+            raise AdminWebError(
+                503,
+                "action_capacity",
+                "操作凭据容量已满，请稍后刷新页面。",
+            ) from None
+        for placeholder, grant in zip(self._placeholders, issued, strict=True):
+            placeholder["csrfToken"] = grant.csrf_token
+            placeholder["actionToken"] = grant.action_token
 
 
 class AdminWebApplication:
@@ -985,12 +1022,12 @@ class AdminWebApplication:
             raise AdminWebError(status, error.code, str(error)) from error
 
     def _default_record(
-        self, context: _RequestContext, rule: dict[str, Any], chat: ChatLabel | None = None,
+        self, grants: _ActionGrantPlan, rule: dict[str, Any], chat: ChatLabel | None = None,
     ) -> dict[str, Any]:
         target = AdminActionTarget("default-rule", rule["id"])
         preconditions = _empty_preconditions(default_revision=ExpectedValue.expect(rule["revision"]))
         result = {**rule, "actions": {
-            mode: self._grant(context, f"defaults.{mode}", target, preconditions)
+            mode: grants.add(f"defaults.{mode}", target, preconditions)
             for mode in ("save", "delete")
         }}
         if chat is not None:
@@ -1005,6 +1042,7 @@ class AdminWebApplication:
         return result
 
     async def _defaults(self, context: _RequestContext) -> Response:
+        grants = _ActionGrantPlan(self._auth, context.session_token)
         mode = _optional_one(context.query, "mode") or "list"
         allowed = {
             "list": {"mode", "kind", "offset", "limit"},
@@ -1034,22 +1072,23 @@ class AdminWebApplication:
                 deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
             ) if kind == "chat" else {}
             result = {**result, "items": [
-                self._default_record(context, rule, chats.get(rule["chat_id"])) for rule in result["items"]
+                self._default_record(grants, rule, chats.get(rule["chat_id"])) for rule in result["items"]
             ],
-                "actions": {"create": self._grant(
-                    context, "defaults.save", AdminActionTarget("default-registry", str(kind)), _empty_preconditions(),
+                "actions": {"create": grants.add(
+                    "defaults.save", AdminActionTarget("default-registry", str(kind)), _empty_preconditions(),
                 )}}
             if kind == "group_name":
-                result["actions"]["reorder"] = self._grant(
-                    context, "defaults.reorder", AdminActionTarget("default-registry", "group_name"),
+                result["actions"]["reorder"] = grants.add(
+                    "defaults.reorder", AdminActionTarget("default-registry", "group_name"),
                     _empty_preconditions(default_order_revision=ExpectedValue.expect(result["order_revision"])),
                 )
         elif mode == "view":
             if result["exact"] is not None:
-                result = {**result, "exact": self._default_record(context, result["exact"])}
-            result = {**result, "actions": {"create": self._grant(
-                context, "defaults.save", AdminActionTarget("default-registry", "chat"), _empty_preconditions(),
+                result = {**result, "exact": self._default_record(grants, result["exact"])}
+            result = {**result, "actions": {"create": grants.add(
+                "defaults.save", AdminActionTarget("default-registry", "chat"), _empty_preconditions(),
             )}}
+        grants.issue()
         return _json_response(200, {**result, "requestId": context.request.request_id})
 
     async def _default_save(self, context: _RequestContext) -> Response:
@@ -1092,6 +1131,7 @@ class AdminWebApplication:
         return _json_response(200, {**result, "requestId": context.request.request_id})
 
     async def _schedules(self, context: _RequestContext) -> Response:
+        grants = _ActionGrantPlan(self._auth, context.session_token)
         mode = _optional_one(context.query, "mode") or "list"
         allowed = {
             "list": {"mode", "chat_id", "project", "enabled", "ended", "cursor"},
@@ -1173,9 +1213,9 @@ class AdminWebApplication:
             )
             result = {
                 **result,
-                "plans": [self._schedule_plan(context, plan, chats[plan["chat_id"]]) for plan in result["plans"]],
-                "actions": {"create": self._grant(
-                    context, "schedules.create", AdminActionTarget("schedule-registry", "schedules"),
+                "plans": [self._schedule_plan(grants, plan, chats[plan["chat_id"]]) for plan in result["plans"]],
+                "actions": {"create": grants.add(
+                    "schedules.create", AdminActionTarget("schedule-registry", "schedules"),
                     _empty_preconditions(),
                 )},
             }
@@ -1184,16 +1224,17 @@ class AdminWebApplication:
             chats = await self._management.resolve_chat_labels(
                 (plan["chat_id"],), deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
             )
-            result = {**result, "plan": self._schedule_plan(context, plan, chats[plan["chat_id"]])}
+            result = {**result, "plan": self._schedule_plan(grants, plan, chats[plan["chat_id"]])}
+        grants.issue()
         return _json_response(200, {**result, "requestId": context.request.request_id})
 
-    def _schedule_plan(self, context: _RequestContext, plan: dict[str, Any], chat: ChatLabel) -> dict[str, Any]:
+    def _schedule_plan(self, grants: _ActionGrantPlan, plan: dict[str, Any], chat: ChatLabel) -> dict[str, Any]:
         target = AdminActionTarget("schedule", plan["id"])
         preconditions = _empty_preconditions(
             schedule_revision=ExpectedValue.expect(plan["revision"]),
         )
         return {**_schedule_plan_json(plan, chat), "actions": {
-            mode: self._grant(context, f"schedules.{mode}", target, preconditions)
+            mode: grants.add(f"schedules.{mode}", target, preconditions)
             if mode != "run_now" or plan.get("can_run_now") is True else None
             for mode in ("update", "delete", "run_now")
         }}
@@ -1274,6 +1315,7 @@ class AdminWebApplication:
         return service
 
     async def _worktrees(self, context: _RequestContext) -> Response:
+        grants = _ActionGrantPlan(self._auth, context.session_token)
         _require_query_keys(context.query, {"project", "cursor", "pageSize"})
         result = await self._worktree_service().query(
             project_alias=_optional_text_query(context.query, "project", maximum=64),
@@ -1281,10 +1323,11 @@ class AdminWebApplication:
             limit=_page_size(context.query),
             deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
         )
-        items = [{**item, "actions": {"previewDelete": self._grant(
-            context, "worktrees.delete-preview", AdminActionTarget("worktree", item["id"]),
+        items = [{**item, "actions": {"previewDelete": grants.add(
+            "worktrees.delete-preview", AdminActionTarget("worktree", item["id"]),
             _empty_preconditions(),
         )}} for item in result["items"]]
+        grants.issue()
         return _json_response(200, {**result, "items": items, "requestId": context.request.request_id})
 
     async def _worktree_creation_options(self, context: _RequestContext) -> Response:
@@ -1450,6 +1493,7 @@ class AdminWebApplication:
         return _json_response(200, {**result, "requestId": context.request.request_id})
 
     async def _projects(self, context: _RequestContext) -> Response:
+        grants = _ActionGrantPlan(self._auth, context.session_token)
         allowed = {"cursor", "pageSize"}
         _require_query_keys(context.query, allowed)
         page_size = _page_size(context.query)
@@ -1464,14 +1508,12 @@ class AdminWebApplication:
         registry_target = AdminActionTarget("project-registry", "new")
         empty = _empty_preconditions()
         actions = {
-            "register": self._grant(
-                context,
+            "register": grants.add(
                 "projects.register",
                 registry_target,
                 empty,
             ),
-            "createDirectory": self._grant(
-                context,
+            "createDirectory": grants.add(
                 "projects.create-directory",
                 registry_target,
                 empty,
@@ -1485,21 +1527,17 @@ class AdminWebApplication:
                 project_revision=ExpectedValue.expect(project.revision)
             )
             project_actions: dict[str, object] = {
-                "setEnabled": self._grant(
-                    context,
+                "setEnabled": grants.add(
                     "projects.set-enabled",
                     project_target,
                     preconditions,
                 ),
-                "previewDelete": self._grant(
-                    context,
+                "previewDelete": grants.add(
                     "projects.delete-preview",
                     project_target,
                     preconditions,
                 ),
-            }
-            if item.deleting:
-                project_actions = {}
+            } if not item.deleting else {}
             items.append(
                 {
                     "alias": project.alias,
@@ -1516,6 +1554,7 @@ class AdminWebApplication:
                     "actions": project_actions,
                 }
             )
+        grants.issue()
         return _json_response(
             200,
             {
@@ -1640,6 +1679,7 @@ class AdminWebApplication:
         raise AssertionError("conversation page did not produce a response")
 
     async def _sessions(self, context: _RequestContext) -> Response:
+        grants = _ActionGrantPlan(self._auth, context.session_token)
         allowed = {
             "cursor",
             "pageSize",
@@ -1729,9 +1769,10 @@ class AdminWebApplication:
                 (snapshot.binding_id, snapshot) for snapshot in snapshots
             )
         items = [
-            self._session_item(context, item, snapshots_by_id[item.record.binding.id])
+            self._session_item(grants, item, snapshots_by_id[item.record.binding.id])
             for item in page.items
         ]
+        grants.issue()
         return _json_response(
             200,
             {
@@ -1744,7 +1785,7 @@ class AdminWebApplication:
 
     def _session_item(
         self,
-        context: _RequestContext,
+        grants: _ActionGrantPlan,
         item: SessionInventoryItem,
         status: BindingStatusProjection,
     ) -> dict[str, object]:
@@ -1781,8 +1822,8 @@ class AdminWebApplication:
             native_thread_id=native_expected,
         )
         actions: dict[str, object] = {
-            "configure": self._grant(
-                context, "sessions.configure", target, preconditions
+            "configure": grants.add(
+                "sessions.configure", target, preconditions
             )
         }
         native_state = item.native.state if item.native is not None else None
@@ -1791,51 +1832,49 @@ class AdminWebApplication:
             and status.pointer_state != "current"
             and native_state is not NativeThreadCatalogState.ARCHIVED
         ):
-            actions["activate"] = self._grant(
-                context, "sessions.activate", target, preconditions
+            actions["activate"] = grants.add(
+                "sessions.activate", target, preconditions
             )
         if binding.native_thread_id is None:
-            actions["deleteLazy"] = self._grant(
-                context, "sessions.delete-lazy", target, preconditions
+            actions["deleteLazy"] = grants.add(
+                "sessions.delete-lazy", target, preconditions
             )
         elif native_state is NativeThreadCatalogState.ACTIVE:
-            actions["rename"] = self._grant(
-                context, "sessions.rename", target, preconditions
+            actions["rename"] = grants.add(
+                "sessions.rename", target, preconditions
             )
-            actions["generateName"] = self._grant(
-                context, "sessions.generate-name", target, preconditions
+            actions["generateName"] = grants.add(
+                "sessions.generate-name", target, preconditions
             )
             if status.can_release:
-                actions["release"] = self._grant(
-                    context, "sessions.release", target, preconditions
+                actions["release"] = grants.add(
+                    "sessions.release", target, preconditions
                 )
         elif native_state is NativeThreadCatalogState.ARCHIVED:
-            actions["unarchive"] = self._grant(
-                context, "sessions.unarchive", target, preconditions
+            actions["unarchive"] = grants.add(
+                "sessions.unarchive", target, preconditions
             )
             if binding.message_context_mode is MentionContextMode.CURRENT_ONLY:
-                actions["unarchiveCurrent"] = self._grant(
-                    context, "sessions.unarchive-current", target, preconditions
+                actions["unarchiveCurrent"] = grants.add(
+                    "sessions.unarchive-current", target, preconditions
                 )
         # A persistent fork may exist before it appears in native catalogs.
         # Keep exact lifecycle controls available and let the native call decide.
         if binding.native_thread_id is not None and native_state is not NativeThreadCatalogState.ARCHIVED:
-            actions["archive"] = self._grant(
-                context,
+            actions["archive"] = grants.add(
                 "sessions.archive",
                 target,
                 lifecycle_preconditions,
             )
         if binding.native_thread_id is not None and self._management.native_delete_available:
-            actions["deleteMaterialized"] = self._grant(
-                context,
+            actions["deleteMaterialized"] = grants.add(
                 "sessions.delete-materialized",
                 target,
                 delete_preconditions,
             )
         if status.can_stop:
-            actions["stop"] = self._grant(
-                context, "sessions.stop", target, preconditions
+            actions["stop"] = grants.add(
+                "sessions.stop", target, preconditions
             )
         metadata = item.native.metadata if item.native is not None else None
         return {
@@ -1915,6 +1954,7 @@ class AdminWebApplication:
         )
 
     async def _side_topics(self, context: _RequestContext) -> Response:
+        grants = _ActionGrantPlan(self._auth, context.session_token)
         allowed = {
             "cursor",
             "pageSize",
@@ -1988,16 +2028,15 @@ class AdminWebApplication:
                         else ExpectedValue.expect(side.root_message_id)
                     ),
                 )
-                actions["close"] = self._grant(
-                    context,
+                actions["close"] = grants.add(
                     "side-topics.close",
                     target,
                     preconditions,
                 )
                 if item.can_stop:
                     assert item.runtime is not None
-                    actions["stop"] = self._grant(
-                        context, "side-topics.stop", target,
+                    actions["stop"] = grants.add(
+                        "side-topics.stop", target,
                         replace(
                             preconditions,
                             activity_revision=ExpectedValue.expect(item.runtime.revision),
@@ -2030,6 +2069,7 @@ class AdminWebApplication:
                     "actions": actions,
                 }
             )
+        grants.issue()
         return _json_response(
             200,
             {
@@ -2120,6 +2160,7 @@ class AdminWebApplication:
         )
 
     async def _project_delete_preview(self, context: _RequestContext) -> Response:
+        grants = _ActionGrantPlan(self._auth, context.session_token)
         _require_query_keys(context.query, set())
         payload, grant = self._redeem(
             context, "projects.delete-preview", expected_resource="project", optional_extra={"deleteWorktrees"},
@@ -2135,7 +2176,7 @@ class AdminWebApplication:
         )
         project = snapshot.project
         lazy_count = sum(item.binding.native_thread_id is None for item in snapshot.bindings)
-        return _json_response(200, {
+        result = {
             "requestId": context.request.request_id,
             "project": {"alias": project.alias, "cwd": project.cwd, "revision": project.revision},
             "sessionCount": len(snapshot.bindings),
@@ -2148,12 +2189,12 @@ class AdminWebApplication:
             "worktrees": [{"id": item.id, "root": item.root, "cwd": item.cwd} for item in snapshot.worktrees],
             "deleteWorktrees": delete_worktrees,
             "actions": {
-                "previewDelete": self._grant(
-                    context, "projects.delete-preview", AdminActionTarget("project", project.alias),
+                "previewDelete": grants.add(
+                    "projects.delete-preview", AdminActionTarget("project", project.alias),
                     _empty_preconditions(project_revision=ExpectedValue.expect(project.revision)),
                 ),
-                "delete": self._grant(
-                    context, "projects.delete", AdminActionTarget("project", project.alias),
+                "delete": grants.add(
+                    "projects.delete", AdminActionTarget("project", project.alias),
                     _empty_preconditions(
                         project_revision=ExpectedValue.expect(project.revision),
                         inventory_fingerprint=ExpectedValue.expect(snapshot.fingerprint),
@@ -2161,7 +2202,9 @@ class AdminWebApplication:
                     ),
                 ),
             },
-        })
+        }
+        grants.issue()
+        return _json_response(200, result)
 
     async def _project_delete(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
@@ -2605,6 +2648,7 @@ class AdminWebApplication:
             raise AdminWebError(401, "auth_expired", "飞书凭证已过期，请重新登录。") from None
 
     def _admin_users(self, context: _RequestContext) -> Response:
+        grants = _ActionGrantPlan(self._auth, context.session_token)
         _require_query_keys(context.query, set())
         with self._users.lock:
             session = self._authenticate(context)
@@ -2614,14 +2658,19 @@ class AdminWebApplication:
             rows = [{
                 "openId": member.identity.open_id, "name": member.name,
                 "avatarUrl": _user_avatar(member.avatar_url),
-                "removeAction": self._grant(context, "admin-users.remove",
+                "removeAction": grants.add(
+                    "admin-users.remove",
                     AdminActionTarget("admin-user", member.identity.open_id), preconditions) if len(members) > 1 else None,
             } for member in members]
-            return _json_response(200, {
+            result = {
                 "revision": revision, "currentOpenId": session.identity.open_id, "users": rows,
-                "addAction": self._grant(context, "admin-users.add", AdminActionTarget("admin-users", self._users.app_id), preconditions),
-                "selectorAction": self._grant(context, "admin-users.selector-config", AdminActionTarget("admin-users", self._users.app_id), preconditions),
-            })
+                "addAction": grants.add(
+                    "admin-users.add", AdminActionTarget("admin-users", self._users.app_id), preconditions),
+                "selectorAction": grants.add(
+                    "admin-users.selector-config", AdminActionTarget("admin-users", self._users.app_id), preconditions),
+            }
+            grants.issue()
+            return _json_response(200, result)
 
     async def _admin_user_action(self, context: _RequestContext) -> Response:
         action = context.path.rsplit("/", 1)[-1]
@@ -2677,25 +2726,10 @@ class AdminWebApplication:
         target: AdminActionTarget,
         preconditions: AdminActionPreconditions,
     ) -> dict[str, object]:
-        try:
-            issued = self._auth.issue_action(
-                context.session_token,
-                action_kind=action_kind,
-                target=target,
-                preconditions=preconditions,
-            )
-        except AuthCapacityExceeded:
-            raise AdminWebError(
-                503,
-                "action_capacity",
-                "操作凭据容量已满，请稍后刷新页面。",
-            ) from None
-        return {
-            "actionKind": action_kind,
-            "csrfToken": issued.csrf_token,
-            "actionToken": issued.action_token,
-            "target": _action_target_json(target),
-        }
+        grants = _ActionGrantPlan(self._auth, context.session_token)
+        result = grants.add(action_kind, target, preconditions)
+        grants.issue()
+        return result
 
     def _redeem(
         self,

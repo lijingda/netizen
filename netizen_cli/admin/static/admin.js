@@ -4,15 +4,21 @@ const state = {
   tab: "projects",
   sessionTab: "ordinary",
   projects: null,
-  sessions: null,
-  sides: null,
   updates: null,
   schedules: null,
   defaults: null,
   projectPage: firstSessionPage(),
-  sidePage: firstSessionPage(),
-  sessionPage: firstSessionPage(),
 };
+
+// Explicit page participants own their resources; hooks are optional and synchronous.
+// Keep batch cleanup and list invalidation at their original points, separately from drawers.
+const pageParticipants = { lists: [window.NetizenSessionLists], batch: [window.NetizenSessionBatch],
+  views: [window.NetizenConversation, window.NetizenTimeRange] };
+
+/** @param {"leave" | "expire" | "pageHide"} event */
+function dispatchPageLifecycle(event, stage = "views", target) {
+  return pageParticipants[stage].map((participant) => participant[event]?.(target));
+}
 
 const statusNode = document.querySelector("#status");
 
@@ -68,9 +74,8 @@ async function api(path, options = {}) {
 function expireAdminSession() {
   if (state.authExpired) return;
   state.authExpired = true;
-  const batchMessage = expireSessionBatch();
-  clearSessionSelection();
-  invalidateSessionListRequest();
+  const [batchMessage] = dispatchPageLifecycle("expire", "batch");
+  dispatchPageLifecycle("expire", "lists");
   stopUpdatePolling();
   closeSessionRenameEditor({ expired: true });
   closeProjectDeleteDialog();
@@ -79,6 +84,10 @@ function expireAdminSession() {
   window.NetizenSelect?.close();
   // Release these modal drawers so the page's login link remains reachable.
   closeNavigationMenu();
+  closeSessionSettingsEditor({ expired: true });
+  closeDefaultEditor({ expired: true });
+  closeScheduleEditor({ expired: true });
+  closeScheduleDetail();
   // Inputs stay in memory, but expired actions can never be submitted again.
   for (const dialog of document.querySelectorAll("#project-drawer, #worktree-create-drawer, #worktree-settings-drawer")) {
     if (dialog.open) dialog.close();
@@ -95,7 +104,7 @@ function expireAdminSession() {
   window.NetizenQuestionNotifications?.expire();
   window.NetizenWorktrees?.expire();
   window.NetizenProjectFiles?.expire();
-  closeConversation();
+  dispatchPageLifecycle("expire");
   setStatus(batchMessage, true, { expired: true });
 }
 
@@ -396,8 +405,8 @@ async function mutate(path, envelope, extra = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(envelope, extra)),
     });
-    const refreshed = await refresh(state.tab);
-    if (refreshed) {
+    const refreshed = await refreshAfterMutation(state.tab);
+    if (refreshed !== "failed") {
       setStatus(result?.message || "操作完成。");
     } else {
       setStatus(`${result?.message || "操作完成。"} 列表刷新失败，请手动刷新核对。`, true);
@@ -888,7 +897,6 @@ async function loadProjects(cursor = undefined) {
   return true;
 }
 
-const timeRangeControllers = new WeakMap();
 const sessionMultiFilters = new Map();
 const sideMultiFilters = new Map();
 const scheduleFilters = new Map();
@@ -1156,6 +1164,15 @@ function initializeFilter(root) {
   empty.hidden = true;
   popover.append(clear, choices, empty);
   root.append(trigger, popover);
+  const optionsError = name === "project" && !single ? document.createElement("p") : null;
+  if (optionsError) {
+    optionsError.id = `${prefix}-project-options-error`;
+    optionsError.className = "hint";
+    optionsError.hidden = true;
+    optionsError.setAttribute("role", "status");
+    trigger.setAttribute("aria-describedby", optionsError.id);
+    root.append(optionsError);
+  }
   let options = filterOptions[name];
   let selected = new Set(defaults);
 
@@ -1218,7 +1235,7 @@ function initializeFilter(root) {
 
   function open() {
     openFilter?.close();
-    openTimeRangeFilter?.cancel({ restoreFocus: false });
+    window.NetizenTimeRange.cancelOpen();
     openFilter = controller;
     search.value = "";
     filterChoices();
@@ -1255,6 +1272,11 @@ function initializeFilter(root) {
       options = [...nextOptions, ...[...selected].filter((value) => !known.has(value))
         .map((value) => [value, `${value}（已不可用）`])];
       renderChoices();
+    },
+    setOptionsError(message) {
+      if (!optionsError) return;
+      optionsError.textContent = message;
+      optionsError.hidden = !message;
     },
   };
   trigger.addEventListener("click", () => {
@@ -1314,7 +1336,7 @@ for (const root of document.querySelectorAll("[data-schedule-filter]")) {
   scheduleFilters.set(root.dataset.scheduleFilter, initializeFilter(root));
 }
 
-async function queryProjectOptions() {
+async function queryProjectOptions(isCurrent = () => true) {
   const options = [];
   const seenCursors = new Set();
   let cursor = null;
@@ -1322,6 +1344,7 @@ async function queryProjectOptions() {
     const query = new URLSearchParams({ pageSize: "50" });
     if (cursor) query.set("cursor", cursor);
     const data = await api(`/api/v1/projects/options?${query}`);
+    if (!isCurrent()) return null;
     options.push(...data.items);
     cursor = data.nextCursor;
     if (cursor && seenCursors.has(cursor)) throw new Error("Project 列表分页异常，请刷新重试。");
@@ -1331,23 +1354,31 @@ async function queryProjectOptions() {
 }
 
 async function loadSessionProjectOptions(filters = sessionMultiFilters, isCurrent = () => true) {
-  const projects = await queryProjectOptions();
-  if (!isCurrent()) return;
-  filters.get("project").setOptions(projects.map((project) => [
-    project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`,
-  ]));
+  const control = filters.get("project");
+  try {
+    const projects = await queryProjectOptions(isCurrent);
+    if (!isCurrent() || !projects) return;
+    control.setOptions(projects.map((project) => [
+      project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`,
+    ]));
+    control.setOptionsError("");
+  } catch {
+    if (isCurrent() && !state.authExpired) {
+      control.setOptionsError("Project 选项读取失败，已保留原有选项；下次读取列表时重试。");
+    }
+  }
 }
 
 function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
   for (const root of form.querySelectorAll("[data-time-range]")) {
-    if (refreshRelativeTime) timeRangeControllers.get(root)?.prepareQuery();
+    if (refreshRelativeTime) window.NetizenTimeRange.controllerFor(root)?.prepareQuery();
   }
   const query = new URLSearchParams();
   for (const [key, value] of new FormData(form)) {
     if (String(value)) query.append(key, String(value));
   }
   for (const root of form.querySelectorAll("[data-time-range]")) {
-    const kind = timeRangeControllers.get(root)?.presetKind();
+    const kind = window.NetizenTimeRange.controllerFor(root)?.presetKind();
     if (kind) query.set(`${root.dataset.timeRangeField || "created"}Range`, kind);
   }
   for (const root of form.querySelectorAll("[data-session-multi], [data-side-multi]")) {
@@ -1361,7 +1392,7 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
     const search = query.get("searchTerm")?.trim();
     if (search) query.set("searchTerm", search); else query.delete("searchTerm");
     // Exact links remain targeted while the user changes state or date filters.
-    const identity = new URLSearchParams(state.sessionPage?.query || "").get("identity");
+    const identity = new URLSearchParams(sessionLists.session.appliedQuery() || "").get("identity");
     if (identity) query.set("identity", identity);
     if (query.get("inventoryState") === "lazy") {
       for (const key of ["createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange"]) query.delete(key);
@@ -1374,520 +1405,7 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
   return query;
 }
 
-const timeRangeTemplate = document.querySelector("#time-range-template");
-const timeRangeMobile = window.matchMedia("(max-width: 650px)");
-const timeRangeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "浏览器本地时区";
-let openTimeRangeFilter = null;
-let timeRangeModalOwner = null;
-let timeRangeModalIsolation = [];
-
-const timeRangePresetLabels = {
-  all: "不限时间",
-  today: "今天",
-  yesterday: "昨天",
-  "last-24-hours": "最近 24 小时",
-  "last-7-days": "最近 7 天",
-  "last-30-days": "最近 30 天",
-  "last-3-months": "最近 3 个月",
-};
-
-function twoDigits(value) {
-  return String(value).padStart(2, "0");
-}
-
-function localMinuteValue(value) {
-  return [
-    String(value.getFullYear()).padStart(4, "0"),
-    "-",
-    twoDigits(value.getMonth() + 1),
-    "-",
-    twoDigits(value.getDate()),
-    "T",
-    twoDigits(value.getHours()),
-    ":",
-    twoDigits(value.getMinutes()),
-  ].join("");
-}
-
-function formatLocalMinute(value) {
-  return localMinuteValue(value).replace("T", " ");
-}
-
-function utcOffsetLabel(value) {
-  const total = -value.getTimezoneOffset();
-  const sign = total >= 0 ? "+" : "-";
-  const absolute = Math.abs(total);
-  return `UTC${sign}${twoDigits(Math.floor(absolute / 60))}:${twoDigits(absolute % 60)}`;
-}
-
-function canonicalUtc(value) {
-  return `${value.toISOString().slice(0, -1)}000+00:00`;
-}
-
-function sameLocalMinute(value, parts) {
-  return value.getFullYear() === parts.year
-    && value.getMonth() === parts.month - 1
-    && value.getDate() === parts.day
-    && value.getHours() === parts.hour
-    && value.getMinutes() === parts.minute;
-}
-
-function parseLocalMinute(raw) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(raw);
-  if (!match) return { date: null, error: "请选择有效的本地日期和时间。" };
-  const parts = {
-    year: Number(match[1]),
-    month: Number(match[2]),
-    day: Number(match[3]),
-    hour: Number(match[4]),
-    minute: Number(match[5]),
-  };
-  const value = new Date(0);
-  value.setFullYear(parts.year, parts.month - 1, parts.day);
-  value.setHours(parts.hour, parts.minute, 0, 0);
-  if (!sameLocalMinute(value, parts)) {
-    return { date: null, error: "该本地时间不存在，可能处于夏令时切换。" };
-  }
-
-  const currentOffset = value.getTimezoneOffset();
-  const nearbyOffsets = new Set([
-    new Date(value.getTime() - 24 * 60 * 60 * 1000).getTimezoneOffset(),
-    new Date(value.getTime() + 24 * 60 * 60 * 1000).getTimezoneOffset(),
-  ]);
-  for (const candidateOffset of nearbyOffsets) {
-    if (candidateOffset === currentOffset) continue;
-    const alternative = new Date(
-      value.getTime() + (candidateOffset - currentOffset) * 60 * 1000,
-    );
-    if (sameLocalMinute(alternative, parts)) {
-      return { date: null, error: "该本地时间因夏令时切换而重复，请选择其他时间。" };
-    }
-  }
-  return { date: value, error: "" };
-}
-
-function zoneDescription(values = []) {
-  const dates = values.length ? values : [new Date()];
-  const offsets = [...new Set(dates.map(utcOffsetLabel))];
-  return `时区：${timeRangeZone} (${offsets.join(" → ")})`;
-}
-
-function setTimeRangeModalIsolation(controller, popover, active) {
-  if (!active && timeRangeModalOwner !== controller) return;
-  for (const node of timeRangeModalIsolation) node.removeAttribute("inert");
-  timeRangeModalIsolation = [];
-  timeRangeModalOwner = active ? controller : null;
-  if (active) {
-    let branch = popover;
-    for (let parent = popover.parentElement; parent; parent = parent.parentElement) {
-      for (const sibling of parent.children) {
-        if (sibling === branch || sibling.matches("[data-time-range-backdrop]")) {
-          continue;
-        }
-        if (!sibling.hasAttribute("inert")) {
-          sibling.setAttribute("inert", "");
-          timeRangeModalIsolation.push(sibling);
-        }
-      }
-      branch = parent;
-    }
-  }
-  document.body.classList.toggle(
-    "time-range-modal-open",
-    timeRangeModalOwner !== null,
-  );
-}
-
-function allTimeRange() {
-  return {
-    kind: "all",
-    from: "",
-    before: "",
-    startValue: "",
-    endValue: "",
-    summary: "全部时间",
-  };
-}
-
-function timeRangeSummary(from, before, kind = "custom", now = new Date()) {
-  if (!from && !before) return "全部时间";
-  const rolling = kind.startsWith("last-");
-  const start = new Date(from);
-  // Show the last included minute, including a partially included rolling minute.
-  const end = before ? new Date(new Date(before).getTime() - 1) : now;
-  const startLabel = Number.isNaN(start.getTime()) ? from || "不限起点" : formatLocalMinute(start);
-  const endLabel = !before && !rolling ? "不限终点"
-    : Number.isNaN(end.getTime()) ? before : formatLocalMinute(end);
-  const label = timeRangePresetLabels[kind];
-  const name = label && kind !== "all" ? `${label}${!before && rolling ? "（至今）" : ""}` : "";
-  const dates = [from ? start : null, before || rolling ? end : null]
-    .filter((value) => value && !Number.isNaN(value.getTime()));
-  const offsets = [...new Set(dates.map(utcOffsetLabel))].join(" → ");
-  const heading = [name, offsets].filter(Boolean).join(" · ");
-  return `${heading ? `${heading}\n` : ""}${startLabel} ~ ${endLabel}`;
-}
-
-function compactTimeRange(from, before, kind = "custom") {
-  if (!from && !before) return "全部时间";
-  if (kind !== "custom" && timeRangePresetLabels[kind]) return timeRangePresetLabels[kind];
-  const date = (value, end = false) => {
-    if (!value) return end ? "不限终点" : "不限起点";
-    const parsed = new Date(new Date(value).getTime() - (end ? 1 : 0));
-    return Number.isNaN(parsed.getTime()) ? value : localMinuteValue(parsed).slice(0, 10);
-  };
-  return `${date(from)} 至 ${date(before, true)}`;
-}
-
-function presetTimeRange(kind, now = new Date(), openEnded = false) {
-  if (kind === "all") return allTimeRange();
-  let from;
-  let before;
-  if (kind === "today") {
-    from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    before = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  } else if (kind === "yesterday") {
-    from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-    before = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  } else if (kind === "last-3-months") {
-    before = new Date(now.getTime());
-    from = new Date(now.getTime());
-    const day = from.getDate();
-    from.setDate(1);
-    from.setMonth(from.getMonth() - 3);
-    const lastDay = new Date(from.getFullYear(), from.getMonth() + 1, 0).getDate();
-    from.setDate(Math.min(day, lastDay));
-  } else {
-    const durationDays = {
-      "last-24-hours": 1,
-      "last-7-days": 7,
-      "last-30-days": 30,
-    }[kind];
-    if (!durationDays) throw new Error("未知时间范围预设");
-    before = new Date(now.getTime());
-    from = new Date(now.getTime() - durationDays * 24 * 60 * 60 * 1000);
-  }
-  const rolling = kind.startsWith("last-");
-  const fromUtc = canonicalUtc(from);
-  const beforeUtc = openEnded && rolling ? "" : canonicalUtc(before);
-  return {
-    kind,
-    from: fromUtc,
-    before: beforeUtc,
-    startValue: localMinuteValue(from),
-    endValue: localMinuteValue(new Date(before.getTime() - 1)),
-    summary: timeRangeSummary(fromUtc, beforeUtc, kind, now),
-  };
-}
-
-function customTimeRange(startValue, endValue) {
-  if (!startValue || !endValue) {
-    return {
-      range: null,
-      error: "请选择开始时间和结束时间。",
-      invalid: startValue ? "end" : "start",
-    };
-  }
-  const parsedStart = parseLocalMinute(startValue);
-  if (!parsedStart.date) {
-    return { range: null, error: `开始时间：${parsedStart.error}`, invalid: "start" };
-  }
-  const parsedEnd = parseLocalMinute(endValue);
-  if (!parsedEnd.date) {
-    return { range: null, error: `结束时间：${parsedEnd.error}`, invalid: "end" };
-  }
-  if (parsedEnd.date < parsedStart.date) {
-    return { range: null, error: "结束时间不能早于开始时间。", invalid: "end" };
-  }
-  const before = new Date(parsedEnd.date.getTime() + 60 * 1000);
-  return {
-    range: {
-      kind: "custom",
-      from: canonicalUtc(parsedStart.date),
-      before: canonicalUtc(before),
-      startValue,
-      endValue,
-      summary: timeRangeSummary(canonicalUtc(parsedStart.date), canonicalUtc(before)),
-    },
-    error: "",
-    invalid: null,
-  };
-}
-
-function initializeTimeRangeFilter(root) {
-  if (!(timeRangeTemplate instanceof HTMLTemplateElement)) {
-    throw new Error("时间范围模板不可用");
-  }
-  root.append(timeRangeTemplate.content.cloneNode(true));
-  const identity = root.dataset.timeRangeId;
-  const field = root.dataset.timeRangeField || "created";
-  const label = root.querySelector("legend").textContent;
-  const defaultKind = root.dataset.timeRangeDefault || "all";
-  // Rolling update filters include later updates when this applied page is refreshed.
-  const preset = (kind) => presetTimeRange(kind, new Date(), field === "updated");
-  const fromNode = root.querySelector("[data-time-range-from]");
-  const beforeNode = root.querySelector("[data-time-range-before]");
-  const trigger = root.querySelector("[data-time-range-trigger]");
-  const summary = root.querySelector("[data-time-range-summary]");
-  const quickClear = root.querySelector("[data-time-range-quick-clear]");
-  const backdrop = root.querySelector("[data-time-range-backdrop]");
-  const popover = root.querySelector("[data-time-range-popover]");
-  const title = root.querySelector("[data-time-range-dialog-title]");
-  const start = root.querySelector("[data-time-range-start]");
-  const end = root.querySelector("[data-time-range-end]");
-  const help = root.querySelector("[data-time-range-help]");
-  const zone = root.querySelector("[data-time-range-zone]");
-  const error = root.querySelector("[data-time-range-error]");
-  const done = root.querySelector("[data-time-range-done]");
-  const cancel = root.querySelector("[data-time-range-cancel]");
-  const clear = root.querySelector("[data-time-range-clear]");
-  const presetButtons = [...root.querySelectorAll("[data-time-range-preset]")];
-
-  fromNode.name = `${field}From`;
-  beforeNode.name = `${field}Before`;
-  title.textContent = label;
-  quickClear.setAttribute("aria-label", `清除${label}筛选`);
-  quickClear.title = `清除${label}筛选`;
-  popover.id = `${identity}-popover`;
-  title.id = `${identity}-title`;
-  help.id = `${identity}-help`;
-  zone.id = `${identity}-zone`;
-  error.id = `${identity}-error`;
-  start.id = `${identity}-start`;
-  end.id = `${identity}-end`;
-  trigger.setAttribute("aria-controls", popover.id);
-  popover.setAttribute("aria-labelledby", title.id);
-  start.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`);
-  end.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`);
-
-  let applied = preset(defaultKind);
-  let draft = { ...applied };
-
-  function setInputValidity(invalid) {
-    for (const [node, name] of [[start, "start"], [end, "end"]]) {
-      if (invalid === name) node.setAttribute("aria-invalid", "true");
-      else node.removeAttribute("aria-invalid");
-    }
-  }
-
-  function renderApplied() {
-    fromNode.value = applied.from;
-    beforeNode.value = applied.before;
-    applied.summary = timeRangeSummary(applied.from, applied.before, applied.kind);
-    summary.textContent = compactTimeRange(applied.from, applied.before, applied.kind);
-    const dates = [applied.from, applied.before || new Date()].filter(Boolean)
-      .map((value) => new Date(value)).filter((value) => !Number.isNaN(value.getTime()));
-    trigger.title = `${applied.summary}\n${zoneDescription(dates)}`;
-    trigger.classList.toggle("has-value", applied.kind !== "all");
-    trigger.setAttribute("aria-label", `${label}：${applied.summary}`);
-    quickClear.hidden = applied.kind === "all";
-  }
-
-  function renderDraft() {
-    start.value = draft.startValue;
-    end.value = draft.endValue;
-    error.textContent = "";
-    setInputValidity(null);
-    done.disabled = false;
-    for (const button of presetButtons) {
-      button.setAttribute(
-        "aria-pressed",
-        String(button.dataset.timeRangePreset === draft.kind),
-      );
-    }
-    const parsedDates = [start.value, end.value]
-      .map(parseLocalMinute)
-      .filter((item) => item.date)
-      .map((item) => item.date);
-    zone.textContent = zoneDescription(parsedDates);
-  }
-
-  function validateDraft() {
-    const result = customTimeRange(start.value, end.value);
-    draft = result.range || {
-      kind: "custom",
-      from: "",
-      before: "",
-      startValue: start.value,
-      endValue: end.value,
-      summary: "自定义范围",
-    };
-    error.textContent = result.error;
-    setInputValidity(result.invalid);
-    done.disabled = !result.range;
-    for (const button of presetButtons) button.setAttribute("aria-pressed", "false");
-    const parsedDates = [start.value, end.value]
-      .map(parseLocalMinute)
-      .filter((item) => item.date)
-      .map((item) => item.date);
-    zone.textContent = zoneDescription(parsedDates);
-    return Boolean(result.range);
-  }
-
-  function syncPresentationMode() {
-    const mobile = timeRangeMobile.matches && !popover.hidden;
-    backdrop.hidden = !mobile;
-    if (mobile) {
-      popover.setAttribute("aria-modal", "true");
-      popover.style.removeProperty("left");
-      popover.style.removeProperty("right");
-    } else {
-      popover.removeAttribute("aria-modal");
-      if (!popover.hidden) {
-        const margin = 24;
-        const width = Math.min(620, window.innerWidth - margin * 2);
-        const rootBounds = root.getBoundingClientRect();
-        const viewportLeft = Math.min(
-          Math.max(rootBounds.left, margin),
-          window.innerWidth - margin - width,
-        );
-        popover.style.left = `${viewportLeft - rootBounds.left}px`;
-        popover.style.right = "auto";
-      }
-    }
-    setTimeRangeModalIsolation(controller, popover, mobile);
-  }
-
-  function closePopover({ restoreFocus = true } = {}) {
-    popover.hidden = true;
-    backdrop.hidden = true;
-    trigger.setAttribute("aria-expanded", "false");
-    popover.removeAttribute("aria-modal");
-    setTimeRangeModalIsolation(controller, popover, false);
-    if (openTimeRangeFilter === controller) openTimeRangeFilter = null;
-    if (restoreFocus) trigger.focus();
-  }
-
-  function cancelDraft(options) {
-    draft = { ...applied };
-    closePopover(options);
-  }
-
-  function prepareQuery() {
-    if (applied.kind === "all" || applied.kind === "custom" || applied.restored) return;
-    applied = preset(applied.kind);
-    renderApplied();
-  }
-
-  function openPopover() {
-    openFilter?.close();
-    if (openTimeRangeFilter && openTimeRangeFilter !== controller) {
-      openTimeRangeFilter.cancel({ restoreFocus: false });
-    }
-    openTimeRangeFilter = controller;
-    draft = { ...applied };
-    renderDraft();
-    popover.hidden = false;
-    trigger.setAttribute("aria-expanded", "true");
-    syncPresentationMode();
-    const selected = presetButtons.find(
-      (button) => button.dataset.timeRangePreset === draft.kind,
-    );
-    (selected || start).focus();
-  }
-
-  const controller = {
-    cancel: cancelDraft,
-    prepareQuery,
-    refreshSummary: renderApplied,
-    presetKind() { return applied.kind !== "all" && applied.kind !== "custom" ? applied.kind : null; },
-    setBounds(from, before, kind = "custom") {
-      if (!from && !before) { this.reset("all"); return; }
-      const startDate = new Date(from);
-      const beforeDate = new Date(before);
-      const endDate = new Date(beforeDate.getTime() - 1);
-      // URL bounds stay absolute; the preset name is presentation metadata only.
-      applied = { kind: Object.hasOwn(timeRangePresetLabels, kind) && kind !== "all" ? kind : "custom", from, before, restored: true,
-        startValue: Number.isNaN(startDate.getTime()) ? "" : localMinuteValue(startDate),
-        endValue: Number.isNaN(endDate.getTime()) ? "" : localMinuteValue(endDate) };
-      draft = { ...applied };
-      closePopover({ restoreFocus: false });
-      renderApplied();
-    },
-    reset(kind = defaultKind) {
-      applied = preset(kind);
-      draft = { ...applied };
-      closePopover({ restoreFocus: false });
-      renderApplied();
-    },
-  };
-
-  trigger.addEventListener("click", () => {
-    if (popover.hidden) openPopover();
-    else cancelDraft();
-  });
-  quickClear.addEventListener("click", () => {
-    applied = allTimeRange();
-    draft = allTimeRange();
-    renderApplied();
-    if (!popover.hidden) renderDraft();
-    trigger.focus();
-  });
-  for (const button of presetButtons) {
-    button.addEventListener("click", () => {
-      draft = preset(button.dataset.timeRangePreset);
-      renderDraft();
-    });
-  }
-  start.addEventListener("input", validateDraft);
-  end.addEventListener("input", validateDraft);
-  clear.addEventListener("click", () => {
-    draft = allTimeRange();
-    renderDraft();
-  });
-  cancel.addEventListener("click", () => cancelDraft());
-  done.addEventListener("click", () => {
-    // A restored URL may have only one bound. Confirming it unchanged must
-    // preserve that valid range; edited custom input still requires both dates.
-    const unchanged = start.value === applied.startValue && end.value === applied.endValue;
-    if (draft.kind === "custom" && !unchanged && !validateDraft()) {
-      (start.getAttribute("aria-invalid") === "true" ? start : end).focus();
-      return;
-    }
-    applied = { ...draft };
-    renderApplied();
-    closePopover();
-  });
-  backdrop.addEventListener("click", () => cancelDraft());
-  popover.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cancelDraft();
-      return;
-    }
-    if (event.key === "Enter" && (event.target === start || event.target === end)) {
-      event.preventDefault();
-      if (!done.disabled) done.click();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = [...popover.querySelectorAll("button:not(:disabled), input:not(:disabled)")]
-      .filter((node) => !node.hidden);
-    if (!focusable.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  });
-  document.addEventListener("pointerdown", (event) => {
-    if (!popover.hidden && !root.contains(event.target)) {
-      cancelDraft({ restoreFocus: false });
-    }
-  });
-  timeRangeMobile.addEventListener("change", syncPresentationMode);
-  window.addEventListener("resize", syncPresentationMode);
-  renderApplied();
-  zone.textContent = zoneDescription();
-  return controller;
-}
-
-for (const root of document.querySelectorAll("[data-time-range]")) {
-  timeRangeControllers.set(root, initializeTimeRangeFilter(root));
-}
+window.NetizenTimeRange.init({ closeOtherFilters: () => openFilter?.close() });
 
 const runtimeLabels = Object.freeze({
   running: "运行中", stopping: "停止中", "turn-observation-unavailable": "任务观测不可用",
@@ -2189,678 +1707,34 @@ function moveListPage(tab, direction) {
   if (next) return refresh(tab, next);
 }
 
-function sessionSort(kind) {
-  const query = new URLSearchParams(state[`${kind}Page`]?.query || "");
-  return { by: query.get("sortBy") || "updatedAt", direction: query.get("sortDirection") || "desc" };
-}
-
-function sessionFilterPage(kind = "session", { resetSort = false } = {}) {
-  const query = formQuery(document.querySelector(`#${kind}-filter`), "20");
-  const sort = resetSort ? { by: "updatedAt", direction: "desc" } : sessionSort(kind);
-  query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : sort.by);
-  query.set("sortDirection", sort.direction);
-  return firstSessionPage(query.toString());
-}
-
-function appliedSessionConditions(kind, query) {
-  const labels = { searchTerm: "搜索", inventoryState: "会话状态", project: "Project", chatId: "群聊",
-    scopeKind: "Scope", current: "当前指针", identity: "会话 ID", topicId: "话题 ID", state: "会话状态" };
-  const conditions = [];
-  for (const [key, label] of Object.entries(labels)) {
-    const values = query.getAll(key);
-    if (!values.length || (key === "inventoryState" && values[0] === "active")
-      || (key === "state" && [...values].sort().join(",") === "creating,open")) continue;
-    const names = values.map((value) => key === "inventoryState" ? catalogStateLabel(value)
-      : key === "current" ? value === "true" ? "当前" : "非当前"
-        : key === "scopeKind" ? ({ direct: "单聊", group: "群聊", topic: "话题" }[value] || value)
-          : key === "state" ? value === "all" ? "全部" : sideStateLabel(value) : value);
-    conditions.push({ key, label: `${label}：${names.join("、")}`, advanced: ["scopeKind", "current"].includes(key) });
-  }
-  for (const field of kind === "side" ? ["created"] : ["created", "updated"]) {
-    const from = query.get(`${field}From`) || "", before = query.get(`${field}Before`) || "";
-    const preset = query.get(`${field}Range`) || "custom";
-    if (field === "created" && !from && !before) continue;
-    if (field === "updated" && (query.get("inventoryState") === "lazy" || (preset === "last-3-months" && !before))) continue;
-    conditions.push({ key: field, label: `${field === "created" ? "创建时间" : "更新时间"}：${compactTimeRange(from, before, preset)}`,
-      title: timeRangeSummary(from, before, preset), advanced: true });
-  }
-  return conditions;
-}
-
-function renderAppliedSessionFilters(kind) {
-  const query = new URLSearchParams(state[`${kind}Page`].query || "");
-  const conditions = appliedSessionConditions(kind, query);
-  const chips = document.querySelector(`#${kind}-filter-chips`);
-  chips.replaceChildren();
-  for (const condition of conditions) {
-    const button = document.createElement("button"); button.type = "button"; button.className = "filter-chip";
-    button.dataset.filterKey = condition.key;
-    button.textContent = `${condition.label} ×`;
-    button.title = condition.title || condition.label;
-    button.setAttribute("aria-label", `移除${condition.label}`);
-    button.addEventListener("click", () => removeSessionCondition(kind, condition.key));
-    chips.append(button);
-  }
-  chips.hidden = !conditions.length;
-  document.querySelector(`#${kind}-more-filters`).textContent = `更多筛选（${conditions.filter((item) => item.advanced).length}）`;
-}
-
-function removeSessionCondition(kind, key) {
-  if (state.authExpired) return;
-  const query = new URLSearchParams(state[`${kind}Page`].query);
-  const defaults = pageQuery("sessions", kind === "side" ? "temporary" : "ordinary");
-  const fields = ["created", "updated"].includes(key) ? [`${key}From`, `${key}Before`, `${key}Range`] : [key];
-  for (const field of fields) {
-    query.delete(field);
-    for (const value of defaults.getAll(field)) query.append(field, value);
-  }
-  // Reset only the removed field's draft. Other unsubmitted inputs stay intact.
-  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
-  if (filters.has(key)) filters.get(key).reset();
-  else if (["created", "updated"].includes(key)) {
-    const root = [...document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")]
-      .find((root) => (root.dataset.timeRangeField || "created") === key);
-    timeRangeControllers.get(root).setBounds(query.get(`${key}From`) || "", query.get(`${key}Before`) || "", query.get(`${key}Range`) || "all");
-  } else if (key === "chatId") {
-    (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
-    document.querySelector(`#${kind}-chat-filter`).value = "";
-  } else if (key === "searchTerm") document.querySelector("#session-search").value = "";
-  else if (key === "inventoryState") {
-    document.querySelector("#session-inventory-state").value = "active";
-    updateSessionDateFilters();
-    // Leaving lazy restores the default date query without submitting date drafts.
-    if (!query.has("updatedFrom") && !query.has("updatedBefore") && !query.has("updatedRange")) {
-      query.set("updatedFrom", defaults.get("updatedFrom")); query.set("updatedRange", "last-3-months");
-    }
-  }
-  return refresh("sessions", firstSessionPage(query.toString()));
-}
-
-function resizeSessionPage(kind) {
-  const query = new URLSearchParams(state[`${kind}Page`].query || pageQuery("sessions", kind === "side" ? "temporary" : "ordinary"));
-  query.set("pageSize", document.querySelector(`#${kind}-page-size`).value);
-  return refresh("sessions", firstSessionPage(query.toString()));
-}
-
-function renderSessionSort(kind) {
-  const sort = sessionSort(kind);
-  const applied = new URLSearchParams(state[`${kind}Page`]?.query || "");
-  const lazy = kind === "session" && applied.get("inventoryState") === "lazy";
-  for (const button of document.querySelectorAll("[data-session-sort]")) {
-    if (button.dataset.sessionSort !== kind) continue;
-    const selected = button.dataset.sortBy === sort.by;
-    const descending = selected && sort.direction === "desc";
-    const label = button.dataset.sortBy === "createdAt" ? lazy ? "登记时间" : "创建时间" : "最近更新";
-    button.disabled = lazy && button.dataset.sortBy === "updatedAt";
-    const labelNode = button.querySelector(".sort-label");
-    if (labelNode) {
-      labelNode.textContent = label;
-      button.title = lazy ? "Netizen 登记时间；此时尚无 Codex 创建时间" : "Codex 会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示";
-    }
-    button.parentElement.setAttribute("aria-sort", selected ? descending ? "descending" : "ascending" : "none");
-    button.setAttribute("aria-label", `按${label}${descending ? "由远及近" : "由近及远"}排序`
-      + (selected ? `（当前${descending ? "由近及远" : "由远及近"}）` : ""));
-    button.querySelector(".sort-indicator").textContent = selected ? descending ? "↓" : "↑" : "↕";
-  }
-}
-
 function updateSessionDateFilters() {
   const lazy = document.querySelector("#session-inventory-state").value === "lazy";
   document.querySelector("#session-search").disabled = lazy;
   for (const root of document.querySelector("#session-filter").querySelectorAll("[data-time-range]")) {
-    if (lazy) timeRangeControllers.get(root)?.cancel({ restoreFocus: false });
+    if (lazy) window.NetizenTimeRange.controllerFor(root)?.cancel({ restoreFocus: false });
     root.disabled = lazy;
   }
 }
 
-function renderSessionFreshness() {
-  const kind = state.sessionTab === "temporary" ? "side" : "session";
-  window.NetizenList.freshness("sessions", state[`${kind}RefreshedAt`] ?? null);
+async function loadSessionsResult(page) {
+  return sessionLists.session.load(page);
 }
 
-async function sortSessionPage(kind, by) {
-  const page = state[`${kind}Page`];
-  // Sorting operates on the displayed result, not unsubmitted filter drafts.
-  const query = new URLSearchParams(page.query ?? sessionFilterPage(kind).query);
-  if (kind === "session" && query.get("inventoryState") === "lazy" && by === "updatedAt") return false;
-  const previous = sessionSort(kind);
-  query.set("sortBy", by);
-  query.set("sortDirection", previous.by === by && previous.direction === "desc" ? "asc" : "desc");
-  return refresh("sessions", firstSessionPage(query.toString()));
+async function loadSessions(page) {
+  return await loadSessionsResult(page) === "applied";
 }
 
-function renderSessionPagination(kind = "session") {
-  const name = kind === "side" ? "sides" : "sessions";
-  const page = state[`${kind}Page`];
-  document.querySelector(`#${name}-previous`).disabled = page.previousCursors.length === 0;
-  document.querySelector(`#${name}-next`).disabled = !page.nextCursor;
-  document.querySelector(`#${name}-page`).textContent = `第 ${page.number} 页 · ${state[name]?.items?.length || 0} 条`;
-}
-
-function resetSessionFilters(kind = "session") {
-  const form = document.querySelector(`#${kind}-filter`);
-  form.reset();
-  document.querySelector(`#${kind}-page-size`).value = "20";
-  if (kind === "session") updateSessionDateFilters();
-  (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
-  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
-  for (const controller of filters.values()) controller.reset();
-  for (const root of form.querySelectorAll("[data-time-range]")) {
-    timeRangeControllers.get(root)?.reset();
+async function refreshAfterMutation(tab) {
+  if (state.authExpired) return "failed";
+  if (tab === "sessions") {
+    if (state.sessionTab !== "temporary") return loadSessionsResult();
+    return sessionLists.side.load();
   }
-  const page = kind === "session" ? firstSessionPage(defaultSessionQuery().toString())
-    : sessionFilterPage(kind, { resetSort: true });
-  const query = new URLSearchParams(page.query);
-  query.delete("identity");
-  if (kind === "session") restoreSessionFilterControls(kind, query);
-  page.query = query.toString();
-  return refresh("sessions", page);
+  return await refresh(tab) ? "applied" : "failed";
 }
 
-let pendingSessionChatLabels = null;
-
-function invalidateSessionListRequest() {
-  state.sessionListRequest = (state.sessionListRequest || 0) + 1;
-  // A failed replacement read can leave these same rows on screen. Their old
-  // enrichment must stop showing a loading placeholder when it is invalidated.
-  pendingSessionChatLabels?.();
-  pendingSessionChatLabels = null;
-}
-
-async function loadSessionChatLabels(kind, data, page, request) {
-  const name = kind === "side" ? "sides" : "sessions";
-  const isCurrent = () => !state.authExpired && request === state.sessionListRequest
-    && state.tab === "sessions" && state.sessionTab === (kind === "side" ? "temporary" : "ordinary")
-    && state[name] === data && state[`${kind}Page`] === page;
-  if (!isCurrent()) return;
-  const body = document.querySelector(`#${name}-body`);
-  const identity = kind === "side" ? "sideId" : "bindingId";
-  const rows = new Map([...body.children].filter((row) => row.dataset[identity])
-    .map((row) => [row.dataset[identity], row]));
-  const targets = data.items.flatMap((item) => item.chatLabelResolved || !item.chatId
-    ? [] : [{ item, cell: rows.get(item[identity])?.querySelector(".session-location") }])
-    .filter(({ cell }) => cell);
-  if (!targets.length) return;
-  const showIdentity = kind !== "side";
-  const finish = () => {
-    for (const { item, cell } of targets) updateSessionLocationCell(cell, item, { showIdentity });
-    updateSessionGroupLabels(kind);
-  };
-  pendingSessionChatLabels = finish;
-  for (const { item, cell } of targets) updateSessionLocationCell(cell, item, { showIdentity, loading: true });
-  try {
-    const query = new URLSearchParams({ chatIds: [...new Set(targets.map(({ item }) => item.chatId))].join(",") });
-    const labels = await api(`/api/v1/chat-labels?${query}`);
-    if (!isCurrent()) return;
-    const byChat = new Map(labels.items.map((label) => [label.chatId, label]));
-    for (const { item } of targets) {
-      const label = byChat.get(item.chatId);
-      if (!label) continue;
-      // Enrichment changes display facts only; retain exact identities, topic
-      // links, runtime and action grants from the successful list response.
-      for (const field of ["chatLabel", "chatLabelResolved", "chatMode", "chatType", "chatOpenUrl"]) {
-        if (Object.hasOwn(label, field)) item[field] = label[field];
-      }
-    }
-  } catch {
-    // Name failures are local to the location cells. Authentication expiry is
-    // already handled by api(), and list status/freshness stay unchanged.
-  } finally {
-    if (isCurrent()) finish();
-    if (pendingSessionChatLabels === finish) pendingSessionChatLabels = null;
-  }
-}
-
-async function loadSessionPage(kind, page, render) {
-  invalidateSessionListRequest();
-  const request = state.sessionListRequest;
-  const isCurrent = () => request === state.sessionListRequest;
-  const name = kind === "side" ? "sides" : "sessions";
-  try {
-    const query = page.query == null
-      ? formQuery(document.querySelector(`#${kind}-filter`), "20")
-      : new URLSearchParams(page.query);
-    if (!query.has("sortBy")) query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : "updatedAt");
-    if (!query.has("sortDirection")) query.set("sortDirection", "desc");
-    const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
-    await loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent);
-    if (!isCurrent()) return false;
-    for (const field of ["created", "updated"]) query.delete(`${field}Range`);
-    if (page.cursor) query.set("cursor", page.cursor);
-    const data = await api(`/api/v1/${kind === "side" ? "side-topics" : "sessions"}?${query}`);
-    if (!isCurrent()) return false;
-    // Rows and their applied query/cursor stack are one successful result.
-    // Draft edits made while awaiting the response remain in the form.
-    state[name] = data;
-    state[`${kind}Page`] = { ...candidate, nextCursor: data.nextCursor };
-    state[`${kind}RefreshedAt`] = Date.now();
-    window.NetizenList.error(name, "");
-    renderSessionSort(kind);
-    render(data);
-    renderAppliedSessionFilters(kind);
-    renderSessionPagination(kind);
-    renderSessionFreshness();
-    for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
-      timeRangeControllers.get(root)?.refreshSummary();
-    }
-    syncPageUrl();
-    window.NetizenList.error(name, "");
-    void loadSessionChatLabels(kind, data, state[`${kind}Page`], request);
-    return true;
-  } catch (error) {
-    if (isCurrent() && !state.authExpired) window.NetizenList.error(name, error.message + (state[name] ? " 当前仍显示上次成功读取的结果。" : ""), () => loadSessionPage(kind, page, render));
-    return false;
-  }
-}
-
-async function loadSessions(page = state.sessionPage) {
-  ensureSessionChatFilter();
-  return loadSessionPage("session", page, renderSessions);
-}
-
-// Selection belongs only to the successfully applied page, never to a filter draft.
-const sessionSelection = { page: null, ids: new Set() };
-let sessionBatch = null;
-const batchNode = (name) => document.querySelector(`#session-batch-${name}`);
-const sessionPageIdentity = () => JSON.stringify([state.sessionPage.query, state.sessionPage.cursor]);
-
-function sessionBatchActions(query = new URLSearchParams(state.sessionPage.query || "")) {
-  const inventory = query.get("inventoryState") || "active";
-  return {
-    archive: inventory === "active" ? { key: "archive", path: "/api/v1/sessions/archive", label: "归档" } : null,
-    delete: ["active", "archived", "lazy"].includes(inventory)
-      ? { key: inventory === "lazy" ? "deleteLazy" : "deleteMaterialized",
-        path: `/api/v1/sessions/delete-${inventory === "lazy" ? "lazy" : "materialized"}`, label: "删除" } : null,
-  };
-}
-
-function sessionBatchGrant(session, action) {
-  return action && session.actions?.[action.key];
-}
-
-function sessionBatchSelectable(session, actions) {
-  return Boolean(sessionBatchGrant(session, actions.archive) || sessionBatchGrant(session, actions.delete));
-}
-
-function clearSessionSelection() {
-  sessionSelection.ids.clear();
-  sessionSelection.page = sessionPageIdentity();
-  renderSessionSelection();
-}
-
-function reconcileSessionSelection(items, actions) {
-  const page = sessionPageIdentity();
-  const present = new Set(items.filter((item) => sessionBatchSelectable(item, actions)).map((item) => item.bindingId));
-  if (page !== sessionSelection.page) sessionSelection.ids.clear();
-  else for (const id of sessionSelection.ids) if (!present.has(id)) sessionSelection.ids.delete(id);
-  sessionSelection.page = page;
-}
-
-function sessionSelectionCell(row, session) {
-  const td = document.createElement("td"); td.className = "session-selection";
-  const label = document.createElement("label"); label.className = "session-select-hit";
-  const input = document.createElement("input"); input.type = "checkbox"; input.className = "session-select";
-  input.setAttribute("aria-label", `选择会话：${sessionName(session)} · ${session.shortId}`);
-  input.addEventListener("change", () => {
-    if (input.disabled) return;
-    if (input.checked) sessionSelection.ids.add(session.bindingId);
-    else sessionSelection.ids.delete(session.bindingId);
-    renderSessionSelection();
-  });
-  label.append(input); td.append(label); row.append(td);
-}
-
-function renderSessionSelection(actions = sessionBatchActions()) {
-  const items = state.sessions?.items || [];
-  const available = new Set(items.filter((item) => sessionBatchSelectable(item, actions)).map((item) => item.bindingId));
-  const busy = Boolean(sessionBatch && sessionBatch.phase !== "finished");
-  let hidden = 0;
-  for (const row of document.querySelector("#sessions-body").children) {
-    const input = row.querySelector(".session-select");
-    if (!input) continue;
-    input.checked = sessionSelection.ids.has(row.dataset.bindingId);
-    input.disabled = Boolean(state.authExpired) || busy || !available.has(row.dataset.bindingId);
-    input.title = available.has(row.dataset.bindingId) ? "" : "此会话不支持批量操作";
-    if (input.checked && row.hidden) hidden += 1;
-  }
-  document.querySelector("#session-batch").hidden = !items.length;
-  const selected = [...available].filter((id) => sessionSelection.ids.has(id)).length;
-  const all = document.querySelector("#session-select-page");
-  all.checked = available.size > 0 && selected === available.size;
-  all.indeterminate = selected > 0 && selected < available.size;
-  all.disabled = Boolean(state.authExpired) || busy || !available.size;
-  batchNode("count").textContent = `已选 ${sessionSelection.ids.size} 项`
-    + (hidden ? `（其中 ${hidden} 项在折叠分组中）` : "");
-  for (const operation of ["archive", "delete"]) {
-    const button = batchNode(operation);
-    button.hidden = !items.some((item) => sessionBatchGrant(item, actions[operation]));
-    button.disabled = Boolean(state.authExpired) || busy;
-    // Keep empty-selection actions focusable so closing results can return focus
-    // to the original trigger. The handler enforces this disabled state as well.
-    button.setAttribute("aria-disabled", String(button.disabled || !sessionSelection.ids.size));
-  }
-  batchNode("clear").disabled = Boolean(state.authExpired) || busy || !sessionSelection.ids.size;
-}
-
-function sessionRunningOrUnconfirmed(session) {
-  const runtime = session.runtime;
-  return Boolean(runtime && (runtime.primaryStatusResolution === "local" || runtime.primaryStatus === "goal-active"
-    || ["deferred", "unavailable"].includes(runtime.primaryStatusResolution)));
-}
-
-function sessionBatchConfirmation(action, targets, dropped, unsupported, trigger) {
-  const count = targets.length;
-  const archive = action.key === "archive", lazy = action.key === "deleteLazy";
-  const body = [archive ? `将归档以下 ${count} 个会话，归档后可在“已归档”中恢复。`
-    : lazy ? `将永久删除以下 ${count} 个尚未开始的会话。` : materializedDeleteWarning];
-  const current = targets.filter((item) => item.pointerState === "current").length;
-  const running = targets.filter(sessionRunningOrUnconfirmed).length;
-  if (current) body.push(`其中 ${current} 个是所在聊天的当前会话，执行后该聊天没有当前会话。`);
-  if (running) body.push(`其中 ${running} 个正在运行或状态未确认，Codex 会关闭正在运行的任务。`);
-  const skipped = [dropped ? `${dropped} 个已移出本页` : "", unsupported ? `${unsupported} 个不支持该操作` : ""].filter(Boolean);
-  if (skipped.length) body.push(`另有 ${skipped.join("、")}，不会执行。`);
-  return { title: archive ? "批量归档会话" : lazy ? "批量删除未开始的会话" : "批量永久删除会话",
-    body: body.join("\n"), danger: !archive, trigger,
-    confirmLabel: `${archive ? "归档" : "永久删除"} ${count} 个会话`,
-    details: targets.map((item) => `${sessionName(item)} · ${item.shortId} · ${item.projectAlias || "—"} · ${item.chatLabelResolved
-      ? item.chatLabel || "聊天不可用" : item.chatId ? locationFallback(item) : "聊天不可用"}`
-      + (item.pointerState === "current" ? "（当前会话）" : "")
-      + (sessionRunningOrUnconfirmed(item) ? `（${runtimeLabel(item.runtime)}）` : "")),
-  };
-}
-
-function sessionBatchSummary(batch) {
-  return ["已完成", "未完成", "结果未确认", "未执行"].map((status) => {
-    const count = batch.results.filter((item) => item.status === status).length;
-    return count ? `${status} ${count} 项` : "";
-  }).filter(Boolean).join("，") + "。";
-}
-
-function renderSessionBatch(batch) {
-  if (state.authExpired || batch.detached) return;
-  const finished = batch.phase === "finished";
-  batchNode("title").textContent = `批量${batch.action.label}会话${finished ? "结果" : ""}`;
-  batchNode("progress").textContent = finished ? sessionBatchSummary(batch)
-    : batch.phase === "refreshing" ? "正在刷新列表…"
-      : `正在${batch.action.label}第 ${batch.index + 1} / ${batch.results.length} 项`;
-  batchNode("note").textContent = batch.refreshFailed ? "列表刷新失败，请手动刷新核对。" : "";
-  batchNode("note").hidden = !batch.refreshFailed;
-  batchNode("results").replaceChildren();
-  for (const result of batch.results) {
-    if (!result.status) continue;
-    const item = document.createElement("li");
-    item.textContent = `${sessionName(result.session)} · ${result.session.shortId} · ${result.status}`
-      + (result.reason ? `（${result.reason}）` : "");
-    if (result.status !== "已完成") item.className = "error";
-    batchNode("results").append(item);
-  }
-  batchNode("results").hidden = !batchNode("results").children.length;
-  batchNode("stop").hidden = finished;
-  batchNode("stop").disabled = batch.stopped || batch.phase !== "running";
-  batchNode("close").hidden = !finished;
-}
-
-function stopSessionBatch() {
-  const batch = sessionBatch;
-  if (!batch || batch.phase === "finished") return;
-  batch.stopped = true;
-  batch.wake();
-}
-
-function sessionBatchControlVisible(control) {
-  return control && !control.disabled && document.body.contains(control) && control.getClientRects().length > 0;
-}
-
-function closeSessionBatch() {
-  const batch = sessionBatch;
-  if (!batch || batch.phase !== "finished") return;
-  sessionBatch = null;
-  if (batchNode("dialog").open) batchNode("dialog").close();
-  document.body.classList.toggle("session-batch-open", false);
-  renderSessionSelection();
-  // Navigation or deleting the last row can hide both the action and its list.
-  const trigger = sessionBatchControlVisible(batch.trigger)
-    ? batch.trigger : [...document.querySelectorAll("[data-refresh]")].find((button) => button.dataset.refresh === "sessions");
-  if (!state.authExpired && sessionBatchControlVisible(trigger)) trigger.focus({ preventScroll: true });
-}
-
-function expireSessionBatch() {
-  const batch = sessionBatch;
-  if (!batch) return "";
-  stopSessionBatch();
-  sessionBatch = null;
-  if (batchNode("dialog").open) batchNode("dialog").close();
-  document.body.classList.toggle("session-batch-open", false);
-  if (["preparing", "confirming"].includes(batch.phase)) return "登录已过期，批量操作未执行。";
-  if (batch.phase === "finished") return `登录已过期。批量结果：${sessionBatchSummary(batch)}`;
-  const completed = batch.results.filter((item) => item.status === "已完成").length;
-  return `登录已过期，批量操作已停止：已完成 ${completed} 项，请重新登录后刷新核对。`;
-}
-
-async function runSessionBatch(operation, trigger) {
-  if (state.authExpired || sessionBatch || !sessionSelection.ids.size) return;
-  if (window.NetizenConfirm.busy()) {
-    setStatus("另一个确认窗口已打开，批量操作未执行。", true);
-    return;
-  }
-  const action = sessionBatchActions()[operation];
-  if (!action) return;
-  const selected = new Set(sessionSelection.ids);
-  const page = state.sessionPage, identity = sessionPageIdentity();
-  const isCurrentPage = () => state.tab === "sessions" && state.sessionTab === "ordinary" && identity === sessionPageIdentity();
-  const batch = { action, trigger, phase: "preparing", stopped: false, results: [], index: 0 };
-  batch.stop = new Promise((resolve) => { batch.wake = resolve; });
-  sessionBatch = batch;
-  renderSessionSelection();
-  let confirmationCancelled = false;
-  try {
-    const refreshing = loadSessions(page);
-    const request = state.sessionListRequest;
-    const refreshed = await refreshing;
-    if (state.authExpired || batch.detached) return;
-    if (request !== state.sessionListRequest || !isCurrentPage() || batch.stopped) {
-      setStatus("列表已变化，批量操作未执行。", true);
-      return;
-    }
-    if (!refreshed) {
-      setStatus("刷新当前页失败，未执行任何操作。", true);
-      return;
-    }
-    const remaining = state.sessions.items.filter((item) => selected.has(item.bindingId));
-    const byId = new Map(remaining.map((item) => [item.bindingId, item]));
-    const targets = [...document.querySelector("#sessions-body").children]
-      .map((row) => byId.get(row.dataset.bindingId)).filter((item) => item?.actions?.[action.key]);
-    if (!targets.length) {
-      setStatus("所选会话已不在本页或不支持该操作，未执行。", true);
-      return;
-    }
-    if (window.NetizenConfirm.busy()) {
-      setStatus("另一个确认窗口已打开，批量操作未执行。", true);
-      return;
-    }
-    batch.phase = "confirming";
-    if (!await window.NetizenConfirm.ask(sessionBatchConfirmation(action, targets,
-      selected.size - remaining.length, remaining.length - targets.length, trigger))) {
-      confirmationCancelled = true;
-      return;
-    }
-    if (state.authExpired || batch.stopped || identity !== sessionPageIdentity()) return;
-    batch.results = targets.map((session) => ({ session, status: null, reason: "" }));
-    batch.phase = "running";
-    renderSessionBatch(batch);
-    document.body.classList.toggle("session-batch-open", true);
-    batchNode("dialog").showModal(); batchNode("stop").focus();
-    for (const [index, result] of batch.results.entries()) {
-      if (batch.stopped || state.authExpired) break;
-      batch.index = index;
-      renderSessionBatch(batch);
-      const response = api(action.path, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(actionPayload(result.session.actions[action.key])),
-      });
-      // The race stops observing batch results; api still handles global expiry.
-      const outcome = await Promise.race([response.then(() => ({}), (error) => ({ error })), batch.stop]);
-      if (state.authExpired) return;
-      if (batch.stopped) {
-        result.status = "结果未确认";
-        result.reason = "已停止等待，服务端可能仍在完成";
-        break;
-      }
-      if (!outcome.error) result.status = "已完成";
-      else {
-        result.reason = outcome.error.message;
-        result.status = [409, 404].includes(outcome.error.status) ? "未完成" : "结果未确认";
-        if (result.status === "结果未确认") break;
-      }
-    }
-    for (const result of batch.results) if (!result.status) result.status = "未执行";
-    clearSessionSelection();
-    batch.phase = "refreshing";
-    renderSessionBatch(batch);
-    if (batch.detached) return;
-    if (isCurrentPage()) {
-      const refreshing = loadSessions(state.sessionPage);
-      const request = state.sessionListRequest;
-      const refreshed = await refreshing;
-      batch.refreshFailed = request === state.sessionListRequest && isCurrentPage() && !refreshed;
-    }
-    if (state.authExpired || batch.detached) return;
-    batch.phase = "finished";
-    renderSessionBatch(batch);
-    const message = sessionBatchSummary(batch) + (batch.refreshFailed ? " 列表刷新失败，请手动刷新核对。" : "");
-    setStatus(message, batch.refreshFailed || batch.results.some((item) => item.status !== "已完成"));
-    batchNode("close").focus();
-  } finally {
-    if (sessionBatch === batch && batch.phase !== "finished") sessionBatch = null;
-    renderSessionSelection();
-    const focus = document.activeElement;
-    const confirmation = document.querySelector("#admin-confirm");
-    // Chrome can retain the closed dialog's cancel button until the next layout.
-    const focusLost = !focus || focus === document.body || (!confirmation.open && confirmation.contains(focus));
-    if (confirmationCancelled && !state.authExpired && focusLost
-        && sessionBatchControlVisible(trigger)) trigger.focus({ preventScroll: true });
-  }
-}
-
-// Presentation choices live only in this page, independently for each list and
-// grouping mode. Keep current rows so folding never recreates action grants.
-const sessionGroupViews = Object.fromEntries(["session", "side"].map((kind) => [kind, {
-  project: new Set(), chat: new Set(), layout: "compact", groups: [],
-}]));
-
-function updateSessionGroupLabels(kind) {
-  const view = sessionGroupViews[kind];
-  if (view.layout !== "chat") return;
-  for (const group of view.groups) {
-    const first = group.items[0];
-    const named = group.items.find((item) => item.chatLabelResolved && item.chatLabel?.trim());
-    const known = group.items.find((item) => item.chatMode || item.chatType) || first;
-    group.title.textContent = named?.chatLabel || shortIdentity(first.chatId)
-      || `聊天不可用 · ${shortIdentity(first.bindingId || first.sideId)}`;
-    group.type.textContent = chatModeLabel(known.chatMode || known.chatType, known.scopeKind);
-    group.button.title = [group.title.textContent, first.chatId, first.appId].filter(Boolean).join("\n");
-  }
-}
-
-function updateSessionGroupControls(kind) {
-  const view = sessionGroupViews[kind];
-  document.querySelector(`#${kind}-group-actions`).hidden = view.layout === "compact";
-  document.querySelector(`#${kind}-groups-expand`).disabled = state.authExpired
-    || !view.groups.some((group) => view[view.layout].has(group.key));
-  document.querySelector(`#${kind}-groups-collapse`).disabled = state.authExpired
-    || !view.groups.some((group) => !view[view.layout].has(group.key));
-}
-
-function setSessionGroupsExpanded(kind, expanded, groups = sessionGroupViews[kind].groups) {
-  const view = sessionGroupViews[kind];
-  if (state.authExpired || view.layout === "compact") return;
-  for (const group of groups) {
-    if (expanded) view[view.layout].delete(group.key);
-    else view[view.layout].add(group.key);
-    group.button.setAttribute("aria-expanded", String(expanded));
-    for (const row of group.rows) row.hidden = !expanded;
-  }
-  updateSessionGroupControls(kind);
-  if (kind === "session") renderSessionSelection();
-}
-
-function applySessionLayout(kind, batchActions) {
-  if (state.authExpired) return;
-  const name = kind === "side" ? "sides" : "sessions";
-  const identity = kind === "side" ? "sideId" : "bindingId";
-  const body = document.querySelector(`#${name}-body`);
-  const view = sessionGroupViews[kind];
-  const selected = document.querySelector(`#${kind}-layout`).value;
-  const layout = ["project", "chat"].includes(selected) ? selected : "compact";
-  const grouped = layout !== "compact";
-  view.layout = layout;
-  view.groups = [];
-  document.querySelector(`#${kind}-group-note`).hidden = !grouped;
-  const rows = new Map([...body.children].filter((row) => row.dataset[identity])
-    .map((row) => [row.dataset[identity], row]));
-  const items = state[name]?.items || [];
-  const groups = new Map();
-  for (const item of items) {
-    const key = layout === "chat"
-      ? JSON.stringify(item.chatId ? ["chat", item.appId || "", item.chatId] : ["missing", item[identity]])
-      : layout === "project" ? JSON.stringify(item.projectAlias || null) : "";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  }
-  body.replaceChildren();
-  if (state[name] && !items.length && document.querySelector(`#${name}-error`).hidden) {
-    window.NetizenList.empty(body, kind === "side" ? 7 : 9,
-      `当前范围内没有${kind === "side" ? "临时" : "普通"}会话，可调整或重置筛选。`, "重置", () => resetSessionFilters(kind));
-  }
-  for (const [key, groupItems] of groups) {
-    const groupRows = groupItems.map((item) => rows.get(item[identity])).filter(Boolean);
-    const expanded = !grouped || !view[layout].has(key);
-    if (grouped) {
-      const heading = document.createElement("tr");
-      heading.className = "session-group-row";
-      const label = document.createElement("th");
-      label.setAttribute("colspan", kind === "side" ? "7" : "9");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "session-group-toggle";
-      button.setAttribute("aria-expanded", String(expanded));
-      button.disabled = Boolean(state.authExpired);
-      const chevron = document.createElement("span");
-      chevron.className = "session-group-chevron";
-      chevron.setAttribute("aria-hidden", "true");
-      const title = document.createElement("span");
-      title.className = "session-group-title";
-      title.textContent = groupItems[0].projectAlias || "项目不可用";
-      const type = document.createElement("span");
-      type.className = "badge session-group-type";
-      type.hidden = layout !== "chat";
-      const count = document.createElement("span");
-      count.className = "session-group-count";
-      count.textContent = `本页 ${groupItems.length} 条`;
-      button.append(chevron, title, type, count);
-      const group = { key, items: groupItems, rows: groupRows, button, title, type };
-      view.groups.push(group);
-      button.addEventListener("click", () => setSessionGroupsExpanded(kind,
-        button.getAttribute("aria-expanded") !== "true", [group]));
-      label.append(button);
-      heading.append(label);
-      body.append(heading);
-    }
-    for (const row of groupRows) {
-      row.hidden = !expanded;
-      body.append(row);
-    }
-  }
-  window.NetizenList.labelRows(body);
-  updateSessionGroupLabels(kind);
-  updateSessionGroupControls(kind);
-  if (kind === "session") renderSessionSelection(batchActions);
-}
-
-function renderSessions(data) {
-  const query = new URLSearchParams(state.sessionPage.query || "");
-  const batchActions = sessionBatchActions(query);
-  reconcileSessionSelection(data.items, batchActions);
+function renderSessions(data, batchActions) {
+  const query = new URLSearchParams(sessionLists.session.appliedQuery() || "");
   document.querySelector("#sessions-lazy-notice").hidden = batchActions.delete?.key !== "deleteLazy";
   document.querySelector("#sessions-identity-notice").hidden = !query.has("identity");
   window.NetizenMenu.close();
@@ -2869,7 +1743,7 @@ function renderSessions(data) {
   for (const session of data.items) {
     const row = document.createElement("tr");
     row.dataset.bindingId = session.bindingId;
-    sessionSelectionCell(row, session);
+    window.NetizenSessionBatch.selectionCell(row, session);
     sessionLocationCell(row, session);
     sessionIdentityCell(row, session);
     const sessionState = document.createElement("td");
@@ -2896,233 +1770,6 @@ function renderSessions(data) {
     wireSessionActions(actions, session);
     body.append(row);
   }
-  applySessionLayout("session", batchActions);
-  observeSessionPreviews(body);
-}
-
-let conversationView = null;
-let conversationRequest = 0;
-const answerNode = (name) => document.querySelector(`#session-answer-${name}`);
-
-function releaseConversationImages(view) {
-  if (!view) return;
-  for (const url of view.imageUrls.values()) URL.revokeObjectURL(url);
-  view.imageUrls.clear();
-}
-
-function installConversationImages(view, container, turnId, images, imageUrls) {
-  const slots = new Map();
-  for (const node of container.querySelectorAll("[data-answer-image]")) {
-    const id = node.dataset.answerImage;
-    if (!slots.has(id)) slots.set(id, []);
-    slots.get(id).push(node);
-  }
-  const unavailable = (node) => node.replaceWith(document.createTextNode(
-    `〔图片：${node.getAttribute("alt") || "图片"}；图片预览不可用〕`,
-  ));
-  for (const [id, nodes] of slots) {
-    const image = Array.isArray(images) ? images.find((item) => item?.id === id) : null;
-    try {
-      if (image?.mime !== "image/png" || typeof image.data !== "string") throw new Error("Invalid answer image");
-      const decoded = atob(image.data);
-      const bytes = new Uint8Array(decoded.length);
-      for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index);
-      const url = URL.createObjectURL(new Blob([bytes], { type: image.mime }));
-      const key = `${turnId}:${id}`;
-      imageUrls.set(key, url);
-      for (const node of nodes) {
-        node.addEventListener("error", () => {
-          if (conversationView === view && view.imageUrls.get(key) === url) unavailable(node);
-        }, { once: true });
-        node.width = image.width;
-        node.height = image.height;
-        node.src = url;
-      }
-    } catch (_error) {
-      for (const node of nodes) unavailable(node);
-    }
-  }
-}
-
-function closeConversation() {
-  conversationRequest += 1;
-  const previous = conversationView;
-  conversationView = null;
-  releaseConversationImages(previous);
-  document.body.classList.toggle("session-answer-open", false);
-  answerNode("content").replaceChildren();
-  answerNode("metadata").textContent = "";
-  if (answerNode("drawer").open) answerNode("drawer").close();
-  if (!state.authExpired && previous?.returnFocus?.isConnected !== false) previous?.returnFocus?.focus();
-}
-
-async function openConversation(session) {
-  if (state.authExpired || !session.canReadLatestAnswer) return;
-  releaseConversationImages(conversationView);
-  conversationView = { session, returnFocus: document.activeElement, preview: true,
-    turns: [], cursor: null, blocked: false, pending: false, imageUrls: new Map() };
-  answerNode("title").textContent = "对话记录";
-  answerNode("identity").textContent = `${session.nativeTitle || "未命名会话"} · ${session.shortId}`;
-  answerNode("content").replaceChildren();
-  answerNode("toggle").hidden = true;
-  answerNode("earlier").hidden = true;
-  answerNode("preview-note").textContent = "";
-  answerNode("details").open = false;
-  answerNode("metadata").textContent = "";
-  document.body.classList.toggle("session-answer-open", true);
-  if (!answerNode("drawer").open) answerNode("drawer").showModal();
-  await refreshConversation();
-}
-
-function renderConversation(view) {
-  for (const turn of view.turns) {
-    turn.preview.hidden = !turn.hasPreview || !view.preview;
-    turn.source.hidden = turn.hasPreview && view.preview;
-  }
-  answerNode("toggle").hidden = !view.turns.some((turn) => turn.hasPreview);
-  answerNode("toggle").textContent = view.preview ? "查看原文" : "排版预览";
-  answerNode("toggle").setAttribute("aria-pressed", String(!view.preview));
-  answerNode("earlier").hidden = !view.cursor;
-  answerNode("earlier").disabled = view.pending || view.blocked;
-}
-
-function captureConversationPosition(view, toLatest = false) {
-  const scroll = answerNode("scroll");
-  const request = conversationRequest;
-  const bottom = toLatest || scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= 1;
-  const top = scroll.getBoundingClientRect().top;
-  const anchor = view.turns.find((turn) => turn.node.getBoundingClientRect().bottom > top)?.node;
-  const offset = anchor ? anchor.getBoundingClientRect().top - top : 0;
-  return () => {
-    if (conversationView !== view || conversationRequest !== request) return;
-    if (bottom) scroll.scrollTop = scroll.scrollHeight;
-    else if (anchor) scroll.scrollTop += anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top - offset;
-  };
-}
-
-function conversationTurn(view, result, imageUrls) {
-  const node = document.createElement("article");
-  node.className = "conversation-turn";
-  node.dataset.turnId = result.turnId;
-  node.tabIndex = -1;
-  const status = { completed: "已完成", interrupted: "已停止", failed: "失败", inProgress: "运行中" }[result.status] || "状态未知";
-  const metadata = document.createElement("p");
-  metadata.className = "conversation-turn-meta";
-  const labels = [status, `轮次 ${result.turnId.slice(0, 12)}`];
-  if (result.startedAt != null) labels.push(`开始 ${nativeSessionDateLabel(result.startedAt)}`);
-  if (result.completedAt != null) labels.push(`完成 ${nativeSessionDateLabel(result.completedAt)}`);
-  metadata.textContent = labels.join(" · ");
-  node.append(metadata);
-  for (const input of result.inputs || []) {
-    const block = document.createElement("section");
-    block.className = "conversation-input";
-    const label = document.createElement("p");
-    label.className = "conversation-input-label";
-    label.textContent = ["用户输入", input.source, input.display_name,
-      input.raw ? "格式未识别，显示原文" : null,
-      input.quoted_count ? `引用 ${input.quoted_count} 条` : null,
-      input.supplemental_count ? `补充上下文 ${input.supplemental_count} 条` : null,
-    ].filter(Boolean).join(" · ");
-    const text = document.createElement("pre");
-    text.className = "session-answer-source";
-    text.textContent = input.text;
-    block.append(label, text);
-    if (input.attachments?.length) {
-      const files = document.createElement("p");
-      files.textContent = `附件：${input.attachments.join("、")}`;
-      block.append(files);
-    }
-    node.append(block);
-  }
-  const answer = document.createElement("section");
-  answer.className = "conversation-answer";
-  const label = document.createElement("p");
-  label.textContent = result.status === "inProgress" ? "本轮运行中" : "最终回答";
-  answer.append(label);
-  const preview = document.createElement("div");
-  preview.className = "markdown-preview";
-  const source = document.createElement("pre");
-  source.className = "session-answer-source";
-  source.textContent = result.answer || (result.oversized ? "该轮内容过大，Admin 不显示" : "暂无最终回答。");
-  const hasPreview = typeof result.markdownHtml === "string";
-  window.NetizenContentPreview.renderMarkdown(preview, hasPreview ? result.markdownHtml : null);
-  installConversationImages(view, preview, result.turnId, result.images, imageUrls);
-  if (result.status !== "inProgress") answer.append(preview, source);
-  if (result.error || result.previewMessage) {
-    const note = document.createElement("p");
-    note.className = "conversation-turn-meta";
-    note.textContent = [result.error, result.previewMessage].filter(Boolean).join(" · ");
-    answer.append(note);
-  }
-  node.append(answer);
-  return { node, preview, source, hasPreview };
-}
-
-async function refreshConversation() { return loadConversation(false); }
-async function loadEarlierConversation() { return loadConversation(true); }
-
-async function loadConversation(earlier) {
-  const view = conversationView;
-  if (!view || state.authExpired || (earlier && (view.pending || view.blocked || !view.cursor))) return;
-  const request = ++conversationRequest;
-  const isCurrent = () => conversationView === view && request === conversationRequest && !state.authExpired;
-  view.pending = true;
-  renderConversation(view);
-  answerNode("refresh").disabled = true;
-  answerNode("drawer").setAttribute("aria-busy", "true");
-  answerNode("note").textContent = earlier ? "正在加载更早的对话…" : "正在读取对话记录…";
-  answerNode("note").classList.toggle("error", false);
-  try {
-    const query = new URLSearchParams({ bindingId: view.session.bindingId, threadId: view.session.nativeThreadId });
-    if (earlier) query.set("cursor", view.cursor);
-    const result = await api(`/api/v1/sessions/conversation?${query}`);
-    if (!isCurrent()) return;
-    const position = captureConversationPosition(view, !earlier);
-    const existing = new Set(earlier ? view.turns.map((turn) => turn.node.dataset.turnId) : []);
-    const staged = { imageUrls: new Map() };
-    const added = [];
-    try {
-      for (const turn of [...result.turns].reverse()) {
-        if (existing.has(turn.turnId)) continue;
-        added.push(conversationTurn(view, turn, staged.imageUrls));
-        existing.add(turn.turnId);
-      }
-    } catch (error) {
-      releaseConversationImages(staged);
-      throw error;
-    }
-    if (earlier) {
-      answerNode("content").prepend(...added.map((turn) => turn.node));
-      view.turns = [...added, ...view.turns];
-    } else {
-      answerNode("content").replaceChildren(...added.map((turn) => turn.node));
-      releaseConversationImages(view);
-      view.turns = added;
-    }
-    for (const [key, url] of staged.imageUrls) view.imageUrls.set(key, url);
-    view.cursor = result.nextCursor;
-    view.blocked = false;
-    renderConversation(view);
-    answerNode("note").textContent = view.turns.length ? `已加载 ${view.turns.length} 轮` : "会话尚无执行轮次。";
-    answerNode("preview-note").textContent = [result.pageMessage, result.previewMessage].filter(Boolean).join(" · ");
-    answerNode("metadata").textContent = `读取于 ${sessionDateLabel(result.readAt)}`;
-    if (earlier && answerNode("earlier").hidden) added[0]?.node.focus({ preventScroll: true });
-    position();
-    requestAnimationFrame(position);
-  } catch (error) {
-    if (!isCurrent()) return;
-    if (["invalid_cursor", "stale_or_conflict", "not_found"].includes(error.code)) view.blocked = true;
-    answerNode("note").textContent = `${error.message}${view.turns.length ? " 当前仍显示上次读取的快照。" : ""}`;
-    answerNode("note").classList.toggle("error", true);
-  } finally {
-    if (isCurrent()) {
-      view.pending = false;
-      renderConversation(view);
-      if (earlier && !answerNode("earlier").hidden) answerNode("earlier").focus({ preventScroll: true });
-      answerNode("refresh").disabled = false;
-      answerNode("drawer").setAttribute("aria-busy", "false");
-    }
-  }
 }
 
 function wireSessionActions(actions, session) {
@@ -3130,7 +1777,7 @@ function wireSessionActions(actions, session) {
   const secondary = document.createElement("div");
   const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
   secondary.append(schedule);
-  if (session.canReadLatestAnswer) secondary.append(actionButton("查看对话记录", () => openConversation(session)));
+  if (session.canReadLatestAnswer) secondary.append(actionButton("查看对话记录", () => window.NetizenConversation.open(session)));
   if (a.configure) {
     const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
     actions.append(button);
@@ -3152,9 +1799,8 @@ function wireSessionActions(actions, session) {
   actions.append(window.NetizenMenu.create([...secondary.children], `更多操作 · ${session.shortId}`));
 }
 
-async function loadSides(page = state.sidePage) {
-  ensureSideChatFilter();
-  return loadSessionPage("side", page, renderSides);
+async function loadSides(page) {
+  return await sessionLists.side.load(page) === "applied";
 }
 
 function renderSides(data) {
@@ -3206,20 +1852,6 @@ function renderSides(data) {
     if (side.actions.close) actions.append(actionButton("结束临时会话", async () => await window.NetizenConfirm.ask({ body: "结束此临时会话？结束后无法恢复。", danger: true }) && mutate("/api/v1/side-topics/close", side.actions.close), true));
     body.append(row);
   }
-  applySessionLayout("side");
-}
-
-function resetSideFilters() {
-  return resetSessionFilters("side");
-}
-
-async function moveSidePage(direction) {
-  return moveSessionPage(direction, "side");
-}
-
-async function moveSessionPage(direction, kind = "session") {
-  const candidate = stepCursorPage(state[`${kind}Page`], direction);
-  if (candidate) return refresh("sessions", candidate);
 }
 
 function sideStateLabel(value) {
@@ -3307,10 +1939,10 @@ async function generateSessionName() {
       if (!current?.actions.generateName || !current.actions.rename) {
         throw new Error("会话状态已变化，请关闭表单并刷新会话。");
       }
-      Object.assign(actions, { generateName: current.actions.generateName, rename: current.actions.rename });
+      sessionLists.session.updateActions(editor.session, { generateName: current.actions.generateName, rename: current.actions.rename });
     }
     const action = actions.generateName;
-    actions.generateName = null;
+    sessionLists.session.updateActions(editor.session, { generateName: null });
     const result = await api("/api/v1/sessions/generate-name", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(action)),
@@ -3336,7 +1968,7 @@ async function saveSessionName(event) {
   const name = sessionRenameInput("name").value.trim();
   if (!editor || editor.generating || editor.saving || !editor.session.actions.rename || !name || state.authExpired) return;
   const action = editor.session.actions.rename;
-  editor.session.actions.rename = null;
+  sessionLists.session.updateActions(editor.session, { rename: null });
   editor.returnFocus.disabled = true;
   editor.saving = true;
   editor.error = "";
@@ -3358,9 +1990,10 @@ async function saveSessionName(event) {
   if (sessionRenameEditor !== editor) return;
   editor.saving = false;
   closeSessionRenameEditor();
-  if (await refresh("sessions")) {
+  const refreshed = await refreshAfterMutation("sessions");
+  if (refreshed !== "failed") {
     setStatus("会话名称已保存。");
-    if (!sessionRenameEditor && state.tab === "sessions") {
+    if (refreshed === "applied" && !sessionRenameEditor && state.tab === "sessions") {
       const row = rowByIdentity("#sessions-body", "bindingId", editor.session.bindingId);
       Array.from(row?.querySelectorAll("button") || []).find((button) => button.textContent === "重命名")?.focus();
     }
@@ -3422,7 +2055,7 @@ async function loadSessionSettingsOptions() {
 
 async function openSessionSettingsEditor(session, returnFocus) {
   returnFocus = returnFocus?.menuTrigger || returnFocus;
-  if (sessionSettingsEditor?.saving || !session.actions.configure) return;
+  if (state.authExpired || sessionSettingsEditor?.saving || !session.actions.configure) return;
   if (sessionSettingsEditor && sessionSettingsHasChanges() && !(await closeSessionSettingsEditor())) return;
   if (sessionSettingsEditor) closeSessionSettingsEditor({ confirmed: true });
   const base = structuredClone(session.sessionSettings);
@@ -3445,18 +2078,20 @@ async function openSessionSettingsEditor(session, returnFocus) {
   });
 }
 
-async function closeSessionSettingsEditor({ saved = false, confirmed = false } = {}) {
+async function closeSessionSettingsEditor({ saved = false, confirmed = false, expired = false } = {}) {
   const editor = sessionSettingsEditor;
   if (!editor) return true;
-  if (editor.saving) return false;
-  if (!saved && !confirmed && (sessionSettingsHasChanges() && !(await confirmDiscardChanges(true)))) return false;
+  if (!expired && editor.saving) return false;
+  if (!expired && !saved && !confirmed && (sessionSettingsHasChanges() && !(await confirmDiscardChanges(true)))) return false;
+  editor.action = null;
+  editor.optionsSerial += 1;
   sessionSettingsEditor = null;
   sessionSettingsInput("editor").hidden = true;
   sessionSettingsInput("drawer").close();
   document.body.classList.toggle("session-settings-drawer-open", false);
   const returnFocus = editor.returnFocus?.disabled
     ? document.querySelector("#sessions [data-refresh]") : editor.returnFocus;
-  returnFocus?.focus();
+  if (!expired) returnFocus?.focus();
   return true;
 }
 
@@ -3483,7 +2118,7 @@ async function saveSessionSettings(event) {
   if (!editor || editor.loading || editor.saving || !editor.action || progressCardSettingsError(editor.settings)) return;
   const action = editor.action;
   editor.action = null;
-  editor.session.actions.configure = null;
+  sessionLists.session.updateActions(editor.session, { configure: null });
   if (editor.returnFocus) editor.returnFocus.disabled = true;
   editor.saving = true;
   renderSessionSettingsEditor();
@@ -3876,7 +2511,7 @@ async function loadDefaultOptions(resolveChat = false) {
 }
 
 async function openDefaultEditor(kind, record = null) {
-  if (defaultsBusy || defaultsNeedsRefresh || !state.defaults) return;
+  if (state.authExpired || defaultsBusy || defaultsNeedsRefresh || !state.defaults) return;
   if (defaultsEditor && defaultEditorHasChanges() && !(await closeDefaultEditor())) return;
   if (defaultsEditor) closeDefaultEditor({ confirmed: true });
   defaultsEditor = { kind, record, action: record ? record.actions.save : state.defaults[kind].actions.create,
@@ -3912,10 +2547,11 @@ async function openDefaultEditor(kind, record = null) {
   });
 }
 
-async function closeDefaultEditor({ saved = false, confirmed = false } = {}) {
-  if (defaultsBusy) return false;
-  if (!saved && !confirmed && (defaultEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
+async function closeDefaultEditor({ saved = false, confirmed = false, expired = false } = {}) {
+  if (!expired && defaultsBusy) return false;
+  if (!expired && !saved && !confirmed && (defaultEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
   chatTargetControllers.get("defaults")?.close();
+  if (defaultsEditor) { defaultsEditor.action = null; defaultsEditor.serial += 1; }
   defaultsEditor = null;
   defaultsInput("editor").hidden = true;
   defaultsInput("drawer").close();
@@ -4491,19 +3127,20 @@ function renderScheduleProjects() {
       project.enabled ? project.alias : `${project.alias}（已停用）`])], selected);
 }
 
-async function closeScheduleEditor({ saved = false, confirmed = false } = {}) {
-  if (scheduleInput("fields").disabled && !saved) return false;
-  if (!saved && !confirmed && (scheduleEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
+async function closeScheduleEditor({ saved = false, confirmed = false, expired = false } = {}) {
+  if (!expired && scheduleInput("fields").disabled && !saved) return false;
+  if (!expired && !saved && !confirmed && (scheduleEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
   const returnFocus = scheduleEditor?.returnFocus;
   scheduleEditorSerial += 1;
   chatTargetControllers.get("schedule")?.close();
   closeScheduleSessionPicker();
+  if (scheduleEditor) { scheduleEditor.action = null; scheduleEditor.optionsSerial += 1; }
   scheduleEditor = null;
   invalidateSchedulePreview();
   scheduleInput("editor").hidden = true;
   scheduleInput("drawer").close();
   document.body.classList.toggle("schedule-drawer-open", false);
-  returnFocus?.focus();
+  if (!expired) returnFocus?.focus();
   return true;
 }
 
@@ -5137,6 +3774,7 @@ async function prepareSchedule() {
 }
 
 function openScheduleEditor(plan = null, source = {}) {
+  if (state.authExpired) return;
   if (scheduleInput("fields").disabled) return;
   if (scheduleEditor) return closeScheduleEditor().then((closed) => closed && openScheduleEditor(plan, source));
   for (const field of [...scheduleFieldErrors.keys()]) clearScheduleFieldError(field);
@@ -5669,14 +4307,14 @@ async function confirmPageNavigation(route, targetIndex) {
     request: ++historyNavigation };
   // A modal confirmation yields to list reads. Keep their applied query and
   // URL together by discarding reads that straddle this navigation decision.
-  invalidateSessionListRequest();
+  window.NetizenSessionLists.invalidate();
   scheduleListSerial += 1;
   navigationConfirmations += 1;
   try {
     const allowed = await confirmDiscardEditors({ preservePageDrafts: true });
     return navigation.request === historyNavigation ? { ...navigation, allowed } : null;
   } finally {
-    invalidateSessionListRequest();
+    window.NetizenSessionLists.invalidate();
     scheduleListSerial += 1;
     navigationConfirmations -= 1;
   }
@@ -5701,7 +4339,7 @@ function pageQuery(tab, sessionTab, raw = "") {
         for (const key of ["createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange"]) query.delete(key);
         query.set("sortBy", "createdAt");
       } else if (!query.has("updatedFrom") && !query.has("updatedBefore") && query.get("updatedRange") !== "all") {
-        const range = presetTimeRange("last-3-months", new Date(), true);
+        const range = window.NetizenTimeRange.presetTimeRange("last-3-months", new Date(), true);
         query.set("updatedFrom", range.from);
         query.set("updatedRange", range.kind);
       }
@@ -5709,7 +4347,7 @@ function pageQuery(tab, sessionTab, raw = "") {
     for (const field of ["created", "updated"]) {
       const kind = query.get(`${field}Range`);
       const hasBounds = query.has(`${field}From`) || query.has(`${field}Before`);
-      const valid = Object.hasOwn(timeRangePresetLabels, kind) && (kind === "all" ? !hasBounds : hasBounds);
+      const valid = Object.hasOwn(window.NetizenTimeRange.timeRangePresetLabels, kind) && (kind === "all" ? !hasBounds : hasBounds);
       if (valid) query.set(`${field}Range`, kind);
       else query.delete(`${field}Range`);
     }
@@ -5758,7 +4396,7 @@ function currentPageUrl(tab = state.tab, sessionTab = state.sessionTab) {
   let query = "";
   if (tab === "sessions") {
     const kind = sessionTab === "temporary" ? "side" : "session";
-    query = state[`${kind}Page`].query || "";
+    query = sessionLists[kind].appliedQuery() || "";
   } else if (tab === "schedules") {
     query = new URLSearchParams(scheduleListQuery || "");
     if (scheduleListQuery !== null && !query.has("ended")) query.set("ended", "all");
@@ -5806,7 +4444,7 @@ function restoreSessionFilterControls(kind, query) {
   document.querySelector(`#${kind}-page-size`).value = query.get("pageSize");
   for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
     const field = root.dataset.timeRangeField || "created";
-    timeRangeControllers.get(root).setBounds(query.get(`${field}From`) || "", query.get(`${field}Before`) || "", query.get(`${field}Range`) || "custom");
+    window.NetizenTimeRange.controllerFor(root).setBounds(query.get(`${field}From`) || "", query.get(`${field}Before`) || "", query.get(`${field}Range`) || "custom");
   }
   if (kind === "session") {
     document.querySelector("#session-inventory-state").value = query.get("inventoryState");
@@ -5819,16 +4457,7 @@ function restorePageFilters(route) {
   const { tab, sessionTab, query } = route;
   if (tab === "sessions") {
     const kind = sessionTab === "temporary" ? "side" : "session";
-    restoreSessionFilterControls(kind, query);
-    state[`${kind}Page`] = firstSessionPage(query.toString());
-    const name = kind === "side" ? "sides" : "sessions";
-    state[name] = null;
-    state[`${kind}RefreshedAt`] = null;
-    document.querySelector(`#${name}-body`).replaceChildren();
-    applySessionLayout(kind);
-    renderAppliedSessionFilters(kind);
-    renderSessionPagination(kind);
-    renderSessionSort(kind);
+    sessionLists[kind].restore(query);
   } else if (tab === "schedules") {
     for (const [name, filter] of scheduleFilters) filter.setValues(query.getAll(name).filter((value) => value !== "all"));
     const apiQuery = new URLSearchParams(query);
@@ -5928,7 +4557,7 @@ function renderSessionTabs() {
     document.querySelector(`#sessions-${name}`).hidden = name !== state.sessionTab;
   }
   document.querySelector("#sessions-heading").textContent = state.sessionTab === "temporary" ? "临时会话" : "普通会话";
-  renderSessionFreshness();
+  sessionLists[state.sessionTab === "temporary" ? "side" : "session"].renderFreshness();
 }
 
 function selectSessionTab(name) {
@@ -5976,22 +4605,17 @@ async function selectTab(name, sessionTab = state.sessionTab || "ordinary", { pr
   window.NetizenGroupAccess?.closePickers();
   window.NetizenSessionAccess?.closePickers();
   closeScheduleDetail();
-  closeConversation();
+  dispatchPageLifecycle("leave", "views", { tab: name, sessionTab });
   state.tab = name;
   state.sessionTab = sessionTab;
-  if (name !== "sessions" || sessionTab !== "ordinary") {
-    clearSessionSelection();
-    stopSessionBatch();
-    if (sessionBatch?.phase === "confirming") window.NetizenConfirm.cancel();
-  }
-  invalidateSessionListRequest();
+  dispatchPageLifecycle("leave", "batch", { tab: name, sessionTab });
+  dispatchPageLifecycle("leave", "lists", { tab: name, sessionTab });
   state.projectListRequest = (state.projectListRequest || 0) + 1;
   scheduleListSerial += 1;
   state.refreshRequest = (state.refreshRequest || 0) + 1;
   sessionChatPicker?.close();
   sideChatPicker?.close();
   openFilter?.close();
-  openTimeRangeFilter?.cancel({ restoreFocus: false });
   renderSessionTabs();
   stopUpdatePolling();
   for (const item of document.querySelectorAll(".tab")) {
@@ -6022,46 +4646,9 @@ for (const button of document.querySelectorAll("[data-refresh]")) {
   button.addEventListener("click", () => refresh(button.dataset.refresh));
 }
 
-for (const button of document.querySelectorAll("[data-session-sort]")) {
-  button.addEventListener("click", () => sortSessionPage(button.dataset.sessionSort, button.dataset.sortBy));
-}
-
-document.querySelector("#session-select-page").addEventListener("change", (event) => {
-  if (event.target.disabled) return;
-  const actions = sessionBatchActions();
-  sessionSelection.ids.clear();
-  if (event.target.checked) for (const item of state.sessions?.items || []) {
-    if (sessionBatchSelectable(item, actions)) sessionSelection.ids.add(item.bindingId);
-  }
-  renderSessionSelection(actions);
-});
-batchNode("clear").addEventListener("click", () => {
-  if (!batchNode("clear").disabled) clearSessionSelection();
-});
-for (const operation of ["archive", "delete"]) {
-  batchNode(operation).addEventListener("click", () => runSessionBatch(operation, batchNode(operation)));
-}
-batchNode("stop").addEventListener("click", stopSessionBatch);
-batchNode("close").addEventListener("click", closeSessionBatch);
-batchNode("dialog").addEventListener("cancel", (event) => {
-  event.preventDefault();
-  closeSessionBatch();
-});
-batchNode("dialog").addEventListener("close", () => {
-  const batch = sessionBatch;
-  if (!batch || state.authExpired || batch.detached || batchNode("dialog").open) return;
-  if (batch.phase === "finished") closeSessionBatch();
-  else if (["running", "refreshing"].includes(batch.phase)) batchNode("dialog").showModal();
-});
 window.addEventListener("pagehide", () => {
-  clearSessionSelection();
-  if (!sessionBatch) return;
-  sessionBatch.detached = true;
-  stopSessionBatch();
-  window.NetizenConfirm.cancel();
-  if (batchNode("dialog").open) batchNode("dialog").close();
-  document.body.classList.toggle("session-batch-open", false);
-  if (sessionBatch.phase === "finished") sessionBatch = null;
+  dispatchPageLifecycle("pageHide");
+  dispatchPageLifecycle("pageHide", "batch");
 });
 
 projectInput("new").addEventListener("click", openProjectEditor);
@@ -6077,60 +4664,87 @@ for (const button of document.querySelectorAll("[data-project-mode]")) {
   button.addEventListener("click", () => selectProjectMode(button.dataset.projectMode));
 }
 
-answerNode("close").addEventListener("click", closeConversation);
-answerNode("drawer").addEventListener("cancel", (event) => { event.preventDefault(); closeConversation(); });
-answerNode("refresh").addEventListener("click", refreshConversation);
-answerNode("earlier").addEventListener("click", loadEarlierConversation);
-answerNode("content").addEventListener("click", (event) => {
-  const anchor = event.target.closest?.("a[data-answer-file-root]");
-  if (!anchor) return;
-  event.preventDefault();
-  if (state.authExpired) return;
-  anchor.focus(); // Safari does not focus links on click; returnFocus needs it.
-  window.NetizenPathFiles?.open({ root: anchor.dataset.answerFileRoot,
-    file: anchor.dataset.answerFileName || null, line: Number(anchor.dataset.answerFileLine) || null });
-});
-answerNode("toggle").addEventListener("click", () => {
-  if (!conversationView) return;
-  const position = captureConversationPosition(conversationView);
-  conversationView.preview = !conversationView.preview;
-  renderConversation(conversationView);
-  position();
-  requestAnimationFrame(position);
-});
-for (const control of document.querySelectorAll("[data-session-layout]")) {
-  control.addEventListener("change", () => applySessionLayout(control.dataset.sessionLayout));
+function resetSessionFilterDrafts(kind) {
+  const form = document.querySelector(`#${kind}-filter`);
+  form.reset();
+  document.querySelector(`#${kind}-page-size`).value = "20";
+  if (kind === "session") updateSessionDateFilters();
+  (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
+  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+  for (const controller of filters.values()) controller.reset();
+  for (const root of form.querySelectorAll("[data-time-range]")) {
+    window.NetizenTimeRange.controllerFor(root)?.reset();
+  }
 }
+
+function resetSessionFilterCondition(kind, key, query) {
+  // Reset only the removed field's draft. Other unsubmitted inputs stay intact.
+  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+  if (filters.has(key)) filters.get(key).reset();
+  else if (["created", "updated"].includes(key)) {
+    const root = [...document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")]
+      .find((root) => (root.dataset.timeRangeField || "created") === key);
+    window.NetizenTimeRange.controllerFor(root).setBounds(query.get(`${key}From`) || "", query.get(`${key}Before`) || "", query.get(`${key}Range`) || "all");
+  } else if (key === "chatId") {
+    (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
+    document.querySelector(`#${kind}-chat-filter`).value = "";
+  } else if (key === "searchTerm") document.querySelector("#session-search").value = "";
+  else if (key === "inventoryState") {
+    document.querySelector("#session-inventory-state").value = "active";
+    updateSessionDateFilters();
+  }
+}
+
+const sessionLists = window.NetizenSessionLists.init({
+  api, isExpired: () => state.authExpired,
+  isVisible: (kind) => state.tab === "sessions" && state.sessionTab === (kind === "side" ? "temporary" : "ordinary"),
+  navigate: (page) => refresh("sessions", page), onApplied: syncPageUrl,
+  renderFreshness: () => sessionLists[state.sessionTab === "temporary" ? "side" : "session"].renderFreshness(),
+  firstSessionPage, stepCursorPage, catalogStateLabel, sideStateLabel,
+  updateSessionLocationCell, shortIdentity, chatModeLabel,
+  list: window.NetizenList, timeRange: window.NetizenTimeRange,
+  ...Object.fromEntries(["session", "side"].map((kind) => [kind, {
+    endpoint: kind === "side" ? "/api/v1/side-topics" : "/api/v1/sessions",
+    ensureChatFilter: kind === "side" ? ensureSideChatFilter : ensureSessionChatFilter,
+    draftQuery: () => formQuery(document.querySelector(`#${kind}-filter`), "20"),
+    defaultQuery: () => pageQuery("sessions", kind === "side" ? "temporary" : "ordinary"),
+    loadProjectOptions: (isCurrent) => loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent),
+    resetDrafts: () => resetSessionFilterDrafts(kind),
+    resetCondition: (key, query) => resetSessionFilterCondition(kind, key, query),
+    restoreControls: (query) => restoreSessionFilterControls(kind, query),
+    render: kind === "side" ? renderSides : renderSessions,
+    ...(kind === "session" ? {
+      beforeRender: (items) => window.NetizenSessionBatch.beforeRender(items),
+      onLayout: (actions) => window.NetizenSessionBatch.onLayout(actions),
+      afterRender: () => observeSessionPreviews(document.querySelector("#sessions-body")),
+    } : {}),
+  }])),
+});
+
+window.NetizenSessionBatch.init({
+  list: sessionLists.session, api, actionPayload, setStatus,
+  isExpired: () => state.authExpired,
+  isVisible: () => state.tab === "sessions" && state.sessionTab === "ordinary",
+  sessionName, runtimeLabel, locationFallback, materializedDeleteWarning,
+});
+
+window.NetizenConversation.init({
+  api, isExpired: () => state.authExpired, nativeSessionDateLabel, sessionDateLabel,
+  openPathFiles: (target) => window.NetizenPathFiles?.open(target),
+});
 for (const kind of ["session", "side"]) {
-  document.querySelector(`#${kind}-groups-expand`).addEventListener("click", () => setSessionGroupsExpanded(kind, true));
-  document.querySelector(`#${kind}-groups-collapse`).addEventListener("click", () => setSessionGroupsExpanded(kind, false));
   const trigger = document.querySelector(`#${kind}-more-filters`);
   const advanced = document.querySelector(`#${kind}-advanced-filters`);
   trigger.addEventListener("click", () => {
     advanced.hidden = !advanced.hidden;
     trigger.setAttribute("aria-expanded", String(!advanced.hidden));
     if (advanced.hidden) {
-      openFilter?.close(); openTimeRangeFilter?.cancel({ restoreFocus: false });
+      openFilter?.close(); window.NetizenTimeRange.cancelOpen();
     }
   });
 }
 
 document.querySelector("#session-inventory-state").addEventListener("change", updateSessionDateFilters);
-document.querySelector("#session-filter").addEventListener("submit", (event) => {
-  event.preventDefault();
-  refresh("sessions", sessionFilterPage());
-});
-document.querySelector("#session-filter-reset").addEventListener("click", () => resetSessionFilters());
-document.querySelector("#session-page-size").addEventListener("change", () => {
-  resizeSessionPage("session");
-});
-document.querySelector("#side-filter").addEventListener("submit", (event) => {
-  event.preventDefault(); refresh("sessions", sessionFilterPage("side"));
-});
-document.querySelector("#side-filter-reset").addEventListener("click", resetSideFilters);
-document.querySelector("#side-page-size").addEventListener("change", () => {
-  resizeSessionPage("side");
-});
 document.querySelector("#projects-previous").addEventListener("click", () => moveListPage("projects", "previous"));
 document.querySelector("#projects-next").addEventListener("click", () => moveListPage("projects", "next"));
 window.NetizenWorktrees?.init({ api, actionPayload, setStatus, queryProjectOptions, isExpired: () => state.authExpired });
@@ -6139,10 +4753,6 @@ window.NetizenProjectFiles?.init({ browser: fileBrowser });
 window.NetizenAttachmentFiles?.init({ browser: fileBrowser, api, isExpired: () => state.authExpired });
 window.NetizenPathFiles?.init({ browser: fileBrowser });
 document.querySelector("#attachment-files-open")?.addEventListener("click", () => window.NetizenAttachmentFiles?.open());
-document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
-document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
-document.querySelector("#sides-previous").addEventListener("click", () => moveSidePage("previous"));
-document.querySelector("#sides-next").addEventListener("click", () => moveSidePage("next"));
 sessionSettingsInput("cancel").addEventListener("click", closeSessionSettingsEditor);
 sessionRenameInput("cancel").addEventListener("click", closeSessionRenameEditor);
 projectDeleteInput("cancel").addEventListener("click", () => closeProjectDeleteDialog());

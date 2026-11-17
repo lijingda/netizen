@@ -2823,6 +2823,7 @@ Project、普通会话和临时会话都使用服务端 cursor，不计算精确
 状态单选“未归档”（`active`，默认）、“已归档”（`archived`）或“未开始”（`lazy`）；current 仍为独立的当前／非当前条件。
 Project、Scope 和 current 保留多选，同项取“或”、不同项取“且”。Project 是可搜索下拉，
 通过独立分页 options 查询包含已停用的全部未删除 Project，不读取 native archived aggregate。
+选项与会话页并行读取，选项失败只在控件处提示，不影响会话列表。
 会话页面不提供原始 ID 筛选输入框，API 保留精确 chat/topic/Binding/native ID 条件。
 完整 ID 收入可复制的“会话标识”折叠区，不改变身份或操作授权。来源会话／定时触发记录
 的精确 ID 链接不限时间，默认查询 Active；用户可切换“已归档”或“未开始”查找该 ID，
@@ -3127,6 +3128,11 @@ ADR 0037/0049/0078 的 delete primitive，由原生返回决定结果。
 继续使用既有 `delete-lazy` 二次确认，Side 不获得 materialized delete action。
 Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume，
 也不注册任意筛选结果或服务端批量的 native mutation route。
+
+列表或详情响应先读完本次事实并登记待返回的 action，再在同一授权临界区整批签发。
+整批校验 action kind、typed payload 和全局／当前 session 剩余容量，全部通过才写入授权表；
+容量不足仍返回 `503 action_capacity`，不留下未交付的半页授权。单项签发复用同一入口，
+已有容量上限、十分钟 TTL、session 绑定和一次性兑换语义不变。
 
 [ADR 0100](adr/0100-batch-archive-and-delete-selected-admin-sessions.md) 只开放普通会话当前页
 显式勾选的批量归档与删除，每页最多 100 条；未归档页提供归档和 materialized 删除，

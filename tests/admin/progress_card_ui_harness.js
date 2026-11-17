@@ -1,7 +1,6 @@
 let confirm = true;
 window.location = { pathname: "/projects", search: "", assign() {} };
 confirmResponder = () => confirm;
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 let nextTimer = 0;
 const timers = new Map();
 function setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; }
@@ -24,6 +23,9 @@ function deferred() {
 }
 const response = (data, status = 200) => ({ status, ok: status >= 200 && status < 300, json: async () => data });
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   if (path === "/api/v1/projects") return response({ items: [], nextCursor: null });
   assert.equal(path, "/api/v1/progress-card/settings");
   requests.push({ path, options });

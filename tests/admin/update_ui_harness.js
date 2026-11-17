@@ -3,7 +3,6 @@ let confirmation = true;
 const confirmations = [];
 window.location = { pathname: "/maintenance", search: "", assign(value) { redirected = value; } };
 confirmResponder = (message) => { confirmations.push(message); return confirmation; };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 let now = 1000;
 Date.now = () => now;
@@ -23,6 +22,9 @@ const diagnostics = {
 };
 let diagnosticsAnswer = async () => response(diagnostics);
 async function fetch(path, options) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   requests.push({ path, options });
   if (path === "/api/v1/instance-diagnostics") return diagnosticsAnswer();
   return answer(path, options);

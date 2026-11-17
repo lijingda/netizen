@@ -10,6 +10,7 @@ class ProjectFilesUiTest(unittest.TestCase):
         before, after = read_fixture("project_files_ui_harness.js", "// SHIPPED_PROJECT_FILES\n")
         if name != "project_files_ui_harness.js":
             _, after = read_fixture(name)
+        # Isolate the shared browser/providers with injected API and editor fakes.
         script = harness_source(
             "index.html",
             ("content-preview.js", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js"),

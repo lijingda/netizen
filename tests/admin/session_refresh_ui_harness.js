@@ -6,7 +6,7 @@
     ["ordinary", "session", "/api/v1/sessions", "sessions"],
     ["temporary", "side", "/api/v1/side-topics", "sides"],
   ]) {
-    ordinary.actions = { stop: grant("ordinary-stop") };
+    ordinary.actions = { stop: ordinaryGrant("stop", "ordinary-stop") };
     let row = structuredClone(kind === "side" ? side : ordinary);
     const answer = async () => ({ items: [structuredClone(row)], nextCursor: null });
     if (kind === "side") sideAnswer = answer;
@@ -33,13 +33,14 @@
       assert(applied.get("updatedFrom"));
       assert(!applied.has("updatedBefore"), "refresh must include updates made after the first page load");
     }
-    assert.equal(state[`${kind}RefreshedAt`], Date.now());
+    assert.equal(sessionLists[kind].snapshot().refreshedAt, Date.now());
     assert(!requests.some((request) => request.path === "/api/v1/runtime-snapshots"));
 
     // Actions retain their exact grants and refresh even if the server rejects
     // one because facts changed since the last explicit list read.
     for (const failure of [false, true]) {
       actionFailure = failure;
+      actionMessage = `服务端确认 ${kind} <b>已停止</b>`;
       const readsBefore = requests.filter((request) => request.path === endpoint).length;
       const stop = body.querySelectorAll("button").find((button) => button.textContent === "停止");
       assert(stop);
@@ -55,11 +56,52 @@
       const action = requests.findLast((request) => request.path.endsWith("/stop"));
       assert.equal(action.options.method, "POST");
       assert.equal(JSON.parse(action.options.body).actionToken, kind === "side" ? "stop" : "ordinary-stop");
+      assert.deepEqual(JSON.parse(action.options.body), fixtureActionPayload(row.actions.stop));
+      if (!failure) {
+        assert.equal(statusNode.textContent, actionMessage, "the mutation displays the server's result message");
+        assert.equal(statusNode.querySelector("b"), null);
+      }
       assert.equal(requests.filter((request) => request.path === endpoint).length, readsBefore + 1);
-      assert.equal(state[dataKey].items[0].runtime[kind === "side" ? "turnState" : "primaryStatus"], failure ? "idle" : "running");
-      assert.equal(state[`${kind}RefreshedAt`], Date.now());
+      assert.equal(sessionLists[kind].snapshot().items[0].runtime[kind === "side" ? "turnState" : "primaryStatus"], failure ? "idle" : "running");
+      assert.equal(sessionLists[kind].snapshot().refreshedAt, Date.now());
     }
     actionFailure = false;
+    actionMessage = "操作完成";
+
+    // Mutation success belongs to the POST; a superseding read owns its error.
+    for (const newerFails of [false, true]) {
+      const stale = deferred();
+      const newest = deferred();
+      const setAnswer = (callback) => { if (kind === "side") sideAnswer = callback; else ordinaryAnswer = callback; };
+      setAnswer(() => stale.promise);
+      const mutation = mutate(`${endpoint}/stop`, row.actions.stop);
+      await flush();
+      setAnswer(() => newest.promise);
+      const replacement = refresh("sessions");
+      await flush();
+      // A late failure of the replaced read is also supersession, not failure.
+      if (newerFails) stale.reject(new Error("obsolete read failed"));
+      else stale.resolve({ items: [structuredClone(row)], nextCursor: null });
+      await mutation;
+      assert.equal(statusNode.textContent, "操作完成");
+      assert(!statusNode.className.split(" ").includes("error"));
+      if (newerFails) newest.reject(new Error("newest read failed"));
+      else newest.resolve({ items: [structuredClone(row)], nextCursor: null });
+      assert.equal(await replacement, !newerFails, "refresh retains its boolean contract");
+      assert.equal(statusNode.textContent, "操作完成");
+      const readError = document.querySelector(kind === "side" ? "#sides-error" : "#sessions-error");
+      if (newerFails) assert.match(readError.textContent, /newest read failed/);
+      else assert.equal(readError.hidden, true);
+    }
+    const actualFailure = async () => { throw new Error("actual read failed"); };
+    if (kind === "side") sideAnswer = actualFailure;
+    else ordinaryAnswer = actualFailure;
+    await mutate(`${endpoint}/stop`, row.actions.stop);
+    assert.match(statusNode.textContent, /操作完成.*列表刷新失败/);
+    assert.equal(await refresh("sessions"), false);
+    if (kind === "side") sideAnswer = answer;
+    else ordinaryAnswer = answer;
+    await refresh("sessions");
 
     // Failed reads retain both the visible facts and their freshness, and do
     // not schedule retry requests. A later manual refresh recovers immediately.
@@ -87,6 +129,21 @@
   // One-shot list reads still render unavailable/archived/local runtime facts
   // faithfully; removing polling must never turn missing knowledge into idle.
   await selectSessionTab("ordinary");
+  for (const [pointerState, pointerLabel] of [["current", "当前"], ["inactive", "非当前"]]) {
+    ordinaryAnswer = async () => ({ items: [{ ...ordinary, pointerState, catalogState: "active",
+      nativeState: "archived", nativeTitle: "<script>untrusted title</script>",
+      runtime: { primaryStatus: "idle", primaryStatusResolution: "local", subscriptionState: "subscribed",
+        turn: { state: "running" }, goal: { status: "active" } } }], nextCursor: null });
+    await refresh("sessions");
+    const body = document.querySelector("#sessions-body");
+    assert(body.querySelectorAll(".badge").some((node) => node.textContent === pointerLabel));
+    assert(body.querySelectorAll(".badge").some((node) => node.textContent === "未归档"), "catalogState owns inventory presentation");
+    assert(!body.querySelectorAll(".badge").some((node) => node.textContent === "已归档"), "legacy nativeState is ignored");
+    assert.equal(body.querySelector(".runtime-primary").textContent, "空闲", "legacy turn/goal objects cannot override primaryStatus");
+    assert(body.querySelector(".runtime-subscription").textContent.includes("已订阅"));
+    assert(body.textContent.includes("<script>untrusted title</script>"));
+    assert.equal(body.querySelector("script"), null, "untrusted row text stays inert");
+  }
   for (const [catalogState, resolution, primaryStatus, label] of [
     ["active", "unavailable", null, "状态暂不可用"],
     ["active", "deferred", null, "状态待确认"],

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from tests.admin.ui_harness import CONFIG_SCRIPTS, harness_source, read_fixture, run_harness
+from tests.admin.ui_harness import harness_source, read_fixture, run_harness
 
 
 class NavigationUiTest(unittest.TestCase):
@@ -12,8 +12,7 @@ class NavigationUiTest(unittest.TestCase):
         common, _ = read_fixture("side_sessions_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
         script = harness_source(
             "index.html",
-            ("chat-picker.js", "identity.js", *CONFIG_SCRIPTS, "worktrees.js",
-             "session-access.js", "group-access.js", "progress-card.js", "question-notifications.js", "admin.js"),
+            None,
             common + before, after,
         )
         for page in ("ordinary", "schedules"):
@@ -37,8 +36,7 @@ class NavigationUiTest(unittest.TestCase):
         before = common + before
         script = harness_source(
             "index.html",
-            ("chat-picker.js", "identity.js", *CONFIG_SCRIPTS, "worktrees.js",
-             "session-access.js", "group-access.js", "progress-card.js", "question-notifications.js", "admin.js"),
+            None,
             before, after,
         )
         cases = [(url, None) for url in (

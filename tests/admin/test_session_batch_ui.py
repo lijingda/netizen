@@ -11,7 +11,7 @@ class SessionBatchUiTest(unittest.TestCase):
         before, after = read_fixture("session_batch_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
         common, _ = read_fixture("side_sessions_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
         script = harness_source(
-            "index.html", ("chat-picker.js", "content-preview.js", "admin.js"), common + before, after,
+            "index.html", None, common + before, after,
         )
         script = f"const initialSearch = ''; const scenario = {json.dumps(scenario)};\n" + script
         result = run_harness(self, script, timeout=15)
