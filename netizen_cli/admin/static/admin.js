@@ -79,6 +79,10 @@ function expireAdminSession() {
   window.NetizenSelect?.close();
   // Release these modal drawers so the page's login link remains reachable.
   closeNavigationMenu();
+  closeSessionSettingsEditor({ expired: true });
+  closeDefaultEditor({ expired: true });
+  closeScheduleEditor({ expired: true });
+  closeScheduleDetail();
   // Inputs stay in memory, but expired actions can never be submitted again.
   for (const dialog of document.querySelectorAll("#project-drawer, #worktree-create-drawer, #worktree-settings-drawer")) {
     if (dialog.open) dialog.close();
@@ -396,8 +400,8 @@ async function mutate(path, envelope, extra = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(envelope, extra)),
     });
-    const refreshed = await refresh(state.tab);
-    if (refreshed) {
+    const refreshed = await refreshAfterMutation(state.tab);
+    if (refreshed !== "failed") {
       setStatus(result?.message || "操作完成。");
     } else {
       setStatus(`${result?.message || "操作完成。"} 列表刷新失败，请手动刷新核对。`, true);
@@ -2411,7 +2415,9 @@ async function loadSessionChatLabels(kind, data, page, request) {
   }
 }
 
-async function loadSessionPage(kind, page, render) {
+// Detailed outcomes are for callers that must distinguish supersession from failure.
+// The public list/refresh wrappers retain their boolean success contract.
+async function loadSessionPageResult(kind, page, render) {
   invalidateSessionListRequest();
   const request = state.sessionListRequest;
   const isCurrent = () => request === state.sessionListRequest;
@@ -2424,11 +2430,11 @@ async function loadSessionPage(kind, page, render) {
     if (!query.has("sortDirection")) query.set("sortDirection", "desc");
     const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
     await loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent);
-    if (!isCurrent()) return false;
+    if (!isCurrent()) return "superseded";
     for (const field of ["created", "updated"]) query.delete(`${field}Range`);
     if (page.cursor) query.set("cursor", page.cursor);
     const data = await api(`/api/v1/${kind === "side" ? "side-topics" : "sessions"}?${query}`);
-    if (!isCurrent()) return false;
+    if (!isCurrent()) return "superseded";
     // Rows and their applied query/cursor stack are one successful result.
     // Draft edits made while awaiting the response remain in the form.
     state[name] = data;
@@ -2446,16 +2452,34 @@ async function loadSessionPage(kind, page, render) {
     syncPageUrl();
     window.NetizenList.error(name, "");
     void loadSessionChatLabels(kind, data, state[`${kind}Page`], request);
-    return true;
+    return "applied";
   } catch (error) {
     if (isCurrent() && !state.authExpired) window.NetizenList.error(name, error.message + (state[name] ? " 当前仍显示上次成功读取的结果。" : ""), () => loadSessionPage(kind, page, render));
-    return false;
+    return isCurrent() ? "failed" : "superseded";
   }
 }
 
-async function loadSessions(page = state.sessionPage) {
+async function loadSessionPage(kind, page, render) {
+  return await loadSessionPageResult(kind, page, render) === "applied";
+}
+
+async function loadSessionsResult(page = state.sessionPage) {
   ensureSessionChatFilter();
-  return loadSessionPage("session", page, renderSessions);
+  return loadSessionPageResult("session", page, renderSessions);
+}
+
+async function loadSessions(page = state.sessionPage) {
+  return await loadSessionsResult(page) === "applied";
+}
+
+async function refreshAfterMutation(tab) {
+  if (state.authExpired) return "failed";
+  if (tab === "sessions") {
+    if (state.sessionTab !== "temporary") return loadSessionsResult();
+    ensureSideChatFilter();
+    return loadSessionPageResult("side", state.sidePage, renderSides);
+  }
+  return await refresh(tab) ? "applied" : "failed";
 }
 
 // Selection belongs only to the successfully applied page, never to a filter draft.
@@ -2654,15 +2678,13 @@ async function runSessionBatch(operation, trigger) {
   renderSessionSelection();
   let confirmationCancelled = false;
   try {
-    const refreshing = loadSessions(page);
-    const request = state.sessionListRequest;
-    const refreshed = await refreshing;
+    const refreshed = await loadSessionsResult(page);
     if (state.authExpired || batch.detached) return;
-    if (request !== state.sessionListRequest || !isCurrentPage() || batch.stopped) {
+    if (refreshed === "superseded" || !isCurrentPage() || batch.stopped) {
       setStatus("列表已变化，批量操作未执行。", true);
       return;
     }
-    if (!refreshed) {
+    if (refreshed === "failed") {
       setStatus("刷新当前页失败，未执行任何操作。", true);
       return;
     }
@@ -2719,10 +2741,8 @@ async function runSessionBatch(operation, trigger) {
     renderSessionBatch(batch);
     if (batch.detached) return;
     if (isCurrentPage()) {
-      const refreshing = loadSessions(state.sessionPage);
-      const request = state.sessionListRequest;
-      const refreshed = await refreshing;
-      batch.refreshFailed = request === state.sessionListRequest && isCurrentPage() && !refreshed;
+      const refreshed = await loadSessionsResult(state.sessionPage);
+      batch.refreshFailed = isCurrentPage() && refreshed === "failed";
     }
     if (state.authExpired || batch.detached) return;
     batch.phase = "finished";
@@ -3358,9 +3378,10 @@ async function saveSessionName(event) {
   if (sessionRenameEditor !== editor) return;
   editor.saving = false;
   closeSessionRenameEditor();
-  if (await refresh("sessions")) {
+  const refreshed = await refreshAfterMutation("sessions");
+  if (refreshed !== "failed") {
     setStatus("会话名称已保存。");
-    if (!sessionRenameEditor && state.tab === "sessions") {
+    if (refreshed === "applied" && !sessionRenameEditor && state.tab === "sessions") {
       const row = rowByIdentity("#sessions-body", "bindingId", editor.session.bindingId);
       Array.from(row?.querySelectorAll("button") || []).find((button) => button.textContent === "重命名")?.focus();
     }
@@ -3422,7 +3443,7 @@ async function loadSessionSettingsOptions() {
 
 async function openSessionSettingsEditor(session, returnFocus) {
   returnFocus = returnFocus?.menuTrigger || returnFocus;
-  if (sessionSettingsEditor?.saving || !session.actions.configure) return;
+  if (state.authExpired || sessionSettingsEditor?.saving || !session.actions.configure) return;
   if (sessionSettingsEditor && sessionSettingsHasChanges() && !(await closeSessionSettingsEditor())) return;
   if (sessionSettingsEditor) closeSessionSettingsEditor({ confirmed: true });
   const base = structuredClone(session.sessionSettings);
@@ -3445,18 +3466,20 @@ async function openSessionSettingsEditor(session, returnFocus) {
   });
 }
 
-async function closeSessionSettingsEditor({ saved = false, confirmed = false } = {}) {
+async function closeSessionSettingsEditor({ saved = false, confirmed = false, expired = false } = {}) {
   const editor = sessionSettingsEditor;
   if (!editor) return true;
-  if (editor.saving) return false;
-  if (!saved && !confirmed && (sessionSettingsHasChanges() && !(await confirmDiscardChanges(true)))) return false;
+  if (!expired && editor.saving) return false;
+  if (!expired && !saved && !confirmed && (sessionSettingsHasChanges() && !(await confirmDiscardChanges(true)))) return false;
+  editor.action = null;
+  editor.optionsSerial += 1;
   sessionSettingsEditor = null;
   sessionSettingsInput("editor").hidden = true;
   sessionSettingsInput("drawer").close();
   document.body.classList.toggle("session-settings-drawer-open", false);
   const returnFocus = editor.returnFocus?.disabled
     ? document.querySelector("#sessions [data-refresh]") : editor.returnFocus;
-  returnFocus?.focus();
+  if (!expired) returnFocus?.focus();
   return true;
 }
 
@@ -3876,7 +3899,7 @@ async function loadDefaultOptions(resolveChat = false) {
 }
 
 async function openDefaultEditor(kind, record = null) {
-  if (defaultsBusy || defaultsNeedsRefresh || !state.defaults) return;
+  if (state.authExpired || defaultsBusy || defaultsNeedsRefresh || !state.defaults) return;
   if (defaultsEditor && defaultEditorHasChanges() && !(await closeDefaultEditor())) return;
   if (defaultsEditor) closeDefaultEditor({ confirmed: true });
   defaultsEditor = { kind, record, action: record ? record.actions.save : state.defaults[kind].actions.create,
@@ -3912,10 +3935,11 @@ async function openDefaultEditor(kind, record = null) {
   });
 }
 
-async function closeDefaultEditor({ saved = false, confirmed = false } = {}) {
-  if (defaultsBusy) return false;
-  if (!saved && !confirmed && (defaultEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
+async function closeDefaultEditor({ saved = false, confirmed = false, expired = false } = {}) {
+  if (!expired && defaultsBusy) return false;
+  if (!expired && !saved && !confirmed && (defaultEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
   chatTargetControllers.get("defaults")?.close();
+  if (defaultsEditor) { defaultsEditor.action = null; defaultsEditor.serial += 1; }
   defaultsEditor = null;
   defaultsInput("editor").hidden = true;
   defaultsInput("drawer").close();
@@ -4491,19 +4515,20 @@ function renderScheduleProjects() {
       project.enabled ? project.alias : `${project.alias}（已停用）`])], selected);
 }
 
-async function closeScheduleEditor({ saved = false, confirmed = false } = {}) {
-  if (scheduleInput("fields").disabled && !saved) return false;
-  if (!saved && !confirmed && (scheduleEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
+async function closeScheduleEditor({ saved = false, confirmed = false, expired = false } = {}) {
+  if (!expired && scheduleInput("fields").disabled && !saved) return false;
+  if (!expired && !saved && !confirmed && (scheduleEditorHasChanges() && !(await confirmDiscardChanges(true)))) return false;
   const returnFocus = scheduleEditor?.returnFocus;
   scheduleEditorSerial += 1;
   chatTargetControllers.get("schedule")?.close();
   closeScheduleSessionPicker();
+  if (scheduleEditor) { scheduleEditor.action = null; scheduleEditor.optionsSerial += 1; }
   scheduleEditor = null;
   invalidateSchedulePreview();
   scheduleInput("editor").hidden = true;
   scheduleInput("drawer").close();
   document.body.classList.toggle("schedule-drawer-open", false);
-  returnFocus?.focus();
+  if (!expired) returnFocus?.focus();
   return true;
 }
 
@@ -5137,6 +5162,7 @@ async function prepareSchedule() {
 }
 
 function openScheduleEditor(plan = null, source = {}) {
+  if (state.authExpired) return;
   if (scheduleInput("fields").disabled) return;
   if (scheduleEditor) return closeScheduleEditor().then((closed) => closed && openScheduleEditor(plan, source));
   for (const field of [...scheduleFieldErrors.keys()]) clearScheduleFieldError(field);

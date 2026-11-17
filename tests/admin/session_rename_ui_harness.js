@@ -12,6 +12,8 @@ const expiredTokens = new Set();
 let serial = 0;
 let generateGate = null;
 let saveGate = null;
+let listGate = null;
+let listFailure = false;
 let generateFailure = false;
 let saveFailure = false;
 let changedTarget = false;
@@ -57,6 +59,8 @@ async function fetch(path, options = {}) {
         assert(path.startsWith("/api/v1/sessions?"), "Unexpected GET: " + path);
         serial += 1;
         data = { items: [fixtureSession()], nextCursor: null };
+        if (listFailure) throw new Error("list read failed");
+        if (listGate) data = await paused(listGate, data);
       }
     }
     return { ok: true, status: 200, json: async () => data };
@@ -77,6 +81,30 @@ function open() {
 function change(value) { field("name").value = value; field("name").dispatch("input"); }
 function submit() { assert(field("editor").dispatch("submit").prevented); }
 const cases = {
+  async superseded_refresh() {
+    for (const newerFails of [false, true]) {
+      listGate = null; listFailure = false;
+      await loadSessions();
+      open(); change("saved name");
+      const obsolete = listGate = {};
+      submit(); await flush();
+      assert(obsolete.resolve, "save must start a list refresh");
+      const newest = listGate = {};
+      const replacement = refresh("sessions"); await flush();
+      obsolete.resolve(); await flush();
+      assert.equal(statusNode.textContent, "会话名称已保存。");
+      if (newerFails) newest.reject("replacement failed"); else newest.resolve();
+      assert.equal(await replacement, !newerFails);
+      assert.equal(statusNode.textContent, "会话名称已保存。");
+      if (newerFails) assert.match(document.querySelector("#sessions-error").textContent, /replacement failed/);
+    }
+  },
+  async refresh_failure() {
+    open(); change("saved name"); listFailure = true;
+    submit(); await flush();
+    assert.match(statusNode.textContent, /会话名称已保存.*列表刷新失败/);
+    assert.match(document.querySelector("#sessions-error").textContent, /list read failed/);
+  },
   async generate_edit_save() {
     const page = structuredClone(state.sessionPage);
     open();

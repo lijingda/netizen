@@ -13,7 +13,7 @@ class SessionRenameUiTest(unittest.TestCase):
         )
         for case in ("generate_edit_save", "failure_and_retry", "expired_grants_refresh_together",
                      "close_and_late_response", "save_failure", "expired_and_changed_target",
-                     "navigation_closes_generation"):
+                     "navigation_closes_generation", "superseded_refresh", "refresh_failure"):
             with self.subTest(case=case):
                 result = run_harness(
                     self, script, timeout=10, args=("-", case),

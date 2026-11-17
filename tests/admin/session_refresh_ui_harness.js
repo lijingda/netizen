@@ -61,6 +61,41 @@
     }
     actionFailure = false;
 
+    // Mutation success belongs to the POST; a superseding read owns its error.
+    for (const newerFails of [false, true]) {
+      const stale = deferred();
+      const newest = deferred();
+      const setAnswer = (callback) => { if (kind === "side") sideAnswer = callback; else ordinaryAnswer = callback; };
+      setAnswer(() => stale.promise);
+      const mutation = mutate(`${endpoint}/stop`, grant("stop"));
+      await flush();
+      setAnswer(() => newest.promise);
+      const replacement = refresh("sessions");
+      await flush();
+      // A late failure of the replaced read is also supersession, not failure.
+      if (newerFails) stale.reject(new Error("obsolete read failed"));
+      else stale.resolve({ items: [structuredClone(row)], nextCursor: null });
+      await mutation;
+      assert.equal(statusNode.textContent, "操作完成");
+      assert(!statusNode.className.split(" ").includes("error"));
+      if (newerFails) newest.reject(new Error("newest read failed"));
+      else newest.resolve({ items: [structuredClone(row)], nextCursor: null });
+      assert.equal(await replacement, !newerFails, "refresh retains its boolean contract");
+      assert.equal(statusNode.textContent, "操作完成");
+      const readError = document.querySelector(kind === "side" ? "#sides-error" : "#sessions-error");
+      if (newerFails) assert.match(readError.textContent, /newest read failed/);
+      else assert.equal(readError.hidden, true);
+    }
+    const actualFailure = async () => { throw new Error("actual read failed"); };
+    if (kind === "side") sideAnswer = actualFailure;
+    else ordinaryAnswer = actualFailure;
+    await mutate(`${endpoint}/stop`, grant("stop"));
+    assert.match(statusNode.textContent, /操作完成.*列表刷新失败/);
+    assert.equal(await refresh("sessions"), false);
+    if (kind === "side") sideAnswer = answer;
+    else ordinaryAnswer = answer;
+    await refresh("sessions");
+
     // Failed reads retain both the visible facts and their freshness, and do
     // not schedule retry requests. A later manual refresh recovers immediately.
     const visible = body.textContent;
