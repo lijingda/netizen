@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-09-16
 amends: 0011, 0015, 0029, 0039, 0055
+amended_by: 0099
 ---
 
 # 统一卡片与转发材料的输入投影

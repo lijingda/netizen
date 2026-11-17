@@ -13,6 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
+from ..card_content import PreparedCardContent, request_locale
 from ..domain import FeishuScope, MessageContextAnchor, ScopeKind
 from ..attachments import AttachmentStore, PreparedAttachments
 from ..file_inputs import FileInputError, FileInputPreparer, file_references, render_file_attachments
@@ -152,13 +153,14 @@ class MessageInputPreparer:
         self._validate_anchor_material(current, quoted_target_id, current_images)
         if isinstance(current, (ScheduledInputProjection, CardAnswerProjection)):
             return PreparedInput(native_input=render_plain_prompt(current))
+        locale = request_locale(source_message)
 
         try:
-            current_fallback = await self._prepare_message_content(
-                source_message, source="current",
+            current_card = await self._prepare_message_content(
+                source_message, source="current", preferred_locale=locale,
             )
             quoted = None
-            fallback_text = None
+            prepared_card = None
             quoted_images: tuple[ImageReference, ...] = ()
             if quoted_target_id is not None:
                 async with asyncio.timeout(_QUOTE_FETCH_TIMEOUT_SECONDS):
@@ -180,8 +182,8 @@ class MessageInputPreparer:
                     source="quoted_message",
                 )
 
-                fallback_text = await self._prepare_message_content(
-                    quoted, source="quoted",
+                prepared_card = await self._prepare_message_content(
+                    quoted, source="quoted", preferred_locale=locale,
                 )
 
             image_references_to_prepare = quoted_images + current_images
@@ -198,7 +200,8 @@ class MessageInputPreparer:
             rendered_current = self._render_current_content(
                 source_message,
                 current,
-                fallback_text=current_fallback,
+                prepared_card=current_card,
+                preferred_locale=locale,
                 images=prepared_images,
                 image_prompt_refs=prompt_image_refs,
             )
@@ -208,7 +211,8 @@ class MessageInputPreparer:
                 prompt_text = compose_quoted_prompt(
                     quoted,
                     rendered_current,
-                    interactive_fallback_text=fallback_text,
+                    prepared_card=prepared_card,
+                    preferred_locale=locale,
                     read_image_keys=quoted_read_keys,
                     image_prompt_refs=prompt_image_refs,
                 )
@@ -256,6 +260,7 @@ class MessageInputPreparer:
         """Prepare a bounded history window and return its exact upper anchor."""
 
         self._validate_anchor_material(current, quoted_target_id, current_images)
+        locale = request_locale(source_message) if isinstance(current, CurrentMessageProjection) else None
         if isinstance(current, (ScheduledInputProjection, CardAnswerProjection)) and upper_id != current.message_id:
             raise PromptProjectionError(
                 "本次输入的上下文边界与反馈消息不一致，本条消息未执行。"
@@ -268,15 +273,16 @@ class MessageInputPreparer:
 
         try:
             async with asyncio.timeout(_CONTEXT_PREPARATION_TIMEOUT_SECONDS):
-                current_fallback = (
-                    await self._prepare_message_content(source_message, source="current")
-                    if isinstance(current, CurrentMessageProjection)
-                    else None
-                )
+                current_card = None
+                if isinstance(current, CurrentMessageProjection):
+                    current_card = await self._prepare_message_content(
+                        source_message, source="current", preferred_locale=locale,
+                    )
                 window = await reader.read_window(scope, lower, upper_id)
                 fetched = await self._fetch_history_candidates(
                     scope,
                     window.candidates,
+                    preferred_locale=locale,
                 )
                 by_id = {
                     reference.message_id: value
@@ -287,20 +293,21 @@ class MessageInputPreparer:
                     for reference in window.candidates
                 }
 
-                quoted_input: tuple[Any, str | None] | None = None
+                quoted_input: tuple[Any, PreparedCardContent | None] | None = None
                 quoted_projection: HistoricalMessageProjection | None = None
                 if quoted_target_id is not None:
                     quoted_input = by_id.get(quoted_target_id)
                     if quoted_input is None:
                         quoted_input = await self._fetch_normalized_history_message(
                             quoted_target_id,
+                            preferred_locale=locale,
                             validate=lambda message: validate_quoted_message(
                                 message,
                                 expected_message_id=quoted_target_id,
                                 expected_chat_id=scope.chat_id,
                             ),
                         )
-                    quoted_message, quoted_fallback = quoted_input
+                    quoted_message, quoted_card = quoted_input
                     validate_quoted_message(
                         quoted_message,
                         expected_message_id=quoted_target_id,
@@ -308,23 +315,25 @@ class MessageInputPreparer:
                     )
                     quoted_projection = project_quoted_message(
                         quoted_message,
-                        interactive_fallback_text=quoted_fallback,
+                        prepared_card=quoted_card,
+                        preferred_locale=locale,
                     )
 
                 eligible_inputs: list[
-                    tuple[Any, str | None, HistoricalMessageProjection]
+                    tuple[Any, PreparedCardContent | None, HistoricalMessageProjection]
                 ] = []
                 projection_omissions: list[SupplementalMessageOmission] = []
-                for message, fallback in fetched:
+                for message, card in fetched:
                     projection = project_supplemental_message(
                         message,
-                        interactive_fallback_text=fallback,
+                        prepared_card=card,
+                        preferred_locale=locale,
                         attribution_name=attribution_names.get(_message_id(message)),
                     )
                     if isinstance(projection, SupplementalMessageOmission):
                         projection_omissions.append(projection)
                     else:
-                        eligible_inputs.append((message, fallback, projection))
+                        eligible_inputs.append((message, card, projection))
 
                 supplemental_stats = SupplementalContextStats(
                     scanned_count=window.stats.raw_messages_scanned,
@@ -392,17 +401,18 @@ class MessageInputPreparer:
         )
 
         selected_inputs = {
-            projection.message_id: (message, fallback)
-            for message, fallback, projection in eligible_inputs
+            projection.message_id: (message, card)
+            for message, card, projection in eligible_inputs
             if projection.message_id in image_eligible_ids
         }
         supplemental_projections: list[HistoricalMessageProjection] = []
         for selected in selection.messages:
             assert selected.message_id is not None
-            message, fallback = selected_inputs[selected.message_id]
+            message, card = selected_inputs[selected.message_id]
             projection = project_supplemental_message(
                 message,
-                interactive_fallback_text=fallback,
+                prepared_card=card,
+                preferred_locale=locale,
                 read_image_keys=self._prepared_image_keys(
                     prepared_images,
                     source="supplemental_message",
@@ -428,10 +438,11 @@ class MessageInputPreparer:
 
         final_quoted_projection = None
         if quoted_input is not None:
-            quoted_message, quoted_fallback = quoted_input
+            quoted_message, quoted_card = quoted_input
             final_quoted_projection = project_quoted_message(
                 quoted_message,
-                interactive_fallback_text=quoted_fallback,
+                prepared_card=quoted_card,
+                preferred_locale=locale,
                 read_image_keys=self._prepared_image_keys(
                     prepared_images,
                     source="quoted_message",
@@ -443,7 +454,8 @@ class MessageInputPreparer:
         rendered_current = self._render_current_content(
             source_message,
             current,
-            fallback_text=current_fallback,
+            prepared_card=current_card,
+            preferred_locale=locale,
             images=prepared_images,
             image_prompt_refs=prompt_image_refs,
         )
@@ -468,15 +480,18 @@ class MessageInputPreparer:
         self,
         scope: FeishuScope,
         references: tuple[MessageHistoryRef, ...],
-    ) -> tuple[tuple[Any, str | None], ...]:
+        *,
+        preferred_locale: str | None = None,
+    ) -> tuple[tuple[Any, PreparedCardContent | None], ...]:
         semaphore = asyncio.Semaphore(_CONTEXT_FETCH_CONCURRENCY)
 
         async def fetch(
             reference: MessageHistoryRef,
-        ) -> tuple[Any, str | None]:
+        ) -> tuple[Any, PreparedCardContent | None]:
             async with semaphore:
                 value = await self._fetch_normalized_history_message(
                     reference.message_id,
+                    preferred_locale=preferred_locale,
                     validate=lambda message: self._validate_history_candidate(
                         scope, reference, message,
                     ),
@@ -499,7 +514,8 @@ class MessageInputPreparer:
         message_id: str,
         *,
         validate: Callable[[Any], None] | None = None,
-    ) -> tuple[Any, str | None]:
+        preferred_locale: str | None = None,
+    ) -> tuple[Any, PreparedCardContent | None]:
         try:
             async with asyncio.timeout(_CONTEXT_FETCH_TIMEOUT_SECONDS):
                 message = await self._channel.fetch_inbound_message(message_id)
@@ -522,21 +538,27 @@ class MessageInputPreparer:
             )
         if validate is not None:
             validate(message)
-        fallback_text = await self._prepare_message_content(message, source="historical")
-        return message, fallback_text
+        if historical_message_deleted(message):
+            return message, None
+        card = await self._prepare_message_content(
+            message, source="historical", preferred_locale=preferred_locale,
+        )
+        return message, card
 
     async def _prepare_message_content(
         self,
         message: Any,
         *,
         source: Literal["current", "quoted", "historical"],
-    ) -> str | None:
+        preferred_locale: str | None = None,
+    ) -> PreparedCardContent | None:
         """One preparation path; only user-facing failure attribution varies."""
 
         try:
             return await prepare_message_content(
                 self._channel,
                 message,
+                preferred_locale=preferred_locale,
                 timeout_seconds=(
                     _CONTEXT_FETCH_TIMEOUT_SECONDS
                     if source == "historical" else _QUOTE_FETCH_TIMEOUT_SECONDS
@@ -632,7 +654,8 @@ class MessageInputPreparer:
         message: Any,
         current: MessageInputProjection,
         *,
-        fallback_text: str | None,
+        prepared_card: PreparedCardContent | None,
+        preferred_locale: str | None,
         images: Sequence[Any],
         image_prompt_refs: ImagePromptReferences,
     ) -> MessageInputProjection:
@@ -641,7 +664,8 @@ class MessageInputPreparer:
         current = project_current_content(
             message,
             current,
-            interactive_fallback_text=fallback_text,
+            prepared_card=prepared_card,
+            preferred_locale=preferred_locale,
             read_image_keys=self._prepared_image_keys(
                 images,
                 source="current_message",

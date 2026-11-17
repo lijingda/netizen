@@ -51,6 +51,7 @@ from lark_oapi.api.im.v1 import (
 from openai_codex import ImageInput, TextInput
 
 from netizen_cli import channel_app
+from netizen_cli.card_content import extract_card_content, original_card
 from netizen_cli.cards import settings_card, turn_files_card, turn_files_card_from_manifest
 from netizen_cli.domain import FeishuScope, ScopeKind, TurnFileManifestItem
 from netizen_cli.image_inputs import (
@@ -59,7 +60,6 @@ from netizen_cli.image_inputs import (
     image_references,
 )
 from netizen_cli.quoted_context import (
-    interactive_quote_visible_text,
     quoted_message_id,
 )
 from netizen_cli.turn_files import TurnFile
@@ -1162,13 +1162,15 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
         )
 
         assert context is not None
-        # Removal trigger: when the pinned SDK returns visible text here,
-        # delete the raw CardKit adapter instead of weakening this assertion.
+        # When the SDK supplies safe, equivalent text for the supported card
+        # matrix, requalify it and remove our bounded content adapter.
         self.assertEqual(context.text, "")
-        self.assertEqual(
-            interactive_quote_visible_text(context),
-            "Card title\nVisible body",
-        )
+        original = original_card(context.raw["body"]["content"])
+        self.assertIsNotNone(original)
+        projected = extract_card_content(original, message_id=context.message_id)
+        self.assertTrue(projected.text.endswith("\nCard title\nVisible body"))
+        self.assertIn('"message_id": "om_cardkit_v2"', projected.text)
+        self.assertIn("未渲染", projected.text)
 
     async def test_webhook_start_and_message_dispatch_ignore_meeting_features(
         self,

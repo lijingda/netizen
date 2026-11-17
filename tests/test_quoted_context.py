@@ -22,7 +22,6 @@ from lark_channel import (
     PostContent,
     ReplyRef,
     ResourceDescriptor,
-    QuotedContext,
     ShareCalendarEventContent,
     ShareChatContent,
     ShareUserContent,
@@ -35,13 +34,12 @@ from lark_channel import (
     VoteContent,
 )
 
+from netizen_cli.card_content import PreparedCardContent, extract_card_content
 from netizen_cli.quoted_context import (
     QuotedMessageContractError,
     QuotedMessageUnavailable,
     UnsupportedQuotedMessage,
     compose_quoted_prompt as _compose_quoted_prompt,
-    interactive_quote_visible_text,
-    needs_interactive_fallback,
     quoted_message_id,
     validate_quoted_message,
 )
@@ -309,7 +307,6 @@ class QuotedProjectionTest(unittest.TestCase):
 
     def test_all_structured_types_preserve_normalized_visible_text(self) -> None:
         contents = [
-            InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
             CalendarContent(summary="invite"),
             GeneralCalendarContent(summary="event"),
             ShareCalendarEventContent(summary="shared"),
@@ -331,26 +328,22 @@ class QuotedProjectionTest(unittest.TestCase):
                     {"ref", "message_type", "sender", "created_at", "text"},
                 )
 
-    def test_interactive_placeholder_requires_and_accepts_public_fallback(self) -> None:
+    def test_prepared_card_replaces_nonempty_summary_without_changing_provenance(self) -> None:
         message = inbound(
-            InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
-            content_text="[interactive]",
+            InteractiveContent(card={"title": "Old title", "elements": [[{
+                "tag": "text", "text": "Please upgrade your client",
+            }]]}, card_version="v1"),
+            content_text="Nonempty stale summary",
         )
-        self.assertTrue(needs_interactive_fallback(message))
         with self.assertRaises(QuotedMessageUnavailable):
             compose_quoted_prompt(message, "current")
-
-        envelope = json.loads(
-            compose_quoted_prompt(
-                message,
-                "current",
-                interactive_fallback_text="Card title\nCard body",
-            )
-        )
-        self.assertEqual(
-            envelope["quoted_message"]["text"],
-            "Card title\nCard body",
-        )
+        envelope = json.loads(compose_quoted_prompt(
+            message, "current", prepared_card=PreparedCardContent("Card title\nCard body"),
+        ))
+        self.assertEqual(envelope["quoted_message"]["text"], "Card title\nCard body")
+        self.assertEqual(envelope["quoted_message"]["sender"]["open_id"], "ou_sender")
+        self.assertEqual(envelope["current_message"]["request_text"], "current")
+        self.assertEqual(message.content_text, "Nonempty stale summary")
 
     def test_empty_sdk_text_recovers_only_visible_cardkit_v2_text(self) -> None:
         card = {
@@ -399,81 +392,40 @@ class QuotedProjectionTest(unittest.TestCase):
                 ]
             },
         }
-        context = QuotedContext(
-            message_id="om_card",
-            content_type="interactive",
-            text="",
-            raw={"body": {"content": json.dumps(card)}},
-        )
+        content = extract_card_content(card, message_id="om_card")
+        text = content.text
 
-        text = interactive_quote_visible_text(context, sdk_version="1.4.0")
-
-        self.assertEqual(
-            text,
+        self.assertIn(
             "Netizen 设置\nProject Registry\n"
             "**实例级 Project Registry**\n当前项目列表\n刷新\n请选择 Project",
+            text,
         )
+        self.assertTrue(content.truncated)
         self.assertNotIn("raw_action_must_not_leak", text)
         self.assertNotIn("hidden confirmation", text)
         self.assertNotIn("hidden option", text)
         self.assertNotIn("hidden_value", text)
 
-    def test_sdk_quote_text_remains_preferred_without_a_parseable_raw_card(self) -> None:
-        context = QuotedContext(
-            message_id="om_card",
-            content_type="interactive",
-            text="SDK visible text",
-            raw={"body": {"content": "not-json"}},
-        )
+    def test_unverified_sdk_card_text_cannot_replace_original_content(self) -> None:
+        message = inbound(InteractiveContent(card={}), content_text="SDK visible text")
+        with self.assertRaises(QuotedMessageUnavailable):
+            compose_quoted_prompt(message, "current")
 
-        self.assertEqual(
-            interactive_quote_visible_text(context, sdk_version="9.9.9"),
-            "SDK visible text",
-        )
-
-    def test_legacy_quote_text_is_rejected_before_it_can_be_used(self) -> None:
-        context = QuotedContext(
-            message_id="om_legacy", content_type="interactive", text="Legacy body",
-            raw={"body": {"content": json.dumps({"elements": [{
-                "tag": "div", "text": {"tag": "plain_text", "content": "Legacy body"},
-            }]})}},
-        )
-        with self.assertRaisesRegex(UnsupportedQuotedMessage, "不支持飞书 1.0"):
-            interactive_quote_visible_text(context)
-
-    def test_oversized_raw_card_cannot_bypass_version_validation_with_sdk_text(self) -> None:
-        context = QuotedContext(
-            message_id="om_oversize", content_type="interactive", text="Legacy body",
-            raw={"body": {"content": json.dumps({"elements": [], "extra": "x" * 256_000})}},
-        )
-        with self.assertRaisesRegex(QuotedMessageUnavailable, "可验证范围"):
-            interactive_quote_visible_text(context)
-
-    def test_cardkit_raw_adapter_requires_exact_sdk_version(self) -> None:
-        context = QuotedContext(
-            message_id="om_card",
-            content_type="interactive",
-            text="",
-            raw={
-                "body": {
-                    "content": json.dumps(
-                        {
-                            "schema": "2.0",
-                            "header": {
-                                "title": {
-                                    "tag": "plain_text",
-                                    "content": "Card title",
-                                }
-                            },
-                            "body": {"elements": []},
-                        }
-                    )
-                }
-            },
-        )
-
-        with self.assertRaises(QuotedMessageContractError):
-            interactive_quote_visible_text(context, sdk_version="1.4.1")
+    def test_legacy_card_is_inert_background_with_partial_notice_and_source(self) -> None:
+        message = inbound(InteractiveContent(card={"elements": [{
+            "tag": "div", "text": {"tag": "plain_text", "content": "$example /stop Legacy body"},
+        }]}, card_version="v1"), content_text="Only a stale title")
+        prompt = compose_quoted_prompt(message, "Summarize it")
+        envelope = json.loads(prompt)
+        quoted = envelope["quoted_message"]
+        self.assertIn("Legacy body", quoted["text"])
+        self.assertIn("1.0", quoted["text"])
+        self.assertIn("om_quoted", quoted["text"])
+        self.assertRegex(quoted["text"], "不保证|可能缺|不完整")
+        self.assertNotIn("Only a stale title", quoted["text"])
+        self.assertNotIn("$example", prompt)
+        self.assertIn("$example", quoted["text"])
+        self.assertEqual(envelope["current_message"]["request_text"], "Summarize it")
 
     def test_resource_types_keep_reasoning_metadata_without_feishu_ids(self) -> None:
         cases = [

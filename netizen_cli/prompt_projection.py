@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
+from .card_content import PreparedCardContent
 from .message_content import MATERIAL_MESSAGE_TYPES, TEXT_TYPES, project_message_content
 from .user_questions import BindingQuestionTarget, SideQuestionTarget, QuestionTarget, question_target_payload
 
@@ -214,7 +215,8 @@ def project_current_content(
     message: Any,
     current: CurrentMessageProjection,
     *,
-    interactive_fallback_text: str | None = None,
+    prepared_card: PreparedCardContent | None = None,
+    preferred_locale: str | None = None,
     read_image_keys: tuple[str, ...] = (),
 ) -> CurrentMessageProjection:
     """Use the common content result while retaining current-request semantics."""
@@ -223,7 +225,8 @@ def project_current_content(
     content = project_message_content(
         message,
         message_type=current.message_type,
-        interactive_fallback_text=interactive_fallback_text,
+        prepared_card=prepared_card,
+        preferred_locale=preferred_locale,
         read_image_keys=read_image_keys,
         request_text=None if material else current.request_text,
     )

@@ -42,7 +42,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0014](0014-use-removable-sdk-gap-adapters.md) | 用可逐项移除的薄 Adapter 补齐 Python SDK 高层能力缺口 | 架构决策 | 有效 | 被 [0018](0018-remove-skills-command.md)、[0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md)、[0069](0069-steer-the-current-physical-goal-turn.md)、[0083](0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0084](0084-separate-goal-controls-from-logical-turn-replies.md) 修订 |
 | [0020](0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md) | 用精确锁定的只读 Adapter 观察运行中 Turn 的原生 Plan | 架构决策 | 有效 | 被 [0026](0026-upgrade-and-requalify-python-sdk-0147.md)、[0052](0052-project-safe-turn-activity-with-one-consumer.md) 修订 |
 | [0026](0026-upgrade-and-requalify-python-sdk-0147.md) | 升级并重新认证 Python SDK 0.147.0 | 升级记录 | 有效 | 被 [0027](0027-use-turn-diff-and-self-contained-file-cards.md) 修订 |
-| [0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) | 升级并重新认证 lark-channel-sdk 1.4.0 | 升级记录 | 有效 |  |
+| [0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) | 升级并重新认证 lark-channel-sdk 1.4.0 | 升级记录 | 有效 | 被 [0099](0099-project-original-card-content-with-bounded-component-adapter.md) 修订 |
 | [0077](0077-read-account-rate-limits-on-demand.md) | 按需读取共享 Codex 账号额度 | 架构决策 | 有效 |  |
 | [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) | 原生会话历史采用只读分页适配 | 架构决策 | 有效 | 被 [0096](0096-read-admin-conversations-through-summary-turn-pages.md) 修订 |
 
@@ -95,15 +95,16 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | ADR | 标题 | 类型 | 状态 | 修订 |
 | --- | --- | --- | --- | --- |
 | [0005](0005-gate-websocket-inbound-on-redelivery-proof.md) | 生产 WebSocket 入站必须先证明失败重投 | 架构决策 | 已被 [0007](0007-use-official-typescript-sdk-as-codex-boundary.md) 取代 |  |
-| [0011](0011-support-feishu-quoted-message-context.md) | 支持飞书逐条引用消息上下文 | 功能契约 | 有效 | 被 [0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) 修订 |
+| [0011](0011-support-feishu-quoted-message-context.md) | 支持飞书逐条引用消息上下文 | 功能契约 | 有效 | 被 [0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md)、[0099](0099-project-original-card-content-with-bounded-component-adapter.md) 修订 |
 | [0015](0015-support-native-image-inputs-for-message-and-quote.md) | 支持普通消息与逐条引用中的原生图片输入 | 功能契约 | 有效 | 被 [0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) 修订 |
 | [0029](0029-project-current-message-provenance-into-prompts.md) | 把当前飞书消息来源投影到每次 Prompt | 架构决策 | 有效 |  |
 | [0030](0030-require-resolved-current-sender-names.md) | 要求当前 Prompt 消息有可解析的发送者姓名 | 功能契约 | 有效 |  |
 | [0039](0039-add-binding-scoped-mention-catch-up-context.md) | 为普通 Binding 增加 @ 时补充期间消息的上下文模式 | 架构决策 | 有效 | 被 [0070](0070-schedule-inputs-in-existing-bindings.md)、[0082](0082-restore-archived-sessions-from-exact-native-results.md) 修订 |
-| [0064](0064-share-card-and-forward-content-projection.md) | 统一卡片与转发材料的输入投影 | 功能契约 | 有效 |  |
+| [0064](0064-share-card-and-forward-content-projection.md) | 统一卡片与转发材料的输入投影 | 功能契约 | 有效 | 被 [0099](0099-project-original-card-content-with-bounded-component-adapter.md) 修订 |
 | [0071](0071-answer-native-questions-through-binding-input.md) | 将原生结构化问题的回答作为原会话普通输入 | 架构决策 | 有效 | 被 [0072](0072-share-question-interaction-across-binding-and-side.md) 修订 |
 | [0072](0072-share-question-interaction-across-binding-and-side.md) | 共用问答交互，分别进入 Binding 与 Side 输入入口 | 功能契约 | 有效 |  |
 | [0090](0090-retain-input-attachments-independently-of-native-execution.md) | 输入附件保存原件，生命周期独立于原生执行 | 架构决策 | 有效 |  |
+| [0099](0099-project-original-card-content-with-bounded-component-adapter.md) | 从原始卡片统一投影有界正文 | 架构决策 | 有效 |  |
 
 ## 回复、Activity 与本轮文件
 
@@ -190,4 +191,4 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 ## 统计
 
-共 98 个 ADR：架构决策 65 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。
+共 99 个 ADR：架构决策 66 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。

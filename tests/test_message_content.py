@@ -349,7 +349,7 @@ class MessageContentTest(unittest.TestCase):
         with self.assertRaises(HistoricalMessageContractError):
             project_message_content(message, message_type="merge_forward")
 
-    def test_sdk_hidden_card_text_leak_is_rejected_for_top_level_and_forward(self) -> None:
+    def test_sdk_hidden_card_text_leak_is_excluded_for_top_level_and_forward(self) -> None:
         for field in (
             "value", "confirm", "options", "behaviors", "events",
             "disabled_tips", "initial_option", "initial_value",
@@ -364,16 +364,17 @@ class MessageContentTest(unittest.TestCase):
                 sdk_text, _ = flatten_content(content)
                 self.assertIn("hidden payload", sdk_text)
                 for source in (content, forward(content)):
-                    with self.assertRaisesRegex(HistoricalMessageUnavailable, "非可见"):
-                        project(source)
+                    result = project(source)
+                    self.assertIn("Visible button", result["text"])
+                    self.assertNotIn("hidden payload", result["text"])
 
-    def test_normal_card_buttons_and_scalar_action_values_keep_sdk_text(self) -> None:
+    def test_normal_card_buttons_expose_labels_without_scalar_action_values(self) -> None:
         content = card([{
             "tag": "button",
             "text": {"tag": "plain_text", "content": "Visible button"},
             "value": {"action": "scalar-secret"},
         }])
-        self.assertEqual(project(content)["text"], "Visible button")
+        self.assertTrue(project(content)["text"].endswith("\nVisible button"))
         result = project(forward(content))
         self.assertIn("Visible button", result["text"])
         self.assertNotIn("scalar-secret", result["text"])
@@ -457,7 +458,7 @@ class RealSdkMaterialContentTest(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaisesRegex(HistoricalMessageUnavailable, "最大深度 3"):
                         project_message_content(message, message_type="merge_forward")
 
-    async def test_v1_card_with_header_is_rejected_even_if_sdk_labels_it_v2(self):
+    async def test_v1_card_with_header_uses_original_shape_even_if_sdk_labels_it_v2(self):
         legacy_card = {
             "header": {"title": {"tag": "plain_text", "content": "Title only"}},
             "elements": [{"tag": "div", "text": {
@@ -470,8 +471,12 @@ class RealSdkMaterialContentTest(unittest.IsolatedAsyncioTestCase):
         }])
         child = message.content.items[0].content
         self.assertEqual(child.card_version, "v2")  # Pinned parser treats a header as v2.
-        with self.assertRaisesRegex(UnsupportedHistoricalMessage, "不支持飞书 1.0"):
-            project_message_content(message, message_type="merge_forward")
+        result = project_message_content(message, message_type="merge_forward")
+        self.assertIn("Invisible to SDK converter", result["text"])
+        self.assertIn("1.0", result["text"])
+        self.assertIn("om_card", result["text"])
+        self.assertIn("om_forward", result["text"])
+        self.assertRegex(result["text"], "不保证|可能缺|不完整")
 
     async def test_item_truncation_cannot_hide_real_sdk_depth_error(self):
         items = [{

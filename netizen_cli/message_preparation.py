@@ -1,19 +1,18 @@
-"""Source-neutral asynchronous preparation of SDK-normalized message content.
-
-Acquisition and exact source validation belong to the caller. In particular a
-quote/history target must be checked before a card fallback can read it again.
-"""
+"""Acquire authoritative card content without changing SDK message identities."""
 
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 
-from .message_content import validate_interactive_version
-from .quoted_context import (
-    interactive_quote_visible_text,
-    needs_interactive_fallback,
+from .card_content import (
+    CardContentError,
+    PreparedCardContent,
+    extract_card_content,
+    original_card,
+    original_message_card,
 )
+from .message_content import HistoricalMessageUnavailable, normalized_content_type
 
 
 class MessagePreparationError(RuntimeError):
@@ -29,32 +28,49 @@ async def prepare_message_content(
     message: Any,
     *,
     timeout_seconds: float,
-) -> str | None:
-    """Complete visible content once using the public SDK's existing fallback.
+    preferred_locale: str | None = None,
+) -> PreparedCardContent | None:
+    """Use an original card already present, or fetch it through the public SDK.
 
-    The SDK has already normalized the inbound/fetched message (including forward
-    expansion). Only its known interactive placeholder needs an extra public read.
-    The returned visible text is consumed by the same pure content projection for
-    current, quoted and supplemental messages. No source semantics are inferred.
+    A normalized card label or nonempty preview is not original-card evidence.
+    The returned projection is the only card text consumed downstream. Source
+    identities, resources and routing remain on the unchanged input message.
     """
 
-    validate_interactive_version(getattr(message, "content", None))
-    if not needs_interactive_fallback(message):
+    if normalized_content_type(message) != "interactive":
         return None
     message_id = getattr(message, "id", None) or getattr(message, "message_id", None)
     if not isinstance(message_id, str) or not message_id:
         raise MessagePreparationError("identity")
     try:
-        async with asyncio.timeout(timeout_seconds):
-            fallback = await channel.fetch_quoted_context(message_id)
-    except TimeoutError as error:
-        raise MessagePreparationError("timeout") from error
-    except Exception as error:
-        raise MessagePreparationError("unavailable") from error
-    if (
-        fallback is None
-        or getattr(fallback, "message_id", None) != message_id
-        or getattr(fallback, "content_type", None) != "interactive"
-    ):
-        raise MessagePreparationError("identity")
-    return interactive_quote_visible_text(fallback)
+        card = original_message_card(message)
+        if card is None:
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    context = await channel.fetch_quoted_context(message_id)
+            except TimeoutError as error:
+                raise MessagePreparationError("timeout") from error
+            except Exception as error:
+                raise MessagePreparationError("unavailable") from error
+
+            # The SDK fills a missing response ID with the requested ID. Only
+            # the public raw message item proves which message was returned.
+            raw = getattr(context, "raw", None)
+            chat_id = getattr(getattr(message, "conversation", None), "chat_id", None)
+            if (
+                not isinstance(raw, dict)
+                or raw.get("message_id") != message_id
+                or raw.get("msg_type") != "interactive"
+                or raw.get("deleted") is True
+                or (chat_id and raw.get("chat_id") != chat_id)
+            ):
+                raise MessagePreparationError("identity")
+            body = raw.get("body")
+            card = original_card(body.get("content") if isinstance(body, dict) else None)
+            if card is None:
+                raise MessagePreparationError("unavailable")
+        return extract_card_content(
+            card, message_id=message_id, preferred_locale=preferred_locale,
+        )
+    except CardContentError as error:
+        raise HistoricalMessageUnavailable(str(error)) from error

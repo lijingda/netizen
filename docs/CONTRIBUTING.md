@@ -50,7 +50,7 @@ start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收
 | `netizen_cli/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
 | `netizen_cli/channel_app.py`、`netizen_cli/channel/` | ChannelApplication 负责准入、Runtime 提交和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。它由 `channel/` 中的单向分层组成（顺序见 `channel_app.py` 模块说明），下层不得调用上层，由类型检查保证；斜杠命令与卡片动作各按名称分发到独立处理函数。 |
 | `netizen_cli/channel/input_preparation.py` | MessageInputPreparer 负责当前、引用和 catch-up 材料的读取、校验与图片准备，返回 typed PreparedInput；ChannelApplication 继续捕获 admission、组装 Context Boundary 提交参数并发送可见回执，Runtime 确认接受后才推进边界。 |
-| `netizen_cli/message_content.py`、`netizen_cli/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读，由消息准备组件复用。控制意图仍由 Channel 入口判定。 |
+| `netizen_cli/message_content.py`、`netizen_cli/message_preparation.py`、`netizen_cli/card_content.py` | 分别负责共享消息内容投影、公共 SDK 原始卡片准备，以及有界的卡片组件正文提取。卡片提取结果独立于来源消息，由当前、引用、补充历史和转发子项复用；控制意图仍由 Channel 入口判定。 |
 | `netizen_cli/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
 | `netizen_cli/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
 | `netizen_cli/admin/port_config.py`、`netizen_cli/chat_access.py` | 前者统一既有 YAML 的原子写入和配置服务快照发布；后者共享群聊与会话权限规则的精确 chat ID 校验和映射解析。 |

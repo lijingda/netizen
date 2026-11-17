@@ -24,6 +24,7 @@ from netizen_cli.message_history import (
     MessageHistoryUnavailable,
     MessageHistoryWindow,
 )
+from netizen_cli.message_projection import HistoricalMessageUnavailable
 from netizen_cli.prompt_projection import (
     PromptProjectionError,
     ScheduledInputProjection,
@@ -301,6 +302,28 @@ class MessageInputPreparerTest(unittest.IsolatedAsyncioTestCase):
 
         self.channel.fetch_quoted_context.assert_not_awaited()
         self.channel.download_resource.assert_not_awaited()
+
+    async def test_deleted_history_card_is_omitted_without_content_refetch(self):
+        reference = MessageHistoryRef("om_deleted", 2_000, "ou_user", "interactive")
+        message = self.message(
+            reference.message_id, reference.create_time_ms,
+            content=InteractiveContent(card={"title": "Old preview", "elements": []}),
+        )
+        message.raw["deleted"] = True
+        self.channel.fetch_inbound_message.return_value = message
+
+        prepared = await self.catch_up(self.reader(reference))
+
+        self.assertEqual(json.loads(prepared.native_input)["supplemental_messages"], [])
+        self.assertEqual(prepared.context_stats.omitted_count, 1)
+        self.channel.fetch_quoted_context.assert_not_awaited()
+        self.channel.download_resource.assert_not_awaited()
+
+        # Explicit quotes remain errors even when the same item is eligible
+        # for omission from the supplemental window.
+        with self.assertRaises(HistoricalMessageUnavailable):
+            await self.catch_up(self.reader(reference), quoted_target_id=reference.message_id)
+        self.channel.fetch_quoted_context.assert_not_awaited()
 
     async def test_candidate_failure_cancels_and_joins_other_pending_reads(self):
         pending_started = asyncio.Event()
