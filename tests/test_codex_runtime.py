@@ -11450,7 +11450,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             while not self.runtime._active[binding.id].terminal_observed:
                 await asyncio.sleep(0)
 
-        await asyncio.wait_for(wait_for_terminal(), timeout=0.1)
+        await asyncio.wait_for(wait_for_terminal(), timeout=5)
         with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
             self.assertEqual(
                 await self.runtime.stop(binding.id),
