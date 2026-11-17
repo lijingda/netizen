@@ -62,6 +62,18 @@ def card_content(text: str) -> InteractiveContent:
     )
 
 
+def received_card_summary() -> InteractiveContent:
+    return InteractiveContent(
+        card={
+            "title": "Task completed",
+            "elements": [[{
+                "tag": "text", "text": "请升级至最新版本客户端，以查看内容",
+            }]],
+        },
+        card_version="v1",
+    )
+
+
 def forwarded_content(*children: object, **kwargs) -> MergeForwardContent:
     return MergeForwardContent(
         items=[
@@ -162,16 +174,26 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
         return self.runtime.submit_calls[0]
 
     async def handle_material_source(
-        self, content: object, *, source: str, case: str
+        self, content: object, *, source: str, case: str,
+        request_language: str | None = None,
+        material_language: str | None = None,
+        normalized_text: str | None = None,
     ) -> None:
         """Put the same public SDK content through each real input boundary."""
 
         self.runtime.submit_calls.clear()
         self.channel.replies.clear()
         self.channel.fetch_quoted_calls.clear()
+        request_raw = {"user_agent": f"LarkLocale/{request_language}"} if request_language else {}
+        material_raw = {"user_agent": f"LarkLocale/{material_language}"} if material_language else {}
         if source in {"current", "quoted"}:
             await self.binding()
-            message = material_message(content, message_id=f"om_material_{case}")
+            message = material_message(
+                content, message_id=f"om_material_{case}",
+                raw=request_raw if source == "current" else material_raw,
+            )
+            if normalized_text is not None:
+                message.content_text = message.body_text = normalized_text
             if source == "current":
                 await self.app.handle_message(message)
             else:
@@ -181,6 +203,7 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
                         "Inspect this material",
                         message_id=f"om_request_{case}",
                         reply_id=message.id,
+                        raw=request_raw,
                     )
                 )
             return
@@ -200,7 +223,10 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
             chat_id=scope.chat_id,
             chat_type="group",
             create_time=2_000,
+            raw=material_raw,
         )
+        if normalized_text is not None:
+            message.content_text = message.body_text = normalized_text
         self.channel.inbound_messages[message.id] = message
         self.history.window = MessageHistoryWindow(
             lower=lower,
@@ -222,7 +248,20 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
                 chat_id=scope.chat_id,
                 chat_type="group",
                 create_time=upper.create_time_ms,
+                raw=request_raw,
             )
+        )
+
+    def submitted_material(self, source: str) -> dict[str, object]:
+        call = self.submitted()
+        if source == "current":
+            request, _ = plain_prompt_projection(call["input"])
+            return json.loads(request.split("\n\n", 1)[1])
+        envelope = json.loads(call["input"])
+        return (
+            envelope["quoted_message"]
+            if source == "quoted"
+            else envelope["supplemental_messages"][0]
         )
 
     async def test_direct_card_preserves_current_provenance(self) -> None:
@@ -523,7 +562,11 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(catch_up["supplemental_messages"]), 1)
                 supplemental = catch_up["supplemental_messages"][0]
                 self.assertEqual(supplemental["message_type"], content.kind)
-                self.assertEqual(supplemental["text"], material["text"])
+                self.assertIn(direct.id, material["text"])
+                self.assertIn(historical.id, supplemental["text"])
+                self.assertEqual(
+                    supplemental["text"], material["text"].replace(direct.id, historical.id),
+                )
                 self.assertEqual(supplemental["ref"], "h1")
                 self.assertEqual(
                     catch_up["current_message"]["request_text"],
@@ -593,7 +636,190 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(material["truncated"], True)
         self.assertIn("截断", material["text"])
 
-    async def test_card_v1_is_rejected_without_fallback_in_every_source(self) -> None:
+    async def test_many_forwarded_cards_share_budget_without_per_card_fetch(self) -> None:
+        await self.binding()
+        await self.app.handle_message(material_message(
+            forwarded_content(*(card_content(f"Card body {index:03d}") for index in range(80))),
+            message_id="om_many_cards",
+        ))
+        material = self.submitted_material("current")
+        self.assertIn("Card body 000", material["text"])
+        self.assertIn("Card body 049", material["text"])
+        self.assertNotIn("Card body 050", material["text"])
+        self.assertNotIn("Card body 079", material["text"])
+        self.assertIs(material["truncated"], True)
+        self.assertEqual(self.channel.fetch_quoted_calls, [])
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+
+    async def test_forwarded_cards_share_the_forward_text_budget(self) -> None:
+        await self.binding()
+        await self.app.handle_message(material_message(
+            forwarded_content(*(card_content(f"Card {index}: " + "x" * 3_000) for index in range(10))),
+            message_id="om_long_cards",
+        ))
+        material = self.submitted_material("current")
+        self.assertIn("Card 0:", material["text"])
+        self.assertNotIn("Card 9:", material["text"])
+        self.assertLessEqual(len(material["text"]), 17_000)
+        self.assertIs(material["truncated"], True)
+        self.assertEqual(self.channel.fetch_quoted_calls, [])
+
+    async def test_v2_raw_body_replaces_nonempty_sdk_summary_in_every_source(self) -> None:
+        for source in ("current", "quoted", "supplemental"):
+            for forwarded in (False, True):
+                with self.subTest(source=source, forwarded=forwarded):
+                    content = card_content("Fresh original body")
+                    if forwarded:
+                        content = forwarded_content(content)
+                    await self.handle_material_source(
+                        content, source=source, case=f"fresh_{source}_{forwarded}",
+                        normalized_text="Obsolete nonempty SDK summary",
+                    )
+                    material = self.submitted_material(source)
+                    self.assertIn("Fresh original body", material["text"])
+                    self.assertNotIn("Obsolete nonempty SDK summary", material["text"])
+                    self.assertEqual(self.channel.fetch_quoted_calls, [])
+
+    async def test_card_language_uses_current_request_including_forwarded_history(self) -> None:
+        card = InteractiveContent(card={
+            "schema": "2.0", "body": {"elements": [{
+                "tag": "markdown", "content": "Default body",
+                "i18n_content": {"en_us": "English requested body", "ja_jp": "Historical author's language"},
+            }]},
+        }, card_version="v2")
+        for source in ("current", "quoted", "supplemental"):
+            for forwarded in (False, True):
+                with self.subTest(source=source, forwarded=forwarded):
+                    await self.handle_material_source(
+                        forwarded_content(card) if forwarded else card,
+                        source=source, case=f"locale_{source}_{forwarded}",
+                        request_language="en-US", material_language="ja-JP",
+                    )
+                    material = self.submitted_material(source)
+                    self.assertIn("English requested body", material["text"])
+                    self.assertNotIn("Historical author's language", material["text"])
+                    self.assertNotIn("Default body", material["text"])
+                    self.assertEqual(self.channel.fetch_quoted_calls, [])
+
+    async def test_card_source_and_rendering_limit_are_consistent_in_every_entry(self) -> None:
+        image = "\n![status chart](img_v3_card_picture)"
+        for selected_has_image in (True, False):
+            selected_text = "Requested localized body" + (image if selected_has_image else "")
+            unselected_image = "" if selected_has_image else image
+            card = InteractiveContent(card={
+                "schema": "2.0", "body": {"elements": [{
+                    "tag": "markdown", "content": "Unselected default body" + unselected_image,
+                    "i18n_content": {
+                        "en_us": selected_text,
+                        "ja_jp": "Unselected historical body" + unselected_image,
+                    },
+                }]},
+            }, card_version="v2")
+            for entry in ("current", "quoted", "supplemental", "forward"):
+                with self.subTest(entry=entry, selected_has_image=selected_has_image):
+                    source = "current" if entry == "forward" else entry
+                    case = f"markdown_image_{entry}_{selected_has_image}"
+                    await self.handle_material_source(
+                        forwarded_content(card) if entry == "forward" else card,
+                        source=source, case=case,
+                        request_language="en-US", material_language="ja-JP",
+                    )
+                    material = self.submitted_material(source)
+                    self.assertIn("Requested localized body", material["text"])
+                    self.assertNotIn("Unselected", material["text"])
+                    self.assertIn("富文本保留源码", material["text"])
+                    self.assertIn("未渲染", material["text"])
+                    self.assertRegex(material["text"], "图片|媒体")
+                    self.assertRegex(material["text"], "未读|未提取")
+                    self.assertFalse(material.get("truncated", False))
+                    self.assertIn(f"om_material_{case}", material["text"])
+                    if entry == "forward":
+                        self.assertIn("om_child_0", material["text"])
+                    if selected_has_image:
+                        self.assertIn(image.strip(), material["text"])
+                    else:
+                        self.assertNotIn("img_v3_card_picture", material["text"])
+                    self.assertEqual(self.channel.fetch_quoted_calls, [])
+                    self.assertEqual(self.channel.download_resource_calls, [])
+
+    async def test_received_card_summary_recovers_full_v2_content_in_every_source(self) -> None:
+        summary = received_card_summary()
+        original = card_content("Unselected default language").card
+        original["body"]["elements"][0]["i18n_content"] = {
+            "en_us": "Complete answer\nAdditional details",
+            "ja_jp": "Unselected historical author's language",
+        }
+        original["header"] = {
+            "title": {"tag": "plain_text", "content": "Original card title"},
+        }
+        for source in ("current", "quoted", "supplemental"):
+            with self.subTest(source=source):
+                case = f"summary_v2_{source}"
+                message_id = f"om_material_{case}"
+                self.channel.quoted_contexts[message_id] = QuotedContext(
+                    message_id=message_id,
+                    content_type="interactive",
+                    text="Obsolete nonempty SDK summary",
+                    raw={
+                        "message_id": message_id,
+                        "msg_type": "interactive",
+                        "chat_id": f"oc_group_{case}" if source == "supplemental" else "oc_direct",
+                        "body": {"content": json.dumps(original)},
+                    },
+                )
+
+                await self.handle_material_source(
+                    summary, source=source, case=case,
+                    request_language="en-US", material_language="ja-JP",
+                )
+
+                call = self.submitted()
+                material = self.submitted_material(source)
+                self.assertTrue(material["text"].endswith(
+                    "\nOriginal card title\nComplete answer\nAdditional details",
+                ))
+                self.assertIn(message_id, material["text"])
+                self.assertEqual(material["message_type"], "interactive")
+                self.assertNotIn("请升级至最新版本客户端", call["input"])
+                self.assertNotIn("Obsolete nonempty SDK summary", call["input"])
+                self.assertNotIn("Unselected", call["input"])
+                self.assertEqual(self.channel.fetch_quoted_calls, [message_id])
+                self.assertEqual(self.channel.download_resource_calls, [])
+
+    async def test_received_card_summary_resolving_to_v1_delivers_body_and_notice(self) -> None:
+        summary = received_card_summary()
+        original = {
+            "elements": [{
+                "tag": "div", "text": {"tag": "lark_md", "content": "Legacy body"},
+            }],
+        }
+        for source in ("current", "quoted", "supplemental"):
+            with self.subTest(source=source):
+                case = f"summary_v1_{source}"
+                message_id = f"om_material_{case}"
+                self.channel.quoted_contexts[message_id] = QuotedContext(
+                    message_id=message_id,
+                    content_type="interactive",
+                    text="Legacy body",
+                    raw={
+                        "message_id": message_id,
+                        "msg_type": "interactive",
+                        "chat_id": f"oc_group_{case}" if source == "supplemental" else "oc_direct",
+                        "body": {"content": json.dumps(original)},
+                    },
+                )
+
+                await self.handle_material_source(summary, source=source, case=case)
+
+                material = self.submitted_material(source)
+                self.assertIn("Legacy body", material["text"])
+                self.assertIn("1.0", material["text"])
+                self.assertIn(message_id, material["text"])
+                self.assertRegex(material["text"], "不保证|可能缺|不完整")
+                self.assertNotIn("请升级至最新版本客户端", material["text"])
+                self.assertEqual(self.channel.fetch_quoted_calls, [message_id])
+
+    async def test_card_v1_delivers_available_body_and_notice_in_every_source(self) -> None:
         body = [{"tag": "div", "text": {"tag": "lark_md", "content": "Old body"}}]
         titled = InteractiveContent(
             card={
@@ -610,15 +836,34 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
                 ("forwarded", forwarded_content(titled)),
             ):
                 with self.subTest(source=source, shape=shape):
+                    case = f"v1_{source}_{shape}"
                     await self.handle_material_source(
-                        content, source=source, case=f"v1_{source}_{shape}"
+                        content, source=source, case=case,
+                        normalized_text="Obsolete nonempty SDK summary",
                     )
-                    self.assertEqual(self.runtime.submit_calls, [])
+                    material = self.submitted_material(source)
+                    self.assertIn("Old body", material["text"])
+                    self.assertIn("1.0", material["text"])
+                    self.assertIn(f"om_material_{case}", material["text"])
+                    if shape == "forwarded":
+                        self.assertIn("om_child_0", material["text"])
+                    self.assertRegex(material["text"], "不保证|可能缺|不完整")
+                    self.assertNotIn("Obsolete nonempty SDK summary", material["text"])
                     self.assertEqual(self.channel.fetch_quoted_calls, [])
-                    self.assertRegex(
-                        str(self.channel.replies[-1][1]),
-                        r"1\.0.*不支持|不支持.*1\.0",
-                    )
+
+    async def test_empty_v1_card_delivers_notice_in_every_source(self) -> None:
+        for source in ("current", "quoted", "supplemental"):
+            with self.subTest(source=source):
+                case = f"empty_v1_{source}"
+                await self.handle_material_source(
+                    InteractiveContent(card={"elements": []}, card_version="v1"),
+                    source=source, case=case,
+                )
+                material = self.submitted_material(source)
+                self.assertIn("1.0", material["text"])
+                self.assertRegex(material["text"], "未提取到.*正文")
+                self.assertIn(f"om_material_{case}", material["text"])
+                self.assertEqual(self.channel.fetch_quoted_calls, [])
 
     async def test_forward_depth_limit_rejects_entire_input_in_every_source(self) -> None:
         deep = forwarded_content(TextContent(text="Deepest discussion"))
@@ -761,6 +1006,7 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_current_card_fallback_failure_and_identity_drift_do_not_submit(self) -> None:
         await self.binding()
+        original = {"content": json.dumps(card_content("Unverified card body").card)}
         for fallback in (
             None,
             RuntimeError("resource unavailable"),
@@ -778,6 +1024,19 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
                 message_id="om_placeholder",
                 content_type="interactive",
                 text="",
+            ),
+            *(
+                QuotedContext(
+                    message_id="om_placeholder", content_type="interactive",
+                    text="SDK-filled summary", raw=raw,
+                )
+                for raw in (
+                    {"msg_type": "interactive", "chat_id": "oc_direct", "body": original},
+                    {"message_id": "om_different", "msg_type": "interactive", "chat_id": "oc_direct", "body": original},
+                    {"message_id": "om_placeholder", "msg_type": "interactive", "chat_id": "oc_other", "body": original},
+                    {"message_id": "om_placeholder", "msg_type": "interactive", "body": original},
+                    {"message_id": "om_placeholder", "msg_type": "text", "chat_id": "oc_direct", "body": original},
+                )
             ),
         ):
             with self.subTest(fallback=fallback):
@@ -939,6 +1198,12 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
                 message_id=message_id,
                 content_type="interactive",
                 text="Visible recovered card",
+                raw={
+                    "message_id": message_id,
+                    "msg_type": "interactive",
+                    "chat_id": "oc_direct",
+                    "body": {"content": json.dumps(card_content("Visible recovered card").card)},
+                },
             )
 
         with patch.object(self.channel, "fetch_quoted_context", side_effect=delayed_context):

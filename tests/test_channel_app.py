@@ -6270,7 +6270,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.inbound_messages["om_card"] = quoted_inbound(
             message_id="om_card",
-            content=InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
+            content=InteractiveContent(card={"title": "Preview", "elements": []}, card_version="v1"),
             content_text="[interactive]",
             raw_content_type="interactive",
         )
@@ -6289,7 +6289,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             message_id="om_card",
             content_type="interactive",
             text="",
-            raw={"body": {"content": json.dumps(card)}},
+            raw={
+                "message_id": "om_card", "msg_type": "interactive", "chat_id": "oc_direct",
+                "body": {"content": json.dumps(card)},
+            },
         )
 
         await self.app.handle_message(
@@ -6304,20 +6307,20 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.fetch_quoted_calls, ["om_card"])
         envelope = json.loads(self.runtime.submit_calls[0]["input"])
         self.assertEqual(envelope["quoted_message"]["message_type"], "interactive")
-        self.assertEqual(
-            envelope["quoted_message"]["text"],
-            "Application title\nVisible application content",
-        )
+        self.assertTrue(envelope["quoted_message"]["text"].endswith(
+            "\nApplication title\nVisible application content",
+        ))
+        self.assertIn('"message_id": "om_card"', envelope["quoted_message"]["text"])
 
-    async def test_interactive_quote_rejects_unverifiable_fallbacks(self) -> None:
+    async def test_interactive_quote_rejects_unverifiable_original_reads(self) -> None:
         await self.fixture.new()
         self.channel.inbound_messages["om_card"] = quoted_inbound(
             message_id="om_card",
-            content=InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
+            content=InteractiveContent(card={"title": "Preview", "elements": []}, card_version="v1"),
             content_text="[interactive]",
             raw_content_type="interactive",
         )
-        invalid_fallbacks = [
+        invalid_contexts = [
             None,
             SimpleNamespace(
                 message_id="om_other",
@@ -6331,9 +6334,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ),
         ]
 
-        for index, fallback in enumerate(invalid_fallbacks):
-            with self.subTest(fallback=fallback):
-                self.channel.quoted_contexts["om_card"] = fallback
+        for index, context in enumerate(invalid_contexts):
+            with self.subTest(context=context):
+                self.channel.quoted_contexts["om_card"] = context
                 await self.app.handle_message(
                     FakeMessage(
                         "summarize it",
@@ -6423,14 +6426,20 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.inbound_messages["om_card"] = quoted_inbound(
             message_id="om_card",
-            content=InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
+            content=InteractiveContent(card={"title": "Preview", "elements": []}, card_version="v1"),
             content_text="[interactive]",
             raw_content_type="interactive",
         )
         self.channel.quoted_contexts["om_card"] = QuotedContext(
             message_id="om_card",
             content_type="interactive",
-            text="Visible card",
+            text="SDK summary",
+            raw={
+                "message_id": "om_card", "msg_type": "interactive", "chat_id": "oc_direct",
+                "body": {"content": json.dumps({"schema": "2.0", "body": {"elements": [
+                    {"tag": "markdown", "content": "Visible card"},
+                ]}})},
+            },
         )
         fetch_inbound = self.channel.fetch_inbound_message
         fetch_context = self.channel.fetch_quoted_context
@@ -6489,13 +6498,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active_timeouts, [])
         self.assertEqual(len(self.runtime.submit_calls), 1)
         envelope = json.loads(self.runtime.submit_calls[0]["input"])
-        self.assertEqual(envelope["quoted_message"]["text"], "Visible card")
+        self.assertTrue(envelope["quoted_message"]["text"].endswith("\nVisible card"))
+        self.assertIn('"message_id": "om_card"', envelope["quoted_message"]["text"])
 
-    async def test_interactive_fallback_timeout_does_not_submit(self) -> None:
+    async def test_interactive_original_read_timeout_does_not_submit(self) -> None:
         await self.fixture.new()
         self.channel.inbound_messages["om_card"] = quoted_inbound(
             message_id="om_card",
-            content=InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
+            content=InteractiveContent(card={"title": "Preview", "elements": []}, card_version="v1"),
             content_text="[interactive]",
             raw_content_type="interactive",
         )

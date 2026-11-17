@@ -1,10 +1,8 @@
 """Feishu quoted-message selection and prompt projection.
 
-This module is deliberately the only Netizen boundary that knows about the
-version-pinned lark-channel-sdk 1.4.0 quote gaps. Quoted content is otherwise
-consumed through the SDK's public normalized message types; public ``raw`` is
-used only for the relation gate, best-effort deletion-state validation, card
-version validation, and a bounded CardKit 2.0 adapter when SDK text is empty.
+The version-pinned relation adapter recovers the SDK first-level reply gap.
+Card content preparation and projection are shared with current and historical
+inputs; this module only selects the quote and renders its existing envelope.
 """
 
 from __future__ import annotations
@@ -14,10 +12,8 @@ from collections.abc import Iterable
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
-from lark_channel import parse_message_content
-
 from .image_inputs import ImagePromptReferences
-from .message_content import usable_text as _usable_text, validate_interactive_version
+from .card_content import PreparedCardContent
 from .message_projection import (
     HistoricalMessageContractError as QuotedMessageContractError,
     HistoricalMessageError as QuotedMessageError,  # noqa: F401 - public quote error name
@@ -25,7 +21,6 @@ from .message_projection import (
     UnsupportedHistoricalMessage as UnsupportedQuotedMessage,  # noqa: F401 - public quote error name
     historical_message_deleted,
     historical_projection_json,
-    normalized_historical_message_type,
     project_quoted_message,
 )
 from .prompt_projection import CurrentMessageProjection, render_current_message_json
@@ -35,11 +30,6 @@ _SDK_RAW_COMPAT_VERSION = "1.4.0"
 _PROMPT_KIND = "feishu_quoted_prompt"
 _PROMPT_VERSION = 4
 _DEFAULT_TEXT_LIMIT = 16_000
-_CARD_RAW_LIMIT = 256_000
-_CARD_NODE_LIMIT = 4_096
-_CARD_DEPTH_LIMIT = 32
-_CARD_PART_LIMIT = 512
-_CARD_TEXT_LIMIT = 64_000
 
 
 def quoted_message_id(message: Any, *, sdk_version: str | None = None) -> str | None:
@@ -112,53 +102,12 @@ def validate_quoted_message(
         )
 
 
-def needs_interactive_fallback(message: Any) -> bool:
-    return normalized_historical_message_type(
-        message
-    ) == "interactive" and not _usable_text(
-        getattr(message, "content_text", ""),
-    )
-
-
-def interactive_quote_visible_text(
-    context: Any,
-    *,
-    sdk_version: str | None = None,
-) -> str | None:
-    """Return public quote text or recover visible CardKit 2.0 text.
-
-    ``lark-channel-sdk==1.4.0`` exposes the exact fetched message item through
-    ``QuotedContext.raw`` but its public quote flattener does not descend into
-    CardKit 2.0 ``header`` and ``body``. The fallback below is deliberately
-    version-gated, bounded, and only visits rendered text nodes. Interaction
-    values, confirmation dialogs, and option payloads are never projected.
-    """
-
-    card = _card_from_quote_raw(getattr(context, "raw", None))
-    if card is not None:
-        validate_interactive_version(parse_message_content("interactive", card))
-    text = _usable_text(getattr(context, "text", None))
-    if text is not None:
-        return text
-
-    if card is None or card.get("schema") != "2.0":
-        return None
-    if not isinstance(card.get("header"), dict) and not isinstance(card.get("body"), dict):
-        return None
-    installed = sdk_version or _installed_sdk_version()
-    if installed != _SDK_RAW_COMPAT_VERSION:
-        raise QuotedMessageContractError(
-            "Channel SDK 版本已经变化，但应用卡片引用兼容适配尚未复核；"
-            "本条消息未执行。"
-        )
-    return _flatten_cardkit_v2_visible_text(card)
-
-
 def compose_quoted_prompt(
     message: Any,
     current: CurrentMessageProjection,
     *,
-    interactive_fallback_text: str | None = None,
+    prepared_card: PreparedCardContent | None = None,
+    preferred_locale: str | None = None,
     read_image_keys: Iterable[str] | None = None,
     text_limit: int = _DEFAULT_TEXT_LIMIT,
     image_prompt_refs: ImagePromptReferences | None = None,
@@ -167,7 +116,8 @@ def compose_quoted_prompt(
 
     quoted = project_quoted_message(
         message,
-        interactive_fallback_text=interactive_fallback_text,
+        prepared_card=prepared_card,
+        preferred_locale=preferred_locale,
         read_image_keys=read_image_keys,
         text_limit=text_limit,
     )
@@ -200,103 +150,6 @@ def _raw_message_dict(value: Any) -> dict[str, Any]:
         return {}
     nested = value.get("message")
     return nested if isinstance(nested, dict) else value
-
-
-def _card_from_quote_raw(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    data = value.get("data") if isinstance(value.get("data"), dict) else value
-    items = data.get("items") if isinstance(data, dict) else None
-    item = items[0] if isinstance(items, list) and items else data
-    if not isinstance(item, dict):
-        return None
-    body = item.get("body")
-    if not isinstance(body, dict):
-        return None
-    content = body.get("content")
-    if isinstance(content, str):
-        if len(content) > _CARD_RAW_LIMIT:
-            raise QuotedMessageUnavailable(
-                "应用卡片内容超过可验证范围，本条消息未执行。"
-            )
-        try:
-            content = json.loads(content)
-        except (RecursionError, ValueError):
-            return None
-    return content if isinstance(content, dict) else None
-
-
-def _flatten_cardkit_v2_visible_text(card: dict[str, Any]) -> str | None:
-    parts: list[str] = []
-    node_count = 0
-    text_length = 0
-    skipped_keys = frozenset(
-        {
-            "behaviors",
-            "confirm",
-            "disabled_tips",
-            "events",
-            "initial_option",
-            "initial_value",
-            "options",
-            "selected_values",
-            "tooltip",
-            "value",
-        }
-    )
-    visible_scalar_keys = frozenset(
-        {"alt", "label", "placeholder", "subtitle", "text", "title"}
-    )
-    text_tags = frozenset({"lark_md", "markdown", "plain_text"})
-
-    class ProjectionLimit(RuntimeError):
-        pass
-
-    def add_part(value: Any) -> None:
-        nonlocal text_length
-        text = _nonempty_string(value)
-        if text is None or (parts and parts[-1] == text):
-            return
-        if len(parts) >= _CARD_PART_LIMIT:
-            raise ProjectionLimit
-        text_length += len(text)
-        if text_length > _CARD_TEXT_LIMIT:
-            raise ProjectionLimit
-        parts.append(text)
-
-    def visit(value: Any, depth: int) -> None:
-        nonlocal node_count
-        if depth > _CARD_DEPTH_LIMIT:
-            raise ProjectionLimit
-        node_count += 1
-        if node_count > _CARD_NODE_LIMIT:
-            raise ProjectionLimit
-        if isinstance(value, list):
-            for item in value:
-                visit(item, depth + 1)
-            return
-        if not isinstance(value, dict):
-            return
-
-        tag = _nonempty_string(value.get("tag"))
-        if tag in text_tags:
-            add_part(value.get("content"))
-        for key, child in value.items():
-            if key in skipped_keys or key in {"content", "tag"}:
-                continue
-            if isinstance(child, (dict, list)):
-                visit(child, depth + 1)
-            elif key in visible_scalar_keys:
-                add_part(child)
-
-    try:
-        # Keep the rendered order deterministic even if the raw mapping order
-        # changes: header first, then card body.
-        visit(card.get("header"), 0)
-        visit(card.get("body"), 0)
-    except ProjectionLimit:
-        return None
-    return _usable_text("\n".join(parts))
 
 
 def _nonempty_string(value: Any) -> str | None:

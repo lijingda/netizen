@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-09
-amended_by: 0055
+amended_by: 0055, 0099
 ---
 
 # 支持飞书逐条引用消息上下文

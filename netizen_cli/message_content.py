@@ -19,6 +19,13 @@ from lark_channel import (
 )
 from lark_channel.channel.normalize import MentionExtraction, resolve_mentions
 
+from .card_content import (
+    CardContentError,
+    PreparedCardContent,
+    extract_card_content,
+    original_card,
+    original_message_card,
+)
 
 _FORWARD_ITEM_LIMIT = 50
 _FORWARD_DEPTH_LIMIT = 3
@@ -32,16 +39,6 @@ _FORWARD_MEDIA_NOTICE = (
     "仅限 SDK 返回的展开内容，不代表原话题完整历史。"
 )
 _FORWARD_TRUNCATION_NOTICE = "合并转发内容已截断，部分消息或文字未提供。"
-_CARD_NODE_LIMIT = 4_096
-_CARD_DEPTH_LIMIT = 32
-_CARD_TEXT_LIMIT = 256_000
-_CARD_HIDDEN_FIELDS = frozenset(
-    {
-        "value", "confirm", "options", "behaviors", "events",
-        "disabled_tips", "initial_option", "initial_value",
-        "selected_values", "tooltip",
-    }
-)
 
 
 TEXT_TYPES = frozenset({"text", "post"})
@@ -130,7 +127,8 @@ def project_message_content(
     message: Any,
     *,
     message_type: str,
-    interactive_fallback_text: str | None = None,
+    prepared_card: PreparedCardContent | None = None,
+    preferred_locale: str | None = None,
     read_image_keys: tuple[str, ...] = (),
     request_text: str | None = None,
 ) -> dict[str, Any]:
@@ -138,11 +136,29 @@ def project_message_content(
 
     content = getattr(message, "content", None)
     if message_type == "merge_forward":
-        return _project_merge_forward(message)
-    read_image_key_set = frozenset(read_image_keys)
+        return _project_merge_forward(message, preferred_locale=preferred_locale)
     if message_type == "interactive":
-        _validate_interactive_content(content)
-        read_image_key_set = frozenset()
+        try:
+            if prepared_card is None:
+                card = original_message_card(message)
+                if card is None:
+                    raise CardContentError("应用卡片缺少可确认的原始内容，本条消息未执行。")
+                prepared_card = extract_card_content(
+                    card,
+                    message_id=getattr(message, "id", None),
+                    preferred_locale=preferred_locale,
+                )
+        except CardContentError as error:
+            raise HistoricalMessageUnavailable(str(error)) from error
+        return {
+            "text": _resolve_material_mentions(prepared_card.text, message),
+            "content_fidelity": "visible_text",
+            "content_read": prepared_card.content_read,
+            "content_metadata": {},
+            "resources": _resource_metadata(message, read_image_keys=frozenset()),
+            "truncated": prepared_card.truncated,
+        }
+    read_image_key_set = frozenset(read_image_keys)
     resources = _resource_metadata(message, read_image_keys=read_image_key_set)
     if message_type == "post" and read_image_keys:
         public_images = {
@@ -189,8 +205,6 @@ def project_message_content(
 
     if message_type in STRUCTURED_TYPES:
         text = usable_text(getattr(message, "content_text", ""))
-        if message_type == "interactive" and text is None:
-            text = usable_text(interactive_fallback_text)
         if text is None:
             raise HistoricalMessageUnavailable(
                 "历史应用消息没有可提取的可见内容，"
@@ -198,9 +212,7 @@ def project_message_content(
             )
         return {
             "text": text,
-            "content_fidelity": (
-                "visible_text" if message_type == "interactive" else "structured_text"
-            ),
+            "content_fidelity": "structured_text",
             "content_read": True,
             "content_metadata": {},
             "resources": resources,
@@ -230,7 +242,9 @@ def project_message_content(
     }
 
 
-def _project_merge_forward(message: Any) -> dict[str, Any]:
+def _project_merge_forward(
+    message: Any, *, preferred_locale: str | None = None,
+) -> dict[str, Any]:
     """Bound the SDK's typed tree before using its public text converter.
 
     The SDK's item limit applies separately to every nested container and its
@@ -304,14 +318,30 @@ def _project_merge_forward(message: Any) -> dict[str, Any]:
                         "合并转发包含不支持的子消息类型，"
                         "请拆分后重试。本条消息未执行。"
                     )
-                if kind == "interactive":
-                    _validate_interactive_content(child)
                 try:
-                    if isinstance(child, PostContent):
+                    if kind == "interactive":
+                        card = original_card(getattr(child, "card", None))
+                        if card is None:
+                            card = original_card(getattr(child, "raw", None))
+                        if card is None:
+                            raise CardContentError(
+                                "合并转发子卡片缺少可确认的原始内容，请单独引用该卡片后重试。"
+                            )
+                        projected_card = extract_card_content(
+                            card, message_id=item.message_id,
+                            parent_message_id=getattr(message, "id", None),
+                            preferred_locale=preferred_locale,
+                        )
+                        child_text = projected_card.text
+                        child_resources: list[Any] = []
+                        truncated |= projected_card.truncated
+                    elif isinstance(child, PostContent):
                         displayed_post, child_resources = _forward_post_content(child)
                         child_text, _ = flatten_content(displayed_post)
                     else:
                         child_text, child_resources = flatten_content(child)
+                except CardContentError as error:
+                    raise HistoricalMessageUnavailable(str(error)) from error
                 except Exception as error:
                     raise HistoricalMessageUnavailable(
                         "合并转发子消息无法转换为可见内容，本条消息未执行。"
@@ -338,15 +368,7 @@ def _project_merge_forward(message: Any) -> dict[str, Any]:
 
     prepared = prepare(content)
     text, _ = flatten_content(prepared)
-    text = resolve_mentions(
-        text,
-        MentionExtraction(mentions={
-            mention.key: mention
-            for mention in getattr(message, "mentions", ()) or ()
-            if isinstance(getattr(mention, "key", None), str)
-            and isinstance(getattr(mention, "name", None), str)
-        }),
-    )
+    text = _resolve_material_mentions(text, message)
     if usable_text(text) is None:
         raise HistoricalMessageUnavailable(
             "合并转发消息没有可读取的内容，请复制内容后重试。"
@@ -370,6 +392,18 @@ def _project_merge_forward(message: Any) -> dict[str, Any]:
         "resources": resources,
         "truncated": bool(truncated),
     }
+
+
+def _resolve_material_mentions(text: str, message: Any) -> str:
+    return resolve_mentions(
+        text,
+        MentionExtraction(mentions={
+            mention.key: mention
+            for mention in getattr(message, "mentions", ()) or ()
+            if isinstance(getattr(mention, "key", None), str)
+            and isinstance(getattr(mention, "name", None), str)
+        }),
+    )
 
 
 def _validate_forward_state(content: MergeForwardContent) -> None:
@@ -516,85 +550,6 @@ def _validate_forward_item(item: MergeForwardItem) -> None:
         raise HistoricalMessageContractError(
             "合并转发子消息的来源或时间格式无效，本条消息未执行。"
         )
-
-
-def validate_interactive_version(content: Any) -> None:
-    """Reject legacy cards, including v1 headers misclassified by SDK parsing."""
-
-    card = getattr(content, "card", None)
-    legacy_shape = (
-        isinstance(card, dict)
-        and "schema" not in card
-        and "body" not in card
-        and any(key in card for key in ("elements", "i18n_elements", "config", "card"))
-    )
-    if getattr(content, "card_version", None) == "v1" or legacy_shape:
-        raise UnsupportedHistoricalMessage(
-            "不支持飞书 1.0 卡片，请提供 2.0 卡片或复制可见正文。本条消息未执行。"
-        )
-
-
-def _validate_interactive_content(content: Any) -> None:
-    """Reject the SDK's proven non-visible text leak without parsing cards.
-
-    SDK 1.4.0 visits arbitrary dictionary values beneath header/body. A
-    markdown/plain_text node inside an interaction payload therefore leaks
-    into its public text. Normal scalar values and visible button labels are
-    fine. This gate can be removed once the SDK excludes those payloads.
-    """
-
-    validate_interactive_version(content)
-    card = getattr(content, "card", None)
-    if not isinstance(card, dict):
-        return
-    header = card.get("header")
-    roots = [card.get("body")]
-    if isinstance(header, dict):
-        roots.extend((header.get("title"), header.get("subtitle")))
-    stack = [(node, 0, False) for node in roots]
-    scheduled = len(stack)
-    text_size = 0
-    while stack:
-        node, depth, hidden = stack.pop()
-        if depth > _CARD_DEPTH_LIMIT:
-            raise HistoricalMessageUnavailable(
-                "应用卡片结构超过可验证范围，本条消息未执行。"
-            )
-        if isinstance(node, str):
-            text_size += len(node)
-        elif isinstance(node, dict):
-            tag = node.get("tag")
-            if tag == "plain_text" or tag == "markdown":
-                text = node.get("content")
-                if hidden and text:
-                    raise HistoricalMessageUnavailable(
-                        "应用卡片的 SDK 转换混入了非可见交互内容，"
-                        "请复制可见正文后重试。本条消息未执行。"
-                    )
-                # The SDK stops traversal at a recognized text node too.
-                if isinstance(text, str):
-                    text_size += len(text)
-            else:
-                for key, value in node.items():
-                    scheduled += 1
-                    if scheduled > _CARD_NODE_LIMIT:
-                        raise HistoricalMessageUnavailable(
-                            "应用卡片结构超过可验证范围，本条消息未执行。"
-                        )
-                    stack.append(
-                        (value, depth + 1, hidden or key in _CARD_HIDDEN_FIELDS)
-                    )
-        elif isinstance(node, list):
-            scheduled += len(node)
-            if scheduled > _CARD_NODE_LIMIT:
-                raise HistoricalMessageUnavailable(
-                    "应用卡片结构超过可验证范围，本条消息未执行。"
-                )
-            stack.extend((value, depth + 1, hidden) for value in node)
-        if text_size > _CARD_TEXT_LIMIT:
-            raise HistoricalMessageUnavailable(
-                "应用卡片内容超过可验证范围，本条消息未执行。"
-            )
 
 
 def _metadata_projection(

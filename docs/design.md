@@ -817,8 +817,10 @@ Skill 存在作为依据。这只是流程选择提示，不是鉴权、权限�
 Goal start 只共享 Task Text 的 @ 投影，来源包装与 resume 等入口保持原样；不为无新输入的跨 Channel 恢复
 增加身份切换机制，也不承诺该场景的宿主识别。
 
-[ADR 0064](adr/0064-share-card-and-forward-content-projection.md) 增加 Card 2.0 卡片 `interactive`
-和合并转发 `merge_forward` 的直接材料输入，转发话题复用后者。材料中的 slash/Skill
+[ADR 0064](adr/0064-share-card-and-forward-content-projection.md) 增加卡片 `interactive`
+和合并转发 `merge_forward` 的直接材料输入，转发话题复用后者；
+[ADR 0099](adr/0099-project-original-card-content-with-bounded-component-adapter.md)
+统一原始卡片正文投影，并允许 1.0 尽力交付。材料中的 slash/Skill
 不解析为当前指令；当前请求只要求结合已有明确任务处理，无明确任务则询问用途。
 材料置于现有 `request_text` 内并中和 `$`，外层 current v1/quote v4/context v2 的版本、
 字段与顺序不变。原 text/post/image 的正文、命令、图片和附件准入保持原语义。
@@ -828,11 +830,12 @@ typed 树调用 SDK 渲染及提及解析，不回用入站原文；转发富文
 同一首选 locale 及非空 `content_v2` 优先的可见 AST。全包最多保留 50 个子消息节点、
 最终文本 16,000 字符，条数或文本截断传播到外层。最大嵌套深度为 3，最外层为
 depth=0，允许内嵌 depth=1..3；depth>3 或 SDK `max_depth_exceeded` 整条拒绝。
-保留的未知或不可渲染子项、loading/error 和循环结构同样明确拒绝。混合子项只提供可见文字/附件描述，
-明确未读图片像素、文件正文和音视频，不逐项下载资源或补读卡片。固定 SDK 会把隐藏
-交互字段内的文本节点混入卡片渲染，内容层对可确认情况拒绝；普通 scalar value 和可见
-label 允许，上游修复且契约与真实卡片验收通过后移除此限制。完整范围与移除条件见
-[ADR 0064](adr/0064-share-card-and-forward-content-projection.md)。
+保留的未知消息类型、无法解释的子项、loading/error 和循环结构同样明确拒绝。已确认
+原始结构的子卡片复用下述正文提取规则，将已准备文本交给 SDK 的转发排版；卡片内部的
+未知组件与未读媒体有明确说明，不被当作完整读取。混合子项只提供可见文字/附件描述，
+明确未读图片像素、文件正文和音视频，不逐项下载资源或补读卡片。卡片的降级提示、来源
+定位与未读说明计入同一全包文字预算；这些限制不恢复 SDK 展开前已经省略的内容，也不
+代替单张卡片的结构预算。
 
 ### 引用读取与 SDK 内容适配
 
@@ -850,17 +853,53 @@ label 允许，上游修复且契约与真实卡片验收通过后移除此限�
 `parent_id != root_id` 区分引用。[ADR 0011](adr/0011-support-feishu-quoted-message-context.md)
 用精确版本、公开 raw relation 和契约测试恢复这一种首层目标；任何非空
 `thread_id` 都优先解释为话题 Scope，不是逐条引用。被引用内容只通过
-Channel SDK 公开 typed fetch 读取：文本/富文本/卡片/结构化类型使用归一化
-可见文本，合并转发使用 SDK 公共 typed 树和渲染，再施加 ADR 0064 的全包边界；
+Channel SDK 公开 typed fetch 读取：文本/富文本/其他结构化类型使用归一化
+可见文本，卡片使用下述原始内容适配，合并转发使用 SDK 公共 typed 树和渲染，再施加
+ADR 0064 的全包边界；
 普通 `image` 与 `post` 图片读取真实像素，准确引用中的普通文件按输入附件规则下载原件；
 其他资源类型在内部 rich projection 保留公开 exact key 与元数据，模型可见 wire 只保留
 类型、名称、时长等可推理信息，
-`system`/未知类型 fail closed。卡片只支持 Card 2.0，Card 1.0 在各来源及转发子项中
-均明确拒绝，不以部分可见文本兜底。受支持卡片归一化只剩占位符时，才使用 SDK 公开
-quote-context fallback。锁定 SDK 1.4.0 若对 CardKit 2.0 返回空文本，只在精确
-版本门禁和结构/大小/深度边界内，从公共 `QuotedContext.raw` 投影 header/body 的
-可见文本节点；按钮值、确认弹窗、选项及事件不进入 prompt。两次 SDK 网络读取
-各自具有 10 秒单次请求预算，避免健康请求因共享总预算产生假超时。
+`system`/未知类型 fail closed。
+
+卡片按 ADR 0099 先取得原始结构，再按原始版本提取正文。已有公开原始卡片或事件
+`user_dsl` 可直接复用；否则顶层卡片通过 SDK 公开 `fetch_quoted_context` 取得
+`user_card_content`。采用补读结果前核验公开 raw 消息项的真实消息 ID、类型及来源一致性，
+不把 SDK 回填的请求 ID 当作响应证据。默认接收格式的 `title/elements` 二维段落摘要和
+SDK `card_version` 不作为版本依据；无法确认原始结构时明确失败，不把摘要当正文，
+转发子项不额外补读。每次 SDK 网络读取独立使用 10 秒请求预算。
+
+`card_content` 只负责有界的纯内容提取，返回独立的 `PreparedCardContent`；消息准备和
+来源验证仍属于原入口。卡片分支只使用该结果，不优先采用旧的非空 `content_text`，不再
+运行另一套 quote-text fallback，也不替换消息副本。适配按组件语义提取正文与必要结构，
+不将过滤后的整包 JSON 当作正文；按钮值、确认弹窗、选项、事件及其他交互载荷不进入
+Prompt。容器只读取各自定义的正文位置，例如仅折叠面板读取 `header.title`，操作区读取
+`actions`，其他容器不借用这些同名字段。未知组件或未读媒体使用明确说明，附最小来源
+定位并传播已知不完整状态。提取器维护的是组件字段和子组件位置，不枚举嵌套组合，
+也不模拟客户端渲染。所有文本字段（含面板标题、表格单元格中的富文本）保留源码，
+不解析 Markdown、HTML、代码或 `<raw>`，不据其中语法判断是否存在媒体；正文保留
+原有空白与缩进。每张卡片统一说明仅提供支持组件的文本字段、未渲染、未读取图片、
+音视频或交互状态，并附已有的最小来源定位，供 Agent 按需核对。
+`truncated` 仅表示已知未提取内容或外层预算截断，`content_read` 表示提取到了文字；
+二者均不证明完整渲染或媒体已读取。表格仅提取官方定义会展示的前 50 列，超出时说明
+省略；分页、折叠状态、行高等布局不限制正文范围。内部 `visible_text` 分类沿用原协议，
+在卡片中表示支持的正文文本字段，不代表客户端渲染结果。
+单卡保留原始 JSON、节点数、深度和文本预算，超限明确失败；表格行等文本片段不另设
+数量上限。
+
+1.0 卡片在当前、引用、补充历史及转发子项中尽力交付，不保证标题或正文完整；其材料
+开头始终说明版本和完整性限制，并附已有的最小来源消息定位。未提取到文字时明确写出，
+不把此降级提示用于掩盖网络失败、错误目标或无法确认的版本。2.0 使用同一有界提取器
+解释支持的组件；所有卡片仍作为材料，不改变当前请求或历史指令的惰性语义。
+
+同一次输入的所有卡片使用同一请求语言提示：仅在当前事件的公开 `user_agent` 已带明确
+`LarkLocale/…` 时取该语言，不把被引用作者的语言当作请求人的语言。对应翻译存在时采用
+它，否则取非空 `content`；再按 `zh_cn`、`en_us`、`ja_jp`、其他已有语种的固定顺序选择
+一种非空多语言文本，不拼接全部语言，也不额外请求用户资料或新增语言配置。此回退是
+本地内容策略，不承诺复现客户端全部语言选择规则。
+
+该纯内容适配以公开 schema 和实际 SDK 契约测试为门禁；原始读取、各来源一致性、语言
+回退与隐藏交互内容必须一起覆盖。上游公开 SDK 提供安全等价的正文能力，并通过相同
+测试和真实卡片验收后，切回公开 API 并删除适配。首层引用关系的精确 1.4.0 门禁保持独立。
 
 引用投影是单层、文本最多 16,000 字符且 mention/资源描述各最多 64 项的 v4
 JSON envelope；被引用消息保持 ADR 0011 的宽类型矩阵，当前消息对象及
@@ -871,7 +910,9 @@ JSON envelope；被引用消息保持 ADR 0011 的宽类型矩阵，当前消息
 key/name 映射时不输出残缺对象，并显式标记该历史消息 truncated；同名同类型但 exact
 身份不同的附件仍保留各自条目。exact
 message/chat/reply/shared-object ID、原始资源 key、读取
-状态和详细统计只留在内部 rich projection，不随历史 wire 进入 prompt。发送者身份仍保留
+状态和详细统计只留在内部 rich projection，不随历史 wire 进入 prompt；ADR 0099 的
+卡片文本材料可携带 exact 来源 message ID，转发子项可附母消息 ID，
+作为按需读取的最小定位例外，不改变外层字段或来源权限。发送者身份仍保留
 app-scoped `open_id`，不投影 `union_id`/`user_id`；raw 事件/card JSON 不会整体复制。
 被引用消息自己的 reply 不递归读取，只有目标也在同一 envelope 时才投影为本地 `hN`；
 图片不保存到 SQLite、文件或长期 cache。超时、撤回、
@@ -1177,6 +1218,12 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | `AppServerAccountRateLimits.read`（[0077](adr/0077-read-account-rate-limits-on-demand.md)） | 只读固定 `account/rateLimits/read` | 能力门禁；不消费通知、不维护账号状态。 | 公开等价额度读取 facade。 |
 | `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页 | shape/synthetic 与原生 paginated/legacy 探针；不替代运行终态或 Files 证据读取，不以全历史读取兜底失败。 | 公开等价历史分页 facade。 |
 | `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
+
+Channel SDK 的卡片原始结构适配见 [ADR 0099](adr/0099-project-original-card-content-with-bounded-component-adapter.md)
+及[引用读取与 SDK 内容适配](#引用读取与-sdk-内容适配)：仅用公开 SDK 取得原始卡片，
+按公开组件结构做有界正文投影，以实际读取契约与行为测试为门禁；不进入私有 API，
+不沿用已删除的 CardKit quote-text fallback 版本分支。首层引用关系仍独立保留精确
+1.4.0 门禁；上游安全等价的正文 API 通过相同测试及真实验收后删除本地提取适配。
 
 Activity observer 与 Goal Tap 只交付 sanitized Activity、[0071](adr/0071-answer-native-questions-through-binding-input.md)
 的 structured question 与 [0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)

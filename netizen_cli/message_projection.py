@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Literal
 
+from .card_content import PreparedCardContent
 from .image_inputs import ImagePromptReferences, localize_image_markers
 from .message_content import (
     SUPPORTED_MESSAGE_TYPES,
@@ -268,7 +269,8 @@ class SupplementalMessageSelection:
 def project_quoted_message(
     message: Any,
     *,
-    interactive_fallback_text: str | None = None,
+    prepared_card: PreparedCardContent | None = None,
+    preferred_locale: str | None = None,
     read_image_keys: Iterable[str] | None = None,
     text_limit: int = _DEFAULT_TEXT_LIMIT,
 ) -> HistoricalMessageProjection:
@@ -277,7 +279,8 @@ def project_quoted_message(
     return project_historical_message(
         message,
         source="quoted_message",
-        interactive_fallback_text=interactive_fallback_text,
+        prepared_card=prepared_card,
+        preferred_locale=preferred_locale,
         read_image_keys=read_image_keys,
         text_limit=text_limit,
     )
@@ -286,7 +289,8 @@ def project_quoted_message(
 def project_supplemental_message(
     message: Any,
     *,
-    interactive_fallback_text: str | None = None,
+    prepared_card: PreparedCardContent | None = None,
+    preferred_locale: str | None = None,
     read_image_keys: Iterable[str] | None = None,
     text_limit: int = _DEFAULT_TEXT_LIMIT,
     attribution_name: str | None = None,
@@ -359,7 +363,8 @@ def project_supplemental_message(
     projection = project_historical_message(
         message,
         source="supplemental_message",
-        interactive_fallback_text=interactive_fallback_text,
+        prepared_card=prepared_card,
+        preferred_locale=preferred_locale,
         read_image_keys=read_image_keys,
         text_limit=text_limit,
     )
@@ -374,7 +379,8 @@ def project_historical_message(
     message: Any,
     *,
     source: HistoricalMessageSource,
-    interactive_fallback_text: str | None = None,
+    prepared_card: PreparedCardContent | None = None,
+    preferred_locale: str | None = None,
     read_image_keys: Iterable[str] | None = None,
     text_limit: int = _DEFAULT_TEXT_LIMIT,
 ) -> HistoricalMessageProjection:
@@ -395,7 +401,8 @@ def project_historical_message(
     content = project_message_content(
         message,
         message_type=message_type,
-        interactive_fallback_text=interactive_fallback_text,
+        prepared_card=prepared_card,
+        preferred_locale=preferred_locale,
         read_image_keys=ordered_read_image_keys,
     )
     text, length_truncated = _truncate(content["text"], text_limit)
