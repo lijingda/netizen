@@ -1,7 +1,6 @@
 const flush = async () => { for (let index = 0; index < 15; index += 1) await Promise.resolve(); };
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 const mutations = [];
 const confirmations = [];
@@ -52,6 +51,9 @@ async function fixtureResponse(path, options = {}) {
   return respond(url.searchParams);
 }
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   try {
     const data = await fixtureResponse(path, options);
     return { ok: true, status: 200, json: async () => data };

@@ -14,9 +14,8 @@ from netizen_cli.admin.auth import AdminAuth, IssuedActionGrant
 from netizen_cli.admin.web import AdminActionTarget, _ActionGrantPlan, _empty_preconditions
 
 
-# Shared editor dependencies; page-specific controllers stay visible in each test.
+# Component-only harnesses explicitly choose their dependencies and skip bootstrap.
 CONFIG_SCRIPTS = ("config-editor.js",)
-CHAT_CONFIG_SCRIPTS = ("chat-picker.js", *CONFIG_SCRIPTS)
 
 
 def action_grant_contract() -> dict[str, list[str]]:
@@ -39,9 +38,14 @@ class _HtmlTree(HTMLParser):
         super().__init__()
         self.root: dict = {"tag": "document", "attrs": {}, "children": []}
         self.stack = [self.root]
+        self.scripts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         node = {"tag": tag, "attrs": dict(attrs), "children": []}
+        if tag == "script" and (src := node["attrs"].get("src")):
+            if not src.startswith("/static/") or ".." in src.split("/"):
+                raise ValueError(f"Expected a shipped static script, got {src!r}")
+            self.scripts.append(src.removeprefix("/static/"))
         self.stack[-1]["children"].append(node)
         if tag not in {"meta", "link", "input", "br", "hr", "img"}:
             self.stack.append(node)
@@ -65,17 +69,22 @@ def read_fixture(name: str, marker: str | None = None) -> tuple[str, str]:
 
 def harness_source(
     page: str | dict,
-    scripts: Sequence[str],
+    scripts: Sequence[str] | None,
     before: str,
     after: str,
 ) -> str:
+    """Use scripts=None for the page's script order; tuples isolate components."""
     static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
     if isinstance(page, str):
         tree = _HtmlTree()
         tree.feed((static / page).read_text(encoding="utf-8"))
         html_tree = tree.root
+        if scripts is None:
+            scripts = tree.scripts
     else:
         html_tree = page
+        if scripts is None:
+            raise ValueError("Page scripts require an HTML filename")
     dom = Path(__file__).with_name("dom_harness.js").read_text(encoding="utf-8")
     grants = Path(__file__).with_name("action_grant_fixture.js").read_text(encoding="utf-8")
     contract = "const actionGrantContract = " + json.dumps(action_grant_contract()) + ";\n"

@@ -9,6 +9,7 @@ from tests.admin.ui_harness import harness_source, run_harness
 
 class ActionGrantFixtureTest(unittest.TestCase):
     def source(self) -> str:
+        # Only exercise the grant fixture contract; page controllers are irrelevant.
         return harness_source("index.html", (), "", """
 const binding = fixtureAction("sessions.stop", {
   resource: "binding", targetId: "one", scopeKey: "scope-one",

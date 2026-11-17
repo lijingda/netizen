@@ -3484,7 +3484,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         from tests.admin.ui_harness import harness_source, read_fixture, run_harness
 
         before, after = read_fixture("time_range_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
-        harness = harness_source("index.html", ("chat-picker.js", "admin.js"), before, after)
+        harness = harness_source("index.html", None, before, after)
 
         def run(timezone: str) -> dict:
             completed = run_harness(

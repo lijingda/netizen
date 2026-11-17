@@ -1,6 +1,5 @@
 window.location = { search: initialSearch, assign() {} };
 confirmResponder = () => true;
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 let now = 0;
 let nextTimer = 0;
@@ -43,6 +42,9 @@ let failSide = false;
 let actionFailure = false;
 let actionMessage = "操作完成";
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   const url = new URL(path, "https://admin");
   requests.push({ path: url.pathname, query: url.searchParams, options });
   let data;

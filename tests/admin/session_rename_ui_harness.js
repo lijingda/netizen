@@ -1,5 +1,4 @@
 window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 window.prompt = () => { throw new Error("Rename must use a dialog"); };
 confirmResponder = () => true;
@@ -34,6 +33,9 @@ const paused = (gate, result) => new Promise((resolve, reject) => {
   gate.reject = (message) => reject(new Error(message));
 });
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   try {
     let data;
     if (options.method === "POST") {

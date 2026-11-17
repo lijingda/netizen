@@ -20,7 +20,12 @@ URL.revokeObjectURL = (url) => {
   revokedAnswerImageUrls.push(url);
 };
 const openedAnswerFiles = [];
-window.NetizenPathFiles = { init() {}, open(target) { openedAnswerFiles.push(target); } };
+const pageHideListeners = [];
+const addPageListener = window.addEventListener;
+window.addEventListener = (name, listener, ...options) => {
+  if (name === "pagehide") pageHideListeners.push(listener);
+  return addPageListener.call(window, name, listener, ...options);
+};
 // Parse trusted image slots and answer anchors from the shipped rendering sink.
 Object.defineProperty(Element.prototype, "innerHTML", {
   get() { return this.html || ""; },
@@ -99,6 +104,8 @@ async function clickConversationControl(name) {
   await flush();
 }
 // SHIPPED_ADMIN_PAGE
+// Install the public file-opening spy after the actual page modules have loaded.
+window.NetizenPathFiles.open = (target) => { openedAnswerFiles.push(target); };
 (async () => {
   await flush();
   state.sessionPage = firstSessionPage("searchTerm=old&project=old&identity=old&chatId=old&inventoryState=archived&updatedRange=all&pageSize=100&sortDirection=asc");
@@ -420,6 +427,31 @@ async function clickConversationControl(name) {
   staleRefresh.resolve(pageOf([imageAnswer()])); await flush();
   assert.equal(answerImageBlobs.length, beforeStale);
   assert.equal(current().source.textContent, "fresh snapshot");
+  for (const lifecycle of ["navigation", "pagehide"]) {
+    const late = deferred(); conversationAnswer = () => late.promise;
+    conversationNode("refresh").click();
+    const beforeLeave = answerImageBlobs.length;
+    if (lifecycle === "navigation") {
+      document.querySelectorAll(".tab").find((tab) => tab.dataset.tab === "projects").click();
+      await flush();
+    } else {
+      assert(pageHideListeners.length, "pagehide is wired by the page");
+      for (const listener of pageHideListeners) listener({ type: "pagehide" });
+    }
+    assert.equal(conversationNode("drawer").open, false, `${lifecycle} closes the drawer`);
+    assert.equal(conversationNode("content").textContent, "");
+    assert.equal(activeAnswerImageUrls.size, 0, `${lifecycle} releases the displayed images`);
+    late.resolve(pageOf([imageAnswer()])); await flush();
+    assert.equal(answerImageBlobs.length, beforeLeave, `${lifecycle} invalidates pending reads`);
+    assert.equal(conversationNode("content").textContent, "");
+    if (lifecycle === "navigation") {
+      document.querySelectorAll(".tab").find((tab) => tab.dataset.tab === "sessions" && tab.dataset.sessionTab === "ordinary").click();
+      await flush();
+    }
+    conversationAnswer = () => pageOf([imageAnswer()]);
+    clickConversationMenu(archived.bindingId); await flush();
+    assert.equal(activeAnswerImageUrls.size, 1, "returning can open a fresh conversation");
+  }
   expireAdminSession();
   assert.equal(activeAnswerImageUrls.size, 0);
   assert.equal(revokedAnswerImageUrls.length, answerImageBlobs.length);

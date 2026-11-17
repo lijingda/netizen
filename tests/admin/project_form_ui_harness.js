@@ -1,5 +1,4 @@
 window.location = { pathname: "/projects", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const grant = (mode) => ({ csrfToken: "csrf", actionToken: mode, target: { resource: "project-registry" } });
@@ -23,6 +22,9 @@ async function fixtureResponse(path, options = {}) {
   return new Promise((resolve, reject) => { completeMutation = resolve; failMutation = reject; });
 }
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   try {
     const data = await fixtureResponse(path, options);
     return { ok: true, status: 200, json: async () => data };

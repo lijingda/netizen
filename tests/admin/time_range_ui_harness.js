@@ -1,5 +1,4 @@
 window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 window.innerWidth = 600;
 const timeRangeViewport = { matches: true, addEventListener() {} };
@@ -11,6 +10,9 @@ document.body.classList.toggle = (name, enabled) => {
   else bodyClasses.delete(name);
 };
 async function fetch(path) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   assert(path.startsWith("/api/v1/sessions?") || path.startsWith("/api/v1/projects/options"));
   return { ok: true, status: 200, json: async () => ({ items: [], nextCursor: null }) };
 }

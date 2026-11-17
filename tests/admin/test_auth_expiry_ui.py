@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import unittest
 
-from tests.admin.ui_harness import CONFIG_SCRIPTS, harness_source, read_fixture, run_harness
+from tests.admin.ui_harness import harness_source, read_fixture, run_harness
 
 
 class AuthExpiryUiTest(unittest.TestCase):
@@ -14,8 +14,7 @@ class AuthExpiryUiTest(unittest.TestCase):
         before, after = read_fixture("auth_expiry_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
         source = harness_source(
             "index.html",
-            ("chat-picker.js", *CONFIG_SCRIPTS, "progress-card.js", "worktrees.js",
-             "content-preview.js", "file-browser.js", "project-files.js", "admin.js"),
+            None,
             common + before, after,
         )
         page = Path("netizen_cli/admin/static/index.html").read_text()

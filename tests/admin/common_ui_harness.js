@@ -1,5 +1,4 @@
 window.location = { pathname: "/projects", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, expire() {} };
 confirmResponder = null;
 const windowEvents = new Map();
 window.addEventListener = (event, listener) => {
@@ -14,6 +13,9 @@ let posts = 0;
 let finishPost;
 let projects = [{ alias: "demo", cwd: "/demo", enabled: true, actions: {}, bindingCount: 0 }];
 async function fetch(path, options = {}) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   if (options.method === "POST") { posts += 1; await new Promise((resolve) => { finishPost = resolve; }); }
   else if (failed) throw new Error("读取失败");
   return { ok: true, status: 200, json: async () => path.startsWith("/api/v1/projects?")

@@ -12,7 +12,7 @@ class SessionGroupingUiTest(unittest.TestCase):
         common, _ = read_fixture("side_sessions_ui_harness.js", "// SHIPPED_ADMIN_PAGE\n")
         before = common + before
         script = harness_source(
-            "index.html", ("chat-picker.js", "content-preview.js", "admin.js"), before, after,
+            "index.html", None, before, after,
         )
         script = f"const initialSearch = ''; const scenario = {json.dumps(scenario)};\n" + script
         result = run_harness(self, script, timeout=15)

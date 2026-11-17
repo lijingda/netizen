@@ -1,5 +1,4 @@
 window.location = { pathname: "/sessions/ordinary", search: "", assign() {} };
-window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
 window.addEventListener = () => {};
 const requests = [];
@@ -8,6 +7,9 @@ let useSessionAnswers = false;
 let failSessionReads = false;
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 async function fetch(path) {
+  // Full-page bootstrap also loads the profile, outside this feature's request log.
+  if (path === "/api/v1/identity") return { ok: true, status: 200,
+    json: async () => ({ openId: "fixture-admin", name: "管理员" }) };
   requests.push(path);
   try {
     if (path.startsWith("/api/v1/sessions?") && failSessionReads) throw new Error("catalog unavailable");
