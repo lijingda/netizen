@@ -12,9 +12,11 @@ const kinds = [
   { kind: "side", tab: "temporary", name: "sides", identity: "sideId", base: side, path: "/api/v1/side-topics" },
 ];
 function sample(config, id, properties = {}) {
-  const target = { resource: config.kind, [config.identity]: id, turnId: `turn-${id}` };
+  const stop = fixtureAction(`${config.kind === "side" ? "side-topics" : "sessions"}.stop`, {
+    resource: config.kind === "side" ? "side" : "binding", targetId: id,
+    scopeKey: config.kind === "side" ? null : `scope-${id}`, actionToken: `stop-${id}`, csrfToken: "csrf" });
   return { ...structuredClone(config.base), appId: "app-one", [config.identity]: id,
-    actions: { stop: { actionToken: `stop-${id}`, csrfToken: "csrf", target } }, ...properties };
+    actions: { stop }, ...properties };
 }
 function reader(config, answer) {
   if (config.kind === "session") ordinaryAnswer = answer;
@@ -87,7 +89,7 @@ async function checkIdentity() {
     stop.click(); await flush();
     const action = requests.findLast((request) => request.path === `${config.path}/stop`);
     assert.equal(action.options.method, "POST");
-    assert.deepEqual(JSON.parse(action.options.body), items[2].actions.stop);
+    assert.deepEqual(JSON.parse(action.options.body), fixtureActionPayload(items[2].actions.stop));
   }
 }
 

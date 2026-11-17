@@ -23,7 +23,10 @@ const ordinary = {
   runtime: { bindingId: "binding-parent", primaryStatus: "idle", primaryStatusResolution: "local" }, actions: {},
 };
 if (initialSearch.includes("inventoryState=archived")) ordinary.catalogState = "archived";
-const grant = (action) => ({ actionToken: action, csrfToken: "csrf", target: { resource: "side", sideId: "side-a" } });
+const grant = (action) => fixtureAction(`side-topics.${action}`, {
+  resource: "side", targetId: "side-a", actionToken: action, csrfToken: "csrf" });
+const ordinaryGrant = (action, actionToken = action) => fixtureAction(`sessions.${action}`, {
+  resource: "binding", targetId: ordinary.bindingId, scopeKey: "scope-parent", actionToken, csrfToken: "csrf" });
 const side = {
   sideId: "side-a", parentBindingId: "binding-parent", parentSession: { bindingId: "binding-parent", title: "普通会话标题", available: true },
   chatId: "oc_side", chatLabel: "研发群", chatLabelResolved: true, chatMode: "group", topicId: "omt_side",
@@ -38,6 +41,7 @@ let sideAnswer;
 let ordinaryAnswer;
 let failSide = false;
 let actionFailure = false;
+let actionMessage = "操作完成";
 async function fetch(path, options = {}) {
   const url = new URL(path, "https://admin");
   requests.push({ path: url.pathname, query: url.searchParams, options });
@@ -51,7 +55,7 @@ async function fetch(path, options = {}) {
     data = sideAnswer ? await sideAnswer() : { items: structuredClone(listItems), nextCursor: url.searchParams.has("cursor") ? null : "side-next" };
   } else if (url.pathname.endsWith("/stop") || url.pathname.endsWith("/close")) {
     if (actionFailure) return { ok: false, status: 409, json: async () => ({ message: "会话状态已变化，请重试" }) };
-    data = { message: "操作完成" };
+    data = { message: actionMessage };
   }
   else throw new Error(`Unexpected request ${path}`);
   return { ok: true, status: 200, json: async () => data };
@@ -77,6 +81,24 @@ async function advanceTime(duration) {
   }
   now = end;
   await flush();
+}
+// Exercise the row's public menu, including its portal and focus behavior.
+function clickConversationMenu(bindingId) {
+  const row = document.querySelector("#sessions-body").children.find((item) => item.dataset.bindingId === bindingId);
+  assert(row, `missing session row ${bindingId}`);
+  const more = row.querySelectorAll("button").find((button) => button.textContent === "更多");
+  assert(more);
+  more.focus(); more.click();
+  const menu = document.querySelector(`#${more.getAttribute("aria-controls")}`);
+  assert.equal(menu.hidden, false);
+  const read = menu.querySelectorAll("button").find((button) => button.textContent === "查看对话记录");
+  assert(read, "materialized session exposes conversation history in More");
+  read.focus();
+  // The DOM port only bubbles events. Deliver the menu's native capture phase
+  // before the item's handler so the drawer observes the real return-focus node.
+  menu.dispatch("click", { target: read });
+  read.click();
+  return more;
 }
 // SHIPPED_ADMIN_PAGE
 (async () => {

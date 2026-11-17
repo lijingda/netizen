@@ -21,6 +21,10 @@ async function fetch(path) {
 // SHIPPED_FILTER_CONTROLLERS
 (async () => {
   await flush();
+  const pageSize = document.querySelector("#session-page-size");
+  assert.deepEqual(pageSize.querySelectorAll("option").map((option) => option.value), ["10", "20", "50", "100"]);
+  assert.equal(pageSize.value, "20");
+  assert(!document.querySelectorAll("input, select").some((node) => ["materialized", "nativeState"].includes(node.name)));
   requests.length = 0;
   const form = document.querySelector("#session-filter");
   const roots = new Map(form.querySelectorAll("[data-session-multi]")
@@ -281,7 +285,8 @@ async function fetch(path) {
     sessionSettings: { turn_settings: null, message_context_mode: "current-only",
       reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true },
     runtime: { primaryStatus: "running", primaryStatusResolution: "local" },
-    actions: { stop: {}, archive: {} },
+    actions: Object.fromEntries(["stop", "archive"].map((kind) => [kind,
+      fixtureAction(`sessions.${kind}`, { resource: "binding", targetId: "binding-unknown", scopeKey: "scope-unknown" })])),
   };
   let sessionResponse = { items: [unknown], nextCursor: null };
   answer = (path) => path.startsWith("/api/v1/projects/options?")
@@ -299,7 +304,7 @@ async function fetch(path) {
   const sessionAnswer = answer;
   answer = (path) => {
     if (path === "/api/v1/schedules?mode=list") return {
-      actions: { create: { actionToken: "create-once", csrfToken: "csrf", target: { resource: "schedule-registry", targetId: "all" } } },
+      actions: { create: fixtureAction("schedules.create", { actionToken: "create-once", csrfToken: "csrf", resource: "schedule-registry", targetId: "schedules" }) },
       default_timezone: "UTC",
     };
     if (path.startsWith("/api/v1/schedules?mode=options")) return {

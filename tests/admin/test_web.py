@@ -3424,113 +3424,57 @@ class _AdminAssetParser(HTMLParser):
 
 
 class AdminStaticAssetsTest(unittest.TestCase):
-    def test_static_ui_has_management_pages_external_assets_and_safe_text_sinks(self) -> None:
+    def test_static_ui_has_management_pages_and_external_assets(self) -> None:
         root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
-        html = (root / "index.html").read_text(encoding="utf-8")
-        javascript = (root / "admin.js").read_text(encoding="utf-8")
         parser = _AdminAssetParser()
-        parser.feed(html)
+        parser.feed((root / "index.html").read_text(encoding="utf-8"))
 
-        self.assertEqual(parser.scripts, ["/static/admin-ui.js", "/static/chat-picker.js", "/static/identity.js",
-                                          "/static/config-editor.js", "/static/session-access.js", "/static/group-access.js", "/static/progress-card.js", "/static/question-notifications.js", "/static/worktrees.js",
-                                          "/static/content-preview.js", "/static/file-browser.js", "/static/project-files.js",
-                                          "/static/attachment-files.js", "/static/path-files.js", "/static/admin.js"])
-        self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css", "/static/content-preview.css"])
+        self.assertTrue(parser.scripts)
+        self.assertTrue(parser.stylesheets)
+        self.assertEqual(parser.scripts[-1], "/static/admin.js")
         self.assertFalse(parser.inline_script_text.strip())
-        self.assertTrue({"projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates"} <= parser.ids)
-        self.assertNotIn("side-topics", parser.ids)
-        self.assertIn("service-restart", parser.ids)
-        self.assertNotIn("update-install", parser.ids)
-        self.assertNotIn("update-check", parser.ids)
-        self.assertTrue(
-            {
-                "session-page-size",
-                "sessions-previous",
-                "sessions-page",
-                "sessions-next",
-            }
-            <= parser.ids
-        )
-        for option in ('value="10"', 'value="20" selected', 'value="50"', 'value="100"'):
-            self.assertIn(option, html)
-        self.assertNotIn('name="materialized"', html)
-        self.assertNotIn('name="nativeState"', html)
-        for unsafe in (
-            "innerHTML",
-            "outerHTML",
-            "insertAdjacentHTML",
-            "document.write",
-            "eval(",
-        ):
-            self.assertNotIn(unsafe, javascript)
-        self.assertIn("textContent", javascript)
-        self.assertIn("runtime.primaryStatus", javascript)
-        self.assertIn("runtime.subscriptionState", javascript)
-        self.assertIn("session.pointerState", javascript)
-        self.assertIn("session.catalogState", javascript)
-        self.assertNotIn("session.nativeState", javascript)
-        self.assertIn("result?.message", javascript)
-        self.assertNotIn("if (runtime.turn)", javascript)
-        self.assertNotIn("if (runtime.goal)", javascript)
-        self.assertIn("sessionLocationCell", javascript)
-        self.assertIn('link.rel = "noopener noreferrer"', javascript)
-        self.assertIn("await refresh(state.tab)", javascript)
-        self.assertIn('state.tab === "sessions"', javascript)
-        self.assertIn('state.sessionTab === "temporary"', javascript)
+        for asset in [*parser.scripts, *parser.stylesheets]:
+            with self.subTest(asset=asset):
+                self.assertIsNotNone(asset, "scripts must be external")
+                self.assertTrue(asset.startswith("/static/"))
+                path = (root / asset.removeprefix("/static/")).resolve()
+                self.assertTrue(path.is_relative_to(root.resolve()))
+                self.assertTrue(path.is_file())
+        # BuiltArtifactTests checks every static file's bytes in the wheel, then
+        # compares the rebuilt sdist wheel. Do not duplicate package builds here.
+        self.assertTrue({
+            "projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates",
+            "service-restart", "session-page-size", "sessions-previous", "sessions-page", "sessions-next",
+            "sessions-body", "sides-body", "session-filter", "side-filter", "time-range-template",
+            *(f"session-answer-{name}" for name in (
+                "drawer", "title", "identity", "close", "scroll", "content", "earlier",
+                "refresh", "toggle", "note", "preview-note", "metadata", "details",
+            )),
+        } <= parser.ids)
+        for obsolete in ("side-topics", "update-install", "update-check"):
+            self.assertNotIn(obsolete, parser.ids)
 
-    def test_time_range_filter_is_shared_accessible_and_uses_utc_bounds(self) -> None:
+    def test_first_party_javascript_keeps_unsafe_text_sinks_outside_trusted_preview(self) -> None:
         root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
-        html = (root / "index.html").read_text(encoding="utf-8")
-        javascript = (root / "admin.js").read_text(encoding="utf-8")
+        paths = [path for path in root.rglob("*.js") if "vendor" not in path.relative_to(root).parts]
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(asset=path.relative_to(root)):
+                javascript = path.read_text(encoding="utf-8")
+                if path.relative_to(root).as_posix() == "content-preview.js":
+                    # Existing bounded server-rendered Markdown sink (ADR 0089/0096).
+                    # Permit only this exact statement, not this file or other sinks.
+                    trusted_sink = 'if (typeof html === "string") target.innerHTML = html;'
+                    self.assertEqual(javascript.count(trusted_sink), 1)
+                    javascript = javascript.replace(trusted_sink, "")
+                for unsafe in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+                    self.assertNotIn(unsafe, javascript)
+
+    def test_time_range_styles_support_popover_and_mobile_modal(self) -> None:
+        # CSS structure is outside the Node DOM port; retain these presentation
+        # guards. Controller semantics and accessibility are exercised below.
+        root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         stylesheet = (root / "admin.css").read_text(encoding="utf-8")
-
-        self.assertEqual(html.count('class="time-range-filter" data-time-range'), 3)
-        self.assertIn('id="time-range-template"', html)
-        self.assertIn('name="createdFrom" data-time-range-from', html)
-        self.assertIn('name="createdBefore" data-time-range-before', html)
-        time_range_template = html.split('<template id="time-range-template">', 1)[1].split("</template>", 1)[0]
-        self.assertEqual(time_range_template.count('type="datetime-local"'), 2)
-        self.assertIn('role="dialog"', html)
-        self.assertIn('role="alert" aria-live="polite"', html)
-        self.assertNotIn("ISO-8601", html)
-        for preset in (
-            "all",
-            "today",
-            "yesterday",
-            "last-24-hours",
-            "last-7-days",
-            "last-30-days",
-            "last-3-months",
-        ):
-            self.assertIn(f'data-time-range-preset="{preset}"', html)
-        for label in ("清除", "取消", "完成"):
-            self.assertIn(f">{label}</button>", html)
-
-        self.assertIn('document.querySelectorAll("[data-time-range]")', javascript)
-        self.assertIn("initializeTimeRangeFilter(root)", javascript)
-        self.assertIn("Intl.DateTimeFormat().resolvedOptions().timeZone", javascript)
-        self.assertIn("function canonicalUtc(value)", javascript)
-        self.assertIn('000+00:00`', javascript)
-        self.assertIn("function customTimeRange(startValue, endValue)", javascript)
-        self.assertIn("parsedEnd.date.getTime() + 60 * 1000", javascript)
-        self.assertIn('popover.setAttribute("aria-modal", "true")', javascript)
-        self.assertIn("function setTimeRangeModalIsolation", javascript)
-        self.assertIn('sibling.setAttribute("inert", "")', javascript)
-        self.assertIn("timeRangeModalOwner !== controller", javascript)
-        self.assertIn('event.key === "Escape"', javascript)
-        self.assertIn('trigger.setAttribute("aria-expanded", "false")', javascript)
-        self.assertIn('zone.id = `${identity}-zone`', javascript)
-        self.assertIn(
-            'start.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`)',
-            javascript,
-        )
-        self.assertIn(
-            'end.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`)',
-            javascript,
-        )
-        self.assertIn("root.getBoundingClientRect()", javascript)
-        self.assertIn("window.innerWidth - margin - width", javascript)
-
         self.assertIn(".time-range-popover", stylesheet)
         self.assertIn(".time-range-backdrop", stylesheet)
         self.assertIn("@media (max-width: 650px)", stylesheet)

@@ -8,11 +8,30 @@ from pathlib import Path
 import shutil
 import subprocess
 import unittest
+from unittest.mock import Mock
+
+from netizen_cli.admin.auth import AdminAuth, IssuedActionGrant
+from netizen_cli.admin.web import AdminActionTarget, _ActionGrantPlan, _empty_preconditions
 
 
 # Shared editor dependencies; page-specific controllers stay visible in each test.
 CONFIG_SCRIPTS = ("config-editor.js",)
 CHAT_CONFIG_SCRIPTS = ("chat-picker.js", *CONFIG_SCRIPTS)
+
+
+def action_grant_contract() -> dict[str, list[str]]:
+    """Exercise the Web serializer with inert tokens; never issue real credentials."""
+    auth = Mock(spec=AdminAuth)
+    auth.issue_actions.return_value = (
+        IssuedActionGrant(csrf_token="fixture-csrf", action_token="fixture-action", expires_at=0),
+    )
+    plan = _ActionGrantPlan(auth, "fixture-session")
+    envelope = plan.add(
+        "sessions.stop", AdminActionTarget("binding", "fixture-binding", "fixture-scope"),
+        _empty_preconditions(),
+    )
+    plan.issue()
+    return {"grant": sorted(envelope), "target": sorted(envelope["target"])}
 
 
 class _HtmlTree(HTMLParser):
@@ -58,10 +77,12 @@ def harness_source(
     else:
         html_tree = page
     dom = Path(__file__).with_name("dom_harness.js").read_text(encoding="utf-8")
+    grants = Path(__file__).with_name("action_grant_fixture.js").read_text(encoding="utf-8")
+    contract = "const actionGrantContract = " + json.dumps(action_grant_contract()) + ";\n"
     if page == "index.html" and "admin-ui.js" not in scripts:
         scripts = ("admin-ui.js", *scripts)
     shipped = "\n".join((static / name).read_text(encoding="utf-8") for name in scripts)
-    return "const htmlTree = " + json.dumps(html_tree) + ";\n" + dom + before + shipped + after
+    return "const htmlTree = " + json.dumps(html_tree) + ";\n" + dom + contract + grants + before + shipped + after
 
 
 def run_harness(

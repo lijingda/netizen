@@ -1,13 +1,15 @@
 const flush = async () => { for (let i = 0; i < 15; i += 1) await Promise.resolve(); };
 function deferred() { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; }
 const element = (id) => document.querySelector(`#session-access-${id}`);
+const accessGrant = (actionToken) => fixtureAction("session-tool-access.save", {
+  resource: "session-tool-access", targetId: "instance", actionToken });
 const calls = [];
 let acceptDiscard = true;
 let failed = false;
 let gate = null;
 let status = "";
 let remote = { revision: "first", discovery: { mode: "all", chatIds: [] },
-  readSend: { mode: "all", chatIds: [] }, saveAction: { actionToken: "first" } };
+  readSend: { mode: "all", chatIds: [] }, saveAction: accessGrant("first") };
 const selectors = new Map();
 window.createChatPicker = (_root, options) => {
   const picker = { setDisabled() {}, close() {}, reset() {}, select: options.onChange };
@@ -16,7 +18,7 @@ window.createChatPicker = (_root, options) => {
 };
 async function fetchChatPage() { throw new Error("not requested by the editor"); }
 function confirmDiscardChanges(dirty) { return !dirty || acceptDiscard; }
-function actionPayload(action, fields) { return { ...action, ...fields }; }
+function actionPayload(action, fields) { return { ...fixtureActionPayload(action), ...fields }; }
 function setStatus(message) { status = message; }
 async function api(path, options = {}) {
   calls.push({ path, options });
@@ -24,7 +26,7 @@ async function api(path, options = {}) {
   if (failed) throw new Error("保存结果未确认");
   if (options.method === "POST") {
     const body = JSON.parse(options.body);
-    remote = { revision: "next", discovery: body.discovery, readSend: body.readSend, saveAction: { actionToken: "next" } };
+    remote = { revision: "next", discovery: body.discovery, readSend: body.readSend, saveAction: accessGrant("next") };
   }
   return structuredClone(remote);
 }

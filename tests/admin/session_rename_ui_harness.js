@@ -18,8 +18,8 @@ let generateFailure = false;
 let saveFailure = false;
 let changedTarget = false;
 let generatedName = "<b>Generated candidate</b>";
-const grant = (kind) => ({ actionKind: `sessions.${kind}`, actionToken: `${kind}-${serial}`,
-  csrfToken: `csrf-${serial}`, target: { resource: "binding", targetId: "binding-exact", scopeKey: "scope-exact" } });
+const grant = (kind) => fixtureAction(`sessions.${kind}`, { actionToken: `${kind}-${serial}`,
+  csrfToken: `csrf-${serial}`, resource: "binding", targetId: "binding-exact", scopeKey: "scope-exact" });
 const fixtureSession = () => ({
   bindingId: "binding-exact", shortId: "exact", scopeKey: "scope-exact", scopeKind: "group", chatMode: "group",
   projectAlias: "netizen", chatId: "oc_group", chatName: "Group", sessionType: "message", topicId: null,

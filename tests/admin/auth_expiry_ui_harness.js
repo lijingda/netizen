@@ -23,22 +23,22 @@ document.createDocumentFragment = () => new Element('fragment');
 // SHIPPED_ADMIN_PAGE
 (async () => {
   await flush();
-  ordinary.actions = { configure: grant('configure'), rename: grant('rename'), archive: grant('archive') };
+  ordinary.actions = { configure: ordinaryGrant('configure'), rename: ordinaryGrant('rename'), archive: ordinaryGrant('archive') };
   ordinary.canReadLatestAnswer = true;
   Object.assign(ordinary.sessionSettings, { reaction_pulse_enabled: false, progress_card_enabled: false,
     completion_mention_enabled: false, progress_card_settings: null });
-  state.projects.actions = { register: grant('register') };
-  state.defaults = { chat: { actions: { create: grant('default') } } };
-  state.schedules = { actions: { create: grant('schedule') } };
+  state.projects.actions = { register: fixtureAction('projects.register', { resource: 'project-registry', targetId: 'new' }) };
+  state.defaults = { chat: { actions: { create: fixtureAction('defaults.save', { resource: 'default-registry', targetId: 'chat' }) } } };
+  state.schedules = { actions: { create: fixtureAction('schedules.create', { resource: 'schedule-registry', targetId: 'schedules' }) } };
   const trigger = document.querySelector('#navigation-open');
   const openings = {
-    'project-delete-dialog': () => confirmProjectDelete({ alias: 'netizen' }, grant('delete')),
+    'project-delete-dialog': () => confirmProjectDelete({ alias: 'netizen' }, fixtureAction('projects.delete', { resource: 'project', targetId: 'netizen' })),
     'project-drawer': () => openProjectEditor(),
     'file-browser-drawer': () => window.NetizenProjectFiles.open({ alias: 'netizen', cwd: '/project' }),
     'worktree-create-drawer': () => document.querySelector('#worktree-new').click(),
     'worktree-settings-drawer': () => document.querySelector('#worktree-configure').click(),
     'session-rename-dialog': () => openSessionRenameEditor(ordinary, trigger),
-    'session-answer-drawer': () => openConversation(ordinary),
+    'session-answer-drawer': () => clickConversationMenu(ordinary.bindingId),
     'session-settings-drawer': () => openSessionSettingsEditor(ordinary, trigger),
     'defaults-drawer': () => openDefaultEditor('chat'),
     'schedule-detail': () => showSchedule('plan-one', trigger),
@@ -62,6 +62,10 @@ document.createDocumentFragment = () => new Element('fragment');
   }
   const dialog = document.querySelector(`#${testDialog}`);
   assert(dialog, testDialog);
+  if (testDialog === 'session-answer-drawer') {
+    ordinary.nativeThreadId = 'native-parent';
+    await selectTab('sessions', 'ordinary');
+  }
   holdReads = true;
   const opening = openings[testDialog]();
   await flush();

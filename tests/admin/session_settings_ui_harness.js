@@ -43,9 +43,9 @@ let postGate = null;
 let generation = 0;
 const gets = [];
 const posts = [];
-const grant = (id) => ({
+const grant = (id) => fixtureAction("sessions.configure", {
   csrfToken: id + "-csrf-" + generation, actionToken: id + "-once-" + generation,
-  target: { resource: "binding", targetId: id, scopeKey: "cli_test:group:oc_group" },
+  resource: "binding", targetId: id, scopeKey: "cli_test:group:oc_group",
 });
 const fixtureSession = (id, settings = baseSettings, extra = {}) => ({
   bindingId: id, shortId: id.slice(-8), projectAlias: "netizen",

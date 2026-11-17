@@ -16,7 +16,7 @@ const labelResponse = (...items) => ({ requestId: "names", items });
 // SHIPPED_ADMIN_PAGE
 (async () => {
   await flush();
-  ordinary.actions = { stop: grant("ordinary-stop") };
+  ordinary.actions = { stop: ordinaryGrant("stop", "ordinary-stop") };
   for (const [view, kind, key] of [["ordinary", "session", "sessions"], ["temporary", "side", "sides"]]) {
     const base = kind === "side" ? side : ordinary;
     const pending = { ...base, chatLabel: base.chatId, chatLabelResolved: false, chatMode: null };

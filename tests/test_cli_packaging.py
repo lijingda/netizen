@@ -78,11 +78,12 @@ class BuiltArtifactTests(unittest.TestCase):
             self.assertIn("netizen_cli/admin/static/index.html", names)
             self.assertEqual(wheel.read("netizen_cli/admin/static/netizen.svg"),
                              (ROOT / "netizen_cli/admin/static/netizen.svg").read_bytes())
-            for path in (ROOT / "netizen_cli/admin/static/vendor/ace").iterdir():
-                self.assertEqual(wheel.read(path.relative_to(ROOT).as_posix()), path.read_bytes())
-            for name in ("content-preview.js", "content-preview.css", "file-browser.js", "project-files.js", "attachment-files.js", "path-files.js"):
-                self.assertEqual(wheel.read("netizen_cli/admin/static/" + name),
-                                 (ROOT / "netizen_cli/admin/static" / name).read_bytes())
+            # Include new first-party modules automatically, not a frozen list of
+            # page scripts. The sdist rebuild test below verifies the same bytes.
+            for path in (ROOT / "netizen_cli/admin/static").rglob("*"):
+                if path.is_file():
+                    with self.subTest(asset=path.relative_to(ROOT)):
+                        self.assertEqual(wheel.read(path.relative_to(ROOT).as_posix()), path.read_bytes())
             self.assertFalse(any(name.startswith("netizen/") for name in names))
             entrypoint = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
             self.assertIn("netizen = netizen_cli.cli:main", wheel.read(entrypoint).decode())

@@ -58,8 +58,10 @@ const reads = () => requests.filter((request) => request.path === "/api/v1/sessi
 const summary = () => node("progress").textContent;
 const details = () => node("results").children.map((item) => item.textContent);
 const selected = () => rows().filter((row) => row.querySelector(".session-select").checked).map((row) => row.dataset.bindingId);
-const exact = (id, action, revision) => ({ actionToken: `${revision}-${action}-${id}`,
-  csrfToken: `csrf-${revision}-${id}`, target: { resource: "binding", bindingId: id, nativeThreadId: `native-${id}` } });
+const exact = (id, action, revision) => fixtureAction(
+  `sessions.${{ delete: "delete-materialized", lazy: "delete-lazy" }[action] || action}`,
+  { resource: "binding", targetId: id, scopeKey: `scope-${id}`,
+    actionToken: `${revision}-${action}-${id}`, csrfToken: `csrf-${revision}-${id}` });
 function sample(id, properties = {}, revision = "old") {
   return { ...structuredClone(ordinary), bindingId: id, shortId: `short-${id}`, nativeTitle: `会话 ${id}`,
     runtime: { primaryStatus: "idle", primaryStatusResolution: "resolved" },
@@ -184,7 +186,7 @@ async function confirmationScenario() {
   assert(!document.querySelector("#admin-confirm-submit").className.includes("danger"));
   const n = reads().length;
   document.querySelector("#admin-confirm-submit").click(); await flush();
-  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body)), [fresh[2].actions.archive, fresh[0].actions.archive]);
+  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body)), [fresh[2].actions.archive, fresh[0].actions.archive].map(fixtureActionPayload));
   assert(posts().every((item) => item.path === "/api/v1/sessions/archive"));
   assert.equal(reads().length, n + 1); assert.equal(selected().length, 0);
   assert.equal(summary(), "已完成 2 项。"); assert.equal(statusNode.textContent, summary());
@@ -228,7 +230,7 @@ async function sequentialScenario() {
     assert.equal(posts().length, index + 1);
     waits[index].resolve(response(status, `服务端原因 ${status}`)); await flush();
   }
-  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body).target.bindingId), ["a", "b", "c", "d"]);
+  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body).target.targetId), ["a", "b", "c", "d"]);
   assert.equal(reads().length, before + 1);
   assert.equal(summary(), "已完成 2 项，未完成 2 项。");
   assert.match(details()[1], /未完成（服务端原因 409）/); assert.match(details()[2], /未完成（服务端原因 404）/);
@@ -525,7 +527,7 @@ async function groupedOrderScenario(mode) {
   const lines = document.querySelector("#admin-confirm").querySelector("ul").children;
   assert.deepEqual(lines.map((item) => item.textContent.split(" · ")[0]), expected.map((id) => `会话 ${id}`));
   document.querySelector("#admin-confirm-submit").click(); await flush();
-  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body).target.bindingId), expected);
+  assert.deepEqual(posts().map((item) => JSON.parse(item.options.body).target.targetId), expected);
   assert.deepEqual(details().map((item) => item.split(" · ")[0]), expected.map((id) => `会话 ${id}`)); finish();
 }
 

@@ -48,9 +48,9 @@ window.webComponent = {
   async config() { selectorConfigs += 1; },
   render(_name, options) { selectorRenders += 1; selectorOnSelect = options.onSelect; return { unmount() { selectorUnmounts += 1; } }; },
 };
-const adminGrant = { actionToken: "fixture-selector", csrfToken: "fixture-csrf", target: {} };
+const adminGrant = fixtureAction("admin-users.selector-config", { resource: "admin-users", targetId: "app-one", actionToken: "fixture-selector", csrfToken: "fixture-csrf" });
 if (typeof navigationRace !== "undefined") {
-  ordinary.actions.configure = adminGrant;
+  ordinary.actions.configure = ordinaryGrant("configure", adminGrant.actionToken);
   Object.assign(ordinary.sessionSettings, { reaction_pulse_enabled: false, progress_card_enabled: false,
     completion_mention_enabled: false, progress_card_settings: null });
 }
