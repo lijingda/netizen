@@ -17,7 +17,7 @@ import math
 import secrets
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Container, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Generic, TypeVar
@@ -534,27 +534,44 @@ class AdminAuth:
     ) -> IssuedActionGrant:
         """Bind immutable exact facts to independent one-shot browser tokens."""
 
-        self._validate_action_kind(action_kind)
-        _require_typed_immutable_payload(target)
-        _require_typed_immutable_payload(preconditions)
+        return self.issue_actions(
+            session_token, ((action_kind, target, preconditions),),
+        )[0]
+
+    def issue_actions(
+        self,
+        session_token: object,
+        actions: Sequence[tuple[str, object, object]],
+    ) -> tuple[IssuedActionGrant, ...]:
+        """Issue an entire response's grants or leave no new authorizations."""
+
+        actions = tuple(actions)
+        # Preserve issue_action's validation errors before authentication errors.
+        for action_kind, target, preconditions in actions:
+            self._validate_action_kind(action_kind)
+            _require_typed_immutable_payload(target)
+            _require_typed_immutable_payload(preconditions)
         with self._lock:
             self._require_admission_locked()
             now = self._now_locked()
             self._prune_locked(now)
             session_digest, _ = self._authenticate_session_locked(session_token)
-            if len(self._actions) >= self._limits.max_actions:
+            if len(self._actions) + len(actions) > self._limits.max_actions:
                 raise AuthCapacityExceeded()
             session_count = len(self._actions_by_session.get(session_digest, ()))
-            if session_count >= self._limits.max_actions_per_session:
+            if session_count + len(actions) > self._limits.max_actions_per_session:
                 raise AuthCapacityExceeded()
-            action_token, action_digest = self._unique_token_locked(self._actions)
-            csrf_token, csrf_digest = _new_token()
-            while hmac.compare_digest(action_digest, csrf_digest):
-                csrf_token, csrf_digest = _new_token()
             expires_at = now + self._limits.action_ttl
-            self._add_action_locked(
-                action_digest,
-                _ActionRecord(
+            pending: dict[bytes, _ActionRecord] = {}
+            issued = []
+            for action_kind, target, preconditions in actions:
+                action_token, action_digest = self._unique_token_locked(
+                    self._actions, reserved=pending,
+                )
+                csrf_token, csrf_digest = _new_token()
+                while hmac.compare_digest(action_digest, csrf_digest):
+                    csrf_token, csrf_digest = _new_token()
+                pending[action_digest] = _ActionRecord(
                     session_digest=session_digest,
                     csrf_digest=csrf_digest,
                     generation=self._generation,
@@ -562,13 +579,15 @@ class AdminAuth:
                     target=target,
                     preconditions=preconditions,
                     expires_at=expires_at,
-                ),
-            )
-            return IssuedActionGrant(
-                csrf_token=csrf_token,
-                action_token=action_token,
-                expires_at=expires_at,
-            )
+                )
+                issued.append(IssuedActionGrant(
+                    csrf_token=csrf_token,
+                    action_token=action_token,
+                    expires_at=expires_at,
+                ))
+            for digest, record in pending.items():
+                self._add_action_locked(digest, record)
+            return tuple(issued)
 
     def redeem_action(
         self,
@@ -807,11 +826,13 @@ class AdminAuth:
 
     @staticmethod
     def _unique_token_locked(
-        records: dict[bytes, object],
+        records: Container[bytes],
+        *,
+        reserved: Container[bytes] = (),
     ) -> tuple[str, bytes]:
         for _ in range(8):
             token, digest = _new_token()
-            if digest not in records:
+            if digest not in records and digest not in reserved:
                 return token, digest
         raise RuntimeError("secure token generator repeatedly collided")
 

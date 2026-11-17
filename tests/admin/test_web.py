@@ -44,6 +44,7 @@ from netizen_cli.admin.queries import (
     _updated_range_query,
 )
 from netizen_cli.admin.web import (
+    AdminActionTarget,
     AdminWebRunner,
     _batches,
     accepted_authorities,
@@ -1429,6 +1430,157 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["code"], "stale_or_consumed")
         call = next(value for name, value in self.management.calls if name == "set-enabled")
         self.assertEqual(call["expected_revision"], 1)
+
+    async def assert_page_grants_atomic(self, session, path, count):
+        """Leave room for all but one new grant, then check both capacity gates."""
+        before = dict(self.auth._actions)
+        index_before = {key: set(value) for key, value in self.auth._actions_by_session.items()}
+        for bound in ("global", "session"):
+            capacity = len(before) + count - 1
+            limits = replace(
+                self.auth._limits,
+                max_actions=capacity if bound == "global" else capacity + 100,
+                max_actions_per_session=capacity,
+            )
+            with self.subTest(path=path, bound=bound), patch.object(self.auth, "_limits", limits):
+                status, _, error = await self.json_get(path, session)
+                self.assertEqual(status, 503, error)
+                self.assertEqual(error["code"], "action_capacity")
+                self.assertEqual(self.auth._actions, before)
+                self.assertEqual(self.auth._actions_by_session, index_before)
+
+    async def test_session_lists_issue_atomic_pages_and_redeem_unchanged_envelopes(self):
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.side_runtime = replace(
+            self.management.side_runtime, turn_id="physical-turn", turn_state=ActiveState.RUNNING,
+        )
+        # Multiple rows catch partial issuance both within and between rows.
+        active = await self.management.query_sessions(query=SimpleNamespace(inventory_state=SessionInventoryState.ACTIVE))
+        first = active.items[0]
+        second_binding = replace(self.management.native, id="binding-second")
+        self.management.runtime_by_id[second_binding.id] = replace(
+            self.management.runtime_by_id[self.management.native.id], binding_id=second_binding.id,
+        )
+        self.management.session_items_override = (first, replace(
+            first, record=replace(first.record, binding=second_binding),
+        ))
+        side_page = await self.management.query_side_topics()
+        first_side = side_page.items[0]
+        second_side = replace(
+            first_side,
+            record=replace(first_side.record, side_topic=replace(self.management.side_record, id="side-2")),
+            runtime=replace(self.management.side_runtime, side_id="side-2"),
+        )
+        with patch.object(self.management, "query_side_topics", return_value=SideTopicInventoryPage(
+            (first_side, second_side), None,
+        )):
+            for route, id_key, resource in (("sessions", "bindingId", "binding"), ("side-topics", "sideId", "side")):
+                path = f"/api/v1/{route}"
+                for _ in range(3):
+                    before = self.auth.state_counts().actions
+                    with patch.object(self.auth, "issue_actions", wraps=self.auth.issue_actions) as issue:
+                        status, _, page = await self.json_get(path, session)
+                    self.assertEqual(status, 200, page)
+                    issue.assert_called_once()
+                    self.assertEqual(len(page["items"]), 2)
+                    count = sum(len(row["actions"]) for row in page["items"])
+                    self.assertGreaterEqual(count, 4)
+                    self.assertEqual(self.auth.state_counts().actions, before + count)
+                    for row in page["items"]:
+                        for envelope in row["actions"].values():
+                            self.assertEqual(set(envelope), {"actionKind", "csrfToken", "actionToken", "target"})
+                            expected_target = {"resource": resource, "targetId": row[id_key],
+                                               "scopeKey": row.get("scopeKey")}
+                            self.assertEqual(envelope["target"], expected_target)
+                            self.assertTrue(envelope["actionKind"].startswith(route + "."))
+                            self.assertRegex(envelope["csrfToken"], r"^[A-Za-z0-9_-]{43}$")
+                            self.assertRegex(envelope["actionToken"], r"^[A-Za-z0-9_-]{43}$")
+                            redeemed = self.auth.redeem_action(
+                                session, csrf_token=envelope["csrfToken"], action_token=envelope["actionToken"],
+                                action_kind=envelope["actionKind"],
+                                target=AdminActionTarget(resource, row[id_key], row.get("scopeKey")),
+                            )
+                            self.assertEqual(redeemed.action_kind, envelope["actionKind"])
+                await self.assert_page_grants_atomic(session, path, count)
+
+    async def test_other_multi_grant_responses_leave_no_capacity_residue(self):
+        self.runner.open_admission()
+        session = await self.login()
+        default = {"id": "rule", "revision": 3, "chat_id": "oc_chat"}
+        schedule = {"id": "plan", "revision": 2, "chat_id": "oc_chat", "can_run_now": True}
+        self.management.worktrees = SimpleNamespace(query=AsyncMock(return_value={
+            "items": [{"id": "worktree-1"}, {"id": "worktree-2"}], "nextCursor": None,
+        }))
+        self.users.add(AdminIdentity("cli_test", "ou_second"), actor=self.member.identity,
+                       expected_revision=self.users.revision, name="Second", avatar_url=None)
+        cases = (
+            ("/api/v1/projects", 4, None),
+            ("/api/v1/worktrees", 2, None),
+            ("/api/v1/admin-users", 4, None),
+            ("/api/v1/defaults", 3, {"items": [default]}),
+            ("/api/v1/defaults?kind=group_name", 4, {"items": [default], "order_revision": 1}),
+            ("/api/v1/defaults?mode=view&chat_id=oc_chat", 3, {"exact": default}),
+            ("/api/v1/schedules", 4, {"ok": True, "plans": [schedule]}),
+            ("/api/v1/schedules?mode=view&plan_id=plan", 3, {"ok": True, "plan": schedule}),
+        )
+        for path, count, result in cases:
+            with self.subTest(path=path):
+                if "defaults" in path:
+                    self.management.defaults = SimpleNamespace(manage=AsyncMock(return_value=result))
+                if "schedules" in path:
+                    self.management.schedules = SimpleNamespace(manage=AsyncMock(return_value=result))
+                before = self.auth.state_counts().actions
+                status, _, page = await self.json_get(path, session)
+                self.assertEqual(status, 200, page)
+                self.assertEqual(self.auth.state_counts().actions, before + count)
+                await self.assert_page_grants_atomic(session, path, count)
+
+    async def test_project_preview_grants_are_atomic_after_consuming_input(self):
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.preview_project_delete = AsyncMock(return_value=SimpleNamespace(
+            project=self.management.project_record, bindings=(), sides=(), scheduled_plans=(),
+            scheduled_runs=(), worktrees=(), fingerprint="exact-inventory",
+        ))
+        for bound in ("global", "session"):
+            with self.subTest(bound=bound):
+                _, _, page = await self.json_get("/api/v1/projects", session)
+                payload = _action_payload(page["items"][0]["actions"]["previewDelete"])
+                before = set(self.auth._actions)
+                index_before = {key: set(value) for key, value in self.auth._actions_by_session.items()}
+                capacity = len(before) + 1
+                limits = replace(self.auth._limits, max_actions=capacity if bound == "global" else capacity + 100,
+                                 max_actions_per_session=capacity)
+                with patch.object(self.auth, "_limits", limits):
+                    status, _, error = await self.json_post("/api/v1/projects/delete-preview", session, payload)
+                self.assertEqual(status, 503, error)
+                self.assertEqual(error["code"], "action_capacity")
+                self.assertEqual(set(self.auth._actions), before)
+                self.assertEqual(self.auth._actions_by_session, index_before)
+                # The original preview grant stays consumed; failed responses are not replayed.
+                status, _, error = await self.json_post("/api/v1/projects/delete-preview", session, payload)
+                self.assertEqual(status, 409, error)
+
+    async def test_deleting_projects_do_not_issue_hidden_actions(self):
+        self.runner.open_admission()
+        session = await self.login()
+        page = await self.management.query_projects()
+        with patch.object(self.management, "query_projects", return_value=replace(
+            page, items=(replace(page.items[0], deleting=True),),
+        )):
+            status, _, result = await self.json_get("/api/v1/projects", session)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["items"][0]["actions"], {})
+        self.assertEqual(self.auth.state_counts().actions, 2)
+
+    async def test_session_list_late_read_failure_does_not_issue_grants(self):
+        self.runner.open_admission()
+        session = await self.login()
+        with patch.object(self.management, "binding_statuses_exact", side_effect=ThreadCatalogError("failed")):
+            status, _, _ = await self.json_get("/api/v1/sessions", session)
+        self.assertEqual(status, 503)
+        self.assertEqual(self.auth.state_counts().actions, 0)
 
     async def test_disconnect_does_not_cancel_redeemed_mutation(self) -> None:
         self.runner.open_admission()

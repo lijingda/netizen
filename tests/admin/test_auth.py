@@ -16,7 +16,7 @@ from netizen_cli.admin.auth import (
     ConsumedActionGrant, ExpectationMode, ExpectedValue, InvalidActionPayload,
     IssuedActionGrant, IssuedSession,
     LoginRejected, MalformedActionGrant, SessionRejected, StaleActionGrant,
-    _token_digest, normalize_source_ip,
+    _new_token, _token_digest, normalize_source_ip,
 )
 from netizen_cli.admin.users import (
     AdminIdentity, AdminUsers, AdminUsersUnavailable,
@@ -101,6 +101,138 @@ class AdminAuthTest(unittest.TestCase):
             session.token, action_kind="test", target=ExactTarget("test", "one"),
             preconditions=self.preconditions(),
         )
+
+    def test_batch_actions_preserve_order_facts_ttl_and_single_use(self) -> None:
+        auth = self.auth()
+        session = self.login(auth)
+        requests = tuple(
+            (f"test.{index}", ExactTarget("test", str(index)), self.preconditions())
+            for index in range(3)
+        )
+        with (
+            patch.object(auth, "_prune_locked", wraps=auth._prune_locked) as prune,
+            patch.object(auth, "_require_admission_locked", wraps=auth._require_admission_locked) as admission,
+            patch.object(auth, "_authenticate_session_locked", wraps=auth._authenticate_session_locked) as authenticate,
+        ):
+            issued = auth.issue_actions(session.token, requests)
+        prune.assert_called_once()
+        admission.assert_called_once()
+        authenticate.assert_called_once_with(session.token)
+        self.assertIsInstance(issued, tuple)
+        self.assertEqual(len(issued), len(requests))
+        for grant, (kind, target, preconditions) in zip(issued, requests, strict=True):
+            self.assertEqual(grant.expires_at, self.clock.now + auth._limits.action_ttl)
+            redeemed = auth.redeem_action(
+                session.token, csrf_token=grant.csrf_token, action_token=grant.action_token,
+                action_kind=kind, target=target,
+            )
+            self.assertEqual(redeemed.preconditions, preconditions)
+            with self.assertRaises(ConsumedActionGrant):
+                auth.redeem_action(
+                    session.token, csrf_token=grant.csrf_token, action_token=grant.action_token,
+                    action_kind=kind, target=target,
+                )
+        self.assert_action_index_consistent(auth)
+
+    def test_batch_capacity_rejection_writes_neither_table_nor_index(self) -> None:
+        for global_limit, session_limit in ((4, 4), (10, 2)):
+            with self.subTest(global_limit=global_limit, session_limit=session_limit):
+                auth = self.auth(limits=AuthLimits(
+                    max_actions=global_limit, max_actions_per_session=session_limit,
+                ))
+                session, other = self.login(auth), self.login(auth)
+                self.issue_test_action(auth, other)
+                self.issue_test_action(auth, other)
+                self.issue_test_action(auth, session)
+                before = dict(auth._actions)
+                index_before = {key: set(value) for key, value in auth._actions_by_session.items()}
+                request = ("test", ExactTarget("test", "new"), self.preconditions())
+                with self.assertRaises(AuthCapacityExceeded):
+                    auth.issue_actions(session.token, (request, request))
+                self.assertEqual(auth._actions, before)
+                self.assertEqual(auth._actions_by_session, index_before)
+                self.assert_action_index_consistent(auth)
+                # A failed batch leaves its remaining one-grant capacity usable.
+                self.assertEqual(len(auth.issue_actions(session.token, (request,))), 1)
+
+    def test_batch_validates_every_kind_and_payload_before_writing(self) -> None:
+        auth = self.auth()
+        session = self.login(auth)
+        self.issue_test_action(auth, session)
+        valid = ("test", ExactTarget("test", "one"), self.preconditions())
+        for invalid, error in (
+            (("", valid[1], valid[2]), ValueError),
+            (("test", MutableTarget("two"), valid[2]), InvalidActionPayload),
+            (("test", valid[1], ShallowFrozenMutableTarget([])), InvalidActionPayload),
+        ):
+            with self.subTest(invalid=invalid):
+                before = dict(auth._actions)
+                index_before = {key: set(value) for key, value in auth._actions_by_session.items()}
+                with self.assertRaises(error):
+                    auth.issue_actions(session.token, (valid, invalid, valid))
+                self.assertEqual(auth._actions, before)
+                self.assertEqual(auth._actions_by_session, index_before)
+
+    def test_batch_tokens_retry_existing_and_in_batch_collisions(self) -> None:
+        auth = self.auth()
+        session = self.login(auth)
+        existing = self.issue_test_action(auth, session)
+        first, second = _new_token(), _new_token()
+        request = ("test", ExactTarget("test", "one"), self.preconditions())
+        with patch("netizen_cli.admin.auth._new_token", side_effect=(
+            (existing.action_token, _token_digest(existing.action_token)),
+            first, _new_token(), first, second, _new_token(),
+        )):
+            issued = auth.issue_actions(session.token, (request, request))
+        self.assertEqual([item.action_token for item in issued], [first[0], second[0]])
+        self.assertEqual(len({existing.action_token, *(item.action_token for item in issued)}), 3)
+        self.assert_action_index_consistent(auth)
+
+    def test_batch_token_generation_failure_leaves_no_partial_grants(self) -> None:
+        auth = self.auth()
+        session = self.login(auth)
+        first = _new_token()
+        request = ("test", ExactTarget("test", "one"), self.preconditions())
+        with patch("netizen_cli.admin.auth._new_token", side_effect=(
+            first, _new_token(), *(first for _ in range(8)),
+        )), self.assertRaisesRegex(RuntimeError, "collided"):
+            auth.issue_actions(session.token, (request, request))
+        self.assertEqual(auth._actions, {})
+        self.assertEqual(auth._actions_by_session, {})
+
+    def test_empty_batch_requires_valid_session_even_at_capacity(self) -> None:
+        auth = self.auth(limits=AuthLimits(max_actions=1, max_actions_per_session=1))
+        session = self.login(auth)
+        self.issue_test_action(auth, session)
+        self.assertEqual(auth.issue_actions(session.token, ()), ())
+        self.assertEqual(auth.state_counts().actions, 1)
+        with self.assertRaises(SessionRejected):
+            auth.issue_actions(None, ())
+        auth.logout(session.token)
+        with self.assertRaises(SessionRejected):
+            auth.issue_actions(session.token, ())
+        auth.close()
+        with self.assertRaises(AdmissionClosed):
+            auth.issue_actions(session.token, ())
+
+    def test_concurrent_batches_reserve_capacity_as_a_whole(self) -> None:
+        auth = self.auth(limits=AuthLimits(max_actions=3, max_actions_per_session=3))
+        session = self.login(auth)
+        ready = threading.Barrier(2)
+        request = ("test", ExactTarget("test", "one"), self.preconditions())
+
+        def issue():
+            ready.wait(timeout=5)
+            try:
+                return len(auth.issue_actions(session.token, (request, request)))
+            except AuthCapacityExceeded:
+                return 0
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(issue) for _ in range(2)]
+            self.assertEqual(sorted(future.result(timeout=5) for future in futures), [0, 2])
+        self.assertEqual(auth.state_counts().actions, 2)
+        self.assert_action_index_consistent(auth)
 
     def test_preauth_nonce_is_source_bound_and_single_use(self) -> None:
         auth = self.auth()

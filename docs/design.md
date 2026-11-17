@@ -3128,6 +3128,11 @@ ADR 0037/0049/0078 的 delete primitive，由原生返回决定结果。
 Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume，
 也不注册任意筛选结果或服务端批量的 native mutation route。
 
+列表或详情响应先读完本次事实并登记待返回的 action，再在同一授权临界区整批签发。
+整批校验 action kind、typed payload 和全局／当前 session 剩余容量，全部通过才写入授权表；
+容量不足仍返回 `503 action_capacity`，不留下未交付的半页授权。单项签发复用同一入口，
+已有容量上限、十分钟 TTL、session 绑定和一次性兑换语义不变。
+
 [ADR 0100](adr/0100-batch-archive-and-delete-selected-admin-sessions.md) 只开放普通会话当前页
 显式勾选的批量归档与删除，每页最多 100 条；未归档页提供归档和 materialized 删除，
 已归档页仅 materialized 删除，未开始页仅 Lazy 删除。点击后先用同一已应用查询和 cursor
