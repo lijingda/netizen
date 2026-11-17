@@ -411,6 +411,10 @@ class SessionService:
                         },
                     )
                     errors.append({"threadId": thread_id, "code": "unavailable", "message": "Could not read task status before the deadline."})
+            if not wake and polls and loop.time() < deadline:
+                await asyncio.sleep(min(1.0, max(0, deadline - loop.time())))
+            # A deadline reached while sleeping returns this call's last polls;
+            # do not erase them by starting another read with no time remaining.
             if wake or not polls or loop.time() >= deadline:
                 # Revalidate registration after reading the other targets;
                 # access was already admitted against this call's snapshot.
@@ -425,7 +429,6 @@ class SessionService:
                             wake = None
                 return {"timedOut": wake is None and (bool(registered) or (data["timeoutMs"] > 0 and loop.time() >= deadline)),
                         "wake": wake, "polls": registered, **({"errors": errors} if errors else {})}
-            await asyncio.sleep(min(1.0, max(0, deadline - loop.time())))
 
 
 def _poll(thread: dict[str, Any], after_cursor: str | None) -> tuple[dict[str, Any], str | None]:

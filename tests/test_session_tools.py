@@ -732,6 +732,59 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(count, 2)
 
+    async def test_wait_timeout_preserves_latest_poll_and_revalidates_target(self):
+        for remove_at_deadline in (False, True):
+            with self.subTest(remove_at_deadline=remove_at_deadline):
+                self.catalog.items["target"].update(
+                    status={"type": "active", "activeFlags": []},
+                    turns=[turn("running", "still working", status="inProgress")],
+                )
+                now = 0.0
+                reads = 0
+
+                async def observe(identifier):
+                    nonlocal reads
+                    # Give an expired read deadline a chance to cancel the read.
+                    await asyncio.sleep(0)
+                    reads += 1
+                    self.catalog.items[identifier]["updatedAt"] = reads
+
+                async def advance(delay):
+                    nonlocal now
+                    now += delay
+                    if remove_at_deadline and now >= 2.5:
+                        self.store.delete_binding(self.target.id)
+
+                self.catalog.read_hook = observe
+                # Advance only this service's clock; SDK reads and asyncio's own
+                # scheduler retain their real clock and cancellation semantics.
+                clock = SimpleNamespace(time=lambda: now)
+                wait_asyncio = SimpleNamespace(
+                    get_running_loop=lambda: clock,
+                    timeout_at=lambda deadline: asyncio.timeout(max(0, deadline - now)),
+                    sleep=advance,
+                )
+                with patch("netizen_cli.sessions.service.asyncio", wait_asyncio):
+                    result = await self.call("wait_threads", {
+                        "targets": [{"threadId": "target"}], "timeoutMs": 2500,
+                    })
+
+                self.assertTrue(result["timedOut"])
+                self.assertIsNone(result["wake"])
+                self.assertEqual(reads, 3)
+                if remove_at_deadline:
+                    self.assertEqual(result["polls"], [])
+                    self.assertEqual(result["errors"][0]["code"], "target_not_registered")
+                else:
+                    self.assertNotIn("errors", result)
+                    poll, = result["polls"]
+                    self.assertEqual(poll["thread"]["status"]["type"], "active")
+                    self.assertEqual(poll["latestTurn"]["status"], "inProgress")
+                    self.assertEqual(poll["revision"], 3)
+                    self.assertEqual(json.loads(poll["cursor"])["updatedAt"], 3)
+                    self.assertEqual(poll["latestAssistantMessage"]["text"], "still working")
+                self.assertEqual(self.calls, [])
+
     async def test_wait_keeps_admitted_targets_when_policy_changes_mid_call(self):
         self.catalog.items["target"]["status"] = {"type": "active", "activeFlags": []}
         other = self.binding("chat-c", "third")
