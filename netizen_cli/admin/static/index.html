@@ -303,13 +303,20 @@
         <span id="session-group-note" class="hint" data-session-group-note="session" hidden>仅分组当前页，保留组内排序。</span>
       </div>
       <div id="sessions-lazy-notice" hidden><p class="hint">未开始的会话按登记时间排序。</p><details class="panel-explanation"><summary>说明</summary><p>未开始的会话尚未在 Codex 创建，按 Netizen 登记时间排序；创建时间和更新时间筛选不适用。</p></details></div>
+      <div id="session-batch" class="session-batch" role="group" aria-label="当前页会话批量操作" hidden>
+        <label class="session-select-hit"><input id="session-select-page" type="checkbox">全选本页</label>
+        <span id="session-batch-count" aria-live="polite">已选 0 项</span>
+        <button id="session-batch-archive" class="action" type="button" aria-disabled="true" hidden>归档所选</button>
+        <button id="session-batch-delete" class="action danger" type="button" aria-disabled="true" hidden>删除所选</button>
+        <button id="session-batch-clear" class="action" type="button" disabled>清除选择</button>
+      </div>
       <p id="sessions-identity-notice" class="hint" hidden>按指定会话 ID 筛选；未找到时可切换会话状态。</p>
       <div id="session-schedule-saved" class="selection-notice" hidden role="status">
         <p>定时任务已创建。</p><button id="session-schedule-view" class="refresh" type="button">查看定时任务</button>
       </div>
       <div id="sessions-error" class="list-error" role="status" aria-live="polite" hidden></div>
       <div class="table-wrap card-table"><table><thead><tr>
-        <th>位置</th><th data-card-title="">会话</th><th data-card-status="">状态</th><th>Project</th><th>配置</th>
+        <th>选择</th><th>位置</th><th data-card-title="">会话</th><th data-card-status="">状态</th><th>Project</th><th>配置</th>
         <th aria-sort="none"><button type="button" class="session-sort" data-session-sort="session" data-sort-by="createdAt" aria-label="按创建时间由近及远排序" title="Codex 会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示"><span class="sort-label">创建时间</span><span class="sort-indicator" aria-hidden="true">↕</span></button></th>
         <th aria-sort="descending"><button type="button" class="session-sort" data-session-sort="session" data-sort-by="updatedAt" aria-label="按最近更新由远及近排序（当前由近及远）" title="Codex 会话最近更新时间；按浏览器本地时区显示">最近更新<span class="sort-indicator" aria-hidden="true">↓</span></button></th><th>操作</th>
       </tr></thead><tbody id="sessions-body"></tbody></table></div>
@@ -939,5 +946,17 @@
       </div>
     </div>
   </template>
+  <dialog id="session-batch-dialog" class="project-delete-dialog session-batch-dialog" aria-labelledby="session-batch-title" aria-describedby="session-batch-progress">
+    <div class="project-delete-head"><h3 id="session-batch-title">批量会话操作</h3></div>
+    <div class="project-delete-body">
+      <p id="session-batch-progress" role="status" aria-live="polite"></p>
+      <p id="session-batch-note" class="error" hidden></p>
+      <ul id="session-batch-results" class="confirm-details" hidden></ul>
+    </div>
+    <div class="project-delete-footer">
+      <button id="session-batch-stop" type="button" class="action">停止剩余</button>
+      <button id="session-batch-close" type="button" class="drawer-cancel" hidden>关闭</button>
+    </div>
+  </dialog>
 </body>
 </html>

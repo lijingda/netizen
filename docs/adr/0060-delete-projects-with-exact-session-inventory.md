@@ -3,10 +3,14 @@ status: accepted
 date: 2026-09-07
 amends: 0031, 0054
 related: 0034, 0037, 0046, 0049
-amended_by: 0078
+amended_by: 0078, 0100
 ---
 
 # 按精确会话清单删除 Project
+
+> 后续修订：[ADR 0100](0100-batch-archive-and-delete-selected-admin-sessions.md)
+> 开放当前页显式勾选的普通会话批量归档与删除，经既有单项端点顺序执行；
+> 任意筛选结果、跨页和服务端批量仍不开放。以下历史正文保持原决策记录。
 
 > 后续修订：[ADR 0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
 > 将共享删除改为按原生返回处理，并把持久 fork 的进程内在途创建纳入 Project 删除交接。

@@ -73,6 +73,9 @@ The usage guides are not implementation guides.
   not create ordinary Bindings; interactive session creation belongs to Feishu.
   The one-shot Admin deployment process for explicit instance restarts is the sole
   deployment exception (ADR 0057/0059/0076). Admin cannot upgrade the shared program.
+  Batch archive and delete apply only to explicitly selected rows on the current
+  page, sequentially through existing exact single-item endpoints (ADR 0100);
+  arbitrary filter results, cross-page selection and server-side batches remain excluded.
 - The sole in-process Scheduler uses the shared application/runtime boundary. Admin
   may maintain Scheduled Plans and request manual runs of their saved versions,
   but cannot submit arbitrary immediate Prompts (ADR 0061/0068).

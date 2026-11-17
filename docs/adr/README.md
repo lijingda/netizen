@@ -144,17 +144,18 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 | ADR | 标题 | 类型 | 状态 | 修订 |
 | --- | --- | --- | --- | --- |
-| [0031](0031-add-in-process-admin-web-control-plane.md) | 引入进程内 Admin Web 管理控制面 | 架构决策 | 有效 | 被 [0037](0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)、[0049](0049-bound-turn-observation-and-delegate-thread-removal.md)、[0054](0054-allow-admin-to-delete-exact-materialized-sessions.md)、[0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md)、[0060](0060-delete-projects-with-exact-session-inventory.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0080](0080-authenticate-admins-with-feishu-identities.md)、[0096](0096-read-admin-conversations-through-summary-turn-pages.md) 修订 |
-| [0054](0054-allow-admin-to-delete-exact-materialized-sessions.md) | 允许 Admin 删除 exact materialized 会话 | 功能契约 | 有效 | 被 [0060](0060-delete-projects-with-exact-session-inventory.md) 修订 |
+| [0031](0031-add-in-process-admin-web-control-plane.md) | 引入进程内 Admin Web 管理控制面 | 架构决策 | 有效 | 被 [0037](0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)、[0049](0049-bound-turn-observation-and-delegate-thread-removal.md)、[0054](0054-allow-admin-to-delete-exact-materialized-sessions.md)、[0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md)、[0060](0060-delete-projects-with-exact-session-inventory.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0080](0080-authenticate-admins-with-feishu-identities.md)、[0096](0096-read-admin-conversations-through-summary-turn-pages.md)、[0100](0100-batch-archive-and-delete-selected-admin-sessions.md) 修订 |
+| [0054](0054-allow-admin-to-delete-exact-materialized-sessions.md) | 允许 Admin 删除 exact materialized 会话 | 功能契约 | 有效 | 被 [0060](0060-delete-projects-with-exact-session-inventory.md)、[0100](0100-batch-archive-and-delete-selected-admin-sessions.md) 修订 |
 | [0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md) | 通过共享安装器执行管理页手动升级 | 功能契约 | 有效 | 被 [0059](0059-support-explicit-admin-service-restart.md) 修订 |
 | [0059](0059-support-explicit-admin-service-restart.md) | 通过同一部署执行者支持管理页独立重启 | 功能契约 | 有效 |  |
-| [0060](0060-delete-projects-with-exact-session-inventory.md) | 按精确会话清单删除 Project | 架构决策 | 有效 | 被 [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 修订 |
+| [0060](0060-delete-projects-with-exact-session-inventory.md) | 按精确会话清单删除 Project | 架构决策 | 有效 | 被 [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0100](0100-batch-archive-and-delete-selected-admin-sessions.md) 修订 |
 | [0080](0080-authenticate-admins-with-feishu-identities.md) | 用飞书身份登录并维护实例管理员 | 架构决策 | 有效 | 被 [0091](0091-load-admin-user-credentials-on-demand.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
 | [0091](0091-load-admin-user-credentials-on-demand.md) | 按用户独立存储并按需读取 Admin 飞书凭证 | 架构决策 | 有效 |  |
 | [0089](0089-browse-current-project-files-through-admin.md) | Admin 按需查看 Project 当前目录中的文件 | 架构决策 | 有效 | 被 [0095](0095-show-uncommitted-changes-against-head-in-project-files.md)、[0098](0098-open-answer-file-links-in-directory-roots.md) 修订 |
 | [0095](0095-show-uncommitted-changes-against-head-in-project-files.md) | Admin 文件查看显示相对 HEAD 的未提交变更 | 架构决策 | 有效 |  |
 | [0096](0096-read-admin-conversations-through-summary-turn-pages.md) | Admin 按轮分页查看只读对话记录 | 架构决策 | 有效 | |
 | [0098](0098-open-answer-file-links-in-directory-roots.md) | Admin 对话记录中的本地文件链接按所在目录只读打开 | 架构决策 | 有效 | |
+| [0100](0100-batch-archive-and-delete-selected-admin-sessions.md) | Admin 普通会话按当前页勾选批量归档与删除 | 架构决策 | 有效 | 修订 [0031](0031-add-in-process-admin-web-control-plane.md)、[0054](0054-allow-admin-to-delete-exact-materialized-sessions.md)、[0060](0060-delete-projects-with-exact-session-inventory.md) |
 
 ## 数据、凭据与服务环境
 
@@ -191,4 +192,4 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 ## 统计
 
-共 99 个 ADR：架构决策 66 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。
+共 100 个 ADR：架构决策 67 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。
