@@ -141,6 +141,10 @@ from netizen_cli.user_questions import (
 )
 
 
+# Allow expected asynchronous progress on busy CI runners.
+EXPECTED_PROGRESS_TIMEOUT = 5.0
+
+
 @dataclass
 class FakeStatus:
     value: str
@@ -1220,7 +1224,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.record.error = native_error
         handle.complete(status="interrupted")
         submission.release_receipt_attempt()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
         outcome = self.outcomes[-1]
         self.assertEqual(outcome.status, "interrupted")
@@ -1590,7 +1594,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             thread_id=snapshot.thread_id,
             turn_id=first.turn_id,
         )
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertEqual(handle.run_calls, 1)
         self.assertEqual(self.cleanup.calls, [snapshot.thread_id])
         self.assertIsNone(self.runtime.side_snapshot(record.id).turn_id)
@@ -1625,7 +1629,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.stop_side(record.id),
             StopDisposition.REQUESTED,
         )
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertEqual(
             self.cleanup.calls,
             [snapshot.thread_id, snapshot.thread_id],
@@ -1652,7 +1656,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TurnInterruptFailed):
             await self.runtime.stop_side(record.id)
         handle.complete(status="interrupted")
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._sides[record.id].active.terminal_observed:
                 await asyncio.sleep(0)
 
@@ -1660,7 +1664,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.stop_side(record.id),
             StopDisposition.REQUESTED,
         )
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertEqual(self.cleanup.calls, [snapshot.thread_id])
         self.assertIsNone(self.runtime.side_snapshot(record.id).turn_id)
 
@@ -1858,7 +1862,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.handles[-1].notifications.put_nowait(RuntimeError("stream lost"))
         assert submission.release_receipt_attempt is not None
         submission.release_receipt_attempt()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
         self.assertEqual(
             self.runtime.side_snapshot(record.id).state,
@@ -1928,7 +1932,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         parent_handle.complete(status="interrupted")
         assert parent.release_receipt_attempt is not None
         parent.release_receipt_attempt()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
     async def test_external_active_parent_fails_closed_before_fork(self) -> None:
         binding = self.materialized_binding()
@@ -2410,7 +2414,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.submit_side(
                 side_id=record.id, input="next", owner_id="ou_owner", origin=object()
             )
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertEqual(handle.run_calls, 1)
         self.assertEqual(len(self.outcomes), 1)
         self.assertEqual(self.outcomes[0].result.final_response, "first result")
@@ -2448,7 +2452,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime._sides[record.id].active.terminal_observed)
 
         handle.complete(response="authoritative result")
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertEqual(handle.run_calls, 1)
         self.assertEqual(self.outcomes[0].result.final_response, "authoritative result")
 
@@ -2473,7 +2477,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             handle.complete(response="side final")
             handle.record.items.insert(0, root_patch)
             started.release_receipt_attempt()
-            self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+            self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, SideTurnOutcome)
@@ -2528,7 +2532,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.codex.handles[-1].complete(status=status)
                 started.release_receipt_attempt()
-                self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+                self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
                 collect.assert_not_awaited()
                 self.assertEqual(self.outcomes[-1].result.status.value, status)
 
@@ -2582,14 +2586,14 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         first = PartialAnswer(started.thread_id, started.turn_id, "p1", "first stable")
         observer.append_partial(first)
-        async with asyncio.timeout(0.2):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while self.runtime.side_turn_activity(record.id).partial_answers != (first,):
                 await asyncio.sleep(0)
         observer.retained_count_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
         observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
         handle = self.codex.handles[-1]
         with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
-            async with asyncio.timeout(0.2):
+            async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
                 while handle.run_calls != 1:
                     await asyncio.sleep(0)
         calls = len(observer.calls)
@@ -2625,7 +2629,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         reads_before = list(self.codex.read_calls)
         first = PartialAnswer(started.thread_id, started.turn_id, "p1", "observed stable answer")
         observer.append_partial(first)
-        async with asyncio.timeout(0.2):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while self.runtime.side_turn_activity(record.id).partial_answers != (first,):
                 await asyncio.sleep(0)
 
@@ -2660,7 +2664,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             observer.retained_count_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
             observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
             with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
-                await asyncio.wait_for(run_started.wait(), timeout=0.2)
+                await asyncio.wait_for(run_started.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
             calls = len(observer.calls)
             observer.append_partial(PartialAnswer(
                 started.thread_id, started.turn_id, "p2", late_item.root.text,
@@ -2669,7 +2673,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(observer.calls), calls)
             finish_run.set()
             started.release_receipt_attempt()
-            self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+            self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, SideTurnOutcome)
@@ -2785,7 +2789,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             thread_id=started.thread_id, turn_id=started.turn_id, request=request,
         )
         observer.complete(thread_id=started.thread_id, turn_id=started.turn_id)
-        await asyncio.wait_for(received.wait(), timeout=0.2)
+        await asyncio.wait_for(received.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
 
         self.assertEqual(handle.run_calls, 1)
         self.assertEqual(self.outcomes, [])
@@ -2801,7 +2805,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         handle.complete(response="authoritative result")
         handle.record.items.insert(0, completed_question(request))
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         handler.assert_awaited_once()
         self.assertEqual(handler.await_args.args[2], request)
         self.assertEqual(handle.run_calls, 1)
@@ -2914,7 +2918,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 await self.runtime.stop_side(record.id), StopDisposition.REQUESTED,
             )
             observer.complete(thread_id=started.thread_id, turn_id=started.turn_id)
-            self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+            self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertEqual(handle.run_calls, 1)
         self.assertEqual(self.outcomes[-1].result.status.value, "interrupted")
         self.assertIsNone(self.outcomes[-1].error)
@@ -2953,7 +2957,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             thread_id=started.thread_id, turn_id=started.turn_id,
             request=QuestionRequest("question-one", (UserQuestion("Choose"),)),
         )
-        await asyncio.wait_for(sending.wait(), timeout=0.2)
+        await asyncio.wait_for(sending.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
         active = self.runtime._sides[record.id].active
         interrupt = handle.interrupt
 
@@ -3086,7 +3090,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 origin=SimpleNamespace(message_id="om-one"),
             )
         )
-        await asyncio.wait_for(first_entered.wait(), timeout=0.2)
+        await asyncio.wait_for(first_entered.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
         second_task = asyncio.create_task(
             self.runtime.submit_side(
                 side_id=second_record.id,
@@ -3117,7 +3121,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         assert second.release_receipt_attempt is not None
         first.release_receipt_attempt()
         second.release_receipt_attempt()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
     async def test_persistence_failure_retains_closing_session_for_retry(self) -> None:
         _binding, record, snapshot = await self.open_side()
@@ -3200,10 +3204,10 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         assert submission.release_receipt_attempt is not None
         submission.release_receipt_attempt()
         self.codex.handles[-1].complete(response="released")
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.5))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         return self.store.get(binding.id)
 
-    async def _wait_for_calls(self, expected: int, *, timeout: float = 0.5) -> None:
+    async def _wait_for_calls(self, expected: int, *, timeout: float = EXPECTED_PROGRESS_TIMEOUT) -> None:
         deadline = asyncio.get_running_loop().time() + timeout
         while len(self.subscription.calls) < expected:
             if asyncio.get_running_loop().time() >= deadline:
@@ -3217,7 +3221,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self,
         expected: int,
         *,
-        timeout: float = 0.5,
+        timeout: float = EXPECTED_PROGRESS_TIMEOUT,
     ) -> None:
         deadline = asyncio.get_running_loop().time() + timeout
         while len(self.inspector.calls) < expected:
@@ -3228,7 +3232,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
             await asyncio.sleep(0.002)
 
-    async def _wait_for_reads(self, expected: int, *, timeout: float = 0.5) -> None:
+    async def _wait_for_reads(self, expected: int, *, timeout: float = EXPECTED_PROGRESS_TIMEOUT) -> None:
         deadline = asyncio.get_running_loop().time() + timeout
         while len(self.codex.read_calls) < expected:
             if asyncio.get_running_loop().time() >= deadline:
@@ -3265,7 +3269,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         assert second.release_receipt_attempt is not None
         second.release_receipt_attempt()
         self.codex.handles[-1].complete()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.5))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
     async def test_running_binding_switched_away_releases_only_at_terminal(self) -> None:
         first = self.binding()
@@ -3284,7 +3288,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.subscription.calls, [])
 
         self.codex.handles[-1].complete()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.5))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         await self._wait_for_calls(1)
         self.assertEqual(self.subscription.calls, [submission.thread_id])
 
@@ -3352,7 +3356,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.subscription.gate = asyncio.Event()
         binding = await self._complete_turn(self.binding())
-        await asyncio.wait_for(self.subscription.entered.wait(), timeout=0.5)
+        await asyncio.wait_for(self.subscription.entered.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
 
         reads_before = len(self.codex.read_calls)
         inspections_before = len(self.inspector.calls)
@@ -3444,7 +3448,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = await self._complete_turn(self.binding())
         self.subscription.gate = asyncio.Event()
         task = asyncio.create_task(self.runtime.release_exact(binding.id))
-        await asyncio.wait_for(self.subscription.entered.wait(), timeout=0.2)
+        await asyncio.wait_for(self.subscription.entered.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
 
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -3475,7 +3479,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         assert running.release_receipt_attempt is not None
         running.release_receipt_attempt()
         self.codex.handles[-1].complete()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.5))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
         self.codex.read_statuses.append("active")
         with self.assertRaises(ThreadReleaseError):
@@ -4706,7 +4710,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.runtime.set_completion_handler(capture)
         archiving = asyncio.create_task(self.runtime.archive_exact(binding.id))
-        await asyncio.wait_for(delivery_started.wait(), timeout=0.1)
+        await asyncio.wait_for(delivery_started.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
 
         lifecycle = self.runtime.lifecycle_state(binding.id)
         self.assertIsNotNone(lifecycle)
@@ -4862,7 +4866,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     expected_native_thread_id="native-1",
                 )
             )
-            await asyncio.wait_for(entered.wait(), timeout=0.1)
+            await asyncio.wait_for(entered.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
             with self.assertRaises(ThreadLifecycleError):
                 await self.runtime.capture_submission_admission(binding.id)
             admission = await self.runtime.capture_submission_admission(other.id)
@@ -5600,12 +5604,12 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(
             self.submit(first, "must not run", admission=admission)
         )
-        await asyncio.wait_for(reconcile_started.wait(), timeout=0.1)
+        await asyncio.wait_for(reconcile_started.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
         self.store.activate(scope_key=self.scope.key, binding_id=second.id)
         release_reconcile.set()
 
         with self.assertRaises(SteerRace):
-            await asyncio.wait_for(task, timeout=0.1)
+            await asyncio.wait_for(task, timeout=EXPECTED_PROGRESS_TIMEOUT)
         self.assertEqual(len(self.codex.turn_inputs), 1)
         self.assertEqual(self.store.active_binding(self.scope.key).id, second.id)
 
@@ -6186,7 +6190,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeClosed):
             await self.runtime.capture_submission_admission(binding.id)
         self.codex.handles[0].complete()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
     async def assert_steer_notifies_before_failed_context_commit(self, *, goal: bool) -> None:
         binding = self.catch_up_binding()
@@ -6236,7 +6240,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
 
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         handle.notifications.put_nowait(token_usage_notification())
@@ -6272,7 +6276,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         children = TaskPatchChildren(
             batches=(TurnPatchBatch("child", "child-turn", self.cwd, (root_patch,)),)
         )
-        async with asyncio.timeout(0.2):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         with patch(
@@ -6343,7 +6347,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
 
@@ -6363,7 +6367,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
 
@@ -6386,7 +6390,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
 
@@ -6417,7 +6421,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         first = await self.submit(binding)
         first_handle = self.codex.handles[0]
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         first_handle.notifications.put_nowait(token_usage_notification())
@@ -6438,7 +6442,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         first = await self.submit(binding)
         first_handle = self.codex.handles[0]
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         first_handle.notifications.put_nowait(token_usage_notification())
@@ -6457,7 +6461,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ContextWindowUsage(25_000, 100_000),
         )
         second.release_receipt_attempt()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
         self.assertEqual(
             self.runtime.context_window_usage(binding.id),
@@ -6475,7 +6479,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         first = await self.submit(binding)
         first_handle = self.codex.handles[0]
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         first_handle.notifications.put_nowait(token_usage_notification())
@@ -6487,7 +6491,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ContextWindowUsage(25_000, 100_000),
         )
         second_handle = self.codex.handles[1]
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         second_handle.notifications.put_nowait(
@@ -6504,7 +6508,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         first = await self.submit(binding)
         first_handle = self.codex.handles[0]
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         first_handle.notifications.put_nowait(token_usage_notification())
@@ -8336,7 +8340,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         started.release_receipt_attempt()
         handle = control.handles[-1]
-        async with asyncio.timeout(0.5):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while handle.activity_sink is None:
                 await asyncio.sleep(0)
         initial = self.runtime.goal_activity(binding.id)
@@ -8397,7 +8401,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.record.items.insert(0, ThreadItem.model_validate({
             "type": "agentMessage", "id": "last", "phase": "partial_answer", "text": "last stage",
         }))
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         outcome = self.outcomes[-1]
         self.assertEqual(outcome.partial_answers, (
             first, second, PartialAnswer(handle.thread_id, "physical-two", "last", "last stage"),
@@ -8411,7 +8415,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(self.runtime.goal_activity(binding.id).partial_answers, ())
         control.handles[-1].finish()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertEqual(self.outcomes[-1].partial_answers, ())
 
     async def test_disabled_goal_progress_keeps_unique_answer_tap(
@@ -8479,7 +8483,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             turn_id="physical-next", question=second,
         ))
         handle.finish(response="final")
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
         self.assertEqual(handle.wait_terminal_calls, 1)
         self.assertEqual([call.args[2] for call in handler.await_args_list], [first, second])
@@ -8508,11 +8512,11 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             turn_id=handle.id,
             question=QuestionRequest("question-one", (UserQuestion("Choose"),)),
         ))
-        await asyncio.wait_for(delivered.wait(), timeout=0.2)
+        await asyncio.wait_for(delivered.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
         handler.assert_awaited_once()
         await self.runtime.archive_exact(binding.id)
         submission.release_receipt_attempt()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
     async def test_goal_patch_children_use_only_final_physical_turn_without_progress(
         self,
@@ -9372,14 +9376,14 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         unexpected = await asyncio.wait_for(self.runtime.compact(
                             binding=self.store.get(binding.id),
                             owner_id="ou_user", origin=object(),
-                        ), timeout=0.2)
+                        ), timeout=EXPECTED_PROGRESS_TIMEOUT)
                 finally:
                     # If this regresses, drain the unexpected mutation before
                     # the next case rather than hanging the test itself.
                     if unexpected is not None:
                         unexpected.release_receipt_attempt()
                         self.codex.finish_compaction()
-                        await self.runtime.wait_idle(timeout=0.2)
+                        await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT)
                 self.assertEqual(len(self.codex.read_calls) - reads_before, 3)
                 self.assertEqual(self.codex.compact_calls, [])
                 self.assertFalse(self.runtime.is_compacting(binding.id))
@@ -9404,7 +9408,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ))
             deletion = None
             try:
-                async with asyncio.timeout(0.5):
+                async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
                     while len(self.codex.read_calls) == reads_before:
                         await asyncio.sleep(0)
                     deletion = asyncio.create_task(self.runtime.delete_exact(
@@ -9438,7 +9442,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.compact_calls, [first.thread_id])
         compact.release_receipt_attempt()
         self.codex.finish_compaction()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
     async def test_compact_terminal_failure_releases_binding(self) -> None:
         binding = self.binding()
@@ -10686,7 +10690,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             request=QuestionRequest("question-one", (UserQuestion("Choose"),)),
         )
         self.runtime.turn_activity(binding.id, refresh_plan=True)
-        await asyncio.wait_for(sending.wait(), timeout=0.2)
+        await asyncio.wait_for(sending.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
         consumer = self.runtime._active[binding.id].task
         self.codex.handles[0].complete()
         submission.release_receipt_attempt()
@@ -10700,7 +10704,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cancelled.is_set())
         await self.runtime.cancel_tasks()
         self.assertTrue(cancelled.is_set())
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
 
     async def test_question_send_timeout_does_not_change_native_completion(self) -> None:
         observer = FakeTurnPlanObserver()
@@ -10721,7 +10725,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with patch("netizen_cli.runtime.limits.QUESTION_DELIVERY_TIMEOUT_SECONDS", 0.01):
             with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
                 self.runtime.turn_activity(binding.id, refresh_plan=True)
-                await asyncio.wait_for(sending.wait(), timeout=0.2)
+                await asyncio.wait_for(sending.wait(), timeout=EXPECTED_PROGRESS_TIMEOUT)
                 await self.finish(self.codex.handles[0], submission)
         self.assertEqual(len(self.outcomes), 1)
         self.assertIsNone(self.outcomes[0].error)
@@ -10753,7 +10757,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         observer.append_partial(first)
         observer.append_partial(PartialAnswer("wrong-thread", started.turn_id, "wrong", "ignore"))
         started.release_receipt_attempt()
-        async with asyncio.timeout(0.2):
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
             while self.runtime.turn_activity(binding.id).partial_answers != (first,):
                 await asyncio.sleep(0)
         snapshot = self.runtime.turn_activity(binding.id)
@@ -10767,7 +10771,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.record.items[:0] = [ThreadItem.model_validate({
             "type": "agentMessage", "id": item_id, "phase": "partial_answer", "text": text,
         }) for item_id, text in (("p1", first.text), ("p2", "terminal supplement"))]
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         outcome = self.outcomes[-1]
         self.assertEqual(outcome.partial_answers, (
             first, PartialAnswer(started.thread_id, started.turn_id, "p2", "terminal supplement"),
@@ -10799,7 +10803,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "type": "agentMessage", "id": "p2", "phase": "partial_answer", "text": "backfilled",
         }))
         started.release_receipt_attempt()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertEqual(len(observer.calls), calls)
         self.assertEqual([a.text for a in self.outcomes[-1].partial_answers], ["already seen", "backfilled"])
 
@@ -11561,7 +11565,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         await self.runtime.cancel_tasks()
 
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.01))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertIsNone(self.runtime.active_turn(binding.id))
 
     async def test_cancel_tasks_breaks_cleanup_barrier_during_native_read(self) -> None:
@@ -11576,7 +11580,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.stop(binding.id)
 
         await asyncio.wait_for(self.runtime.cancel_tasks(), timeout=0.1)
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.01))
+        self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         self.assertIsNone(self.runtime.active_turn(binding.id))
 
     async def test_cancel_tasks_does_not_wait_for_stop_acknowledgement_lock(
@@ -11675,7 +11679,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
 
         try:
-            await asyncio.wait_for(wait_until_terminal_is_observed(), timeout=0.1)
+            await asyncio.wait_for(wait_until_terminal_is_observed(), timeout=EXPECTED_PROGRESS_TIMEOUT)
         except TimeoutError:
             active = self.runtime._active[binding.id]
             self.fail(
