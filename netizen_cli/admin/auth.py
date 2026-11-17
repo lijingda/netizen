@@ -16,7 +16,7 @@ import ipaddress
 import math
 import secrets
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
@@ -351,7 +351,8 @@ class AdminAuth:
         self._last_now: float | None = None
         self._preauth: dict[bytes, _PreauthRecord] = {}
         self._sessions: dict[bytes, _SessionRecord] = {}
-        self._actions: dict[bytes, _ActionRecord] = {}
+        self._actions: OrderedDict[bytes, _ActionRecord] = OrderedDict()
+        self._actions_by_session: dict[bytes, set[bytes]] = {}
         self._rate_by_source: dict[str, deque[float]] = {}
         self._rate_global: deque[float] = deque()
         users.subscribe_revocation(self.revoke_identity)
@@ -543,10 +544,7 @@ class AdminAuth:
             session_digest, _ = self._authenticate_session_locked(session_token)
             if len(self._actions) >= self._limits.max_actions:
                 raise AuthCapacityExceeded()
-            session_count = sum(
-                hmac.compare_digest(record.session_digest, session_digest)
-                for record in self._actions.values()
-            )
+            session_count = len(self._actions_by_session.get(session_digest, ()))
             if session_count >= self._limits.max_actions_per_session:
                 raise AuthCapacityExceeded()
             action_token, action_digest = self._unique_token_locked(self._actions)
@@ -554,14 +552,17 @@ class AdminAuth:
             while hmac.compare_digest(action_digest, csrf_digest):
                 csrf_token, csrf_digest = _new_token()
             expires_at = now + self._limits.action_ttl
-            self._actions[action_digest] = _ActionRecord(
-                session_digest=session_digest,
-                csrf_digest=csrf_digest,
-                generation=self._generation,
-                action_kind=action_kind,
-                target=target,
-                preconditions=preconditions,
-                expires_at=expires_at,
+            self._add_action_locked(
+                action_digest,
+                _ActionRecord(
+                    session_digest=session_digest,
+                    csrf_digest=csrf_digest,
+                    generation=self._generation,
+                    action_kind=action_kind,
+                    target=target,
+                    preconditions=preconditions,
+                    expires_at=expires_at,
+                ),
             )
             return IssuedActionGrant(
                 csrf_token=csrf_token,
@@ -666,7 +667,22 @@ class AdminAuth:
     def _clear_bearer_state_locked(self) -> None:
         self._preauth.clear()
         self._sessions.clear()
+        self._clear_actions_locked()
+
+    def _add_action_locked(self, digest: bytes, record: _ActionRecord) -> None:
+        self._actions[digest] = record
+        self._actions_by_session.setdefault(record.session_digest, set()).add(digest)
+
+    def _remove_action_locked(self, digest: bytes) -> None:
+        record = self._actions.pop(digest)
+        session_actions = self._actions_by_session[record.session_digest]
+        session_actions.remove(digest)
+        if not session_actions:
+            del self._actions_by_session[record.session_digest]
+
+    def _clear_actions_locked(self) -> None:
         self._actions.clear()
+        self._actions_by_session.clear()
 
     def _now_locked(self) -> float:
         now = float(self._clock())
@@ -684,13 +700,14 @@ class AdminAuth:
             raise LoginRejected() from None
 
     def _prune_locked(self, now: float) -> None:
-        expired_actions = [
-            digest
-            for digest, record in self._actions.items()
-            if record.expires_at <= now
-        ]
-        for digest in expired_actions:
-            self._actions.pop(digest, None)
+        # A single TTL plus the monotonic clock makes insertion order expiry
+        # order. OrderedDict keeps head lookup and arbitrary deletion O(1),
+        # including after many removals; consumed grants retain their position.
+        while self._actions:
+            digest, record = next(iter(self._actions.items()))
+            if record.expires_at > now:
+                break
+            self._remove_action_locked(digest)
 
     def _prune_rate_locked(self, now: float) -> None:
         cutoff = now - self._limits.login_window
@@ -775,13 +792,8 @@ class AdminAuth:
 
     def _drop_session_locked(self, session_digest: bytes) -> None:
         self._sessions.pop(session_digest, None)
-        action_digests = [
-            digest
-            for digest, record in self._actions.items()
-            if hmac.compare_digest(record.session_digest, session_digest)
-        ]
-        for digest in action_digests:
-            self._actions.pop(digest, None)
+        for digest in tuple(self._actions_by_session.get(session_digest, ())):
+            self._remove_action_locked(digest)
 
     @staticmethod
     def _validate_action_kind(action_kind: str) -> None:
