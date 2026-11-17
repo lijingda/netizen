@@ -271,8 +271,8 @@ async function advanceTime(duration) {
   assert.equal(lazyCreated.querySelector(".sort-label").textContent, "登记时间");
   assert.equal(document.querySelector("#sessions-lazy-notice").hidden, false);
   const lazyRow = document.querySelector("#sessions-body").children[0];
-  assert.equal(lazyRow.children[5].textContent, sessionDateLabel(registeredAt));
-  assert.equal(lazyRow.children[6].textContent, "尚未开始");
+  assert.equal(lazyRow.children.find((cell) => cell.dataset.label === "登记时间").textContent, sessionDateLabel(registeredAt));
+  assert.equal(lazyRow.children.find((cell) => cell.dataset.label === "最近更新").textContent, "尚未开始");
   const beforeSort = requests.length;
   await sortSessionPage("session", "updatedAt");
   assert.equal(requests.length, beforeSort, "Lazy cannot claim to sort unknown native update times");
@@ -393,8 +393,8 @@ async function checkSessionSorting() {
     assert.equal(freshness.hidden, false);
     assert.match(freshness.textContent, /^更新于 \d{2}:\d{2}:\d{2}$/);
 
-    const createdCell = row().children[kind === "side" ? 4 : 5];
-    const updatedCell = row().children[kind === "side" ? 5 : 6];
+    const createdCell = row().children.find((cell) => cell.dataset.label === "创建时间");
+    const updatedCell = row().children.find((cell) => cell.dataset.label === "最近更新");
     assert.equal(createdCell.textContent, kind === "side" ? sessionDateLabel(side.createdAt) : nativeSessionDateLabel(ordinary.createdAt));
     assert.equal(updatedCell.textContent, kind === "side" ? sessionDateLabel(side.updatedAt) : sessionUpdatedAtLabel(ordinary));
 

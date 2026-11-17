@@ -17,10 +17,10 @@ const state = {
 const statusNode = document.querySelector("#status");
 
 let statusTimer = null;
-function setStatus(message, isError = false, { pending = false } = {}) {
+function setStatus(message, isError = false, { pending = false, expired = false } = {}) {
+  if (state.authExpired && !expired) return;
   clearTimeout(statusTimer);
   statusTimer = null;
-  if (state.authExpired) message = "";
   statusNode.replaceChildren();
   statusNode.hidden = !message;
   statusNode.classList.toggle("error", isError);
@@ -28,7 +28,7 @@ function setStatus(message, isError = false, { pending = false } = {}) {
   const text = document.createElement("span"); text.textContent = message;
   const close = document.createElement("button"); close.type = "button"; close.className = "status-close";
   close.setAttribute("aria-label", "关闭操作提示");
-  close.addEventListener("click", () => setStatus(""));
+  close.addEventListener("click", () => setStatus("", false, { expired: true }));
   statusNode.append(text, close);
   if (!isError && !pending && !/正在|未确认|未知|待确认|(?:请|需|需要).*?(?:核对|核查|刷新)|刷新失败/.test(message)) {
     statusTimer = setTimeout(() => setStatus(""), 5000);
@@ -68,6 +68,8 @@ async function api(path, options = {}) {
 function expireAdminSession() {
   if (state.authExpired) return;
   state.authExpired = true;
+  const batchMessage = expireSessionBatch();
+  clearSessionSelection();
   invalidateSessionListRequest();
   stopUpdatePolling();
   closeSessionRenameEditor({ expired: true });
@@ -94,7 +96,7 @@ function expireAdminSession() {
   window.NetizenWorktrees?.expire();
   window.NetizenProjectFiles?.expire();
   closeConversation();
-  setStatus("");
+  setStatus(batchMessage, true, { expired: true });
 }
 
 const updateTerminalPhases = new Set([
@@ -604,10 +606,12 @@ async function saveProject(event) {
   }
 }
 
+const materializedDeleteWarning = "Codex 会话、派生会话、Codex App/CLI 历史和 Netizen 中的会话记录都会永久消失，无法恢复。";
+
 function confirmMaterializedDelete(session) {
   const name = session.nativeTitle || "未命名会话";
   return window.NetizenConfirm.ask({ title: "永久删除会话", danger: true, confirmLabel: "永久删除",
-    body: "Codex 会话、派生会话、Codex App/CLI 历史和 Netizen 中的会话记录都会永久消失，无法恢复。",
+    body: materializedDeleteWarning,
     details: [`会话：${name}`, `Scope：${session.scopeKey}`, `Netizen 会话编号：${session.shortId}`],
   });
 }
@@ -2081,11 +2085,14 @@ function observeSessionPreviews(body) {
   for (const wrapper of wrappers) sessionPreviewObserver.observe(wrapper.querySelector(".preview"));
 }
 
+function sessionName(session) {
+  return session.nativeTitle || (session.catalogState === "lazy" ? "未开始的会话" : "未命名会话");
+}
+
 function sessionIdentityCell(row, session) {
   const td = document.createElement("td");
   const title = document.createElement("strong");
-  title.textContent = session.nativeTitle
-    || (session.catalogState === "lazy" ? "未开始的会话" : "未命名会话");
+  title.textContent = sessionName(session);
   td.append(title);
   if (session.nativePreview) td.append(sessionPreview(session.nativePreview));
   const bindingId = document.createElement("div");
@@ -2428,10 +2435,10 @@ async function loadSessionPage(kind, page, render) {
     state[`${kind}Page`] = { ...candidate, nextCursor: data.nextCursor };
     state[`${kind}RefreshedAt`] = Date.now();
     window.NetizenList.error(name, "");
+    renderSessionSort(kind);
     render(data);
     renderAppliedSessionFilters(kind);
     renderSessionPagination(kind);
-    renderSessionSort(kind);
     renderSessionFreshness();
     for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
       timeRangeControllers.get(root)?.refreshSummary();
@@ -2449,6 +2456,290 @@ async function loadSessionPage(kind, page, render) {
 async function loadSessions(page = state.sessionPage) {
   ensureSessionChatFilter();
   return loadSessionPage("session", page, renderSessions);
+}
+
+// Selection belongs only to the successfully applied page, never to a filter draft.
+const sessionSelection = { page: null, ids: new Set() };
+let sessionBatch = null;
+const batchNode = (name) => document.querySelector(`#session-batch-${name}`);
+const sessionPageIdentity = () => JSON.stringify([state.sessionPage.query, state.sessionPage.cursor]);
+
+function sessionBatchActions(query = new URLSearchParams(state.sessionPage.query || "")) {
+  const inventory = query.get("inventoryState") || "active";
+  return {
+    archive: inventory === "active" ? { key: "archive", path: "/api/v1/sessions/archive", label: "归档" } : null,
+    delete: ["active", "archived", "lazy"].includes(inventory)
+      ? { key: inventory === "lazy" ? "deleteLazy" : "deleteMaterialized",
+        path: `/api/v1/sessions/delete-${inventory === "lazy" ? "lazy" : "materialized"}`, label: "删除" } : null,
+  };
+}
+
+function sessionBatchGrant(session, action) {
+  return action && session.actions?.[action.key];
+}
+
+function sessionBatchSelectable(session, actions) {
+  return Boolean(sessionBatchGrant(session, actions.archive) || sessionBatchGrant(session, actions.delete));
+}
+
+function clearSessionSelection() {
+  sessionSelection.ids.clear();
+  sessionSelection.page = sessionPageIdentity();
+  renderSessionSelection();
+}
+
+function reconcileSessionSelection(items, actions) {
+  const page = sessionPageIdentity();
+  const present = new Set(items.filter((item) => sessionBatchSelectable(item, actions)).map((item) => item.bindingId));
+  if (page !== sessionSelection.page) sessionSelection.ids.clear();
+  else for (const id of sessionSelection.ids) if (!present.has(id)) sessionSelection.ids.delete(id);
+  sessionSelection.page = page;
+}
+
+function sessionSelectionCell(row, session) {
+  const td = document.createElement("td"); td.className = "session-selection";
+  const label = document.createElement("label"); label.className = "session-select-hit";
+  const input = document.createElement("input"); input.type = "checkbox"; input.className = "session-select";
+  input.setAttribute("aria-label", `选择会话：${sessionName(session)} · ${session.shortId}`);
+  input.addEventListener("change", () => {
+    if (input.disabled) return;
+    if (input.checked) sessionSelection.ids.add(session.bindingId);
+    else sessionSelection.ids.delete(session.bindingId);
+    renderSessionSelection();
+  });
+  label.append(input); td.append(label); row.append(td);
+}
+
+function renderSessionSelection(actions = sessionBatchActions()) {
+  const items = state.sessions?.items || [];
+  const available = new Set(items.filter((item) => sessionBatchSelectable(item, actions)).map((item) => item.bindingId));
+  const busy = Boolean(sessionBatch && sessionBatch.phase !== "finished");
+  let hidden = 0;
+  for (const row of document.querySelector("#sessions-body").children) {
+    const input = row.querySelector(".session-select");
+    if (!input) continue;
+    input.checked = sessionSelection.ids.has(row.dataset.bindingId);
+    input.disabled = Boolean(state.authExpired) || busy || !available.has(row.dataset.bindingId);
+    input.title = available.has(row.dataset.bindingId) ? "" : "此会话不支持批量操作";
+    if (input.checked && row.hidden) hidden += 1;
+  }
+  document.querySelector("#session-batch").hidden = !items.length;
+  const selected = [...available].filter((id) => sessionSelection.ids.has(id)).length;
+  const all = document.querySelector("#session-select-page");
+  all.checked = available.size > 0 && selected === available.size;
+  all.indeterminate = selected > 0 && selected < available.size;
+  all.disabled = Boolean(state.authExpired) || busy || !available.size;
+  batchNode("count").textContent = `已选 ${sessionSelection.ids.size} 项`
+    + (hidden ? `（其中 ${hidden} 项在折叠分组中）` : "");
+  for (const operation of ["archive", "delete"]) {
+    const button = batchNode(operation);
+    button.hidden = !items.some((item) => sessionBatchGrant(item, actions[operation]));
+    button.disabled = Boolean(state.authExpired) || busy;
+    // Keep empty-selection actions focusable so closing results can return focus
+    // to the original trigger. The handler enforces this disabled state as well.
+    button.setAttribute("aria-disabled", String(button.disabled || !sessionSelection.ids.size));
+  }
+  batchNode("clear").disabled = Boolean(state.authExpired) || busy || !sessionSelection.ids.size;
+}
+
+function sessionRunningOrUnconfirmed(session) {
+  const runtime = session.runtime;
+  return Boolean(runtime && (runtime.primaryStatusResolution === "local" || runtime.primaryStatus === "goal-active"
+    || ["deferred", "unavailable"].includes(runtime.primaryStatusResolution)));
+}
+
+function sessionBatchConfirmation(action, targets, dropped, unsupported, trigger) {
+  const count = targets.length;
+  const archive = action.key === "archive", lazy = action.key === "deleteLazy";
+  const body = [archive ? `将归档以下 ${count} 个会话，归档后可在“已归档”中恢复。`
+    : lazy ? `将永久删除以下 ${count} 个尚未开始的会话。` : materializedDeleteWarning];
+  const current = targets.filter((item) => item.pointerState === "current").length;
+  const running = targets.filter(sessionRunningOrUnconfirmed).length;
+  if (current) body.push(`其中 ${current} 个是所在聊天的当前会话，执行后该聊天没有当前会话。`);
+  if (running) body.push(`其中 ${running} 个正在运行或状态未确认，Codex 会关闭正在运行的任务。`);
+  const skipped = [dropped ? `${dropped} 个已移出本页` : "", unsupported ? `${unsupported} 个不支持该操作` : ""].filter(Boolean);
+  if (skipped.length) body.push(`另有 ${skipped.join("、")}，不会执行。`);
+  return { title: archive ? "批量归档会话" : lazy ? "批量删除未开始的会话" : "批量永久删除会话",
+    body: body.join("\n"), danger: !archive, trigger,
+    confirmLabel: `${archive ? "归档" : "永久删除"} ${count} 个会话`,
+    details: targets.map((item) => `${sessionName(item)} · ${item.shortId} · ${item.projectAlias || "—"} · ${item.chatLabelResolved
+      ? item.chatLabel || "聊天不可用" : item.chatId ? locationFallback(item) : "聊天不可用"}`
+      + (item.pointerState === "current" ? "（当前会话）" : "")
+      + (sessionRunningOrUnconfirmed(item) ? `（${runtimeLabel(item.runtime)}）` : "")),
+  };
+}
+
+function sessionBatchSummary(batch) {
+  return ["已完成", "未完成", "结果未确认", "未执行"].map((status) => {
+    const count = batch.results.filter((item) => item.status === status).length;
+    return count ? `${status} ${count} 项` : "";
+  }).filter(Boolean).join("，") + "。";
+}
+
+function renderSessionBatch(batch) {
+  if (state.authExpired || batch.detached) return;
+  const finished = batch.phase === "finished";
+  batchNode("title").textContent = `批量${batch.action.label}会话${finished ? "结果" : ""}`;
+  batchNode("progress").textContent = finished ? sessionBatchSummary(batch)
+    : batch.phase === "refreshing" ? "正在刷新列表…"
+      : `正在${batch.action.label}第 ${batch.index + 1} / ${batch.results.length} 项`;
+  batchNode("note").textContent = batch.refreshFailed ? "列表刷新失败，请手动刷新核对。" : "";
+  batchNode("note").hidden = !batch.refreshFailed;
+  batchNode("results").replaceChildren();
+  for (const result of batch.results) {
+    if (!result.status) continue;
+    const item = document.createElement("li");
+    item.textContent = `${sessionName(result.session)} · ${result.session.shortId} · ${result.status}`
+      + (result.reason ? `（${result.reason}）` : "");
+    if (result.status !== "已完成") item.className = "error";
+    batchNode("results").append(item);
+  }
+  batchNode("results").hidden = !batchNode("results").children.length;
+  batchNode("stop").hidden = finished;
+  batchNode("stop").disabled = batch.stopped || batch.phase !== "running";
+  batchNode("close").hidden = !finished;
+}
+
+function stopSessionBatch() {
+  const batch = sessionBatch;
+  if (!batch || batch.phase === "finished") return;
+  batch.stopped = true;
+  batch.wake();
+}
+
+function sessionBatchControlVisible(control) {
+  return control && !control.disabled && document.body.contains(control) && control.getClientRects().length > 0;
+}
+
+function closeSessionBatch() {
+  const batch = sessionBatch;
+  if (!batch || batch.phase !== "finished") return;
+  sessionBatch = null;
+  if (batchNode("dialog").open) batchNode("dialog").close();
+  document.body.classList.toggle("session-batch-open", false);
+  renderSessionSelection();
+  // Navigation or deleting the last row can hide both the action and its list.
+  const trigger = sessionBatchControlVisible(batch.trigger)
+    ? batch.trigger : [...document.querySelectorAll("[data-refresh]")].find((button) => button.dataset.refresh === "sessions");
+  if (!state.authExpired && sessionBatchControlVisible(trigger)) trigger.focus({ preventScroll: true });
+}
+
+function expireSessionBatch() {
+  const batch = sessionBatch;
+  if (!batch) return "";
+  stopSessionBatch();
+  sessionBatch = null;
+  if (batchNode("dialog").open) batchNode("dialog").close();
+  document.body.classList.toggle("session-batch-open", false);
+  if (["preparing", "confirming"].includes(batch.phase)) return "登录已过期，批量操作未执行。";
+  if (batch.phase === "finished") return `登录已过期。批量结果：${sessionBatchSummary(batch)}`;
+  const completed = batch.results.filter((item) => item.status === "已完成").length;
+  return `登录已过期，批量操作已停止：已完成 ${completed} 项，请重新登录后刷新核对。`;
+}
+
+async function runSessionBatch(operation, trigger) {
+  if (state.authExpired || sessionBatch || !sessionSelection.ids.size) return;
+  if (window.NetizenConfirm.busy()) {
+    setStatus("另一个确认窗口已打开，批量操作未执行。", true);
+    return;
+  }
+  const action = sessionBatchActions()[operation];
+  if (!action) return;
+  const selected = new Set(sessionSelection.ids);
+  const page = state.sessionPage, identity = sessionPageIdentity();
+  const isCurrentPage = () => state.tab === "sessions" && state.sessionTab === "ordinary" && identity === sessionPageIdentity();
+  const batch = { action, trigger, phase: "preparing", stopped: false, results: [], index: 0 };
+  batch.stop = new Promise((resolve) => { batch.wake = resolve; });
+  sessionBatch = batch;
+  renderSessionSelection();
+  let confirmationCancelled = false;
+  try {
+    const refreshing = loadSessions(page);
+    const request = state.sessionListRequest;
+    const refreshed = await refreshing;
+    if (state.authExpired || batch.detached) return;
+    if (request !== state.sessionListRequest || !isCurrentPage() || batch.stopped) {
+      setStatus("列表已变化，批量操作未执行。", true);
+      return;
+    }
+    if (!refreshed) {
+      setStatus("刷新当前页失败，未执行任何操作。", true);
+      return;
+    }
+    const remaining = state.sessions.items.filter((item) => selected.has(item.bindingId));
+    const byId = new Map(remaining.map((item) => [item.bindingId, item]));
+    const targets = [...document.querySelector("#sessions-body").children]
+      .map((row) => byId.get(row.dataset.bindingId)).filter((item) => item?.actions?.[action.key]);
+    if (!targets.length) {
+      setStatus("所选会话已不在本页或不支持该操作，未执行。", true);
+      return;
+    }
+    if (window.NetizenConfirm.busy()) {
+      setStatus("另一个确认窗口已打开，批量操作未执行。", true);
+      return;
+    }
+    batch.phase = "confirming";
+    if (!await window.NetizenConfirm.ask(sessionBatchConfirmation(action, targets,
+      selected.size - remaining.length, remaining.length - targets.length, trigger))) {
+      confirmationCancelled = true;
+      return;
+    }
+    if (state.authExpired || batch.stopped || identity !== sessionPageIdentity()) return;
+    batch.results = targets.map((session) => ({ session, status: null, reason: "" }));
+    batch.phase = "running";
+    renderSessionBatch(batch);
+    document.body.classList.toggle("session-batch-open", true);
+    batchNode("dialog").showModal(); batchNode("stop").focus();
+    for (const [index, result] of batch.results.entries()) {
+      if (batch.stopped || state.authExpired) break;
+      batch.index = index;
+      renderSessionBatch(batch);
+      const response = api(action.path, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(actionPayload(result.session.actions[action.key])),
+      });
+      // The race stops observing batch results; api still handles global expiry.
+      const outcome = await Promise.race([response.then(() => ({}), (error) => ({ error })), batch.stop]);
+      if (state.authExpired) return;
+      if (batch.stopped) {
+        result.status = "结果未确认";
+        result.reason = "已停止等待，服务端可能仍在完成";
+        break;
+      }
+      if (!outcome.error) result.status = "已完成";
+      else {
+        result.reason = outcome.error.message;
+        result.status = [409, 404].includes(outcome.error.status) ? "未完成" : "结果未确认";
+        if (result.status === "结果未确认") break;
+      }
+    }
+    for (const result of batch.results) if (!result.status) result.status = "未执行";
+    clearSessionSelection();
+    batch.phase = "refreshing";
+    renderSessionBatch(batch);
+    if (batch.detached) return;
+    if (isCurrentPage()) {
+      const refreshing = loadSessions(state.sessionPage);
+      const request = state.sessionListRequest;
+      const refreshed = await refreshing;
+      batch.refreshFailed = request === state.sessionListRequest && isCurrentPage() && !refreshed;
+    }
+    if (state.authExpired || batch.detached) return;
+    batch.phase = "finished";
+    renderSessionBatch(batch);
+    const message = sessionBatchSummary(batch) + (batch.refreshFailed ? " 列表刷新失败，请手动刷新核对。" : "");
+    setStatus(message, batch.refreshFailed || batch.results.some((item) => item.status !== "已完成"));
+    batchNode("close").focus();
+  } finally {
+    if (sessionBatch === batch && batch.phase !== "finished") sessionBatch = null;
+    renderSessionSelection();
+    const focus = document.activeElement;
+    const confirmation = document.querySelector("#admin-confirm");
+    // Chrome can retain the closed dialog's cancel button until the next layout.
+    const focusLost = !focus || focus === document.body || (!confirmation.open && confirmation.contains(focus));
+    if (confirmationCancelled && !state.authExpired && focusLost
+        && sessionBatchControlVisible(trigger)) trigger.focus({ preventScroll: true });
+  }
 }
 
 // Presentation choices live only in this page, independently for each list and
@@ -2490,9 +2781,10 @@ function setSessionGroupsExpanded(kind, expanded, groups = sessionGroupViews[kin
     for (const row of group.rows) row.hidden = !expanded;
   }
   updateSessionGroupControls(kind);
+  if (kind === "session") renderSessionSelection();
 }
 
-function applySessionLayout(kind) {
+function applySessionLayout(kind, batchActions) {
   if (state.authExpired) return;
   const name = kind === "side" ? "sides" : "sessions";
   const identity = kind === "side" ? "sideId" : "bindingId";
@@ -2517,7 +2809,7 @@ function applySessionLayout(kind) {
   }
   body.replaceChildren();
   if (state[name] && !items.length && document.querySelector(`#${name}-error`).hidden) {
-    window.NetizenList.empty(body, kind === "side" ? 7 : 8,
+    window.NetizenList.empty(body, kind === "side" ? 7 : 9,
       `当前范围内没有${kind === "side" ? "临时" : "普通"}会话，可调整或重置筛选。`, "重置", () => resetSessionFilters(kind));
   }
   for (const [key, groupItems] of groups) {
@@ -2527,7 +2819,7 @@ function applySessionLayout(kind) {
       const heading = document.createElement("tr");
       heading.className = "session-group-row";
       const label = document.createElement("th");
-      label.setAttribute("colspan", kind === "side" ? "7" : "8");
+      label.setAttribute("colspan", kind === "side" ? "7" : "9");
       const button = document.createElement("button");
       button.type = "button";
       button.className = "session-group-toggle";
@@ -2562,11 +2854,14 @@ function applySessionLayout(kind) {
   window.NetizenList.labelRows(body);
   updateSessionGroupLabels(kind);
   updateSessionGroupControls(kind);
+  if (kind === "session") renderSessionSelection(batchActions);
 }
 
 function renderSessions(data) {
   const query = new URLSearchParams(state.sessionPage.query || "");
-  document.querySelector("#sessions-lazy-notice").hidden = query.get("inventoryState") !== "lazy";
+  const batchActions = sessionBatchActions(query);
+  reconcileSessionSelection(data.items, batchActions);
+  document.querySelector("#sessions-lazy-notice").hidden = batchActions.delete?.key !== "deleteLazy";
   document.querySelector("#sessions-identity-notice").hidden = !query.has("identity");
   window.NetizenMenu.close();
   const body = document.querySelector("#sessions-body");
@@ -2574,6 +2869,7 @@ function renderSessions(data) {
   for (const session of data.items) {
     const row = document.createElement("tr");
     row.dataset.bindingId = session.bindingId;
+    sessionSelectionCell(row, session);
     sessionLocationCell(row, session);
     sessionIdentityCell(row, session);
     const sessionState = document.createElement("td");
@@ -2600,7 +2896,7 @@ function renderSessions(data) {
     wireSessionActions(actions, session);
     body.append(row);
   }
-  applySessionLayout("session");
+  applySessionLayout("session", batchActions);
   observeSessionPreviews(body);
 }
 
@@ -5683,6 +5979,11 @@ async function selectTab(name, sessionTab = state.sessionTab || "ordinary", { pr
   closeConversation();
   state.tab = name;
   state.sessionTab = sessionTab;
+  if (name !== "sessions" || sessionTab !== "ordinary") {
+    clearSessionSelection();
+    stopSessionBatch();
+    if (sessionBatch?.phase === "confirming") window.NetizenConfirm.cancel();
+  }
   invalidateSessionListRequest();
   state.projectListRequest = (state.projectListRequest || 0) + 1;
   scheduleListSerial += 1;
@@ -5724,6 +6025,44 @@ for (const button of document.querySelectorAll("[data-refresh]")) {
 for (const button of document.querySelectorAll("[data-session-sort]")) {
   button.addEventListener("click", () => sortSessionPage(button.dataset.sessionSort, button.dataset.sortBy));
 }
+
+document.querySelector("#session-select-page").addEventListener("change", (event) => {
+  if (event.target.disabled) return;
+  const actions = sessionBatchActions();
+  sessionSelection.ids.clear();
+  if (event.target.checked) for (const item of state.sessions?.items || []) {
+    if (sessionBatchSelectable(item, actions)) sessionSelection.ids.add(item.bindingId);
+  }
+  renderSessionSelection(actions);
+});
+batchNode("clear").addEventListener("click", () => {
+  if (!batchNode("clear").disabled) clearSessionSelection();
+});
+for (const operation of ["archive", "delete"]) {
+  batchNode(operation).addEventListener("click", () => runSessionBatch(operation, batchNode(operation)));
+}
+batchNode("stop").addEventListener("click", stopSessionBatch);
+batchNode("close").addEventListener("click", closeSessionBatch);
+batchNode("dialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeSessionBatch();
+});
+batchNode("dialog").addEventListener("close", () => {
+  const batch = sessionBatch;
+  if (!batch || state.authExpired || batch.detached || batchNode("dialog").open) return;
+  if (batch.phase === "finished") closeSessionBatch();
+  else if (["running", "refreshing"].includes(batch.phase)) batchNode("dialog").showModal();
+});
+window.addEventListener("pagehide", () => {
+  clearSessionSelection();
+  if (!sessionBatch) return;
+  sessionBatch.detached = true;
+  stopSessionBatch();
+  window.NetizenConfirm.cancel();
+  if (batchNode("dialog").open) batchNode("dialog").close();
+  document.body.classList.toggle("session-batch-open", false);
+  if (sessionBatch.phase === "finished") sessionBatch = null;
+});
 
 projectInput("new").addEventListener("click", openProjectEditor);
 projectInput("cancel").addEventListener("click", closeProjectEditor);
