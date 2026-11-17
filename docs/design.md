@@ -2823,6 +2823,7 @@ Project、普通会话和临时会话都使用服务端 cursor，不计算精确
 状态单选“未归档”（`active`，默认）、“已归档”（`archived`）或“未开始”（`lazy`）；current 仍为独立的当前／非当前条件。
 Project、Scope 和 current 保留多选，同项取“或”、不同项取“且”。Project 是可搜索下拉，
 通过独立分页 options 查询包含已停用的全部未删除 Project，不读取 native archived aggregate。
+选项与会话页并行读取，选项失败只在控件处提示，不影响会话列表。
 会话页面不提供原始 ID 筛选输入框，API 保留精确 chat/topic/Binding/native ID 条件。
 完整 ID 收入可复制的“会话标识”折叠区，不改变身份或操作授权。来源会话／定时触发记录
 的精确 ID 链接不限时间，默认查询 Active；用户可切换“已归档”或“未开始”查找该 ID，

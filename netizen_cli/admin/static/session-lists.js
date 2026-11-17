@@ -227,8 +227,8 @@ window.NetizenSessionLists = (() => {
         if (!query.has("sortBy")) query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : "updatedAt");
         if (!query.has("sortDirection")) query.set("sortDirection", "desc");
         const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
-        await options.loadProjectOptions(isCurrent);
-        if (!isCurrent()) return "superseded";
+        // Options own their control-level failure handling, independently of this page.
+        void options.loadProjectOptions(isCurrent);
         for (const field of ["created", "updated"]) query.delete(`${field}Range`);
         if (page.cursor) query.set("cursor", page.cursor);
         const data = await dependencies.api(`${options.endpoint}?${query}`);

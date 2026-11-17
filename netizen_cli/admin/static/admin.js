@@ -1164,6 +1164,15 @@ function initializeFilter(root) {
   empty.hidden = true;
   popover.append(clear, choices, empty);
   root.append(trigger, popover);
+  const optionsError = name === "project" && !single ? document.createElement("p") : null;
+  if (optionsError) {
+    optionsError.id = `${prefix}-project-options-error`;
+    optionsError.className = "hint";
+    optionsError.hidden = true;
+    optionsError.setAttribute("role", "status");
+    trigger.setAttribute("aria-describedby", optionsError.id);
+    root.append(optionsError);
+  }
   let options = filterOptions[name];
   let selected = new Set(defaults);
 
@@ -1264,6 +1273,11 @@ function initializeFilter(root) {
         .map((value) => [value, `${value}（已不可用）`])];
       renderChoices();
     },
+    setOptionsError(message) {
+      if (!optionsError) return;
+      optionsError.textContent = message;
+      optionsError.hidden = !message;
+    },
   };
   trigger.addEventListener("click", () => {
     if (popover.hidden) open();
@@ -1322,7 +1336,7 @@ for (const root of document.querySelectorAll("[data-schedule-filter]")) {
   scheduleFilters.set(root.dataset.scheduleFilter, initializeFilter(root));
 }
 
-async function queryProjectOptions() {
+async function queryProjectOptions(isCurrent = () => true) {
   const options = [];
   const seenCursors = new Set();
   let cursor = null;
@@ -1330,6 +1344,7 @@ async function queryProjectOptions() {
     const query = new URLSearchParams({ pageSize: "50" });
     if (cursor) query.set("cursor", cursor);
     const data = await api(`/api/v1/projects/options?${query}`);
+    if (!isCurrent()) return null;
     options.push(...data.items);
     cursor = data.nextCursor;
     if (cursor && seenCursors.has(cursor)) throw new Error("Project 列表分页异常，请刷新重试。");
@@ -1339,11 +1354,19 @@ async function queryProjectOptions() {
 }
 
 async function loadSessionProjectOptions(filters = sessionMultiFilters, isCurrent = () => true) {
-  const projects = await queryProjectOptions();
-  if (!isCurrent()) return;
-  filters.get("project").setOptions(projects.map((project) => [
-    project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`,
-  ]));
+  const control = filters.get("project");
+  try {
+    const projects = await queryProjectOptions(isCurrent);
+    if (!isCurrent() || !projects) return;
+    control.setOptions(projects.map((project) => [
+      project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`,
+    ]));
+    control.setOptionsError("");
+  } catch {
+    if (isCurrent() && !state.authExpired) {
+      control.setOptionsError("Project 选项读取失败，已保留原有选项；下次读取列表时重试。");
+    }
+  }
 }
 
 function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {

@@ -509,4 +509,85 @@ async function fetch(path) {
   assert.equal(new URLSearchParams(sessionLists.session.snapshot().page.query).has("current"), false);
   assert.equal(chips.children.length, 0);
   }
+  // Both directories commit pages independently from their Project option reads.
+  const deferred = () => {
+    let resolve, reject;
+    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  };
+  for (const kind of ["session", "side"]) {
+    answer = () => ({ items: [], nextCursor: null });
+    await selectSessionTab(kind === "side" ? "temporary" : "ordinary");
+    await flush();
+    const list = sessionLists[kind];
+    const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+    const project = filters.get("project");
+    const root = document.querySelector(`#${kind}-filter`).querySelector(`[data-${kind}-multi]`);
+    const hint = document.querySelector(`#${kind}-project-options-error`);
+    const listError = document.querySelector(kind === "side" ? "#sides-error" : "#sessions-error");
+    const choices = () => root.querySelectorAll("input").filter((input) => input.type === "checkbox").map((input) => input.value);
+    const url = () => window.location.pathname + window.location.search;
+    const pageQueries = [];
+    let pending = deferred();
+    answer = (path) => {
+      if (path.startsWith("/api/v1/projects/options?")) return pending.promise;
+      pageQueries.push(new URL(path, "https://admin").searchParams);
+      return { items: [], nextCursor: null };
+    };
+    project.setValues(["missing-applied"]);
+    let result;
+    const reading = list.load(list.filterPage()).then((value) => { result = value; });
+    await flush();
+    assert.equal(result, "applied", `${kind}: slow options must not delay page commit`);
+    await reading;
+    assert.deepEqual(pageQueries.at(-1).getAll("project"), ["missing-applied"]);
+    assert.match(root.querySelector(".multi-filter-summary").textContent, /missing-applied/);
+    const snapshot = list.snapshot(), appliedUrl = url();
+    project.setValues(["missing-draft"]);
+    pending.resolve({ items: [{ alias: "fresh", enabled: true }], nextCursor: null });
+    await flush();
+    assert.deepEqual(project.values(), ["missing-draft"], `${kind}: late options preserve draft edits`);
+    assert.match(root.querySelector(".multi-filter-summary").textContent, /missing-draft（已不可用）/);
+    assert.deepEqual(list.snapshot(), snapshot);
+    assert.equal(url(), appliedUrl);
+    assert.equal(hint.hidden, true);
+
+    // Failure is local, keeps the last successful options, and cannot alter freshness/URL.
+    pending = deferred();
+    assert.equal(await list.load(list.filterPage()), "applied");
+    assert.deepEqual(pageQueries.at(-1).getAll("project"), ["missing-draft"]);
+    const beforeFailure = list.snapshot(), beforeFailureUrl = url(), previousChoices = choices();
+    pending.reject(new Error("options unavailable"));
+    await flush();
+    assert.equal(hint.hidden, false);
+    assert.match(hint.textContent, /Project.*失败/);
+    assert.equal(listError.hidden, true);
+    assert.deepEqual(choices(), previousChoices);
+    assert.deepEqual(list.snapshot(), beforeFailure);
+    assert.equal(url(), beforeFailureUrl);
+
+    // Superseded success/failure can neither overwrite options nor change the hint.
+    for (const oldFails of [false, true]) {
+      const old = pending = deferred();
+      assert.equal(await list.load(), "applied");
+      pending = deferred();
+      assert.equal(await list.load(), "applied");
+      pending.resolve({ items: [{ alias: "newest", enabled: true }], nextCursor: null });
+      await flush();
+      assert.equal(hint.hidden, true, `${kind}: next successful refresh clears the hint`);
+      const latest = list.snapshot(), latestUrl = url();
+      const requestCount = requests.length;
+      if (oldFails) old.reject(new Error("stale option failure"));
+      else old.resolve({ items: [{ alias: "stale", enabled: true }], nextCursor: "stale-next-page" });
+      await flush();
+      assert(choices().includes("newest"));
+      assert(!choices().includes("stale"));
+      assert.equal(requests.length, requestCount, `${kind}: superseded options stop pagination`);
+      assert.equal(hint.hidden, true);
+      assert.equal(listError.hidden, true);
+      assert.deepEqual(list.snapshot(), latest);
+      assert.equal(url(), latestUrl);
+      assert.deepEqual(project.values(), ["missing-draft"]);
+    }
+  }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
