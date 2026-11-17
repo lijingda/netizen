@@ -132,8 +132,16 @@ async function selectionScenario() {
   const label = deferred(); labelsAnswer = () => label.promise;
   answer([sample("a", { chatLabelResolved: false, chatLabel: null })]);
   await refresh("sessions");
+  const beforeLabels = sessionLists.session.snapshot();
+  assert.equal(sessionLists.session.snapshot(), beforeLabels);
   label.resolve({ items: [{ chatId: ordinary.chatId, chatLabel: "补读的名称", chatLabelResolved: true }] });
   await flush(); assert.deepEqual(selected(), ["a"]);
+  const afterLabels = sessionLists.session.snapshot();
+  assert.notEqual(afterLabels, beforeLabels, "name enrichment replaces the cached snapshot");
+  assert.equal(beforeLabels.items[0].chatLabel, null, "previous snapshots remain unchanged");
+  assert.equal(afterLabels.items[0].chatLabel, "补读的名称");
+  assert(Object.isFrozen(afterLabels.items[0].actions.archive.target));
+  assert.equal(sessionLists.session.snapshot(), afterLabels);
   assert(rows()[0].textContent.includes("补读的名称"));
   for (const change of [
     () => sessionLists.session.move("next"),
@@ -147,7 +155,7 @@ async function selectionScenario() {
     if (state.tab !== "sessions" || state.sessionTab !== "ordinary") await selectSessionTab("ordinary");
     if (!checks()[0].checked) checks()[0].click();
     await change(); await flush();
-    assert.equal(sessionSelection.ids.size, 0, "a successful new page or navigation clears selection");
+    assert.equal(selected().length, 0, "a successful new page or navigation clears selection");
   }
   await selectSessionTab("temporary"); layout("compact");
   const sides = document.querySelector("#sides-body");
@@ -157,7 +165,7 @@ async function selectionScenario() {
   sideAnswer = async () => ({ items: [], nextCursor: null }); await refresh("sessions");
   assert.equal(sides.querySelector("td").colSpan, 7);
   await show([sample("a")]); all().click(); expireAdminSession();
-  assert.equal(sessionSelection.ids.size, 0); assert(!checks()[0].checked); assert(checks()[0].disabled);
+  assert.equal(selected().length, 0); assert(!checks()[0].checked); assert(checks()[0].disabled);
 }
 
 async function confirmationScenario() {
@@ -259,7 +267,7 @@ async function expiryScenario() {
   await confirm();
   assert(state.authExpired); assert.equal(posts().length, 2); assert.equal(reads().length, 2);
   assert(!node("dialog").open); assert.equal(document.querySelector("#auth-expired").hidden, false);
-  assert.equal(sessionSelection.ids.size, 0);
+  assert.equal(selected().length, 0);
   assert.equal(statusNode.textContent, "登录已过期，批量操作已停止：已完成 1 项，请重新登录后刷新核对。");
   assert.equal(statusError, true);
   setStatus("另一个操作的晚到提示");
@@ -361,12 +369,12 @@ async function nativeCloseScenario() {
   assert.equal(summary(), "已完成 1 项。");
   node("dialog").close(); await flush();
   assert(!node("dialog").open); assert(!bodyClasses.has("session-batch-open"));
-  assert.equal(sessionBatch, null); assert.equal(document.activeElement, node("archive"));
+  assert(!node("archive").disabled, "finished/cancelled batches release the action controls"); assert.equal(document.activeElement, node("archive"));
   // The previous close event must not leave the next batch blocked or reopen it.
   all().click(); confirmResponder = null; start(); await flush();
   assert(document.querySelector("#admin-confirm").open);
   document.querySelector("#admin-confirm-cancel").click(); await flush();
-  assert.equal(sessionBatch, null);
+  assert(!node("archive").disabled, "finished/cancelled batches release the action controls");
 }
 
 async function navigationScenario(temporary) {
@@ -391,10 +399,14 @@ async function navigationScenario(temporary) {
   const focus = Element.prototype.focus;
   Element.prototype.focus = function (...args) { focused.push(this); return focus.apply(this, args); };
   finish(); await flush(); Element.prototype.focus = focus;
-  assert(!bodyClasses.has("session-batch-open")); assert.equal(sessionBatch, null);
+  assert(!bodyClasses.has("session-batch-open")); assert(!node("archive").disabled, "finished/cancelled batches release the action controls");
   assert(!focused.includes(node("archive")), "never force focus into a hidden panel");
   if (temporary) assert.equal(document.activeElement, document.querySelectorAll("[data-refresh]").find((button) => button.dataset.refresh === "sessions"));
   else assert(!focused.some((button) => button.dataset.refresh === "sessions"), "hidden refresh control is not focused either");
+  await selectSessionTab("ordinary"); all().click(); confirmResponder = null; start(); await flush();
+  assert(document.querySelector("#admin-confirm").open, "closing the navigated result releases the batch for another operation");
+  document.querySelector("#admin-confirm-cancel").click(); await flush();
+  assert.equal(posts().length, 1, "returning never resumes the stopped batch");
 }
 
 async function lostGrantScenario() {
@@ -418,10 +430,17 @@ async function stagedExpiryScenario(stage) {
     confirmResponder = null; start(); await flush();
   } else await confirm();
   const saved = details(), result = summary();
-  assert.equal(sessionBatch.phase, stage);
+  if (stage === "preparing") {
+    assert(node("archive").disabled); assert(!node("dialog").open); assert(!document.querySelector("#admin-confirm").open);
+    assert.equal(reads().length, 2); assert.equal(posts().length, 0);
+  } else if (stage === "confirming") {
+    assert(document.querySelector("#admin-confirm").open); assert.equal(posts().length, 0);
+  } else {
+    assert(node("dialog").open); assert(!node("close").hidden); assert.equal(summary(), "已完成 1 项。");
+  }
   expireAdminSession(); await flush();
   assert(!node("dialog").open); assert(!document.querySelector("#admin-confirm").open);
-  assert(!bodyClasses.has("session-batch-open")); assert.equal(sessionSelection.ids.size, 0);
+  assert(!bodyClasses.has("session-batch-open")); assert.equal(selected().length, 0);
   assert.equal(document.querySelector("#auth-expired").hidden, false);
   assert.equal(statusNode.textContent, stage === "finished" ? `登录已过期。批量结果：${result}` : "登录已过期，批量操作未执行。");
   assert.equal(posts().length, stage === "finished" ? 1 : 0);
@@ -458,7 +477,7 @@ async function supersededEndingScenario() {
   await show([sample("a")]); all().click();
   const wait = deferred();
   mutationAnswer = async () => { ordinaryAnswer = () => wait.promise; return response(); };
-  await confirm(); assert.equal(sessionBatch.phase, "refreshing");
+  await confirm(); assert.equal(summary(), "正在刷新列表…"); assert(node("stop").disabled);
   answer([sample("a", { nativeTitle: "新读取结果" })]); await refresh("sessions");
   wait.resolve({ items: [sample("a", { nativeTitle: "过期结果" })], nextCursor: null }); await flush();
   assert.equal(summary(), "已完成 1 项。"); assert(node("note").hidden);
@@ -545,14 +564,28 @@ async function resultPresentationScenario() {
 
 async function queryBudgetScenario() {
   await show(Array.from({ length: 100 }, (_, i) => sample(String(i))));
-  const original = sessionBatchActions;
-  let actionCalculations = 0;
-  sessionBatchActions = (...args) => { actionCalculations += 1; return original(...args); };
+  // Count real query parsing only inside the public batch render hooks. Other
+  // list/URL rendering also parses queries, but is outside the batch budget.
+  const original = globalThis.URLSearchParams;
+  const batch = window.NetizenSessionBatch;
+  const hooks = { beforeRender: batch.beforeRender, onLayout: batch.onLayout, selectionCell: batch.selectionCell };
+  let observing = false, parses = 0;
+  globalThis.URLSearchParams = class extends original {
+    constructor(...args) { super(...args); if (observing) parses += 1; }
+  };
+  for (const [key, callback] of Object.entries(hooks)) batch[key] = (...args) => {
+    observing = true;
+    try { return callback(...args); } finally { observing = false; }
+  };
   try {
-    await loadSessions(); assert.equal(actionCalculations, 1, "100 rows and their selection controls share one action calculation");
-    actionCalculations = 0; all().click(); assert.equal(actionCalculations, 1, "select-all shares its action calculation with the toolbar render");
+    await loadSessions(); assert.equal(parses, 1, "100 rows and their selection controls share one query parse");
+    parses = 0; observing = true; all().click(); observing = false;
+    assert.equal(parses, 1, "select-all shares its action calculation with the toolbar render");
     assert.equal(selected().length, 100);
-  } finally { sessionBatchActions = original; }
+  } finally {
+    globalThis.URLSearchParams = original;
+    Object.assign(batch, hooks);
+  }
 }
 
 (async () => {

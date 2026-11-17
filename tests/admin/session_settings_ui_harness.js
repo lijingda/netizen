@@ -486,6 +486,7 @@ const cases = {
     change("progress", true);
     const draft = structuredClone(sessionSettingsEditor.settings);
     const action = structuredClone(sessionSettingsEditor.action);
+    const beforeSave = sessionLists.session.snapshot();
     const gate = {};
     postGate = gate;
     await submit();
@@ -513,6 +514,8 @@ const cases = {
     assert.equal(field("fields").disabled, false);
     assert.equal(sessionSettingsEditor.action, null);
     assert.equal(sessionLists.session.snapshot().items[0].actions.configure, null);
+    assert.notEqual(sessionLists.session.snapshot(), beforeSave, "grant consumption refreshes the cached snapshot");
+    assert.deepEqual(beforeSave.items[0].actions.configure, action, "older frozen snapshots retain the original grant");
     assert(field("save").disabled);
     assert(button.disabled);
     assert.match(field("note").textContent, /保存结果未确认.*重新打开/);

@@ -47,9 +47,8 @@ document.createDocumentFragment = () => new Element('fragment');
     'session-batch-dialog': async () => {
       state.tab = 'sessions';
       await loadSessions();
-      sessionSelection.ids.add(ordinary.bindingId);
-      renderSessionSelection();
-      return runSessionBatch('archive', trigger);
+      document.querySelector('#session-select-page').click();
+      document.querySelector('#session-batch-archive').click();
     },
     'admin-confirm': () => {
       confirmResponder = null;

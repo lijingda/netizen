@@ -26,6 +26,8 @@ window.NetizenSessionLists = (() => {
     let appliedPage = dependencies.firstSessionPage();
     let currentData = null;
     let refreshedAt = null;
+    let cachedSnapshot;
+    rebuildSnapshot();
     // Keep existing rows so folding never recreates action grants.
     const groupView = { project: new Set(), chat: new Set(), layout: "compact", groups: [] };
 
@@ -188,15 +190,20 @@ window.NetizenSessionLists = (() => {
         const labels = await dependencies.api(`/api/v1/chat-labels?${query}`);
         if (!isCurrent()) return;
         const byChat = new Map(labels.items.map((label) => [label.chatId, label]));
+        let changed = false;
         for (const { item } of targets) {
           const label = byChat.get(item.chatId);
           if (!label) continue;
           // Enrichment changes display facts only; retain exact identities, topic
           // links, runtime and action grants from the successful list response.
           for (const field of ["chatLabel", "chatLabelResolved", "chatMode", "chatType", "chatOpenUrl"]) {
-            if (Object.hasOwn(label, field)) item[field] = label[field];
+            if (Object.hasOwn(label, field) && item[field] !== label[field]) {
+              item[field] = label[field];
+              changed = true;
+            }
           }
         }
+        if (changed) rebuildSnapshot();
       } catch {
         // Name failures are local to the location cells. Authentication expiry is
         // already handled by api(), and list status/freshness stay unchanged.
@@ -231,6 +238,7 @@ window.NetizenSessionLists = (() => {
         currentData = data;
         appliedPage = { ...candidate, nextCursor: data.nextCursor };
         refreshedAt = Date.now();
+        rebuildSnapshot();
         dependencies.list.error(name, "");
         renderSessionSort();
         const context = options.beforeRender?.(data.items);
@@ -371,6 +379,7 @@ window.NetizenSessionLists = (() => {
       appliedPage = dependencies.firstSessionPage(query.toString());
       currentData = null;
       refreshedAt = null;
+      rebuildSnapshot();
       document.querySelector(`#${name}-body`).replaceChildren();
       applySessionLayout();
       renderAppliedSessionFilters();
@@ -393,8 +402,21 @@ window.NetizenSessionLists = (() => {
       dependencies.list.freshness("sessions", refreshedAt ?? null);
     }
 
+    // Rebuild only when owned data changes; selection/layout reads reuse the same
+    // deeply frozen copy without exposing mutable DTOs or exact action grants.
+    function rebuildSnapshot() {
+      cachedSnapshot = readonlyCopy({ items: currentData?.items || [], page: appliedPage, refreshedAt });
+    }
+
     function snapshot() {
-      return readonlyCopy({ items: currentData?.items || [], page: appliedPage, refreshedAt });
+      return cachedSnapshot;
+    }
+
+    // Editors retain their exact row even after it leaves the displayed page.
+    // Keep their grant consumption in sync with the cache only while it is owned.
+    function updateActions(item, actions) {
+      Object.assign(item.actions, actions);
+      if (currentData?.items.includes(item)) rebuildSnapshot();
     }
 
     for (const button of document.querySelectorAll("[data-session-sort]")) {
@@ -413,7 +435,7 @@ window.NetizenSessionLists = (() => {
     document.querySelector(`#${name}-next`).addEventListener("click", () => move("next"));
 
     return { load, move, sort: sortSessionPage, filterPage: sessionFilterPage, reset: resetSessionFilters,
-      restore, snapshot, appliedQuery: () => appliedPage.query,
+      restore, snapshot, updateActions, appliedQuery: () => appliedPage.query,
       pageIdentity: () => JSON.stringify([appliedPage.query, appliedPage.cursor]), renderFreshness };
   }
 

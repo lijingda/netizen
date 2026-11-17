@@ -401,6 +401,9 @@ async function checkListOwnership() {
   assert.equal(Reflect.set(saved.page, "cursor", "not-a-server-cursor"), false);
   assert.equal(Reflect.set(saved.items[0].runtime, "primaryStatus", "fake"), false);
   assert.deepEqual(sessionLists.session.snapshot(), saved, "callers cannot rewrite the owner's committed result");
+  for (let index = 0; index < 5; index += 1) {
+    assert.equal(sessionLists.session.snapshot(), saved, "unchanged results reuse the deeply frozen snapshot");
+  }
 
   // Even direct reads from the two controllers share one commit generation.
   // Navigation invalidation is deliberately not involved in this race.
@@ -415,7 +418,19 @@ async function checkListOwnership() {
   ordinaryAnswer = async () => { throw new Error("latest list failed"); };
   assert.equal(await sessionLists.session.load(), "failed");
   assert.deepEqual(sessionLists.session.snapshot(), saved);
+  assert.equal(sessionLists.session.snapshot(), saved, "failed and superseded reads retain the cached snapshot");
   ordinaryAnswer = null;
+  assert.equal(await sessionLists.session.load(), "applied");
+  const replaced = sessionLists.session.snapshot();
+  assert.notEqual(replaced, saved, "a committed read publishes a new snapshot");
+  assert(Object.isFrozen(replaced.items[0].runtime));
+  assert.equal(sessionLists.session.snapshot(), replaced);
+  sessionLists.session.restore(new URLSearchParams(replaced.page.query));
+  const restored = sessionLists.session.snapshot();
+  assert.notEqual(restored, replaced, "URL restoration replaces the snapshot");
+  assert(Object.isFrozen(restored) && Object.isFrozen(restored.items));
+  assert.deepEqual(restored.items, []);
+  assert.equal(sessionLists.session.snapshot(), restored);
 }
 
 async function checkSessionSorting() {
