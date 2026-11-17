@@ -1219,6 +1219,33 @@ SDK patch 或另一套 Goal 编排。
 仅覆盖当前 App Server store，须完整分页，且不是原子的 cleanup 检查；不能替代
 ADR 0060 的 Project 精确清单或 ADR 0078 的原生 delete 成功证明，不为此新增私有 gateway。
 
+**原生 Project（`project/*` 与 `Thread.projectId`）**
+
+0.169.0 的原生 Project 暂不接入（2026-11-16 补记）。稳定协议只有只读的 `Thread.projectId`
+与 `project/changed`、`thread/project/updated` 通知；`project/list|read|create|update|delete|move|import`
+以及 `thread/start`、`thread/list`、`thread/metadata/update` 的 `projectId` 参数只出现在
+`codex app-server generate-json-schema --experimental` 生成的 experimental 协议中。公开高层
+SDK 没有 Project API，`thread_start` 也不接受 `projectId`。原生 Project 由 App Server 保存在
+共享 `$CODEX_HOME` 的状态库中，同账号的各实例与其他客户端共用；它有不透明 ID 和多个 roots，
+没有启停或墓碑。Thread 归属可选、可改，只采用显式传入的 ID：`thread/start` 在创建前拒绝
+未知 ID，不按 cwd 或 roots 推导归属；删除 Project 只解除归属。接口证据见固定版本的
+[协议定义](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server-protocol/src/protocol/v2/project.rs)、
+[创建时归属](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server/src/request_processors/thread_processor.rs#L1315)
+与[存储迁移](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/state/migrations/0049_projects.sql)。
+
+它与[Project 登记](#project-登记与准入)不是同一概念：Netizen Project 是本实例的 alias、
+单一默认 cwd 和必选的 Binding 归属，另有启停、墓碑与 ADR 0060 的精确删除清单。以原生 Project
+替代登记表会依赖 experimental 接口，并把按实例管理的资源变成跨实例共享；镜像同步则形成两份
+需要对账的数据。因此 Netizen 不读取、写入或映射原生 Project，新建会话没有原生归属。
+`list_threads` 原样透传原生 `projectId`：Netizen 不设置它，但共享同一 `$CODEX_HOME` 的其他
+客户端可以赋值，它与 `projectAlias` 无关。CLI 的 `create_thread` 会继承来源 Thread 的原生
+归属（[dynamic_tools.rs](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/tui/src/dynamic_tools.rs#L497)），
+Netizen 的同名工具不继承；这一差异随本条一并复审。
+
+重新评估的触发条件是原生 Project 接口进入稳定协议或公开高层 SDK，或确有需要让本实例会话
+出现在共享同一 `$CODEX_HOME` 的客户端 Project 中。届时另立 ADR，优先评估在创建会话时映射
+归属而不替换登记表，并处理多实例共享；不为此新增私有 gateway、直接写原生状态库或以本地状态模拟。
+
 ### 原生归档与删除
 
 原生 archive 与 materialized delete 的准入事实是 Binding 指向 materialized、persisted、
