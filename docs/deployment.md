@@ -640,7 +640,7 @@ Parent 已被单独删除时的孤立 Runtime Side；检查原生四视图消失
 订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
 同一 ID 接管、继续 Turn 并再次取消订阅；这证明 Binding 可以保留 ID/历史而无需常驻订阅。
 该 phase 不等待也不冒充最后订阅者离开后的卸载验证；何时卸载由 Codex 的
-`thread_unload_delay_secs` 决定（0.169 默认 60 秒），Netizen 不设置。当前协议没有
+`thread_unload_delay_secs` 决定（0.170 默认 60 秒），Netizen 不设置。当前协议没有
 稳定、无副作用的 live registered-terminal fixture，因此 list 非空、检查错误与 unsubscribe
 响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为本地代码门禁。
 
@@ -1197,6 +1197,7 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 
 | 能力 / 实际版本与环境 | 验证层级与记录 | 未覆盖 / 复验入口 |
 | --- | --- | --- |
+| SDK/Runtime；`0.170.0`，2026-11-18 Linux 源码 checkout | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除及 mock 原生场景；限流失败项以指定模型重跑通过](compatibility-history.md#sdk-0170-20261118) | 审核展示指令真实形态、旧版客户端共享 rollout、Bedrock/Vertex 增量工具、真实组织 provider 策略、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | SDK/Runtime、provider 保留；`0.169.0`，2026-11-15 Linux 源码 checkout | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 保留与冷恢复拒绝及 mock 原生场景](compatibility-history.md#sdk-0169-20261115) | 真实组织 provider 策略、旧会话选到原提供方不支持的模型、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | SDK/Runtime、provider 准入；`0.167.0`，2026-11-09 Linux 候选 | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 准入及 mock 原生场景](compatibility-history.md#sdk-0167-20261109) | 冷恢复实际权限本机未验证；真实组织 provider 策略、图片附件形态的真实生成、卸载后接管、解除归档后代恢复、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | 历史分页、Goal 分离；`0.163.0`，2026-10-17/18 本机 | [本地门禁、mock 原生探针](compatibility-history.md#history-goal-20261017) | interrupted 续流缺口仍在；旧混合卡不承诺兼容；真实模型/客户端、十万会话压测与部署未验收；复验 history/Goal 专项 |
