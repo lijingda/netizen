@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from .card_content import PreparedCardContent
 from .message_content import MATERIAL_MESSAGE_TYPES, TEXT_TYPES, project_message_content
@@ -342,6 +342,9 @@ class ConversationInput:
     attachments: tuple[str, ...] = ()
     quoted_count: int = 0
     supplemental_count: int = 0
+    kind: Literal["user", "session_agent", "external_unrecognized", "unavailable"] = "user"
+    source_thread_id: str | None = None
+    source_is_side: bool = False
 
 
 _DISPLAY_MARKERS = (

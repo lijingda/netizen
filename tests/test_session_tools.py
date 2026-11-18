@@ -17,7 +17,7 @@ from mcp.types import CallToolRequestParams
 from netizen_cli.bindings import BindingStore, SideTopicState
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.runtime.contracts import NativeThreadCatalogPage, NativeThreadMetadata, SideSessionSnapshot, SideSessionState
-from netizen_cli.sessions.delegation import delegated_prompt
+from netizen_cli.delegation_envelope import delegated_prompt
 from netizen_cli.sessions.errors import SessionToolError
 from netizen_cli.sessions.mcp import SessionMcpRunner
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule
@@ -902,6 +902,8 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
             {**messages[0], "id": "other-tool", "name": "read_thread"},
             {**messages[0], "id": "plain-output", "output": "not an envelope"},
             {**messages[0], "id": "missing-source", "output": "<codex_delegation>\n  <input>x</input>\n</codex_delegation>"},
+            {**messages[0], "id": "empty-source", "output": delegated_prompt("", "private")},
+            {**messages[0], "id": "blank-source", "output": delegated_prompt(" \t ", "private")},
             {**messages[0], "id": "missing-suffix", "output": envelope[:-1]},
         ]
         self.catalog.items["target"]["turns"] = [{"id": "turn", "status": "completed", "items": messages + unrelated}]

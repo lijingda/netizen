@@ -36,7 +36,8 @@ def conversation_raw_text_within_limit(page: NativeConversationPage, maximum: in
     for turn in page.turns:
         texts = [turn.answer, turn.error]
         for part in turn.inputs:
-            texts.extend((part.text, part.source, part.display_name, *part.attachments))
+            texts.extend((part.text, part.source, part.display_name, part.kind,
+                          part.source_thread_id, *part.attachments))
         for text in texts:
             if text is None:
                 continue

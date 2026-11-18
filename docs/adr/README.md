@@ -44,7 +44,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0026](0026-upgrade-and-requalify-python-sdk-0147.md) | 升级并重新认证 Python SDK 0.147.0 | 升级记录 | 有效 | 被 [0027](0027-use-turn-diff-and-self-contained-file-cards.md) 修订 |
 | [0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) | 升级并重新认证 lark-channel-sdk 1.4.0 | 升级记录 | 有效 | 被 [0099](0099-project-original-card-content-with-bounded-component-adapter.md) 修订 |
 | [0077](0077-read-account-rate-limits-on-demand.md) | 按需读取共享 Codex 账号额度 | 架构决策 | 有效 |  |
-| [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) | 原生会话历史采用只读分页适配 | 架构决策 | 有效 | 被 [0096](0096-read-admin-conversations-through-summary-turn-pages.md) 修订 |
+| [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) | 原生会话历史采用只读分页适配 | 架构决策 | 有效 | 被 [0096](0096-read-admin-conversations-through-summary-turn-pages.md)、[0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md) 修订 |
 
 ## 会话身份、生命周期与并发
 
@@ -153,9 +153,10 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0091](0091-load-admin-user-credentials-on-demand.md) | 按用户独立存储并按需读取 Admin 飞书凭证 | 架构决策 | 有效 |  |
 | [0089](0089-browse-current-project-files-through-admin.md) | Admin 按需查看 Project 当前目录中的文件 | 架构决策 | 有效 | 被 [0095](0095-show-uncommitted-changes-against-head-in-project-files.md)、[0098](0098-open-answer-file-links-in-directory-roots.md) 修订 |
 | [0095](0095-show-uncommitted-changes-against-head-in-project-files.md) | Admin 文件查看显示相对 HEAD 的未提交变更 | 架构决策 | 有效 |  |
-| [0096](0096-read-admin-conversations-through-summary-turn-pages.md) | Admin 按轮分页查看只读对话记录 | 架构决策 | 有效 | |
+| [0096](0096-read-admin-conversations-through-summary-turn-pages.md) | Admin 按轮分页查看只读对话记录 | 架构决策 | 有效 | 被 [0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md) 修订 |
 | [0098](0098-open-answer-file-links-in-directory-roots.md) | Admin 对话记录中的本地文件链接按所在目录只读打开 | 架构决策 | 有效 | |
 | [0100](0100-batch-archive-and-delete-selected-admin-sessions.md) | Admin 普通会话按当前页勾选批量归档与删除 | 架构决策 | 有效 | 修订 [0031](0031-add-in-process-admin-web-control-plane.md)、[0054](0054-allow-admin-to-delete-exact-materialized-sessions.md)、[0060](0060-delete-projects-with-exact-session-inventory.md) |
+| [0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md) | Admin 对话记录显示开启本轮的会话协作来信 | 架构决策 | 有效 | 修订 [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0096](0096-read-admin-conversations-through-summary-turn-pages.md) |
 
 ## 数据、凭据与服务环境
 

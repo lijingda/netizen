@@ -57,7 +57,7 @@ from ..message_history import (
 )
 from ..sdk_gap_adapter import SkillCatalogError
 from ..sdk_gap_adapter import GoalControlError
-from ..sessions.delegation import SIDE_SOURCE_NOTICE, delegated_prompt
+from ..delegation_envelope import SIDE_SOURCE_NOTICE, delegated_prompt
 from ..sessions.errors import SessionToolError
 from ..sessions.sources import SessionSource, resolve_session_source
 

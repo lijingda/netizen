@@ -583,7 +583,10 @@ class SubmissionRuntime(CompactionRuntime):
                 # The returned handle has its own SDK notification cursor.
                 # Dropping it releases that unused cursor through SDK-owned
                 # finalization. Keep the original consumer, owner and origin.
+                # Like a confirmed steer, the exact running Turn accepted
+                # one more input.
                 self._refresh_turn_activity(active)
+                active.steer_count += 1
                 active.plan_may_be_stale = True
                 active.plan_stale_after_cursor = active.plan_cursor
                 active.activity_revision += 1

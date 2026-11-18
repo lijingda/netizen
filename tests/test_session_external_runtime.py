@@ -133,6 +133,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.progress_card_defaults = ProgressCardSettings(operation_limit=16)
         active = self.runtime._active[self.binding.id]
         task = active.task
+        self.assertEqual(active.steer_count, 0)
         read_count = len(self.codex.read_calls)
         second = await self.runtime.submit_external(
             binding=self.binding,
@@ -145,6 +146,8 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second.release_receipt_attempt)
         self.assertEqual(second.task_feedback.progress_card_settings, first_settings)
         self.assertIs(self.runtime._active[self.binding.id].task, task)
+        # A joined Session Agent Input counts like a confirmed steer.
+        self.assertEqual(active.steer_count, 1)
         self.assertEqual(self.codex.handles[0].steers, [])
         self.assertEqual(self.codex.resume_calls, [])
         self.assertEqual(len(self.codex.read_calls), read_count)
@@ -216,6 +219,7 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     first.thread_id, first.turn_id, first.turn_id,
                 ))
                 self.assertEqual(self.runtime.active_turn(self.binding.id).turn_id, first.turn_id)
+                self.assertEqual(self.runtime._active[self.binding.id].steer_count, 0)
         await self.finish(first)
 
     async def test_external_input_failure_does_not_restore_suppression(self):

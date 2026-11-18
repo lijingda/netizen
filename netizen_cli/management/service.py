@@ -757,9 +757,11 @@ class ManagementRuntimePort:
 
     async def thread_conversation_exact(
         self, thread_id: str, *, cursor: str | None = None, limit: int = 10,
-        previous_page: NativeConversationPage | None = None,
+        previous_page: NativeConversationPage | None = None, deadline: float | None = None,
     ) -> NativeConversationPage:
-        return await self.__runtime.thread_conversation(thread_id, cursor=cursor, limit=limit, previous_page=previous_page)
+        return await self.__runtime.thread_conversation(
+            thread_id, cursor=cursor, limit=limit, previous_page=previous_page, deadline=deadline,
+        )
 
     async def thread_summary_exact(
         self, thread_id: str,
@@ -1486,7 +1488,7 @@ class InstanceManagementService:
                 self._summary_read_limiter.release()
                 raise RuntimeClosed("Native history reads are closed or expired")
             task = asyncio.create_task(self._runtime.thread_conversation_exact(
-                thread_id, cursor=cursor, limit=limit, previous_page=previous_page,
+                thread_id, cursor=cursor, limit=limit, previous_page=previous_page, deadline=deadline,
             ))
             self._summary_reads.add(task)
             task.add_done_callback(self._summary_read_finished)
