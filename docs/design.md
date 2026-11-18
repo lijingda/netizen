@@ -1216,7 +1216,7 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | `ThreadSubscriptionControl.unsubscribe`（[0028](adr/0028-release-idle-persistent-thread-subscriptions.md)） | 固定 `thread/unsubscribe`，供普通 Binding/Side 复用 | 能力门禁，固定 request/response。 | 公开等价 unsubscribe，独立于 Side boundary。 |
 | `ThreadDeleteControl`（[0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)、[0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)） | 固定 `thread/delete` | 生产构造须过独立 shape/synthetic，另需 disposable live；区分可信 RPC 拒绝与传输/响应未知，仅原生成功响应后删 Binding，无目录对账或自动重试。 | 公开等价 Delete facade。 |
 | `AppServerAccountRateLimits.read`（[0077](adr/0077-read-account-rate-limits-on-demand.md)） | 只读固定 `account/rateLimits/read` | 能力门禁；不消费通知、不维护账号状态。 | 公开等价额度读取 facade。 |
-| `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页 | shape/synthetic 与原生 paginated/legacy 探针；不替代运行终态或 Files 证据读取，不以全历史读取兜底失败。 | 公开等价历史分页 facade。 |
+| `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0101](adr/0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页；同一 items 端点升序 `limit=1` 读取开启本轮的输入 | shape/synthetic 与原生 paginated/legacy 探针；不替代运行终态或 Files 证据读取，不以全历史读取兜底失败。 | 公开等价历史分页 facade。 |
 | `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
 
 Channel SDK 的卡片原始结构适配见 [ADR 0099](adr/0099-project-original-card-content-with-bounded-component-adapter.md)
@@ -2973,16 +2973,27 @@ Project 行仅增加“查看会话”，以同一标准默认查询构造后覆
 点击时校验准确 Binding/Thread，以 summary 视图读取十轮；最新轮位于下方，打开定位到
 最新。只有点击顶部“加载更早”才读取下一原生 cursor，不自动翻页。每轮展示第一条
 用户输入、终态最终回答、状态与原生实际存在的开始/完成时间；运行中轮也展示 summary
-实际返回的第一条用户输入，不显示未终态回答或 commentary；原生未返回输入时仅显示运行中。
-summary 不含 steer 追加输入。无轮、无回答、失败 error.message、读取失败和身份变化
-分别表达，不展示推理、commentary、工具参数/输出或输出文件。
+实际返回的第一条用户输入，不显示未终态回答或 commentary。
+Summary 缺少 userMessage 的轮次（包括运行中轮）按页内顺序读取该 Turn 第一条 item
+（同一 `thread/items/list` 端点，升序、`limit=1`；[ADR 0101](adr/0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)）。
+`functionCallOutput` 的 `codex_tui`、`codex_app` namespace 与当前委派外层整体识别成功时，
+展示“会话协作来信”、来源完整 Codex 会话 ID 和完整正文；正文的固定 Side 来源说明去除，
+改为标注来自临时 Side。其他 `functionCallOutput`（含旧 `netizen_sessions` JSON 信封）
+只显示“外部输入 · 格式未识别”及占位，不返回工具原文。其他类型、首项 userMessage 或空页
+不显示输入，用户输入始终以 Summary 为准。原生不支持（legacy `-32601`）、CodexError 或
+ThreadHistoryUnavailable 时，该轮及本页剩余无用户输入轮次显示“〔未能读取本轮首条输入〕”，
+停止本页补读，只记录一次含 Thread/Turn ID 与异常类型的 warning，不含正文。
+补读共享本页在途名额和十秒外层期限，每页最多十次，不并发或重试；取消与外层超时继续传播。
+十轮回退单轮时复用同一 Turn ID 已取得的输入投影（包括无输入与不可用），不重复补读。
+轮中加入的来信与 steer 追加输入继续不显示。无轮、无回答、失败 error.message、读取失败和身份变化
+分别表达，不展示推理、commentary、其他工具参数/输出或输出文件。
 
 归档只读，不 resume/unarchive；不交互、不缓存、不预取、不写 SQLite。刷新丢弃更早页，
 重新读最新页。exact 身份前后校验、十秒请求期限和共享在途原生精读限额不变，超时
 不提前释放 worker。非法 cursor 明确拒绝并提示从最新重新读取，不回退完整 Thread。
 每次页读取的 Markdown 渲染和 JSON 编码合用文件预览 2 worker / 4 capacity 执行器的一次任务；
 十轮页回退到单轮时，同一请求最多提交两次任务。
-执行器繁忙时，本页输入、回答及展示元数据文本不超过 1 MiB，可在事件循环直接编码
+执行器繁忙时，本页输入、回答及展示元数据文本（含来信正文和来源会话 ID）不超过 1 MiB，可在事件循环直接编码
 无 Markdown HTML/图片的原文页，有回答时在页面级提示一次“排版预览暂不可用，已显示原文。”；超出才返回
 503。执行器关闭返回 503；排版执行器超时或 worker 结果未知（期限耗尽）改为返回 504，
 此前最近回答在这些情况下降级为原文。

@@ -359,6 +359,26 @@ window.NetizenPathFiles.open = (target) => { openedAnswerFiles.push(target); };
     inputBlocks[0].querySelector(".conversation-input-label").textContent.length, "raw input has an additional visible annotation");
   const noAnswer = current().source.textContent;
   assert(noAnswer, "empty answer has the no-answer presentation");
+  const sourceThread = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa<tag>";
+  const agentInput = { kind: "session_agent", text: "来信 <script> &amp;\n完整正文", source_thread_id: sourceThread };
+  const inputLabels = [
+    [agentInput, `会话协作来信 · 来自 Codex 会话 ${sourceThread}`],
+    [{ ...agentInput, source_is_side: true }, `会话协作来信 · 来自临时 Side · Codex 会话 ${sourceThread}`],
+    [{ kind: "external_unrecognized", text: "〔外部输入；格式未识别，此处不显示内容〕" }, "外部输入 · 格式未识别"],
+    [{ kind: "unavailable", text: "〔未能读取本轮首条输入〕" }, "输入"],
+    [{ kind: "user", text: "普通用户输入" }, "用户输入"],
+  ];
+  conversationAnswer = () => pageOf([{ turnId: "agent-inputs", status: "inProgress",
+    inputs: inputLabels.map(([part]) => part) }]);
+  await clickConversationControl("refresh");
+  const agentBlocks = current().node.querySelectorAll(".conversation-input");
+  assert.equal(agentBlocks.length, inputLabels.length);
+  agentBlocks.forEach((block, index) => {
+    assert.equal(block.querySelector(".conversation-input-label").textContent, inputLabels[index][1]);
+    assert.equal(block.querySelector("pre").textContent, inputLabels[index][0].text);
+    assert.equal(block.querySelector("script"), null, "delegated text stays inert");
+    assert.equal(block.querySelector("tag"), null, "source identity stays inert and complete");
+  });
   conversationAnswer = () => ({ ...pageOf([{ turnId: "no-answer", status: "completed", answer: null }]), previewMessage: "RAW PREVIEW" });
   await clickConversationControl("refresh");
   assert.equal(current().source.textContent, noAnswer);

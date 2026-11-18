@@ -2,9 +2,13 @@
 status: accepted
 date: 2026-11-12
 amends: 0031, 0083
+amended_by: 0101
 ---
 
 # Admin 按轮分页查看只读对话记录
+
+> [ADR 0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md) 为 Summary 没有用户输入的轮次
+> 增加首项补读，展示开启本轮的会话协作来信及来源；轮中加入的来信与 steer 仍不显示。下文保留原始决定。
 
 管理员排查会话需要看到请求与结果的对应关系，只有最近回答不足以提供上下文。
 Admin 仍是管理入口，不是第二个 Codex 客户端；本决定将最近回答扩展为只读对话记录，

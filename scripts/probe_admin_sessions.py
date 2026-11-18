@@ -20,12 +20,13 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, Sandbox
+from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, ExternalMessage, Sandbox
 from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import ThreadStartResponse
 
 from netizen_cli.bindings import BindingStore
 from netizen_cli.codex_runtime import CodexRuntime
+from netizen_cli.sessions.delegation import delegated_prompt
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup
 from netizen_cli.thread_history import AppServerThreadHistory
 from probe_sdk_partial_answers import isolated_config, message_events, mock_provider, response_events
@@ -136,6 +137,7 @@ async def conversation_case(root: Path, mode: str) -> dict:
         f"answer-{index}", f"ANSWER-{index}", "final_answer",
     ))) for index in range(10)]
     replies += [
+        (200, response_events("session-agent", *message_events("agent-answer", "SESSION-AGENT-ANSWER", "final_answer"))),
         (200, response_events("steer-first", *message_events("steer-initial", "STEER-FIRST-ANSWER", "final_answer"))),
         (200, response_events("steer-final", *message_events("steer-answer", "STEER-FINAL-ANSWER", "final_answer"))),
         (400, b'{"error":{"message":"CONVERSATION-FAILURE","type":"invalid_request_error"}}'),
@@ -155,9 +157,10 @@ async def conversation_case(root: Path, mode: str) -> dict:
     with mock_provider(replies) as provider:
         cwd, env = isolated_config(root, provider)
         store = BindingStore(root / "channel.sqlite3")
-        gate, interrupt_gate = ArrivalGate(), ArrivalGate()
-        provider.response_gates[11] = gate
-        provider.response_gates[14] = interrupt_gate
+        gate, interrupt_gate, agent_gate = ArrivalGate(), ArrivalGate(), ArrivalGate()
+        provider.response_gates[11] = agent_gate
+        provider.response_gates[12] = gate
+        provider.response_gates[15] = interrupt_gate
         try:
             async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
                 runtime = runtime_for(codex, store)
@@ -175,6 +178,25 @@ async def conversation_case(root: Path, mode: str) -> dict:
                         result = await turn.run()
                         assert result.status.value == "completed"
                         turn_ids.append(turn.id)
+                    source_id = str(uuid.uuid4())
+                    agent_prompt = "SESSION-AGENT-INPUT <tag> &\nfull delegated request"
+                    agent_turn = await thread.turn(ExternalMessage(
+                        tool_name="send_message_to_thread", namespace="codex_tui",
+                        content=delegated_prompt(source_id, agent_prompt),
+                    ))
+                    turn_ids.append(agent_turn.id)
+                    await asyncio.wait_for(agent_gate.arrived.wait(), 10)
+                    agent_running = (await runtime.thread_conversation(thread.id)).turns[0]
+                    assert agent_running.turn_id == agent_turn.id and agent_running.status == "inProgress"
+                    assert agent_running.answer is None and len(agent_running.inputs) == 1
+                    agent_input = agent_running.inputs[0]
+                    if mode == "paginated":
+                        assert agent_input.kind == "session_agent" and agent_input.text == agent_prompt
+                        assert agent_input.source_thread_id == source_id and not agent_input.source_is_side
+                    else:
+                        assert agent_input.kind == "unavailable" and agent_input.text == "〔未能读取本轮首条输入〕"
+                    agent_gate.set()
+                    assert (await agent_turn.run()).status.value == "completed"
                     turn = await thread.turn("STEER-FIRST")
                     turn_ids.append(turn.id)
                     await asyncio.wait_for(gate.arrived.wait(), 10)
@@ -186,7 +208,7 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     assert running_turn.turn_id == turn.id and running_turn.status == "inProgress"
                     assert [part.text for part in running_turn.inputs] == ["STEER-FIRST"]
                     assert running_turn.answer is None and not running_turn.images
-                    assert len(provider.requests) == 11, "running history read started model work"
+                    assert len(provider.requests) == 12, "running history read started model work"
                     await turn.steer("STEER-SECOND")
                     gate.set()
                     result = await turn.run()
@@ -223,10 +245,12 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     else:
                         raise AssertionError("summary cursor chain did not terminate")
                     assert [turn.turn_id for turn in all_turns] == list(reversed(turn_ids))
-                    assert [page["count"] for page in pages] == [10, 3]
+                    assert [page["count"] for page in pages] == [10, 4]
                     assert all_turns[0].status == "interrupted" and all_turns[0].answer is None
                     assert all_turns[1].status == "failed" and all_turns[1].error
                     assert [part.text for part in all_turns[2].inputs] == ["STEER-FIRST"]
+                    assert all_turns[3].turn_id == agent_turn.id and all_turns[3].inputs == agent_running.inputs
+                    assert all_turns[3].answer == "SESSION-AGENT-ANSWER"
                     invalid = None
                     try:
                         await runtime.thread_conversation(thread.id, cursor="invalid-history-cursor")
@@ -248,6 +272,10 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     return {"mode": mode, "passed": True, "pages": pages, "turn_count": len(all_turns),
                             "complete_newest_to_oldest_chain": True, "steer_first_input_only": True,
                             "running_summary_first_input": True, "running_projected_first_input": True,
+                            "session_agent_input_kind": agent_input.kind,
+                            "session_agent_running_and_completed": True,
+                            "session_agent_source_and_full_prompt": mode == "paginated",
+                            "legacy_first_input_unavailable": mode == "legacy",
                             "failed_error": all_turns[1].error, "interrupted_without_final": True,
                             "invalid_cursor": invalid, "connection_reused_after_error": True,
                             "archived_read_without_resume": True, "model_requests_during_reads": 0,
@@ -255,6 +283,7 @@ async def conversation_case(root: Path, mode: str) -> dict:
                 finally:
                     gate.set()
                     interrupt_gate.set()
+                    agent_gate.set()
                     await runtime.cancel_tasks()
         finally:
             store.close()

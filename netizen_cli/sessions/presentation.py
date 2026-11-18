@@ -6,7 +6,7 @@ import json
 from enum import Enum
 from typing import Any
 
-from .delegation import parse_delegated_prompt
+from .delegation import recognize_delegated_output
 
 MAX_RESULT_BYTES = 8000
 
@@ -40,7 +40,7 @@ def _delegation_summary(item: dict[str, Any]) -> dict[str, str] | None:
     } or not isinstance(item.get("output"), str):
         return None
     if item.get("namespace") in {"codex_tui", "codex_app"}:
-        delegation = parse_delegated_prompt(item["output"])
+        delegation = recognize_delegated_output(item["namespace"], item["output"])
         if delegation is None:
             return None
         source, prompt = delegation

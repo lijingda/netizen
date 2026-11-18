@@ -30,6 +30,8 @@ class ThreadHistory(Protocol):
     async def list_items(self, thread_id: str, turn_id: str, *, limit: int = 20
                          ) -> ThreadItemsListResponse: ...
 
+    async def first_item(self, thread_id: str, turn_id: str) -> ThreadItemsListResponse: ...
+
 
 def facade_migration_requirements() -> tuple[str, ...]:
     candidates = {
@@ -92,11 +94,18 @@ class AppServerThreadHistory:
 
     async def list_items(self, thread_id: str, turn_id: str, *, limit: int = 20
                          ) -> ThreadItemsListResponse:
+        return await self._items_page(thread_id, turn_id, limit=limit, sort_direction="desc")
+
+    async def first_item(self, thread_id: str, turn_id: str) -> ThreadItemsListResponse:
+        return await self._items_page(thread_id, turn_id, limit=1, sort_direction="asc")
+
+    async def _items_page(self, thread_id: str, turn_id: str, *, limit: int,
+                          sort_direction: Literal["asc", "desc"]) -> ThreadItemsListResponse:
         _identity(thread_id)
         _identity(turn_id)
         _limit(limit, 20)
         params = self._item_params(thread_id=thread_id, turn_id=turn_id, limit=limit,
-                                   sort_direction="desc")
+                                   sort_direction=sort_direction)
         response = await self._client.request(
             "thread/items/list", params.model_dump(mode="json", by_alias=True, exclude_none=True),
             response_model=self._item_response,

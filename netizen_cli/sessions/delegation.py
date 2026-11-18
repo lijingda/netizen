@@ -33,3 +33,10 @@ def parse_delegated_prompt(value: str) -> tuple[str, str] | None:
         return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
     return unescape(source), unescape(prompt)
+
+
+def recognize_delegated_output(namespace: object, output: object) -> tuple[str, str] | None:
+    """Recognize only the current native delegation envelope, without legacy outputs."""
+    if namespace not in ("codex_tui", "codex_app") or not isinstance(output, str):
+        return None
+    return parse_delegated_prompt(output)
