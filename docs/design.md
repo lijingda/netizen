@@ -2252,7 +2252,9 @@ UTF-8 字节限制。模型目录 ID 在 SDK 提交前解析为实际 model，�
 创建首条输入及后续跨会话来信构造明确 agent 来源和公开 SDK `ExternalMessage`，
 向 exact Thread 提交，由 Codex 在接收时选择 start/join。普通飞书、问题卡和定时输入
 保留原有 exact Turn 准入。Runtime 按实际返回的 Turn ID 复用既有消费者或建立新一轮
-消费者，不启动重复 `handle.run()`，不把旧轮结果改归属到新来信。
+消费者，不启动重复 `handle.run()`，不把旧轮结果改归属到新来信。原生确认加入运行中
+普通 Turn 时，与已确认的 steer 一样计入该轮“已接收调整”次数（过程卡与 `/status`）；
+加入失败或返回新 Turn 不计入原轮。
 
 Side 来信保留其真实 native Thread ID，飞书来源展示、origin 与执行归属均表达 Side，
 不借用 Parent 或虚构普通 Binding。兼容 `<codex_delegation>` 外层形状保持不变，
@@ -3444,7 +3446,7 @@ callback 携带严格字段、类型及容量校验的只读展示快照，仅�
 单独提示重新发送 `/status` 获取可用入口；同一 render 的重复投递继续由 SDK 去重。
 动态字段使用纯文本组件，不解释 Markdown、HTML 或提及。
 卡片保留当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
-native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
+native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数（含加入该轮的会话协作来信）、上下文窗口
 用量、Model、Effort、Speed 和配置来源。若会话实际 cwd 位于 Git work tree 中，普通与
 Side `/status` 还会即时显示 Git `status --porcelain=v1 --branch` 的 branch header 内容；
 Netizen 只移除稳定的 `## ` 格式前缀，不自行解释普通分支、upstream、detached HEAD 或空
