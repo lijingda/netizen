@@ -23,7 +23,8 @@
 本机 `make check` 通过，执行 4,344 项测试（15 项条件跳过），包括 ruff、mypy、编译、依赖一致性
 与 SDK synthetic 门禁。以下运行均在干净提交 `5b21bf9` 上经 `run_upgrade_regression.py --live`
 执行，Linux x86_64 源码 checkout、CPython 3.11；源码运行中未变，无残留进程、清理失败或超时，
-disposable cwd 已删除。后续提交只改文档、注释与测试。
+disposable cwd 已删除。本次升级其后的提交只改文档、注释与测试；合入前从 main 带入的
+Session Agent Input 改动（PR #292）只经 `make check` 与 CI 在 `0.170.0` 下验证，未纳入该次 live。
 
 首轮全集 49 项中 36 项通过。13 项失败与账号请求限流同时发生：Codex 日志记录到模型请求反复收到
 `429 Too Many Requests` 与 `Selected model is at capacity`，服务端指示等待 100 秒以上，超过探针
