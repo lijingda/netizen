@@ -1028,7 +1028,9 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         plan, run_id, binding = await self.run_fixture()
         run = self.store.schedules.get_run(run_id)
         for changes, expected in (
-            ({}, "unreported"), ({"binding_removed": True, "self_reported_outcome": "failed"}, "failed"),
+            ({}, "unreported"), ({"binding_removed": True}, None),
+            ({"initial_turn_id": None, "barrier": "released", "error_code": "input_rejected"}, "unreported"),
+            ({"binding_removed": True, "self_reported_outcome": "failed"}, "failed"),
             ({"binding_id": "missing", "self_reported_outcome": "succeeded"}, "succeeded"),
             ({"target_kind": "binding"}, None), ({"binding_id": None}, None),
         ):

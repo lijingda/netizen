@@ -31,7 +31,7 @@ class OutcomeMigrationTest(unittest.TestCase):
                 if table == "schedule_runs":
                     rows = [(*row, None) for row in rows]
                 self.assertEqual(db.execute(f"SELECT * FROM {table}").fetchall(), rows)
-        with closing(BindingStore(self.path)) as store:
+        with closing(BindingStore(self.path, wall_clock=lambda: 12345)) as store:
             schedules = store.schedules
             run = schedules.new_topic_run_for_binding("binding")
             self.assertEqual(run.id, "run-topic")
@@ -39,6 +39,7 @@ class OutcomeMigrationTest(unittest.TestCase):
             for outcome in ("failed", "succeeded"):
                 self.assertTrue(schedules.record_self_reported_outcome(run.id, "binding", outcome))
                 self.assertEqual(schedules.get_run(run.id).self_reported_outcome, outcome)
+                self.assertEqual(schedules.get_run(run.id).updated_at, 12345)
             with self.assertRaises(ValueError):
                 schedules.record_self_reported_outcome(run.id, "binding", "unreported")
             self.assertFalse(schedules.record_self_reported_outcome(run.id, "other", "failed"))

@@ -48,6 +48,7 @@ class OutcomeToolTest(unittest.IsolatedAsyncioTestCase):
                 result = await self.call(self.meta, **args)
                 self.assertTrue(result.is_error)
                 self.assertEqual(result.structured_content["error"]["code"], "invalid_call_context")
+                self.assertIn("Do not retry", result.structured_content["error"]["message"])
         for inner in (None, "{", [], {"thread_id": "parent"}, {"turn_id": "turn"},
                       {"thread_id": "other", "turn_id": "turn"}, {"thread_id": "parent", "turn_id": ["turn"]},
                       {"thread_id": "parent", "turn_id": "turn", "subagent_kind": "thread_spawn"},
@@ -59,15 +60,19 @@ class OutcomeToolTest(unittest.IsolatedAsyncioTestCase):
         for outer in (None, [], {"x-codex-turn-metadata": self.meta["x-codex-turn-metadata"]}):
             self.assertTrue((await self.call(outer, outcome="failed")).is_error)
         self.runner.close_admission()
-        self.assertEqual((await self.call(self.meta, outcome="failed")).structured_content["error"]["code"], "unavailable")
+        error = (await self.call(self.meta, outcome="failed")).structured_content["error"]
+        self.assertEqual(error["code"], "unavailable")
+        self.assertIn("later Turn", error["message"])
         self.callback.assert_not_awaited()
 
     async def test_uncertain_callback_is_not_repeated(self):
         self.callback.side_effect = TimeoutError()
-        with self.assertLogs("netizen_cli.schedules.outcome_mcp", "WARNING"):
+        with self.assertLogs("netizen_cli.schedules.outcome_mcp", "WARNING") as logs:
             result = await self.call(self.meta, outcome="failed")
         self.assertTrue(result.is_error)
         self.assertEqual(result.structured_content["error"]["code"], "outcome_unknown")
+        self.assertIn("later Turn", result.structured_content["error"]["message"])
+        self.assertEqual(logs.records[0].error_type, "TimeoutError")
         self.callback.assert_awaited_once()
 
 
@@ -92,7 +97,7 @@ class OutcomeChannelTest(unittest.IsolatedAsyncioTestCase):
             self.f.runtime.turn_activity_values[self.binding.id] = turn_activity_snapshot(
                 binding_id=self.binding.id, thread_id=self.thread_id, turn_id=turn_id)
             result = await self.report(turn_id, outcome)
-            self.assertEqual(result["task"], {"plan_name": "review", "triggered_at": "1970-01-01T01:01:40+00:00"})
+            self.assertEqual(result["task"], {"plan_name": "review", "triggered_at": "1970-01-01T01:01+00:00"})
             self.assertEqual((result["recorded"], result["outcome"]), (True, outcome))
         self.assertEqual((await self.report("turn-initial"))["error"]["code"], "invalid_call_context")
         run = self.f.store.schedules.get_run(self.run_id)

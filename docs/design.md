@@ -2509,7 +2509,8 @@ Admin 只发起本实例重启，由同用户独立 systemd transient service／
 
 定时任务的列表、详情与执行记录共用 ScheduleService 投影。Admin、飞书 `/cron` 和
 MCP `cron_manage` 读取公开字段 `agent_self_assessment`。已创建 Binding 的新话题 Run
-显示“Agent 自评：目标达成 / 目标未达成 / 未自评”，其余 Run 该字段为 null。
+显示“Agent 自评：目标达成 / 目标未达成 / 未自评”。Binding 删除后仅显示已有自评，
+没有记录时该字段为 null。其余 Run 该字段也为 null。
 流程状态独立展示，首轮失败而续聊达成任务时，两项均按实值显示。
 
 ### Project 文件查看

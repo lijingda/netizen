@@ -34,7 +34,7 @@ def validate(connection: sqlite3.Connection) -> None:
             "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
         ).fetchone()
         if row is None or _tokens(row[0]) != _tokens(statement):
-            raise RuntimeError(f"schema v21 query index is invalid: {name}")
+            raise RuntimeError(f"schema v22 query index is invalid: {name}")
     if connection.execute(
         "SELECT 1 FROM schedule_plans WHERE typeof(auto_archive) != 'integer' OR auto_archive NOT IN (0,1) "
         "OR (auto_archive != 0 AND (target_kind != 'new_topic' OR deleted != 0)) LIMIT 1"

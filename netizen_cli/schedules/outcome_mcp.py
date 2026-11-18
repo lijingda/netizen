@@ -29,7 +29,11 @@ def _result(value: dict[str, Any]) -> CallToolResult:
 
 
 def _error(code: str, message: str) -> CallToolResult:
-    return _result({"error": {"code": code, "message": message + " Do not retry in this session."}})
+    if code in ("unavailable", "outcome_unknown"):
+        message += " You can report again later in this Turn or a later Turn. Repeating the same assessment is idempotent."
+    else:
+        message += " Do not retry in this session."
+    return _result({"error": {"code": code, "message": message}})
 
 
 class OutcomeMcpRunner(EmbeddedMcpRunner):
@@ -73,8 +77,10 @@ class OutcomeMcpRunner(EmbeddedMcpRunner):
             async with asyncio.timeout(15):
                 result = await self._callback(source_thread_id=thread_id, source_turn_id=turn_id, outcome=args["outcome"])
             return _result(result)
-        except Exception:
-            logger.warning("report_run_outcome outcome_unknown", extra={"thread_id": thread_id, "turn_id": turn_id})
+        except Exception as error:
+            logger.warning("report_run_outcome outcome_unknown", extra={
+                "thread_id": thread_id, "turn_id": turn_id, "error_type": type(error).__name__,
+            })
             return _error("outcome_unknown", "The assessment write could not be confirmed.")
         finally:
             self._calls.discard(task)

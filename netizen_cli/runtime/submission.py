@@ -842,14 +842,14 @@ class SubmissionRuntime(CompactionRuntime):
                 # omitting approval_mode deliberately selects its
                 # auto_review default.
                 assert execution_cwd is not None
-                start_kwargs: dict[str, object] = {"cwd": str(execution_cwd), **self._scheduled_load_kwargs(binding.id)}
+                start_kwargs: dict[str, object] = {"cwd": str(execution_cwd)}
                 if resolved_settings is not None:
                     # Initialize native model metadata with the first Turn's
                     # selected model, including its context window budget.
                     start_kwargs["model"] = resolved_settings.model
                 if external_model is not None:
                     start_kwargs["model"] = external_model
-                thread = await self._codex.thread_start(**start_kwargs)
+                thread = await self._start_native_thread(binding.id, **start_kwargs)
             else:
                 # Resume with inherited native settings and only the eligible
                 # scheduled topic tool entry.

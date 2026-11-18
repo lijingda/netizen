@@ -82,7 +82,7 @@ related: 0021, 0023, 0028, 0067, 0068, 0070, 0075, 0076, 0078, 0081
   `new_topic` Run 附加 `succeeded`/`failed`/`unreported` 一维，其中 `unreported` 只是显示值，
   不入库。各入口不自行读取原始列。界面写作“Agent 自评：目标达成 / 目标未达成 / 未自评”。
   “失败 · Agent 自评：目标达成”是成立的组合，比如首轮失败、用户续聊后完成。`binding`
-  目标及尚未建立 Binding 的 Run 不显示这一维。
+  目标及尚未建立 Binding 的 Run 不显示这一维。Binding 删除后仅显示已有自评，未记录时不显示这一维。
 - schema v22 为 `schedule_runs` 增加可空的 `self_reported_outcome TEXT`。CHECK 要求该列
   为 NULL，或者是文本、取值二选一、`target_kind='new_topic'` 且 `binding_id` 非空。
   新增冻结的 v21 → v22 迁移（[ADR 0075](0075-migrate-channel-databases-during-installation.md)、

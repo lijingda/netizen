@@ -811,6 +811,9 @@ async function chooseScheduleTarget(value) {
   assert.match(scheduleInput("detail-state").textContent, /Agent 自评：目标达成/);
   assert.match(scheduleInput("runs-body").textContent, /Agent 自评：未自评/);
   assert.match(scheduleInput("runs-body").textContent, /手动触发/);
+  viewedPlan.execution.agent_self_assessment = "unknown_value";
+  await showSchedule("plan-exact");
+  assert.doesNotMatch(scheduleInput("detail-state").textContent, /·\s*(?:·|$)/);
 
   // One click starts an exact saved plan, without editing or confirmation.
   // Duplicate clicks cannot race the outstanding request or its consumed grant.

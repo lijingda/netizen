@@ -7,9 +7,7 @@ import hashlib
 import logging
 import uuid
 from dataclasses import replace
-from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from lark_channel import (
     OutboundCard,
@@ -60,6 +58,7 @@ from ..message_history import (
 )
 from ..sdk_gap_adapter import SkillCatalogError
 from ..sdk_gap_adapter import GoalControlError
+from ..schedules.service import iso_minutes
 from ..delegation_envelope import SIDE_SOURCE_NOTICE, delegated_prompt
 from ..sessions.errors import SessionToolError
 from ..sessions.sources import SessionSource, resolve_session_source
@@ -103,12 +102,12 @@ class SessionToolChannel(ForkChannel):
         if _current_reply_turn(self._runtime, binding.id, source_thread_id, source_turn_id) is None:
             return {"error": {"code": "invalid_call_context", "message": "Only the current physical Turn may report. Do not retry in this session."}}
         plan = schedules.get(run.plan_id, include_deleted=True)
-        zone = ZoneInfo(plan.schedule.timezone if plan.schedule else "UTC")
+        timezone = plan.schedule.timezone if plan.schedule else "UTC"
         if not schedules.record_self_reported_outcome(run.id, binding.id, outcome):
             return {"error": {"code": "run_unavailable", "message": "The scheduled task is unavailable. Do not retry in this session."}}
         return {
             "recorded": True, "outcome": outcome,
-            "task": {"plan_name": plan.name or None, "triggered_at": datetime.fromtimestamp(run.due_at, zone).isoformat()},
+            "task": {"plan_name": plan.name or None, "triggered_at": iso_minutes(run.due_at, timezone)},
             "instruction": "Only this scheduled task's assessment was updated. Continue the Turn normally. "
                            "Result delivery is unchanged. Report again if your assessment changes.",
         }

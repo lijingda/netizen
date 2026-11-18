@@ -326,7 +326,7 @@ class RuntimeState:
     """Shared per-instance state, slot guards and admission revisions."""
 
     _codex: NativeCodex
-    _outcome_thread_config: Callable[[], dict[str, object]] | None
+    _outcome_thread_config: Callable[[str], dict[str, object] | None] | None
     _bindings: BindingStore
     _terminal_cleanup: TerminalCleanup
     _skill_catalog: SkillCatalog | None
@@ -486,16 +486,33 @@ class RuntimeState:
             raise ScheduledInitialStartConflict("定时任务正在启动，请稍后重发。")
 
     def _scheduled_load_kwargs(self, binding_id: str) -> dict[str, object]:
-        if self._outcome_thread_config is not None:
+        if self._outcome_thread_config is None:
+            return {}
+        try:
             run = self._bindings.schedules.new_topic_run_for_binding(binding_id)
-            if run is not None and not run.binding_removed:
-                return {"config": self._outcome_thread_config()}
-        return {}
+        except Exception as error:
+            logger.warning("scheduled outcome Run lookup failed", extra={
+                "binding_id": binding_id, "error_type": type(error).__name__,
+            })
+            return {}
+        if run is None or run.binding_removed:
+            return {}
+        config = self._outcome_thread_config(run.app_id)
+        return {"config": config} if config is not None else {}
+
+    async def _start_native_thread(self, binding_id: str, **kwargs: object) -> NativeThread:
+        return await self._codex.thread_start(**kwargs, **self._scheduled_load_kwargs(binding_id))
 
     async def _resume_native_thread(self, thread_id: str) -> NativeThread:
         kwargs = {}
         if self._outcome_thread_config is not None:
-            binding = self._bindings.find_by_native_thread_id(thread_id)
+            try:
+                binding = self._bindings.find_by_native_thread_id(thread_id)
+            except Exception as error:
+                logger.warning("scheduled outcome Binding lookup failed", extra={
+                    "thread_id": thread_id, "error_type": type(error).__name__,
+                })
+                binding = None
             if binding is not None:
                 kwargs = self._scheduled_load_kwargs(binding.id)
         return await self._codex.thread_resume(thread_id, include_turns=False, **kwargs)

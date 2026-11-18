@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 from contextlib import AsyncExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -180,7 +181,7 @@ def entries_for(router: Router, label: str) -> list[dict[str, Any]]:
     return [entry for entry in router.log if entry["label"] == label]
 
 
-CASES = ("isolation", "resume", "fork", "subagent", "unreachable")
+CASES = ("isolation", "resume", "restore", "fork", "subagent", "unreachable")
 
 
 async def load_state(thread):
@@ -239,7 +240,10 @@ async def probe(case: str) -> dict:
                 runner.open_admission()
             path = Path(env["CODEX_HOME"]) / "config.toml"
             user_entry = schedule.config_overrides[0].split("=", 1)[1]
-            path.write_text(f"thread_unload_delay_secs = 1\nmcp_servers.user_existing={user_entry}\n" + path.read_text())
+            probe_config = path.read_text().replace('approval_policy = "never"', 'approval_policy = "on-request"')
+            settings = tomllib.loads(probe_config)
+            assert (settings["approval_policy"], settings["approvals_reviewer"]) == ("on-request", "user")
+            path.write_text(f"thread_unload_delay_secs = 1\nmcp_servers.user_existing={user_entry}\n" + probe_config)
             original = path.read_bytes()
 
             def config(runner):
@@ -281,6 +285,14 @@ async def probe(case: str) -> dict:
                         await check(fork, kind, None)
                         mounted = await codex.thread_resume(mounted.id, config=outcome.thread_config())
                         await check(mounted, f"after-{kind}", outcome)
+                if "restore" in selected:
+                    for label, kwargs in (("restore-mounted", {"config": outcome.thread_config()}), ("restore-none", {})):
+                        await codex.thread_archive(mounted.id)
+                        restored = await codex.thread_unarchive(mounted.id)
+                        assert restored.id == mounted.id
+                        restored = await codex.thread_resume(mounted.id, include_turns=False, **kwargs)
+                        assert restored.id == mounted.id
+                        await check(restored, label, outcome if kwargs else None)
                 if "subagent" in selected:
                     for label in ("delegated-fresh", "delegated-full"):
                         parent = await codex.thread_start(cwd=str(cwd), config=outcome.thread_config())

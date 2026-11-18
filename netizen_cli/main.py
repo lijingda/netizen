@@ -206,6 +206,11 @@ class ServiceCore:
         self._started = False
         self._closed = False
 
+    def _outcome_thread_config(self, app_id: str) -> dict[str, object] | None:
+        if self._outcome_mcp is not None and app_id == self._settings.app_id:
+            return self._outcome_mcp.thread_config()
+        return None
+
     async def start(self) -> None:
         stage_started_at = time.monotonic()
         try:
@@ -319,7 +324,7 @@ class ServiceCore:
                 logger.warning("native Turn activity observation unavailable: %s", error)
             self._runtime = CodexRuntime(
                 codex=self._codex,
-                outcome_thread_config=self._outcome_mcp.thread_config if self._outcome_mcp else None,
+                outcome_thread_config=self._outcome_thread_config if self._outcome_mcp else None,
                 bindings=self._store,
                 terminal_cleanup=terminal_cleanup,
                 skill_catalog=skill_catalog,

@@ -86,7 +86,7 @@ class QueryIndexesMigrationTest(unittest.TestCase):
                         connection.commit()
                     before = self.contents()
                     for validate in (validate_channel_database, migrations.plan_channel_database):
-                        with self.assertRaisesRegex(RuntimeError, "schema v21 query index is invalid"):
+                        with self.assertRaisesRegex(RuntimeError, r"schema v\d+ query index is invalid"):
                             validate(self.path)
                     self.assertEqual(self.contents(), before)
                     with closing(sqlite3.connect(self.path)) as connection:

@@ -271,7 +271,7 @@ class CodexRuntime(ShutdownRuntime):
         background_terminal_inspector: BackgroundTerminalInspector | None = None,
         thread_delete_control: ThreadDeleteControl | None = None,
         turn_plan_observer: TurnActivityObserver | None = None,
-        outcome_thread_config: Callable[[], dict[str, object]] | None = None,
+        outcome_thread_config: Callable[[str], dict[str, object] | None] | None = None,
         progress_card_defaults: Callable[[], ProgressCardSettings] = ProgressCardSettings,
         on_completion: CompletionHandler = _ignore_completion,
         poll_interval_seconds: float = 0.5,

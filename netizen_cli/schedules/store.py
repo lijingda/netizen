@@ -586,9 +586,9 @@ class ScheduleStore:
             raise ValueError("invalid scheduled Run outcome")
         with self.owner._transaction():
             updated = self._db.execute(
-                "UPDATE schedule_runs SET self_reported_outcome=? "
+                "UPDATE schedule_runs SET self_reported_outcome=?, updated_at=? "
                 "WHERE run_id=? AND binding_id=? AND target_kind='new_topic' AND binding_removed=0",
-                (outcome, run_id, binding_id),
+                (outcome, self._now(None), run_id, binding_id),
             )
             return updated.rowcount == 1
 

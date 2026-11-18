@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -69,16 +70,16 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self.directory.cleanup()
 
-    def occurrence(self, *, session_settings=SessionSettings(), context_anchor=None):
+    def occurrence(self, *, session_settings=SessionSettings(), context_anchor=None, app_id="app"):
         self.sequence += 1
         suffix = str(self.sequence)
         plan = self.store.schedules.create(workspace=WorkspacePolicy(),
             name="Routine " + suffix, instructions="Inspect the project",
-            project_alias="p", app_id="app", chat_id="chat",
+            project_alias="p", app_id=app_id, chat_id="chat",
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100),
             request_id="create-" + suffix, now=100,
         )
-        claim = self.store.schedules.claim_due(plan.plan_id, app_id="app", now=160)
+        claim = self.store.schedules.claim_due(plan.plan_id, app_id=app_id, now=160)
         assert claim is not None
         topic = "topic-" + suffix
         self.store.schedules.set_run(
@@ -87,7 +88,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         binding = self.store.create_scheduled_binding(
             run_id=claim.run.id,
-            scope=FeishuScope("app", "chat", ScopeKind.TOPIC, topic),
+            scope=FeishuScope(app_id, "chat", ScopeKind.TOPIC, topic),
             session_settings=session_settings, context_anchor=context_anchor,
         )
         return claim.run.id, binding
@@ -106,7 +107,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     def enable_outcome_mount(self):
         config = {"mcp_servers.netizen_run_outcome_test": {"enabled_tools": ["report_run_outcome"]}}
-        self.runtime._outcome_thread_config = lambda: config
+        self.runtime._outcome_thread_config = lambda app_id: config if app_id == "app" else None
         return config
 
     async def test_outcome_mount_first_followup_skills_and_resource_lifecycle(self):
@@ -135,6 +136,43 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.store._connection.execute("DELETE FROM schedule_runs WHERE run_id=?", (run_id,))
         await self.runtime.restore_exact(binding.id)
         self.assertEqual(self.codex.resume_calls[-1], (first.thread_id, {"include_turns": False}))
+
+    async def test_outcome_lookup_errors_leave_native_submission_open(self):
+        self.enable_outcome_mount()
+        run_id, binding = self.occurrence()
+        self.codex.complete_immediately = True
+        error = sqlite3.OperationalError("private query detail")
+        with patch.object(self.store.schedules, "new_topic_run_for_binding", side_effect=error), \
+                self.assertLogs("netizen_cli.codex_runtime", "WARNING") as logs:
+            first = await self.start(run_id, binding)
+        first.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd)}])
+        self.assertEqual(logs.records[0].binding_id, binding.id)
+        self.assertEqual(logs.records[0].error_type, "OperationalError")
+        self.assertTrue(self.runtime._accepting)
+        for store, lookup in ((self.store, "find_by_native_thread_id"), (self.store.schedules, "new_topic_run_for_binding")):
+            with self.subTest(lookup=lookup), patch.object(store, lookup, side_effect=error), \
+                    self.assertLogs("netizen_cli.codex_runtime", "WARNING") as logs:
+                next_turn = await self.runtime.submit(binding=self.store.get(binding.id), cwd=self.cwd,
+                    input="continue", owner_id="owner", origin=object())
+            next_turn.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(timeout=2))
+            self.assertTrue(self.runtime._accepting)
+            self.assertEqual(logs.records[0].error_type, "OperationalError")
+            self.assertNotIn("private query detail", logs.output[0])
+        self.assertEqual(self.codex.resume_calls, [(first.thread_id, {"include_turns": False})] * 2)
+
+    async def test_other_app_run_starts_and_resumes_without_outcome_mount(self):
+        self.enable_outcome_mount()
+        run_id, binding = self.occurrence(app_id="other")
+        self.codex.complete_immediately = True
+        first = await self.start(run_id, binding)
+        first.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        await self.runtime.restore_exact(binding.id)
+        self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd)}])
+        self.assertEqual(self.codex.resume_calls, [(first.thread_id, {"include_turns": False})])
 
     async def test_ordinary_binding_and_binding_target_never_get_outcome_mount(self):
         self.enable_outcome_mount()

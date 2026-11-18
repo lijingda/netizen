@@ -4186,8 +4186,9 @@ async function showSchedule(planId, returnFocus = document.activeElement) {
     if (serial !== scheduleDetailSerial) return;
     scheduleInput("detail-title").textContent = data.plan.name;
     scheduleInput("detail-identity").textContent = `计划 ${data.plan.id} · 修订 ${data.plan.revision}`;
+    const assessment = scheduleAssessment(data.plan.execution.agent_self_assessment);
     scheduleInput("detail-state").textContent = `${schedulePlanState(data.plan).replace("\n", " · ")} · ${scheduleExecutionLabel(data.plan.execution)}`
-      + (data.plan.execution.agent_self_assessment ? ` · ${scheduleAssessment(data.plan.execution.agent_self_assessment)}` : "")
+      + (assessment ? ` · ${assessment}` : "")
       + (scheduleTriggerSource(data.plan.execution.trigger_source) ? ` · ${scheduleTriggerSource(data.plan.execution.trigger_source)}` : "")
       + (scheduleBlockedLabel(data.plan) ? ` · ${scheduleBlockedLabel(data.plan)}` : "")
       + (data.plan.execution.worktree_id ? ` · ${scheduleWorktreeReceipt(data.plan.execution)}` : "")
