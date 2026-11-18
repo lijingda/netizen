@@ -449,9 +449,7 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                     if resume_required and not resume_attempted:
                         io_count += 1
                         try:
-                            thread = await self._codex.thread_resume(
-                                active.handle.thread_id, include_turns=False
-                            )
+                            thread = await self._resume_native_thread(active.handle.thread_id)
                         except asyncio.CancelledError:
                             raise
                         except Exception as caught:

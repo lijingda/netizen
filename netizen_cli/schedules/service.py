@@ -722,7 +722,7 @@ class ScheduleService:
                 value["execution"].update({
                     key: projection[key] for key in (
                         "status", "native_thread_id", "scope_key", "feishu_url",
-                        "worktree_id", "worktree",
+                        "worktree_id", "worktree", "agent_self_assessment",
                     )
                 })
         return [value for value, _run in snapshots]
@@ -788,7 +788,7 @@ class ScheduleService:
             run = latest[0]
             value["latest_run"] = {
                 "id": run.id, "due_at": run.due_at, "phase": run.phase,
-                "trigger_source": run.trigger_source,
+                "trigger_source": run.trigger_source, "agent_self_assessment": _agent_self_assessment(run),
                 "error_code": run.error_code, "binding_id": run.binding_id,
                 "worktree_id": run.worktree_id, "worktree": self._worktree_receipt(run),
                 "due_local": _iso(run.due_at, timezone),
@@ -799,6 +799,7 @@ class ScheduleService:
             "status": "expired" if lifecycle.ended else "not_started",
             "is_last": selected is not None and not lifecycle.has_trigger,
             "run_id": selected.id if selected else None,
+            "agent_self_assessment": None,
             "trigger_source": selected.trigger_source if selected else None,
             "due_at": selected.due_at if selected else None,
             "due_local": _iso(selected.due_at, timezone) if selected else None,
@@ -855,6 +856,8 @@ class ScheduleService:
 
     async def _run(self, run: Run, *, timezone: str, deadline: float, slots: asyncio.Semaphore, observed: str | None = None) -> dict[str, Any]:
         value = asdict(run)
+        del value["self_reported_outcome"]
+        value["agent_self_assessment"] = _agent_self_assessment(run)
         value["worktree"] = self._worktree_receipt(run)
         status = run.error_code or ("starting" if run.barrier == "held" else "unknown")
         if run.barrier == "unknown" or run.error_code == "publishing_unknown":
@@ -918,6 +921,12 @@ class ScheduleService:
         except WorktreeNotFound:
             return {"id": run.worktree_id, "root": None, "cwd": None, "creation_state": None}
         return {"id": record.id, "root": record.root, "cwd": record.cwd, "creation_state": record.creation_state}
+
+
+def _agent_self_assessment(run: Run) -> str | None:
+    if run.target_kind == "new_topic" and run.binding_id:
+        return run.self_reported_outcome or "unreported"
+    return None
 
 
 def _models(catalog: ModelCatalog | None) -> list[dict[str, Any]]:

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from netizen_cli import database_migrations as migrations
 from netizen_cli.bindings import BindingStore, validate_channel_database
-from netizen_cli.migrations import v21
+from netizen_cli.migrations import v21, v22
 from netizen_cli.migrations.schema import require_schema
 
 
@@ -31,8 +31,8 @@ class QueryIndexesMigrationTest(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_version'",
             )]
             before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
-        expected = {"source_version": 20, "target_version": 21,
-                    "steps": [{"from_version": 20, "to_version": 21}]}
+        expected = {"source_version": 20, "target_version": 22,
+                    "steps": [{"from_version": 20, "to_version": 21}, {"from_version": 21, "to_version": 22}]}
         original = self.contents()
         self.assertEqual(migrations.plan_channel_database(self.path), expected)
         self.assertEqual(self.contents(), original)
@@ -40,10 +40,12 @@ class QueryIndexesMigrationTest(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as upgraded, closing(BindingStore()) as fresh:
             upgraded.row_factory = sqlite3.Row
             for table, rows in before.items():
+                if table == "schedule_runs":
+                    rows = [(*row, None) for row in rows]
                 self.assertEqual([tuple(row) for row in upgraded.execute(f"SELECT * FROM {table}")], rows, table)
-            v21.validate(upgraded)
-            v21.validate(fresh._connection)
-            require_schema(upgraded, v21.SCHEMA)
+            v22.validate(upgraded)
+            v22.validate(fresh._connection)
+            require_schema(upgraded, v22.SCHEMA)
             for statement in v21.INDEXES:
                 name = statement.split()[2]
                 for pragma in ("index_info", "index_xinfo"):
@@ -55,7 +57,7 @@ class QueryIndexesMigrationTest(unittest.TestCase):
         with closing(BindingStore(self.path, create=False)) as store:
             self.assertTrue(store.schedules.get("plan-topic").auto_archive)
         migrated = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=21)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=22)["steps"], [])
         self.assertEqual(self.contents(), migrated)
 
     def test_index_failure_rolls_back_all_indexes_and_version(self):
@@ -66,7 +68,7 @@ class QueryIndexesMigrationTest(unittest.TestCase):
 
         before = self.contents()
         step = migrations.Migration(20, 21, fail, v21.validate)
-        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:-1], step)):
+        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:-2], step, migrations.MIGRATIONS[-1])):
             with self.assertRaisesRegex(RuntimeError, "interrupted index creation"):
                 migrations.migrate_channel_database(self.path, expected_source_version=20)
         self.assertEqual(self.contents(), before)

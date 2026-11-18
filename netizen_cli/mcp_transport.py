@@ -16,7 +16,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 MAX_BODY_BYTES = 65536
 
 
-def native_thread_id(meta: dict[str, Any] | None) -> str | None:
+def native_thread_id(meta: dict[str, Any] | None, *, require_turn_thread: bool = False) -> str | None:
     """Read only native per-call metadata, never arguments or connection state."""
     if meta is None:
         return None
@@ -24,6 +24,8 @@ def native_thread_id(meta: dict[str, Any] | None) -> str | None:
         raise ValueError("Invalid native call metadata")
     thread_id = meta.get("threadId")
     other_id = _native_turn_metadata(meta).get("thread_id")
+    if require_turn_thread and other_id is None:
+        raise ValueError("Missing native turn metadata Thread ID")
     for value in (thread_id, other_id):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError("Invalid native Thread ID")
@@ -105,16 +107,6 @@ class EmbeddedMcpRunner:
         if self._url is None:
             raise RuntimeError("Embedded MCP listener has not been bound")
         return self._url
-
-    @property
-    def config_overrides(self) -> tuple[str, ...]:
-        # A single owned table entry cannot replace the user's mcp_servers table.
-        entry = (
-            f'{{url={json.dumps(self.url)}, '
-            f'bearer_token_env_var={json.dumps(self._env_key)}, '
-            f'enabled=true, enabled_tools={json.dumps(self._tool_names)}}}'
-        )
-        return (f"mcp_servers.{self.namespace}={entry}",)
 
     @property
     def app_server_env(self) -> dict[str, str]:
@@ -258,3 +250,17 @@ class EmbeddedMcpRunner:
             (b"content-length", str(len(body)).encode("ascii")),
         ]})
         await send({"type": "http.response.body", "body": body})
+
+
+class ProcessMcpRunner(EmbeddedMcpRunner):
+    """Process-wide MCP entry registered before App Server initialization."""
+
+    @property
+    def config_overrides(self) -> tuple[str, ...]:
+        # A single owned table entry cannot replace the user's mcp_servers table.
+        entry = (
+            f'{{url={json.dumps(self.url)}, '
+            f'bearer_token_env_var={json.dumps(self._env_key)}, '
+            f'enabled=true, enabled_tools={json.dumps(self._tool_names)}}}'
+        )
+        return (f"mcp_servers.{self.namespace}={entry}",)

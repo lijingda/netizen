@@ -1930,6 +1930,20 @@ false；创建省略为关闭，更新省略保留旧值，显式值须为布尔
 原生历史、飞书话题与工作区，恢复走 `/sessions archived` 的既有链路。重启不重放执行、
 不重发结果，也不从 Run 或原生历史推断待执行策略并补归档。
 
+### 定时新话题的 Agent 自评
+
+执行 Agent 可在首轮或后续协助完成任务时调用 `report_run_outcome`，更新创建本话题的那次
+计划执行的目标达成情况。例如，巡检要求发现并汇报异常，发现并汇报就可以达成目标。
+后续无关请求不更新自评。执行、交接、结果投递、调度与自动归档继续按各自原有条件处理。
+
+普通提交和 Goal 的 Thread start，以及所有原生 resume，均现查 Binding 对应的唯一
+`new_topic` Run。仅在 Run 保留且 Binding 未删除时，用一个 `mcp_servers.<namespace>`
+点号键挂载专用工具。fork 与 Side 创建沿用原生默认。loopback runner 绑定失败时本次启动
+继续服务。服务端核对原生调用元数据的两个 Thread ID 和物理 Turn ID，拒绝子 agent、
+其他 App 以及非本 Runtime 正在承接的普通或 Goal 物理 Turn。一个同步事务按 Run ID、
+Binding ID、目标类型和未删除条件更新一行。最近一次声明随 Run 保留，回执含计划名和触发时间。
+见 [ADR 0102](adr/0102-record-agent-self-assessment-for-scheduled-topic-runs.md)。
+
 ### 原会话目标
 
 原会话模式保存不可变的 `target_binding_id`，从 exact Binding 取得 Project、chat/Scope、
@@ -2321,7 +2335,7 @@ MCP 连接；来源只能是可信 `_meta.threadId` 映射的普通 Binding，Pr
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v21 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v22 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
 `schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
 v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
@@ -2347,6 +2361,8 @@ v21 仅增加五个非唯一查询索引，不改变记录或解释：`dedup_key
 每次 dedup mark／管理请求查重沿 expiry 索引最多清理 16 条最早到期记录；不保留分钟级
 清理节流状态。`seen` 与请求 exact-key lookup 始终按当前时间判定到期，未轮到物理清理
 的记录不能继续去重或重放。mark 的清理与 upsert 共用一个同步事务，不跨 await。
+v22 为 `schedule_runs` 增加可空 `self_reported_outcome`。只保存已建立新话题 Binding 的
+Run 最近一次自评枚举（`succeeded`、`failed`），旧行保持 NULL。原因、调用历史和正文不入库。
 受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
 创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
 不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
@@ -2369,7 +2385,7 @@ Codex 配置或卡片 session，也不与 Project 或 Worktree 删除级联。
 Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
 每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
-数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18 → v19 → v20 → v21；基线仍为 v14，沿用
+数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17 → v18 → v19 → v20 → v21 → v22；基线仍为 v14，沿用
 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
 历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
 在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
@@ -2382,7 +2398,8 @@ CLI start 仍明确失败，手工 Runtime 启动非零退出。修复后显式�
 Project 删除 intent、
 确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
 ADR 0061/0070 的窄例外仅保存当前计划指令、执行目标、时间规则与游标、最小调度交接证据、
-独立工作区策略、exact 资源/接收 Turn ID 引用和有界管理请求去重。Run 通过 Binding 获取 native Thread ID，不保存第二份
+独立工作区策略、exact 资源/接收 Turn ID 引用和有界管理请求去重。ADR 0102 另保存新话题 Run
+最近一次 Agent 自评枚举，不保存原因或调用历史。Run 通过 Binding 获取 native Thread ID，不保存第二份
 映射或原生终态历史。计划删除清空指令并保留不可复活墓碑；最近已释放 Run 有界保留。
 除此以外，数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
 native Thread ID、Turn、Goal、
@@ -2489,6 +2506,11 @@ Admin 只发起本实例重启，由同用户独立 systemd transient service／
 历史实现的验收仅证明其当时边界，CLI 的测试及两平台实机验收分别记录。
 
 ## 管理查询与操作
+
+定时任务的列表、详情与执行记录共用 ScheduleService 投影。Admin、飞书 `/cron` 和
+MCP `cron_manage` 读取公开字段 `agent_self_assessment`。已创建 Binding 的新话题 Run
+显示“Agent 自评：目标达成 / 目标未达成 / 未自评”，其余 Run 该字段为 null。
+流程状态独立展示，首轮失败而续聊达成任务时，两项均按实值显示。
 
 ### Project 文件查看
 
@@ -3599,6 +3621,10 @@ AsyncCodex 绑定，业务 admission 在完整初始化与调度恢复后开放�
 MCP namespace instructions 与工具 description 提供管理指引；全新 Thread 使用公开 API 默认
 `auto_review`，不提供 Ask/Custom 宿主选择器；持久 fork 保留原生继承权限，其余配置不由
 Netizen 覆盖。
+
+除定时管理和会话协作两个进程级入口外，新话题自评专用 runner 也在 AsyncCodex 之前
+绑定并注入随机 bearer 环境变量，业务 ready 后开放。仅 Thread 加载时通过公开 `config`
+追加单个非 required entry，服务停机时随其他传输关闭准入、排空并释放。
 
 安装包通过原生 Skill 提供 Netizen 使用咨询、应用 profile／当前消息入口及运行环境约定，不进入
 Channel command router，也不替代动态 `/help`。[内置清单与资源校验](../netizen_cli/builtin_skills.py)

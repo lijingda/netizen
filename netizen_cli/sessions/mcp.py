@@ -9,7 +9,7 @@ from typing import Any
 from mcp.server import ServerRequestContext
 from mcp.types import CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams, TextContent, Tool, ToolAnnotations
 
-from ..mcp_transport import EmbeddedMcpRunner, native_subagent_kind, native_thread_id, native_turn_id
+from ..mcp_transport import ProcessMcpRunner, native_subagent_kind, native_thread_id, native_turn_id
 from .errors import SessionToolError
 from .presentation import fit_result
 from .schema import TOOL_ARGUMENTS, TOOL_DESCRIPTIONS, validate_arguments
@@ -24,7 +24,7 @@ Use suppress_reply when no further reply is needed under the current task instru
 _MUTATIONS = {"create_thread", "send_message_to_thread", "create_worktree"}
 
 
-class SessionMcpRunner(EmbeddedMcpRunner):
+class SessionMcpRunner(ProcessMcpRunner):
     def __init__(self) -> None:
         super().__init__(name="Netizen sessions", namespace_prefix="netizen_sessions",
                          env_prefix="NETIZEN_SESSION_MCP_TOKEN", instructions=INSTRUCTIONS,

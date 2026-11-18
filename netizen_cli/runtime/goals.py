@@ -618,7 +618,7 @@ class GoalRuntime(TurnObservationRuntime):
                     raise GoalNotMaterialized(
                         "当前会话尚未在 Codex 中创建。"
                     )
-                thread = await self._codex.thread_start(cwd=str(creation_cwd))
+                thread = await self._codex.thread_start(cwd=str(creation_cwd), **self._scheduled_load_kwargs(binding.id))
                 self._bindings.assign_native_thread_id(binding.id, thread.id)
             else:
                 thread = await self._resume_thread_for_operation(

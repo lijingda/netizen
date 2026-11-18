@@ -378,6 +378,7 @@ class Run:
     target_kind: str = "new_topic"
     disposition: str | None = None
     worktree_id: str | None = None
+    self_reported_outcome: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

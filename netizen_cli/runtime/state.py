@@ -326,6 +326,7 @@ class RuntimeState:
     """Shared per-instance state, slot guards and admission revisions."""
 
     _codex: NativeCodex
+    _outcome_thread_config: Callable[[], dict[str, object]] | None
     _bindings: BindingStore
     _terminal_cleanup: TerminalCleanup
     _skill_catalog: SkillCatalog | None
@@ -484,6 +485,21 @@ class RuntimeState:
         if self._bindings.scheduled_initial_reservation(binding_id) is not None:
             raise ScheduledInitialStartConflict("定时任务正在启动，请稍后重发。")
 
+    def _scheduled_load_kwargs(self, binding_id: str) -> dict[str, object]:
+        if self._outcome_thread_config is not None:
+            run = self._bindings.schedules.new_topic_run_for_binding(binding_id)
+            if run is not None and not run.binding_removed:
+                return {"config": self._outcome_thread_config()}
+        return {}
+
+    async def _resume_native_thread(self, thread_id: str) -> NativeThread:
+        kwargs = {}
+        if self._outcome_thread_config is not None:
+            binding = self._bindings.find_by_native_thread_id(thread_id)
+            if binding is not None:
+                kwargs = self._scheduled_load_kwargs(binding.id)
+        return await self._codex.thread_resume(thread_id, include_turns=False, **kwargs)
+
     async def _resume_thread_for_operation(self, thread_id: str) -> NativeThread:
         """Recognize only verified exact-ID resume rejections.
 
@@ -496,7 +512,7 @@ class RuntimeState:
         """
 
         try:
-            return await self._codex.thread_resume(thread_id, include_turns=False)
+            return await self._resume_native_thread(thread_id)
         except InvalidRequestError as error:
             provider_rejection = _model_provider_rejection(error)
             if provider_rejection is not None:

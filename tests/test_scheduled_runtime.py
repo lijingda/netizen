@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from openai_codex import AsyncCodex, CodexConfig, InvalidRequestError
+from openai_codex import AsyncCodex, CodexConfig, InternalRpcError, InvalidRequestError
 
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingNotFound, BindingStore, ProjectDisabled
@@ -27,7 +27,7 @@ from netizen_cli.schedules.models import ScheduleConflict, ScheduleRule
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from tests.test_codex_runtime import (
     FakeCodex, FakeSkillCatalog, FakeTerminalCleanup, FakeThread,
-    FakeThreadDeleteControl, fake_skills,
+    FakeThreadDeleteControl, FakeGoalControl, FakeSideThreadControl, GoalStatus, goal_snapshot, fake_skills,
 )
 from tests.test_sdk_gap_adapter import _close_probe_pipes
 
@@ -103,6 +103,112 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(1):
             while not predicate():
                 await asyncio.sleep(0)
+
+    def enable_outcome_mount(self):
+        config = {"mcp_servers.netizen_run_outcome_test": {"enabled_tools": ["report_run_outcome"]}}
+        self.runtime._outcome_thread_config = lambda: config
+        return config
+
+    async def test_outcome_mount_first_followup_skills_and_resource_lifecycle(self):
+        config = self.enable_outcome_mount()
+        run_id, binding = self.occurrence()
+        self.codex.complete_immediately = True
+        first = await self.start(run_id, binding)
+        first.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd), "config": config}])
+        for skills in ((), ("code-review",)):
+            second = await self.runtime.submit(binding=self.store.get(binding.id), cwd=self.cwd,
+                input="inspect", owner_id="owner", origin=object(), skill_names=skills)
+            second.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        compact = await self.runtime.compact(binding=self.store.get(binding.id), owner_id="owner", origin=object())
+        compact.release_receipt_attempt()
+        self.codex.finish_compaction()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        await self.runtime.restore_exact(binding.id)
+        self.assertEqual(self.codex.resume_calls, [(first.thread_id, {"include_turns": False, "config": config})] * 4)
+        self.store.schedules.set_run(run_id, binding_removed=True)
+        await self.runtime.restore_exact(binding.id)
+        self.assertEqual(self.codex.resume_calls[-1], (first.thread_id, {"include_turns": False}))
+        with self.store._transaction():
+            self.store._connection.execute("DELETE FROM schedule_runs WHERE run_id=?", (run_id,))
+        await self.runtime.restore_exact(binding.id)
+        self.assertEqual(self.codex.resume_calls[-1], (first.thread_id, {"include_turns": False}))
+
+    async def test_ordinary_binding_and_binding_target_never_get_outcome_mount(self):
+        self.enable_outcome_mount()
+        self.codex.complete_immediately = True
+        scope = FeishuScope("app", "chat", ScopeKind.GROUP)
+        binding = self.store.create_channel_binding(scope=scope, project_alias="p", creator_id="owner")
+        for scheduled in (False, True):
+            if scheduled:
+                plan = self.store.schedules.create(name="existing", instructions="inspect", project_alias="p",
+                    app_id="app", chat_id="chat", target_kind="binding", target_binding_id=binding.id,
+                    schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100),
+                    session_settings=None, workspace=None, request_id="original-target", now=100)
+                self.assertIsNotNone(self.store.schedules.claim_due(plan.plan_id, app_id="app", now=160))
+            submission = await self.runtime.submit(binding=self.store.get(binding.id), cwd=self.cwd,
+                input="inspect", owner_id="owner", origin=object())
+            submission.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd)}])
+        self.assertEqual(self.codex.resume_calls, [(submission.thread_id, {"include_turns": False})])
+
+    async def test_outcome_mount_lazy_goal_start_and_resume(self):
+        config = self.enable_outcome_mount()
+        run_id, binding = self.occurrence()
+        self.store.schedules.release(run_id, error_code="input_rejected")
+        control = self.runtime._goal_control = FakeGoalControl(self.codex)
+        first = await self.runtime.start_goal(binding=binding, cwd=self.cwd, objective="work", owner_id="owner", origin=object())
+        first.release_receipt_attempt()
+        control.handles[0].finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd), "config": config}])
+        control.persisted = goal_snapshot(GoalStatus.PAUSED)
+        second = await self.runtime.resume_goal(binding=self.store.get(binding.id), owner_id="owner", origin=object())
+        second.release_receipt_attempt()
+        control.handles[-1].finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertEqual(self.codex.resume_calls, [(first.thread_id, {"include_turns": False, "config": config})])
+
+    async def test_outcome_mount_observation_recovery(self):
+        config = self.enable_outcome_mount()
+        run_id, binding = self.occurrence()
+        self.codex.read_errors.append(InternalRpcError(-32603, "metadata unavailable"))
+        self.codex.read_statuses.append("notLoaded")
+        native_resume = self.codex.thread_resume
+
+        async def resume(thread_id, **kwargs):
+            thread = await native_resume(thread_id, **kwargs)
+            self.codex.handles[0].complete()
+            return thread
+
+        with patch.object(self.codex, "thread_resume", resume):
+            first = await self.start(run_id, binding)
+            first.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertEqual(self.codex.resume_calls, [(first.thread_id, {"include_turns": False, "config": config})])
+
+    async def test_outcome_mount_resumes_side_parent_and_excludes_forks(self):
+        config = self.enable_outcome_mount()
+        run_id, binding = self.occurrence()
+        self.codex.complete_immediately = True
+        initial = await self.start(run_id, binding)
+        initial.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        source = self.store.get(binding.id)
+        async with self.runtime.track_fork_creation("p"):
+            await self.runtime.fork_exact(source, expected_project_revision=self.store.get_project("p").revision)
+        side_control = FakeSideThreadControl()
+        self.runtime._side_boundary_control = side_control
+        self.runtime._thread_subscription_control = side_control
+        record = self.store.create_side_topic(app_id="app", chat_id="chat", source_message_id="side",
+            parent_binding_id=source.id, creator_id="owner", requires_mention=False)
+        await self.runtime.create_side(side_id=record.id, binding=source, cwd=self.cwd, creator_id="owner")
+        self.assertEqual(self.codex.resume_calls, [(source.native_thread_id, {"include_turns": False, "config": config})])
+        self.assertEqual(self.codex.fork_calls, [(source.native_thread_id, {"ephemeral": ephemeral, "include_turns": False})
+                                                for ephemeral in (False, True)])
 
     async def test_provider_rejection_releases_initial_as_input_rejected(self):
         run_id, binding = self.occurrence()

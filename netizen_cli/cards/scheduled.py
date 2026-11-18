@@ -102,6 +102,11 @@ def _display_state(value: Any) -> str:
     return _STATES.get(str(value), "状态待确认")
 
 
+def _assessment_line(run: Mapping[str, Any]) -> str:
+    label = {"succeeded": "目标达成", "failed": "目标未达成", "unreported": "未自评"}.get(run.get("agent_self_assessment"))
+    return f"\nAgent 自评：{label}" if label else ""
+
+
 def _trigger_source(value: Any) -> str:
     return "手动触发" if value == "manual" else "定时触发"
 
@@ -412,6 +417,7 @@ def _plan_summary(plan: Mapping[str, Any]) -> str:
         + deadline
         + f"\n下次：{plan.get('next_due_local') or '无'}"
         + (f"\n最近触发：{plan['latest_run']['due_local']} · {_trigger_source(plan['latest_run'].get('trigger_source'))}" if plan.get("latest_run") else "")
+        + (_assessment_line(plan["latest_run"]) if plan.get("latest_run") else "")
         + (_run_workspace_receipt(plan["latest_run"]) if plan.get("latest_run") else "")
     )
 
@@ -495,7 +501,7 @@ def _runs_panel(scope: FeishuScope, result: dict[str, Any], *, plan_id: str, nav
             f"时间：{run.get('due_local') or _utc_time(run.get('due_at'))}\n"
             f"来源：{_trigger_source(run.get('trigger_source'))}\n"
             f"状态：{_display_state(run.get('status') or run.get('error_code') or run.get('phase'))}\n"
-            + delivery
+            + delivery + _assessment_line(run)
             + (f"\n合并漏跑：{run['missed_count']} 次" if run.get("missed_count", 0) > 1 else "")
             + _run_workspace_receipt(run)
         ))

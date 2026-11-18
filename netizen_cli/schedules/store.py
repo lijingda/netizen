@@ -43,6 +43,12 @@ _RUN_TABLE = """CREATE TABLE schedule_runs (
         target_kind TEXT NOT NULL DEFAULT 'new_topic' CHECK(target_kind IN ('new_topic','binding')),
         disposition TEXT CHECK(disposition IN ('started','steered')),
         worktree_id TEXT CHECK(worktree_id IS NULL OR (target_kind = 'new_topic' AND length(worktree_id) > 0)),
+        self_reported_outcome TEXT CHECK (
+            self_reported_outcome IS NULL OR (
+                typeof(self_reported_outcome) = 'text'
+                AND self_reported_outcome IN ('succeeded', 'failed')
+                AND target_kind = 'new_topic'
+                AND binding_id IS NOT NULL AND length(binding_id) > 0)),
         CHECK(target_kind = 'new_topic' OR binding_id IS NOT NULL),
         CHECK(disposition IS NULL OR (target_kind = 'binding' AND initial_turn_id IS NOT NULL AND barrier = 'released'))
     )"""
@@ -97,7 +103,7 @@ TABLE_COLUMNS = {
         "run_id", "plan_id", "plan_revision", "due_at", "project_alias", "app_id", "chat_id",
         "phase", "barrier", "root_uuid", "seed_uuid", "root_message_id", "topic_id",
         "origin_message_id", "binding_id", "initial_turn_id", "error_code", "delivery_state",
-        "created_at", "updated_at", "missed_from", "missed_count", "binding_removed", "trigger_source", "target_kind", "disposition", "worktree_id",
+        "created_at", "updated_at", "missed_from", "missed_count", "binding_removed", "trigger_source", "target_kind", "disposition", "worktree_id", "self_reported_outcome",
     },
     "schedule_requests": {"request_id", "operation", "payload_digest", "plan_id", "revision", "expires_at", "run_id"},
 }
@@ -118,6 +124,9 @@ def create_schema(connection: sqlite3.Connection) -> None:
 
 def require_schema(connection: sqlite3.Connection) -> None:
     _require_table_schema(connection)
+    outcome = next(row for row in connection.execute("PRAGMA table_info(schedule_runs)") if row["name"] == "self_reported_outcome")
+    if outcome["type"].upper() != "TEXT" or outcome["notnull"] or outcome["dflt_value"] is not None:
+        raise RuntimeError("current scheduling self-assessment has invalid shape")
     trigger = next(row for row in connection.execute("PRAGMA table_info(schedule_runs)") if row["name"] == "trigger_source")
     if trigger["type"].upper() != "TEXT" or trigger["notnull"] != 1 or trigger["dflt_value"] != "'scheduled'":
         raise RuntimeError("current scheduling trigger source has invalid shape")
@@ -563,6 +572,25 @@ class ScheduleStore:
             if row is None:
                 raise ScheduleNotFound("定时执行不存在。")
             return _run(row)
+
+    def new_topic_run_for_binding(self, binding_id: str) -> Run | None:
+        with self.owner._lock:
+            row = self._db.execute(
+                "SELECT * FROM schedule_runs WHERE binding_id=? AND target_kind='new_topic'",
+                (binding_id,),
+            ).fetchone()
+            return _run(row) if row is not None else None
+
+    def record_self_reported_outcome(self, run_id: str, binding_id: str, outcome: str) -> bool:
+        if outcome not in ("succeeded", "failed"):
+            raise ValueError("invalid scheduled Run outcome")
+        with self.owner._transaction():
+            updated = self._db.execute(
+                "UPDATE schedule_runs SET self_reported_outcome=? "
+                "WHERE run_id=? AND binding_id=? AND target_kind='new_topic' AND binding_removed=0",
+                (outcome, run_id, binding_id),
+            )
+            return updated.rowcount == 1
 
     def list_runs(self, plan_id: str, *, after: str | None = None, limit: int = 20) -> tuple[Run, ...]:
         if type(limit) is not int or not 1 <= limit <= 1001:

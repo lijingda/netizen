@@ -111,7 +111,8 @@ The usage guides are not implementation guides.
   Manage only worktrees created by this instance's shared service, never external
   App/CLI worktrees.
 - Channel SQLite may store only the metadata and narrow exceptions explicitly listed
-  in the [current data contract](docs/design.md#channel-数据库与结构校验).
+  in the [current data contract](docs/design.md#channel-数据库与结构校验), including the
+  scheduled topic Run self-assessment enum (ADR 0102).
   Do not persist Git state or duplicate native cwd authority. Never store prompts
   beyond those exceptions, message bodies, responses, Turn history/activity, card
   sessions, effective Codex configuration, or Admin sessions/tokens/indexes/audit records.
@@ -141,8 +142,9 @@ The usage guides are not implementation guides.
 - Native Codex controls model, tools, Skills, MCP, sandboxing, and environment
   policy except the documented Binding
   Model/Effort/Speed intent, non-login tool boundary, and dedicated temporary
-  Scheduler/session collaboration MCP server entries (ADR 0061/0081).
-  These public process overrides must not write user configuration, replace user
+  Scheduler/session collaboration MCP server entries (ADR 0061/0081) and the
+  Thread-level entry for a scheduled new-topic Run (ADR 0102).
+  These public overrides must not write user configuration, replace user
   MCP entries, or override developer/base instructions. Fresh Threads use the public SDK's `auto_review` default;
   persistent forks retain native inherited permissions without client overrides.
 - Message-history access remains the narrow, public, typed, read-only

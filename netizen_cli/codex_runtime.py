@@ -271,6 +271,7 @@ class CodexRuntime(ShutdownRuntime):
         background_terminal_inspector: BackgroundTerminalInspector | None = None,
         thread_delete_control: ThreadDeleteControl | None = None,
         turn_plan_observer: TurnActivityObserver | None = None,
+        outcome_thread_config: Callable[[], dict[str, object]] | None = None,
         progress_card_defaults: Callable[[], ProgressCardSettings] = ProgressCardSettings,
         on_completion: CompletionHandler = _ignore_completion,
         poll_interval_seconds: float = 0.5,
@@ -287,6 +288,7 @@ class CodexRuntime(ShutdownRuntime):
             raise ValueError("ordinary Thread idle timeout must be positive")
         self._codex = codex
         self._bindings = bindings
+        self._outcome_thread_config = outcome_thread_config
         self._terminal_cleanup = terminal_cleanup
         self._skill_catalog = skill_catalog
         self._account_rate_limits = account_rate_limits
