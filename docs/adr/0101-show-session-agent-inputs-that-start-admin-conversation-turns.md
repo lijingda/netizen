@@ -65,8 +65,8 @@ ADR 0083 的 `AppServerThreadHistory` 只增加同一固定 `thread/items/list` 
 首项读取的耗时与该轮大小（约 0.8 MB 或 2.6 MB）、轮次新旧和会话总大小无关；读取期间
 另一个 metadata 读取仍约 1.1 ms，共享事件循环最大停顿约 1 ms。Full 十轮页使事件循环
 最多停顿 15 ms（15.8 MB）或 39 ms（51.7 MB），并随会话增大。运行中的来信轮同样能读到
-该 `functionCallOutput`。legacy history 的 `thread/items/list` 返回 `-32601`
-（[SDK 0.169.0 升级审查](../research/codex-sdk-0.169.0-upgrade-review.md)），只能显示占位说明。
+该 `functionCallOutput`。legacy history 的 `thread/items/list` 返回 `-32601`（SDK 0.169.0
+升级审查与 `scripts/probe_admin_sessions.py` 的 legacy 场景），只能显示占位说明。
 
 采用逐轮首项补读：普通用户轮没有额外请求，只有缺少输入的轮次多一次小请求。放弃的方案：
 
