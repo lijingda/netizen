@@ -189,7 +189,7 @@ def _accepted_execution_cwd(cwd: Path | None) -> Path:
 
 def _native_cwd(native_thread: object, thread_id: str) -> Path:
     cwd = getattr(native_thread, "cwd", None)
-    # Public 0.169.0 Thread.cwd is AbsolutePathBuf(RootModel[str]).
+    # Public 0.170.0 Thread.cwd is AbsolutePathBuf(RootModel[str]).
     cwd = getattr(cwd, "root", cwd)
     if (
         getattr(native_thread, "id", None) != thread_id

@@ -640,7 +640,7 @@ Parent 已被单独删除时的孤立 Runtime Side；检查原生四视图消失
 订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
 同一 ID 接管、继续 Turn 并再次取消订阅；这证明 Binding 可以保留 ID/历史而无需常驻订阅。
 该 phase 不等待也不冒充最后订阅者离开后的卸载验证；何时卸载由 Codex 的
-`thread_unload_delay_secs` 决定（0.169 默认 60 秒），Netizen 不设置。当前协议没有
+`thread_unload_delay_secs` 决定（0.170 默认 60 秒），Netizen 不设置。当前协议没有
 稳定、无副作用的 live registered-terminal fixture，因此 list 非空、检查错误与 unsubscribe
 响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为本地代码门禁。
 

@@ -1056,7 +1056,7 @@ shutdown 先禁止新 timer，取消并排空已有 timer，再关闭 Codex tran
 拒绝。`/status` 展示的也只是本 Netizen
 进程的瞬态订阅投影。`unsubscribed`、`notSubscribed` 或 `notLoaded` 不表示 Thread 被删除，
 也不表示 writer 立即释放：最后一个订阅者离开后何时卸载，由 Codex 的
-`thread_unload_delay_secs` 决定（0.169 默认 60 秒）；Netizen 不设置该值。
+`thread_unload_delay_secs` 决定（0.170 默认 60 秒）；Netizen 不设置该值。
 
 ### Side 运行与关闭
 
@@ -1186,7 +1186,7 @@ Turn。不把普通 Turn 的消费者改为 Goal route，不为竞争结果未�
 shutdown 不会对 `starting/unknown/external-active` 发起第二套 cleanup；
 最终 transport close 后才取消并关闭残留 consumer。
 
-SDK `0.169.0` 仍有自动 interrupted continuation 的观测缺口：例如 PreCompact hook
+SDK `0.170.0` 仍有自动 interrupted continuation 的观测缺口：例如 PreCompact hook
 中止一次自动压缩后，App Server 可以继续 Goal，但 Python logical stream 会在第一次
 interrupted 后注销 route。新版本在连续三次无活动的中断后可将原生 Goal 置为 blocked，
 这不恢复已丢失的通知。Netizen 做上述公开历史失配防护和按需空闲重检，不保证此路径
@@ -1253,6 +1253,7 @@ worker 和取消补偿不符合当前维护成本目标，因此保留
 [ADR 0014 的启动与取消边界](adr/0014-use-removable-sdk-gap-adapters.md#runtime-生命周期)。
 接口证据见固定版本的 [Goal helper](https://github.com/openai/codex/blob/rust-v0.161.0/sdk/python/src/openai_codex/client.py#L541)
 与 [App Server 处理器](https://github.com/openai/codex/blob/rust-v0.161.0/codex-rs/app-server/src/request_processors/thread_goal_processor.rs#L133)。
+0.170.0 复核确认 SDK 的 `_goal.py` 和 `client.py` 与此前相同，Goal helper 仍不透传 `origin`。
 
 重新评估的触发条件是 SDK 原有 helper 可透传来源且保留现有生命周期，或公开高层 API
 提供等价能力。届时区分用户新建、恢复、暂停、清除与内部前置 clear、自动完成清理、
@@ -1265,6 +1266,7 @@ SDK patch 或另一套 Goal 编排。
 使用本实例资源与关联清单；将来公开 SDK 提供等价管理能力时再评估替换。原生查询
 仅覆盖当前 App Server store，须完整分页，且不是原子的 cleanup 检查；不能替代
 ADR 0060 的 Project 精确清单或 ADR 0078 的原生 delete 成功证明，不为此新增私有 gateway。
+0.170.0 的公开 SDK 仍无对应的附件归属查询能力，替换条件未变。
 
 **原生 Project（`project/*` 与 `Thread.projectId`）**
 
@@ -1288,10 +1290,33 @@ SDK 没有 Project API，`thread_start` 也不接受 `projectId`。原生 Projec
 客户端可以赋值，它与 `projectAlias` 无关。CLI 的 `create_thread` 会继承来源 Thread 的原生
 归属（[dynamic_tools.rs](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/tui/src/dynamic_tools.rs#L497)），
 Netizen 的同名工具不继承；这一差异随本条一并复审。
+0.170.0 的 stable 和 experimental 方法集合与 0.169.0 相同，`project/*` 方法仍只在 experimental，
+公开 SDK 仍无 Project API，TUI 的 `create_thread` 仍继承来源 Thread 的原生 Project。
 
 重新评估的触发条件是原生 Project 接口进入稳定协议或公开高层 SDK，或确有需要让本实例会话
 出现在共享同一 `$CODEX_HOME` 的客户端 Project 中。届时另立 ADR，优先评估在创建会话时映射
 归属而不替换登记表，并处理多实例共享；不为此新增私有 gateway、直接写原生状态库或以本地状态模拟。
+
+**答案审核展示（agentMessage `moderation`）**
+
+Netizen 暂不接入答案审核展示（2026-11-18，0.170.0 升级审查）。自 0.169.0 起，助手消息处于
+`final_answer` 阶段且 item ID 与后端审核决定匹配时，App Server 可在实时 `item/completed`
+通知与历史条目中附带 `moderation`，包含 `moderated` 和可空的 `display`。0.170.0 将展示指令
+版本化，version 1 的 `show` 支持求助热线注释与可信联系人（trusted contacts）检查，`hide` 可用
+热线提示替换答案，`block` 区分 `protection` 与 `cyber` 原因。遇到无法识别的指令，SDK 与
+App Server 均保留条目，将审核字段收敛为 `moderated=true, display=null`。
+[展示协议与回落规则](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/protocol/src/items/display.rs#L50-L147)、
+[原生审核决定匹配](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/core/src/stream_events_utils.rs#L335-L348)。
+
+协议将 `display` 定义为 Chat 恢复答案时的展示指令。热线替换、可信联系人检查属于 Chat 专属
+流程，飞书没有对应能力。Netizen 与 0.170.0 官方 Codex TUI 一致，照常展示原生最终答案文本，
+不按该字段隐藏、替换或标注。虽然原生审核决定只附在最终答案上，答案原文有多条交付或复用路径，
+包括回复卡 Result、阶段性答案、Goal 收尾、观测恢复、Admin 对话记录与列表预览、会话协作
+read/wait 摘要和后台命名。只改一个出口，其他出口仍会交付或使用原文。
+
+当官方 Codex 客户端开始按该字段改变展示、协议给出面向 Codex 客户端的语义，或维护者决定为
+群聊等共享场景增加审核展示策略时，再另立 ADR，在 exact item 投影处统一判定并覆盖全部出口。
+展示策略不改变原生执行终态、模型上下文、Goal 四项完成证明或 Files 证据，不持久化答案或审核状态。
 
 ### 原生归档与删除
 
@@ -1682,7 +1707,7 @@ Thread 或文件目录，不增加数据库历史。
 Turn/item 身份并去重；重复/迟到事件、补读和重试不能重复追加或改换归属。普通观察
 不可用后停止周期观察 I/O；Side 的 observer/cursor 降级及 4096 high-water 仍转入唯一
 `run()`，不为提前推送增加消费者或 ephemeral history 轮询。终态从可取得的权威 typed
-items 补齐已知遗漏。SDK `0.169.0` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
+items 补齐已知遗漏。SDK `0.170.0` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
 items；若先因 high-water 或 observer 异常降级，只能保留此前已观察片段，之后未观察且
 未返回 items 的片段不能补齐。Goal 只补读最终物理 Turn，不追补旧轮。
 
