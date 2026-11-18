@@ -6,20 +6,25 @@ import logging
 import asyncio
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from openai_codex import (
     CodexError,
     InvalidRequestError,
 )
+from openai_codex.errors import MethodNotFoundError
+from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from openai_codex.generated.v2_all import ThreadItem, Turn
 
 from ..account_rate_limits import (
     AccountRateLimitsSnapshot,
     AccountRateLimitsUnavailable,
 )
+from ..delegation_envelope import SIDE_SOURCE_NOTICE, recognize_delegated_output
 from ..model_settings import ModelCatalog, ModelCatalogError, TurnModelSettings
 from ..prompt_projection import ConversationInput, project_conversation_input, project_conversation_image_label
-from ..sessions.delegation import SIDE_SOURCE_NOTICE, recognize_delegated_output
 from ..thread_history import AppServerThreadHistory, ThreadHistoryUnavailable
 from .contracts import NativeAnswerImage, NativeLatestAnswer, NativeConversationPage, NativeConversationTurn
 from .contracts import (
@@ -61,6 +66,32 @@ def _history_not_materialized(error: InvalidRequestError, thread_id: str) -> boo
         f"thread {thread_id} is not materialized yet; "
         "thread/turns/list is unavailable before first user message"
     )
+
+
+def _summary_inputs(turn: Turn) -> tuple[ConversationInput, ...] | None:
+    user = next((item.root for item in turn.items if item.root.type == "userMessage"), None)
+    if user is None:
+        return None
+    inputs = []
+    parts = [getattr(part, "root", part) for part in user.content]
+    index = 0
+    while index < len(parts):
+        value = parts[index]
+        index += 1
+        text = getattr(value, "text", None)
+        kind = getattr(value, "type", None)
+        if kind == "text" and isinstance(text, str):
+            if index < len(parts) and getattr(parts[index], "type", None) in {"image", "localImage"}:
+                image_label = project_conversation_image_label(text)
+                if image_label is not None:
+                    inputs.append(image_label)
+                    index += 1
+                    continue
+            inputs.append(project_conversation_input(text))
+        else:
+            label = {"image": "图片", "localImage": "本地图片", "skill": "技能", "mention": "提及"}.get(kind, "非文本输入")
+            inputs.append(ConversationInput(f"〔{label}；此处仅显示说明〕"))
+    return tuple(inputs)
 
 
 class NativeQueryRuntime(ForkRuntime):
@@ -198,9 +229,65 @@ class NativeQueryRuntime(ForkRuntime):
                 )
                 return {"cwd": cwd, "status": "active" if local_busy else "unknown"}
 
+    def _first_input_projection(self, item: ThreadItem) -> ConversationInput | None:
+        first = item.root
+        if first.type != "functionCallOutput":
+            return None
+        delegation = recognize_delegated_output(first.namespace, first.name, first.output.root)
+        if delegation is None:
+            return ConversationInput("〔外部输入；格式未识别，此处不显示内容〕", kind="external_unrecognized")
+        source, prompt = delegation
+        is_side = False
+        if prompt.startswith(SIDE_SOURCE_NOTICE):
+            try:
+                is_side = self._bindings.find_by_native_thread_id(source) is None
+            except Exception:
+                # Without a source lookup, retain the sender's verbatim text.
+                pass
+            if is_side:
+                prompt = prompt.removeprefix(SIDE_SOURCE_NOTICE)
+        return ConversationInput(prompt, kind="session_agent", source_thread_id=source, source_is_side=is_side)
+
+    async def _conversation_inputs(
+        self, history: AppServerThreadHistory, thread_id: str, turns: list[Turn],
+        previous_page: NativeConversationPage | None, deadline: float | None,
+    ) -> dict[str, tuple[ConversationInput, ...]]:
+        inputs = {
+            turn.turn_id: turn.inputs for turn in previous_page.turns
+        } if previous_page is not None and previous_page.thread_id == thread_id else {}
+        loop = asyncio.get_running_loop()
+        for index, turn in enumerate(turns):
+            if turn.id in inputs:
+                continue
+            if deadline is not None and loop.time() >= deadline:
+                error_type: type[Exception] = TimeoutError
+                break
+            try:
+                first = await history.first_item(thread_id, turn.id)
+            except (CodexError, ThreadHistoryUnavailable, ValidationError) as error:
+                error_type = type(error)
+                break
+            projected = self._first_input_projection(first.data[0].item) if first.data else None
+            inputs[turn.id] = (projected,) if projected is not None else (_summary_inputs(turn) or ())
+        else:
+            return inputs
+
+        if not issubclass(error_type, MethodNotFoundError):
+            logger.warning(
+                "conversation first input unavailable",
+                extra={"thread_id": thread_id, "turn_id": turn.id, "error_type": error_type.__name__},
+            )
+        for unread in turns[index:]:
+            if unread.id not in inputs:
+                summary = _summary_inputs(unread)
+                inputs[unread.id] = summary if summary is not None else (
+                    ConversationInput("〔未能读取本轮首条输入〕", kind="unavailable"),
+                )
+        return inputs
+
     async def thread_conversation(
         self, thread_id: str, *, cursor: str | None = None, limit: int = 10,
-        previous_page: NativeConversationPage | None = None,
+        previous_page: NativeConversationPage | None = None, deadline: float | None = None,
     ) -> NativeConversationPage:
         """Read a summary page with bounded first-input and newest-image evidence."""
         history = AppServerThreadHistory(self._codex)
@@ -212,78 +299,16 @@ class NativeQueryRuntime(ForkRuntime):
             if not _history_not_materialized(error, thread_id):
                 raise
             return NativeConversationPage(thread_id)
-        previous_inputs = {
-            turn.turn_id: turn.inputs for turn in previous_page.turns if turn.first_input_projected
-        } if previous_page is not None and previous_page.thread_id == thread_id else {}
-        first_input_unavailable = False
+        inputs = await self._conversation_inputs(history, thread_id, page.data, previous_page, deadline)
         turns = []
         for turn in page.data:
             status = _enum_value(turn.status)
             terminal = status in {"completed", "failed", "interrupted"}
-            inputs = []
-            has_user_message = False
-            for item in turn.items:
-                root = getattr(item, "root", item)
-                if getattr(root, "type", None) != "userMessage":
-                    continue
-                has_user_message = True
-                parts = [getattr(part, "root", part) for part in getattr(root, "content", ())]
-                index = 0
-                while index < len(parts):
-                    value = parts[index]
-                    index += 1
-                    text = getattr(value, "text", None)
-                    kind = getattr(value, "type", None)
-                    if kind == "text" and isinstance(text, str):
-                        if index < len(parts) and getattr(parts[index], "type", None) in {"image", "localImage"}:
-                            image_label = project_conversation_image_label(text)
-                            if image_label is not None:
-                                inputs.append(image_label)
-                                index += 1
-                                continue
-                        inputs.append(project_conversation_input(text))
-                    else:
-                        label = {"image": "图片", "localImage": "本地图片", "skill": "技能", "mention": "提及"}.get(kind, "非文本输入")
-                        inputs.append(ConversationInput(f"〔{label}；此处仅显示说明〕"))
-                break
-            if not has_user_message:
-                if turn.id in previous_inputs:
-                    inputs.extend(previous_inputs[turn.id])
-                else:
-                    if not first_input_unavailable:
-                        try:
-                            first = await history.first_item(thread_id, turn.id)
-                        except (CodexError, ThreadHistoryUnavailable) as error:
-                            first_input_unavailable = True
-                            logger.warning(
-                                "conversation first input unavailable",
-                                extra={"thread_id": thread_id, "turn_id": turn.id,
-                                       "error_type": type(error).__name__},
-                            )
-                        else:
-                            if first.data:
-                                root = first.data[0].item.root
-                                if root.type == "functionCallOutput":
-                                    delegation = recognize_delegated_output(root.namespace, root.output.root)
-                                    if delegation is None:
-                                        inputs.append(ConversationInput(
-                                            "〔外部输入；格式未识别，此处不显示内容〕", kind="external_unrecognized",
-                                        ))
-                                    else:
-                                        source, prompt = delegation
-                                        is_side = prompt.startswith(SIDE_SOURCE_NOTICE)
-                                        inputs.append(ConversationInput(
-                                            prompt.removeprefix(SIDE_SOURCE_NOTICE), kind="session_agent",
-                                            source_thread_id=source, source_is_side=is_side,
-                                        ))
-                    if first_input_unavailable:
-                        inputs.append(ConversationInput("〔未能读取本轮首条输入〕", kind="unavailable"))
             error_message = getattr(getattr(turn, "error", None), "message", None)
             turns.append(NativeConversationTurn(
-                turn.id, status, tuple(inputs), _final_agent_response(list(turn.items)) if terminal else None,
+                turn.id, status, inputs[turn.id], _final_agent_response(list(turn.items)) if terminal else None,
                 error_message if status == "failed" and isinstance(error_message, str) else None,
                 getattr(turn, "started_at", None), getattr(turn, "completed_at", None),
-                first_input_projected=not has_user_message,
             ))
         if cursor is None and turns:
             turns[0] = replace(turns[0], latest=True)

@@ -35,8 +35,11 @@ def parse_delegated_prompt(value: str) -> tuple[str, str] | None:
     return unescape(source), unescape(prompt)
 
 
-def recognize_delegated_output(namespace: object, output: object) -> tuple[str, str] | None:
+def recognize_delegated_output(namespace: object, name: object, output: object) -> tuple[str, str] | None:
     """Recognize only the current native delegation envelope, without legacy outputs."""
-    if namespace not in ("codex_tui", "codex_app") or not isinstance(output, str):
+    if (namespace not in ("codex_tui", "codex_app")
+            or name not in ("create_thread", "send_message_to_thread")
+            or not isinstance(output, str)):
         return None
-    return parse_delegated_prompt(output)
+    delegation = parse_delegated_prompt(output)
+    return delegation if delegation is not None and delegation[0].strip() else None

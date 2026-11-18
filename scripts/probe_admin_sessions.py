@@ -17,16 +17,17 @@ import time
 import tempfile
 import threading
 import uuid
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, ExternalMessage, Sandbox
-from openai_codex.errors import JsonRpcError
+from openai_codex.errors import InvalidRequestError, JsonRpcError, MethodNotFoundError
 from openai_codex.generated.v2_all import ThreadStartResponse
 
 from netizen_cli.bindings import BindingStore
 from netizen_cli.codex_runtime import CodexRuntime
-from netizen_cli.sessions.delegation import delegated_prompt
+from netizen_cli.delegation_envelope import delegated_prompt
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup
 from netizen_cli.thread_history import AppServerThreadHistory
 from probe_sdk_partial_answers import isolated_config, message_events, mock_provider, response_events
@@ -131,17 +132,55 @@ async def native_case(root: Path, mode: str) -> dict:
             store.close()
 
 
+async def _creation_snapshot(history, runtime, mode, thread_id, turn_id, status, expected_inputs):
+    """Compare native history with Admin for the first, create_thread-initiated Turn."""
+    creation = {}
+    try:
+        summary = await history.list_turns(thread_id, items_view="summary")
+    except InvalidRequestError as error:
+        assert mode == "legacy" and error.message == (
+            f"thread {thread_id} is not materialized yet; "
+            "thread/turns/list is unavailable before first user message"
+        ), error
+        creation["summary_error"] = {"class": type(error).__name__, "code": error.code, "message": error.message}
+    else:
+        assert [t.id for t in summary.data] == [turn_id]
+        creation["summary_item_types"] = [item.root.type for item in summary.data[0].items]
+    try:
+        first = await history.first_item(thread_id, turn_id)
+    except MethodNotFoundError as error:
+        assert mode == "legacy" and error.code == -32601
+        creation["first_item_error"] = {"class": type(error).__name__, "code": error.code}
+    else:
+        assert [entry.item.root.type for entry in first.data] == ["functionCallOutput"]
+        creation["first_item"] = first.data[0].item.root.name
+        assert creation["first_item"] == "create_thread"
+    created_page = await runtime.thread_conversation(thread_id)
+    if "summary_error" in creation:
+        assert not created_page.turns
+        creation["admin"] = "no_turn"
+    else:
+        projected = created_page.turns[0]
+        assert projected.turn_id == turn_id and projected.status == status
+        assert projected.answer == ("CREATE-ANSWER" if status == "completed" else None)
+        assert projected.inputs == expected_inputs
+        creation["admin"] = projected.inputs[0].kind
+    return creation
+
+
 async def conversation_case(root: Path, mode: str) -> dict:
     """Cover the production summary projection against both native stores."""
     replies = [(200, response_events(f"page-{index}", *message_events(
         f"answer-{index}", f"ANSWER-{index}", "final_answer",
     ))) for index in range(10)]
     replies += [
+        (200, response_events("agent-before-steer", *message_events("agent-initial", "AGENT-INITIAL", "final_answer"))),
         (200, response_events("session-agent", *message_events("agent-answer", "SESSION-AGENT-ANSWER", "final_answer"))),
         (200, response_events("steer-first", *message_events("steer-initial", "STEER-FIRST-ANSWER", "final_answer"))),
         (200, response_events("steer-final", *message_events("steer-answer", "STEER-FINAL-ANSWER", "final_answer"))),
         (400, b'{"error":{"message":"CONVERSATION-FAILURE","type":"invalid_request_error"}}'),
         (200, response_events("interrupted", *message_events("never-final", "INTERRUPTED-ANSWER", "final_answer"))),
+        (200, response_events("agent-create", *message_events("create-answer", "CREATE-ANSWER", "final_answer"))),
     ]
     loop = asyncio.get_running_loop()
 
@@ -159,19 +198,22 @@ async def conversation_case(root: Path, mode: str) -> dict:
         store = BindingStore(root / "channel.sqlite3")
         gate, interrupt_gate, agent_gate = ArrivalGate(), ArrivalGate(), ArrivalGate()
         provider.response_gates[11] = agent_gate
-        provider.response_gates[12] = gate
-        provider.response_gates[15] = interrupt_gate
+        provider.response_gates[13] = gate
+        provider.response_gates[16] = interrupt_gate
+        create_gate = provider.response_gates[17] = ArrivalGate()
         try:
             async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
                 runtime = runtime_for(codex, store)
                 try:
-                    if mode == "paginated":
-                        thread = await codex.thread_start(cwd=str(cwd), approval_mode=ApprovalMode.deny_all, sandbox=Sandbox.read_only)
-                    else:
+                    async def start_thread():
+                        if mode == "paginated":
+                            return await codex.thread_start(cwd=str(cwd), approval_mode=ApprovalMode.deny_all, sandbox=Sandbox.read_only)
                         started = await codex._client.request("thread/start", {
                             "cwd": str(cwd), "approvalPolicy": "never", "sandbox": "read-only", "historyMode": "legacy",
                         }, response_model=ThreadStartResponse)
-                        thread = AsyncThread(codex, started.thread.id)
+                        return AsyncThread(codex, started.thread.id)
+
+                    thread = await start_thread()
                     turn_ids = []
                     for index in range(10):
                         turn = await thread.turn(f"FIRST-{index}")
@@ -186,6 +228,7 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     ))
                     turn_ids.append(agent_turn.id)
                     await asyncio.wait_for(agent_gate.arrived.wait(), 10)
+                    requests_before_read = len(provider.requests)
                     agent_running = (await runtime.thread_conversation(thread.id)).turns[0]
                     assert agent_running.turn_id == agent_turn.id and agent_running.status == "inProgress"
                     assert agent_running.answer is None and len(agent_running.inputs) == 1
@@ -195,8 +238,16 @@ async def conversation_case(root: Path, mode: str) -> dict:
                         assert agent_input.source_thread_id == source_id and not agent_input.source_is_side
                     else:
                         assert agent_input.kind == "unavailable" and agent_input.text == "〔未能读取本轮首条输入〕"
+                    assert len(provider.requests) == requests_before_read, "running agent history read started model work"
+                    await agent_turn.steer("HUMAN-STEER")
                     agent_gate.set()
                     assert (await agent_turn.run()).status.value == "completed"
+                    history = AppServerThreadHistory(codex)
+                    post_steer = (await history.list_turns(thread.id, items_view="summary")).data[0]
+                    steer_texts = [part.root.text for item in post_steer.items if item.root.type == "userMessage"
+                                   for part in item.root.content if part.root.type == "text"]
+                    assert post_steer.id == agent_turn.id
+                    assert steer_texts == ["HUMAN-STEER"]
                     turn = await thread.turn("STEER-FIRST")
                     turn_ids.append(turn.id)
                     await asyncio.wait_for(gate.arrived.wait(), 10)
@@ -208,7 +259,7 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     assert running_turn.turn_id == turn.id and running_turn.status == "inProgress"
                     assert [part.text for part in running_turn.inputs] == ["STEER-FIRST"]
                     assert running_turn.answer is None and not running_turn.images
-                    assert len(provider.requests) == 12, "running history read started model work"
+                    assert len(provider.requests) == 13, "running history read started model work"
                     await turn.steer("STEER-SECOND")
                     gate.set()
                     result = await turn.run()
@@ -233,10 +284,16 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     requests_before = len(provider.requests)
                     all_turns, pages, cursors = [], [], set()
                     cursor = None
+                    read_first = AppServerThreadHistory.first_item
                     for _ in range(4):
-                        page = await runtime.thread_conversation(thread.id, cursor=cursor)
+                        with patch.object(AppServerThreadHistory, "first_item", autospec=True, side_effect=read_first) as reads:
+                            page = await runtime.thread_conversation(thread.id, cursor=cursor)
+                        expected_reads = [(thread.id, turn.turn_id) for turn in page.turns]
+                        first_reads = [call.args[1:] for call in reads.await_args_list]
+                        assert first_reads == (expected_reads if mode == "paginated" else expected_reads[:1])
                         all_turns.extend(page.turns)
-                        pages.append({"count": len(page.turns), "has_next": page.next_cursor is not None})
+                        pages.append({"count": len(page.turns), "has_next": page.next_cursor is not None,
+                                      "first_item_reads": len(first_reads)})
                         cursor = page.next_cursor
                         if cursor is None:
                             break
@@ -249,7 +306,11 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     assert all_turns[0].status == "interrupted" and all_turns[0].answer is None
                     assert all_turns[1].status == "failed" and all_turns[1].error
                     assert [part.text for part in all_turns[2].inputs] == ["STEER-FIRST"]
-                    assert all_turns[3].turn_id == agent_turn.id and all_turns[3].inputs == agent_running.inputs
+                    assert all_turns[3].turn_id == agent_turn.id
+                    if mode == "paginated":
+                        assert all_turns[3].inputs == agent_running.inputs
+                    else:
+                        assert [part.text for part in all_turns[3].inputs] == steer_texts
                     assert all_turns[3].answer == "SESSION-AGENT-ANSWER"
                     invalid = None
                     try:
@@ -267,12 +328,33 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     archived_catalog = await runtime.thread_catalog_page(archived=True)
                     assert thread.id in {item.thread_id for item in archived_catalog.threads}
                     assert len(provider.requests) == requests_before, "history reads must not run model work"
+
+                    created = await start_thread()
+                    create_turn = await created.turn(ExternalMessage(
+                        tool_name="create_thread", namespace="codex_tui", content=delegated_prompt(source_id, agent_prompt),
+                    ))
+                    await asyncio.wait_for(create_gate.arrived.wait(), 10)
+                    requests_before = len(provider.requests)
+                    creation = {"running": await _creation_snapshot(
+                        history, runtime, mode, created.id, create_turn.id, "inProgress", agent_running.inputs,
+                    )}
+                    assert len(provider.requests) == requests_before, "running first-Turn reads started model work"
+                    create_gate.set()
+                    assert (await create_turn.run()).status.value == "completed"
+                    creation["completed"] = await _creation_snapshot(
+                        history, runtime, mode, created.id, create_turn.id, "completed", agent_running.inputs,
+                    )
+                    assert len(provider.requests) == requests_before, "first-Turn reads started model work"
                     assert not provider.replies
                     assert all(error == "model response connection closed early" for error in provider.errors), provider.errors
                     return {"mode": mode, "passed": True, "pages": pages, "turn_count": len(all_turns),
                             "complete_newest_to_oldest_chain": True, "steer_first_input_only": True,
                             "running_summary_first_input": True, "running_projected_first_input": True,
                             "session_agent_input_kind": agent_input.kind,
+                            "create_thread_first_turn": creation,
+                            "delegated_then_steered": {"summary_texts": steer_texts,
+                                                      "admin_input_kind": all_turns[3].inputs[0].kind},
+                            "running_agent_model_requests_during_read": 0,
                             "session_agent_running_and_completed": True,
                             "session_agent_source_and_full_prompt": mode == "paginated",
                             "legacy_first_input_unavailable": mode == "legacy",
@@ -284,6 +366,7 @@ async def conversation_case(root: Path, mode: str) -> dict:
                     gate.set()
                     interrupt_gate.set()
                     agent_gate.set()
+                    create_gate.set()
                     await runtime.cancel_tasks()
         finally:
             store.close()

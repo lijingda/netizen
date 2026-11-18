@@ -30,8 +30,6 @@ class ThreadHistory(Protocol):
     async def list_items(self, thread_id: str, turn_id: str, *, limit: int = 20
                          ) -> ThreadItemsListResponse: ...
 
-    async def first_item(self, thread_id: str, turn_id: str) -> ThreadItemsListResponse: ...
-
 
 def facade_migration_requirements() -> tuple[str, ...]:
     candidates = {

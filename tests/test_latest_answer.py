@@ -4,16 +4,17 @@ import asyncio
 from dataclasses import asdict
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from openai_codex import CodexError, InvalidRequestError
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ThreadItem, ThreadItemsListResponse
+from pydantic import ValidationError
 
 from netizen_cli.codex_runtime import CodexRuntime
 from netizen_cli.runtime.contracts import NativeAnswerImage, NativeLatestAnswer
 from netizen_cli.runtime.state import RUNTIME_LOGGER_NAME
-from netizen_cli.sessions.delegation import SIDE_SOURCE_NOTICE, delegated_prompt
+from netizen_cli.delegation_envelope import SIDE_SOURCE_NOTICE, delegated_prompt
 from netizen_cli.thread_history import ThreadHistoryUnavailable
 
 
@@ -115,6 +116,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.runtime = object.__new__(CodexRuntime)
         self.runtime._codex = object()
+        self.runtime._bindings = SimpleNamespace(find_by_native_thread_id=Mock(return_value=None))
 
     def inputless_turn(self, identity, status="completed"):
         turn = self.turn(identity, status)
@@ -126,6 +128,9 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
             "data": [] if item is None else [{"turnId": turn_id, "item": item}],
         })
 
+    def summary_history(self, **list_turns):
+        return SimpleNamespace(list_turns=AsyncMock(**list_turns), first_item=AsyncMock(return_value=self.first_item_page()))
+
     def delegation(self, prompt="request", namespace="codex_tui"):
         return {"type": "functionCallOutput", "id": "input", "name": "send_message_to_thread",
                 "namespace": namespace, "output": delegated_prompt("source-full-thread-id", prompt)}
@@ -136,6 +141,8 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
             for side in (False, True):
                 for status in ("completed", "inProgress"):
                     with self.subTest(namespace=namespace, side=side, status=status):
+                        lookup = self.runtime._bindings.find_by_native_thread_id
+                        lookup.reset_mock()
                         history = SimpleNamespace(
                             list_turns=AsyncMock(return_value=SimpleNamespace(
                                 data=[self.inputless_turn("turn", status)], next_cursor="next")),
@@ -145,7 +152,6 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
                         with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
                             page = await self.runtime.thread_conversation("thread")
                         projected = page.turns[0]
-                        self.assertTrue(projected.first_input_projected)
                         self.assertEqual(projected.status, status)
                         self.assertEqual(projected.answer, "final" if status == "completed" else None)
                         self.assertEqual(len(projected.inputs), 1)
@@ -153,67 +159,118 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((part.kind, part.text), ("session_agent", prompt))
                         self.assertEqual(part.source_thread_id, "source-full-thread-id")
                         self.assertEqual(part.source_is_side, side)
+                        if side:
+                            lookup.assert_called_once_with("source-full-thread-id")
+                        else:
+                            lookup.assert_not_called()
                         self.assertNotIn("send_message_to_thread", str(asdict(page)))
                         history.first_item.assert_awaited_once_with("thread", "turn")
+
+    async def test_side_notice_is_verbatim_for_binding_source_or_failed_lookup(self):
+        prompt = SIDE_SOURCE_NOTICE + "full request"
+        for result in (object(), RuntimeError("lookup failed")):
+            with self.subTest(result=result):
+                lookup = Mock(side_effect=[result])
+                self.runtime._bindings.find_by_native_thread_id = lookup
+                history = self.summary_history(return_value=SimpleNamespace(data=[self.turn("turn")], next_cursor=None))
+                history.first_item.return_value = self.first_item_page(self.delegation(prompt))
+                with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
+                    page = await self.runtime.thread_conversation("thread")
+                part, = page.turns[0].inputs
+                self.assertEqual((part.kind, part.source_thread_id, part.text), ("session_agent", "source-full-thread-id", prompt))
+                self.assertFalse(part.source_is_side)
+                lookup.assert_called_once_with("source-full-thread-id")
 
     async def test_unrecognized_external_inputs_never_expose_output_or_legacy_envelope(self):
         private = "PRIVATE-TOOL-OUTPUT"
         for changes in (
             {"namespace": "another", "output": delegated_prompt("source", private)},
+            {"name": "read_thread", "output": delegated_prompt("source", private)},
+            {"output": delegated_prompt("", private)}, {"output": delegated_prompt(" \t ", private)},
             {"namespace": "netizen_sessions", "output": '{"sourceThreadId":"source","sourceBindingId":"binding","message":"' + private + '"}'},
             {"output": private}, {"output": delegated_prompt("source", private)[:-1]},
             {"output": [{"type": "input_text", "text": private}]},
         ):
             with self.subTest(changes=changes):
                 history = SimpleNamespace(
-                    list_turns=AsyncMock(return_value=SimpleNamespace(data=[self.inputless_turn("turn")], next_cursor=None)),
+                    list_turns=AsyncMock(return_value=SimpleNamespace(data=[self.turn("turn")], next_cursor=None)),
                     first_item=AsyncMock(return_value=self.first_item_page({**self.delegation(), **changes})),
                 )
                 with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
                     page = await self.runtime.thread_conversation("thread")
-                self.assertEqual(page.turns[0].inputs[0].kind, "external_unrecognized")
+                self.assertEqual([part.kind for part in page.turns[0].inputs], ["external_unrecognized"])
                 self.assertEqual(page.turns[0].inputs[0].text, "〔外部输入；格式未识别，此处不显示内容〕")
                 self.assertNotIn(private, str(asdict(page)))
 
     async def test_other_first_items_and_empty_pages_never_become_input(self):
         for item in (None,
+                     {"type": "hookPrompt", "id": "hook", "fragments": []},
+                     {"type": "contextCompaction", "id": "compaction"},
                      {"type": "reasoning", "id": "reason", "summary": ["PRIVATE-REASONING"], "content": []},
                      {"type": "agentMessage", "id": "agent", "text": "PRIVATE-AGENT"},
                      {"type": "userMessage", "id": "user", "content": [{"type": "text", "text": "PRIVATE-USER"}]}):
             with self.subTest(item=item):
-                history = SimpleNamespace(
-                    list_turns=AsyncMock(return_value=SimpleNamespace(data=[self.inputless_turn("turn")], next_cursor=None)),
-                    first_item=AsyncMock(return_value=self.first_item_page(item)),
-                )
+                turns = [self.inputless_turn("empty"), self.turn("user")]
+                history = self.summary_history(return_value=SimpleNamespace(data=turns, next_cursor=None))
+                history.first_item.side_effect = [self.first_item_page(item, turn.id) for turn in turns]
                 with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
                     page = await self.runtime.thread_conversation("thread")
                 self.assertEqual(page.turns[0].inputs, ())
-                self.assertTrue(page.turns[0].first_input_projected)
+                self.assertEqual(page.turns[1].inputs[0].text, "first")
                 self.assertNotIn("PRIVATE", str(asdict(page)))
 
     async def test_first_item_failure_stops_page_reads_and_warns_once_without_content(self):
-        for error in (MethodNotFoundError(-32601, "PRIVATE"), CodexError("PRIVATE"), ThreadHistoryUnavailable("PRIVATE")):
+        with self.assertRaises(ValidationError) as validation:
+            ThreadItemsListResponse.model_validate({"data": "PRIVATE"})
+        for error in (MethodNotFoundError(-32601, "PRIVATE"), CodexError("PRIVATE"),
+                      ThreadHistoryUnavailable("PRIVATE"), validation.exception):
             with self.subTest(error=error):
-                turns = [self.inputless_turn("ok"), self.inputless_turn("failed"), self.turn("user"),
+                turns = [self.turn("ok"), self.inputless_turn("failed"), self.turn("user"),
                          self.inputless_turn("remaining")]
+                # A userMessage with no content is still a Summary input.
+                empty_user = self.turn("empty-user")
+                empty_user.items[0].root.content = []
+                turns.append(empty_user)
                 history = SimpleNamespace(
                     list_turns=AsyncMock(return_value=SimpleNamespace(data=turns, next_cursor="next")),
                     first_item=AsyncMock(side_effect=[self.first_item_page(self.delegation(), "ok"), error]),
                 )
+                legacy = isinstance(error, MethodNotFoundError)
+                log_check = self.assertNoLogs if legacy else self.assertLogs
                 with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
-                        self.assertLogs(RUNTIME_LOGGER_NAME, level="WARNING") as logs:
+                        log_check(RUNTIME_LOGGER_NAME, level="WARNING") as logs:
                     page = await self.runtime.thread_conversation("thread")
-                self.assertEqual([turn.inputs[0].kind for turn in page.turns],
+                self.assertEqual([turn.inputs[0].kind for turn in page.turns[:-1]],
                                  ["session_agent", "unavailable", "user", "unavailable"])
+                self.assertEqual(page.turns[-1].inputs, ())
                 self.assertEqual(page.turns[1].inputs[0].text, "〔未能读取本轮首条输入〕")
                 self.assertEqual(page.next_cursor, "next")
                 self.assertEqual([call.args for call in history.first_item.await_args_list],
                                  [("thread", "ok"), ("thread", "failed")])
-                self.assertEqual(len(logs.records), 1)
-                self.assertEqual(logs.records[0].thread_id, "thread")
-                self.assertEqual(logs.records[0].turn_id, "failed")
-                self.assertEqual(logs.records[0].error_type, type(error).__name__)
-                self.assertNotIn("PRIVATE", str(logs.output))
+                if not legacy:
+                    self.assertEqual(len(logs.records), 1)
+                    self.assertEqual(logs.records[0].thread_id, "thread")
+                    self.assertEqual(logs.records[0].turn_id, "failed")
+                    self.assertEqual(logs.records[0].error_type, type(error).__name__)
+                    self.assertNotIn("PRIVATE", str(logs.output))
+
+    async def test_first_item_deadline_is_checked_before_each_read(self):
+        turns = [self.turn("steer"), self.inputless_turn("missing"), self.turn("user")]
+        for start in (99, 100):
+            with self.subTest(start=start):
+                history = self.summary_history(return_value=SimpleNamespace(data=turns, next_cursor=None))
+                with patch.object(asyncio.get_running_loop(), "time", return_value=start) as clock:
+                    async def first(_thread_id, turn_id):
+                        self.assertEqual(turn_id, "steer")
+                        clock.return_value = 100
+                        return self.first_item_page(self.delegation(), turn_id)
+                    history.first_item.side_effect = first
+                    with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
+                            self.assertLogs(RUNTIME_LOGGER_NAME, level="WARNING"):
+                        page = await self.runtime.thread_conversation("thread", deadline=100)
+                self.assertEqual(history.first_item.await_count, 1 if start < 100 else 0)
+                self.assertEqual([turn.inputs[0].kind for turn in page.turns],
+                                 ["session_agent" if start < 100 else "user", "unavailable", "user"])
 
     async def test_first_item_cancellation_and_outer_timeout_propagate(self):
         for error in (asyncio.CancelledError(), TimeoutError()):
@@ -234,7 +291,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
             return self.first_item_page(turn_id=turn_id)
         history = SimpleNamespace(
             list_turns=AsyncMock(return_value=SimpleNamespace(
-                data=[self.inputless_turn("first"), self.inputless_turn("second")], next_cursor=None)),
+                data=[self.turn("first"), self.inputless_turn("second")], next_cursor=None)),
             first_item=AsyncMock(side_effect=read),
         )
         with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
@@ -286,13 +343,12 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
         from dataclasses import asdict
         turns = [self.turn("running", "inProgress"), self.turn("failed", "failed", error="provider failed"),
                  self.turn("interrupted", "interrupted", answer=None), self.turn("complete")]
-        history = SimpleNamespace(list_turns=AsyncMock(return_value=SimpleNamespace(data=turns, next_cursor="older")),
-                                  first_item=AsyncMock())
+        history = self.summary_history(return_value=SimpleNamespace(data=turns, next_cursor="older"))
         with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
             result = await self.runtime.thread_conversation("thread", cursor="opaque")
         self.assertIsInstance(result, NativeConversationPage)
         history.list_turns.assert_awaited_once_with("thread", cursor="opaque", limit=10, items_view="summary")
-        history.first_item.assert_not_awaited()
+        self.assertEqual([call.args for call in history.first_item.await_args_list], [("thread", turn.id) for turn in turns])
         self.assertEqual(result.next_cursor, "older")
         self.assertEqual(result.turns[0].inputs[0].text, "first")
         self.assertIsNone(result.turns[0].answer)
@@ -309,7 +365,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
     async def test_first_page_images_use_exact_latest_identity_without_retry(self):
         image = NativeAnswerImage("/image.png", "bytes")
         summary = SimpleNamespace(data=[self.turn("latest", answer="![image](/image.png)"), self.turn("older")], next_cursor="next")
-        history = SimpleNamespace(list_turns=AsyncMock(return_value=summary))
+        history = self.summary_history(return_value=summary)
         for identity in ("latest", "new-turn-started"):
             full = AsyncMock(return_value=NativeLatestAnswer("thread", identity, "completed", "answer", images=(image,)))
             with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
@@ -325,10 +381,10 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
         image = NativeAnswerImage("/image.png", "bytes")
         for identity in ("latest", "different"):
             with self.subTest(identity=identity):
-                history = SimpleNamespace(list_turns=AsyncMock(side_effect=[
+                history = self.summary_history(side_effect=[
                     SimpleNamespace(data=[self.turn("latest", answer="![image](/image.png)")], next_cursor="next"),
                     SimpleNamespace(data=[self.turn(identity, answer="![image](/image.png)")], next_cursor="single-next"),
-                ]))
+                ])
                 full = AsyncMock(return_value=NativeLatestAnswer("thread", "latest", "completed", "answer", images=(image,)))
                 with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
                         patch.object(self.runtime, "latest_thread_answer", full):
@@ -346,7 +402,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
         async def project(content):
             turn = self.turn("image-turn")
             turn.items[0].root.content = content
-            history = SimpleNamespace(list_turns=AsyncMock(return_value=SimpleNamespace(data=[turn], next_cursor=None)))
+            history = self.summary_history(return_value=SimpleNamespace(data=[turn], next_cursor=None))
             with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history):
                 return (await self.runtime.thread_conversation("thread")).turns[0].inputs
 
@@ -385,7 +441,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status, answer=answer):
                 page = SimpleNamespace(data=[self.turn("latest", status, answer=answer),
                                              self.turn("older", answer="![older](/image.png)")], next_cursor="next")
-                history = SimpleNamespace(list_turns=AsyncMock(return_value=page))
+                history = self.summary_history(return_value=page)
                 with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
                         patch.object(self.runtime, "latest_thread_answer", AsyncMock()) as full:
                     result = await self.runtime.thread_conversation("thread")
@@ -409,7 +465,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
         from netizen_cli.runtime.state import RUNTIME_LOGGER_NAME
 
         summary = SimpleNamespace(data=[self.turn("latest", answer="private answer ![image](/image.png)")], next_cursor="next")
-        history = SimpleNamespace(list_turns=AsyncMock(return_value=summary))
+        history = self.summary_history(return_value=summary)
         for error in (CodexError("private error content"), ThreadHistoryUnavailable("private error content")):
             full = AsyncMock(side_effect=error)
             with patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \

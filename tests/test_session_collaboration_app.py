@@ -25,7 +25,7 @@ from netizen_cli.runtime.contracts import (
 )
 from netizen_cli.sdk_gap_adapter import GoalControlError, GoalMutationStateUnknown
 from netizen_cli.sessions.errors import SessionToolError
-from netizen_cli.sessions.delegation import SIDE_SOURCE_NOTICE, parse_delegated_prompt
+from netizen_cli.delegation_envelope import SIDE_SOURCE_NOTICE, parse_delegated_prompt
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.group_access import GroupAccessRule, GroupAccessService
 from tests.support.channel_fixtures import channel_fixture

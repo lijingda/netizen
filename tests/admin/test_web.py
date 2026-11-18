@@ -2415,6 +2415,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 type="agentMessage", phase="final_answer", text=text,
             ))])
         latest = turn("latest", "![image](/image.png)")
+        latest.items.insert(0, SimpleNamespace(root=SimpleNamespace(
+            type="userMessage", content=[SimpleNamespace(type="text", text="first request")],
+        )))
         history = SimpleNamespace(list_turns=AsyncMock(side_effect=[
             SimpleNamespace(data=[latest] + [turn(str(i), "body" * 100) for i in range(9)], next_cursor="ten-next"),
             SimpleNamespace(data=[latest], next_cursor="one-next"),
@@ -2422,7 +2425,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOesAAAAASUVORK5CYII="
         full = AsyncMock(return_value=NativeLatestAnswer("native", "latest", "completed", "![image](/image.png)",
             images=(NativeAnswerImage("/image.png", data),)))
-        async def read(_binding_id, *, thread_id, deadline, **kwargs):
+        async def read(_binding_id, *, thread_id, **kwargs):
             return await runtime.thread_conversation(thread_id, **kwargs)
         with patch.object(self.management, "binding_conversation", side_effect=read, create=True), \
                 patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
@@ -2435,6 +2438,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.kwargs["limit"] for call in history.list_turns.call_args_list], [10, 1])
         self.assertEqual(result["nextCursor"], "one-next")
         self.assertEqual(result["turns"][0]["images"][0]["data"], data)
+        self.assertEqual(result["turns"][0]["inputs"][0]["text"], "first request")
 
     async def test_conversation_image_bytes_do_not_hide_text_or_force_single_turn(self):
         from netizen_cli.runtime.contracts import NativeAnswerImage, NativeConversationPage, NativeConversationTurn

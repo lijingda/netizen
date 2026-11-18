@@ -534,7 +534,6 @@ class NativeConversationTurn:
     completed_at: int | None = None
     images: tuple[NativeAnswerImage, ...] = ()
     latest: bool = False
-    first_input_projected: bool = False
 
 
 @dataclass(frozen=True, slots=True)

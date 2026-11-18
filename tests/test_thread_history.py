@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 from openai_codex import AsyncCodex, AsyncThread, CodexConfig
 from openai_codex.errors import InvalidRequestError
 from openai_codex.generated import v2_all as generated
+from pydantic import ValidationError
 
 from netizen_cli.sdk_gap_adapter import SdkFacadeMigrationRequired, SdkGapCapabilityUnavailable
 from netizen_cli.thread_history import (
@@ -185,6 +186,18 @@ class ThreadHistoryTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(thread=thread_id, turn=turn_id), self.assertRaises(ThreadHistoryUnavailable):
                 await bridge.first_item(thread_id, turn_id)
         bridge._client.request.assert_not_awaited()
+
+    async def test_sdk_rejects_malformed_first_item_without_retrying(self):
+        payload = {"thread/items/list": {"data": [{"turnId": "turn", "item": {"type": "unknown"}}]},
+                   "thread/turns/list": {"data": [turn(items_view="summary")]}}
+        async with server(payload) as (codex, log):
+            bridge = AppServerThreadHistory(codex)
+            with self.assertRaises(ValidationError):
+                await bridge.first_item("thread", "turn")
+            page = await bridge.list_turns("thread", items_view="summary")
+            self.assertEqual(page.data[0].id, "turn")
+            self.assertEqual([message["method"] for message in _requests(log)[1:]],
+                             ["thread/items/list", "thread/turns/list"])
 
     def test_shape_and_public_facade_migration_gates(self):
         self.assertEqual(facade_migration_requirements(), ())
