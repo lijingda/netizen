@@ -120,7 +120,10 @@ window.NetizenConversation = (() => {
       block.className = "conversation-input";
       const label = document.createElement("p");
       label.className = "conversation-input-label";
-      label.textContent = ["用户输入", input.source, input.display_name,
+      const inputLabel = input.kind === "session_agent"
+        ? `会话协作来信 · ${input.source_is_side ? "来自临时 Side · Codex 会话" : "来自 Codex 会话"} ${input.source_thread_id}`
+        : { external_unrecognized: "外部输入 · 格式未识别", unavailable: "输入" }[input.kind] || "用户输入";
+      label.textContent = [inputLabel, input.source, input.display_name,
         input.raw ? "格式未识别，显示原文" : null,
         input.quoted_count ? `引用 ${input.quoted_count} 条` : null,
         input.supplemental_count ? `补充上下文 ${input.supplemental_count} 条` : null,

@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-10-17
 amends: 0014, 0081
-amended_by: 0096
+amended_by: 0096, 0101
 related: 0077
 ---
 
@@ -14,7 +14,8 @@ related: 0077
 `thread/items/list`。采用这两个固定方法的薄适配，不建立本地历史或第二客户端。
 
 > [ADR 0096](0096-read-admin-conversations-through-summary-turn-pages.md) 将下文 Admin 最近回答扩展为 Summary Turn 分页对话记录，
-> 保留最新轮图片规则与本适配的迁移条件。下文保留原始决定。
+> 保留最新轮图片规则与本适配的迁移条件；[ADR 0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)
+> 在同一 items 端点增加升序首项读取，展示开启本轮的会话协作来信。下文保留原始决定。
 
 ## 决定
 

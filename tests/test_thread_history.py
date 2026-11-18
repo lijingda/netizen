@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 from openai_codex import AsyncCodex, AsyncThread, CodexConfig
 from openai_codex.errors import InvalidRequestError
 from openai_codex.generated import v2_all as generated
+from pydantic import ValidationError
 
 from netizen_cli.sdk_gap_adapter import SdkFacadeMigrationRequired, SdkGapCapabilityUnavailable
 from netizen_cli.thread_history import (
@@ -112,15 +113,20 @@ class ThreadHistoryTest(unittest.IsolatedAsyncioTestCase):
             items = await bridge.list_items("thread", "turn")
             self.assertIsInstance(items, generated.ThreadItemsListResponse)
             self.assertEqual(items.data[0].item.root.text, "hello")
+            first = await bridge.first_item("thread", "turn")
+            self.assertIsInstance(first, generated.ThreadItemsListResponse)
+            self.assertEqual(first.data[0].item.root.id, "answer")
             calls = _requests(log)[1:]
-        self.assertEqual([call["method"] for call in calls], ["thread/turns/list", "thread/items/list"])
+        self.assertEqual([call["method"] for call in calls], ["thread/turns/list", "thread/items/list", "thread/items/list"])
         self.assertEqual(calls[0]["params"], {"threadId": "thread", "cursor": "opaque-input", "limit": 2, "sortDirection": "desc", "itemsView": "full"})
         self.assertEqual(calls[1]["params"], {"threadId": "thread", "turnId": "turn", "limit": 20, "sortDirection": "desc"})
+        self.assertEqual(calls[2]["params"], {"threadId": "thread", "turnId": "turn", "limit": 1, "sortDirection": "asc"})
         self.assertFalse(hasattr(bridge, "request"))
         self.assertFalse(hasattr(bridge, "close"))
 
     async def test_empty_pages_and_summary(self):
         self.assertEqual((await adapter({"data": []}).list_turns("thread")).data, [])
+        self.assertEqual((await adapter({"data": []}).first_item("thread", "turn")).data, [])
         bridge = adapter({"data": [turn(items_view="summary")]})
         page = await bridge.list_turns("thread", items_view="summary")
         self.assertEqual(page.data[0].items_view.value, "summary")
@@ -169,6 +175,29 @@ class ThreadHistoryTest(unittest.IsolatedAsyncioTestCase):
         for payload in ({"data": [item("other")]}, {"data": [item(), item()]}):
             with self.subTest(payload=payload), self.assertRaises(ThreadHistoryUnavailable):
                 await adapter(payload).list_items("thread", "turn")
+
+    async def test_first_item_shares_exact_identity_and_page_validation(self):
+        for payload in ({"data": [item("other")]}, {"data": [item(item_id="")]},
+                        {"data": [item(), item(item_id="second")]}, {"data": [], "nextCursor": " "}):
+            with self.subTest(payload=payload), self.assertRaises(ThreadHistoryUnavailable):
+                await adapter(payload).first_item("thread", "turn")
+        bridge = adapter({"data": []})
+        for thread_id, turn_id in (("", "turn"), ("thread", " turn")):
+            with self.subTest(thread=thread_id, turn=turn_id), self.assertRaises(ThreadHistoryUnavailable):
+                await bridge.first_item(thread_id, turn_id)
+        bridge._client.request.assert_not_awaited()
+
+    async def test_sdk_rejects_malformed_first_item_without_retrying(self):
+        payload = {"thread/items/list": {"data": [{"turnId": "turn", "item": {"type": "unknown"}}]},
+                   "thread/turns/list": {"data": [turn(items_view="summary")]}}
+        async with server(payload) as (codex, log):
+            bridge = AppServerThreadHistory(codex)
+            with self.assertRaises(ValidationError):
+                await bridge.first_item("thread", "turn")
+            page = await bridge.list_turns("thread", items_view="summary")
+            self.assertEqual(page.data[0].id, "turn")
+            self.assertEqual([message["method"] for message in _requests(log)[1:]],
+                             ["thread/items/list", "thread/turns/list"])
 
     def test_shape_and_public_facade_migration_gates(self):
         self.assertEqual(facade_migration_requirements(), ())

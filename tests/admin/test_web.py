@@ -2168,6 +2168,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(read.await_count, 1)
 
     async def test_conversation_is_an_authenticated_exact_read_not_a_mutation(self) -> None:
+        from netizen_cli.prompt_projection import ConversationInput
         from netizen_cli.runtime.contracts import NativeLatestAnswer, NativeConversationTurn, NativeConversationPage
         from netizen_cli.thread_history import ThreadHistoryUnavailable
         from netizen_cli.management.blocking_io import BoundedBlockingIOExecutor
@@ -2177,8 +2178,11 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.management.file_reads.aclose)
         session = await self.login()
         answer = NativeLatestAnswer("native", "turn", "completed", "<b>answer</b>")
+        inputs = (ConversationInput("来信 <tag>", kind="session_agent", source_thread_id="source-thread", source_is_side=True),
+                  ConversationInput("〔外部输入；格式未识别，此处不显示内容〕", kind="external_unrecognized"),
+                  ConversationInput("〔未能读取本轮首条输入〕", kind="unavailable"))
         with patch.object(self.management, "binding_conversation", AsyncMock(return_value=NativeConversationPage("native", (NativeConversationTurn(
-                answer.turn_id, answer.status, answer=answer.answer, images=answer.images, latest=True,
+                answer.turn_id, answer.status, inputs=inputs, answer=answer.answer, images=answer.images, latest=True,
             ),))), create=True) as read:
             status, _, result = await self.json_get("/api/v1/sessions/conversation?bindingId=binding&threadId=native", session)
             self.assertEqual(status, 200, result)
@@ -2186,6 +2190,11 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("&lt;b&gt;answer&lt;/b&gt;", result["turns"][0]["markdownHtml"])
             self.assertNotIn("<b>", result["turns"][0]["markdownHtml"])
             self.assertIsNone(result["turns"][0]["startedAt"])
+            parts = result["turns"][0]["inputs"]
+            self.assertEqual([part["kind"] for part in parts], ["session_agent", "external_unrecognized", "unavailable"])
+            self.assertEqual(parts[0]["source_thread_id"], "source-thread")
+            self.assertTrue(parts[0]["source_is_side"])
+            self.assertEqual(parts[0]["text"], "来信 <tag>")
             self.assertIn("readAt", result)
             self.assertEqual(read.call_args.args, ("binding",))
             self.assertEqual(read.call_args.kwargs["thread_id"], "native")
@@ -2406,14 +2415,17 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 type="agentMessage", phase="final_answer", text=text,
             ))])
         latest = turn("latest", "![image](/image.png)")
+        latest.items.insert(0, SimpleNamespace(root=SimpleNamespace(
+            type="userMessage", content=[SimpleNamespace(type="text", text="first request")],
+        )))
         history = SimpleNamespace(list_turns=AsyncMock(side_effect=[
             SimpleNamespace(data=[latest] + [turn(str(i), "body" * 100) for i in range(9)], next_cursor="ten-next"),
             SimpleNamespace(data=[latest], next_cursor="one-next"),
-        ]))
+        ]), first_item=AsyncMock(return_value=SimpleNamespace(data=[])))
         data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOesAAAAASUVORK5CYII="
         full = AsyncMock(return_value=NativeLatestAnswer("native", "latest", "completed", "![image](/image.png)",
             images=(NativeAnswerImage("/image.png", data),)))
-        async def read(_binding_id, *, thread_id, deadline, **kwargs):
+        async def read(_binding_id, *, thread_id, **kwargs):
             return await runtime.thread_conversation(thread_id, **kwargs)
         with patch.object(self.management, "binding_conversation", side_effect=read, create=True), \
                 patch("netizen_cli.runtime.queries.AppServerThreadHistory", return_value=history), \
@@ -2422,9 +2434,11 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             status, _, result = await self.json_get("/api/v1/sessions/conversation?bindingId=binding&threadId=native", session)
         self.assertEqual(status, 200, result)
         full.assert_awaited_once_with("native")
+        self.assertEqual(history.first_item.await_count, 10, "size fallback reuses the first-item projection")
         self.assertEqual([call.kwargs["limit"] for call in history.list_turns.call_args_list], [10, 1])
         self.assertEqual(result["nextCursor"], "one-next")
         self.assertEqual(result["turns"][0]["images"][0]["data"], data)
+        self.assertEqual(result["turns"][0]["inputs"][0]["text"], "first request")
 
     async def test_conversation_image_bytes_do_not_hide_text_or_force_single_turn(self):
         from netizen_cli.runtime.contracts import NativeAnswerImage, NativeConversationPage, NativeConversationTurn
@@ -2470,7 +2484,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         page = NativeConversationPage("native", (NativeConversationTurn("turn", "completed",
             inputs=(ConversationInput("中🌙"),), answer="# output", latest=True,
             images=(NativeAnswerImage("/image.png", "unused"),), started_at=10),), "next")
-        budget = len("中🌙# output".encode("utf-8"))
+        budget = len("中🌙# outputuser".encode("utf-8"))
         encoders = []
         def encode(*args, **kwargs):
             encoders.append(threading.get_ident())
@@ -2506,6 +2520,25 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 200, result)
             self.assertEqual("previewMessage" in result, len(turns) > 1)
             self.assertTrue(all("previewMessage" not in turn for turn in result["turns"]))
+
+    async def test_conversation_raw_budget_counts_session_agent_kind_and_source_id(self):
+        from netizen_cli.prompt_projection import ConversationInput
+        from netizen_cli.runtime.contracts import NativeConversationPage, NativeConversationTurn
+        from netizen_cli.management.blocking_io import BlockingIOExecutorSaturated
+
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.file_reads = SimpleNamespace(submit=AsyncMock(side_effect=BlockingIOExecutorSaturated()))
+        part = ConversationInput("来信正文", kind="session_agent", source_thread_id="完整来源🌙", source_is_side=True)
+        budget = len((part.text + part.kind + part.source_thread_id).encode("utf-8"))
+        page = NativeConversationPage("native", (NativeConversationTurn("turn", "inProgress", inputs=(part,)),))
+        with patch.object(self.management, "binding_conversation", AsyncMock(return_value=page), create=True):
+            for maximum, expected in ((budget, 200), (budget - 1, 503), (len(part.text.encode("utf-8")), 503)):
+                with self.subTest(maximum=maximum), patch("netizen_cli.admin.web.MAX_CONVERSATION_RAW_TEXT_BYTES", maximum):
+                    status, _, result = await self.json_get("/api/v1/sessions/conversation?bindingId=binding&threadId=native", session)
+                self.assertEqual(status, expected, result)
+                if status == 200:
+                    self.assertEqual(result["turns"][0]["inputs"][0]["source_thread_id"], part.source_thread_id)
 
     async def test_conversation_raw_saturation_fallback_rechecks_authentication(self):
         from netizen_cli.admin.web import _json_response

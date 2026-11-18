@@ -1216,7 +1216,7 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | `ThreadSubscriptionControl.unsubscribe`（[0028](adr/0028-release-idle-persistent-thread-subscriptions.md)） | 固定 `thread/unsubscribe`，供普通 Binding/Side 复用 | 能力门禁，固定 request/response。 | 公开等价 unsubscribe，独立于 Side boundary。 |
 | `ThreadDeleteControl`（[0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)、[0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)） | 固定 `thread/delete` | 生产构造须过独立 shape/synthetic，另需 disposable live；区分可信 RPC 拒绝与传输/响应未知，仅原生成功响应后删 Binding，无目录对账或自动重试。 | 公开等价 Delete facade。 |
 | `AppServerAccountRateLimits.read`（[0077](adr/0077-read-account-rate-limits-on-demand.md)） | 只读固定 `account/rateLimits/read` | 能力门禁；不消费通知、不维护账号状态。 | 公开等价额度读取 facade。 |
-| `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页 | shape/synthetic 与原生 paginated/legacy 探针；不替代运行终态或 Files 证据读取，不以全历史读取兜底失败。 | 公开等价历史分页 facade。 |
+| `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0101](adr/0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页。Admin 按页内顺序在期限内读取每轮首项（升序、`limit=1`、最多十轮），首项为 `functionCallOutput` 时替换 Summary 输入 | shape/synthetic 与原生 paginated/legacy 探针。首项读取失败按 [Admin 对话记录规则](#管理查询与操作) 降级，legacy `-32601` 不告警。运行终态与 Files 仍有各自的证据读取。 | 公开等价历史分页 facade。 |
 | `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
 
 Channel SDK 的卡片原始结构适配见 [ADR 0099](adr/0099-project-original-card-content-with-bounded-component-adapter.md)
@@ -2252,7 +2252,9 @@ UTF-8 字节限制。模型目录 ID 在 SDK 提交前解析为实际 model，�
 创建首条输入及后续跨会话来信构造明确 agent 来源和公开 SDK `ExternalMessage`，
 向 exact Thread 提交，由 Codex 在接收时选择 start/join。普通飞书、问题卡和定时输入
 保留原有 exact Turn 准入。Runtime 按实际返回的 Turn ID 复用既有消费者或建立新一轮
-消费者，不启动重复 `handle.run()`，不把旧轮结果改归属到新来信。
+消费者，不启动重复 `handle.run()`，不把旧轮结果改归属到新来信。原生确认加入运行中
+普通 Turn 时，与已确认的 steer 一样计入该轮“已接收调整”次数（过程卡与 `/status`）；
+加入失败或返回新 Turn 不计入原轮。
 
 Side 来信保留其真实 native Thread ID，飞书来源展示、origin 与执行归属均表达 Side，
 不借用 Parent 或虚构普通 Binding。兼容 `<codex_delegation>` 外层形状保持不变，
@@ -2969,18 +2971,38 @@ Project 行仅增加“查看会话”，以同一标准默认查询构造后覆
 
 物化持久普通会话提供“查看对话记录”，Lazy/Side 不显示（[ADR 0096](adr/0096-read-admin-conversations-through-summary-turn-pages.md)）。
 点击时校验准确 Binding/Thread，以 summary 视图读取十轮；最新轮位于下方，打开定位到
-最新。只有点击顶部“加载更早”才读取下一原生 cursor，不自动翻页。每轮展示第一条
-用户输入、终态最终回答、状态与原生实际存在的开始/完成时间；运行中轮也展示 summary
-实际返回的第一条用户输入，不显示未终态回答或 commentary；原生未返回输入时仅显示运行中。
-summary 不含 steer 追加输入。无轮、无回答、失败 error.message、读取失败和身份变化
-分别表达，不展示推理、commentary、工具参数/输出或输出文件。
+最新。只有点击顶部“加载更早”才读取下一原生 cursor，不自动翻页。每轮展示开启本轮的
+输入、终态最终回答、状态与原生实际存在的开始/完成时间。运行中轮也展示输入。
+按页内顺序为每轮读取第一条 item（同一 `thread/items/list` 端点，升序、`limit=1`），
+每页串行读取最多十次（[ADR 0101](adr/0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)）。
+
+首项为 `functionCallOutput` 时替换 Summary 输入。Admin 与 `read_thread` 共用识别规则，
+要求 namespace 为 `codex_tui` 或 `codex_app`，工具名为 `create_thread` 或
+`send_message_to_thread`，字符串输出符合当前委派信封格式，来源 Thread ID 至少含一个
+非空白字符。识别成功后展示“会话协作来信”、完整来源 ID 和完整正文，即使 Summary 里已有
+后来追加的 steer。仅当正文具有固定 Side 前缀时，按来源 ID 查询本实例的普通 Binding，
+确认没有对应 Binding 才去除前缀并标注临时 Side。查到 Binding 或查询出错时按普通来源
+原样保留正文。其他 `functionCallOutput`（含旧 `netizen_sessions` JSON 信封）只显示
+“外部输入 · 格式未识别”及占位。其他首项类型和空列表均保留 Summary 的 userMessage
+投影，没有 userMessage 时留空。
+
+补读共享本页在途名额和十秒外层期限。每次开始读取前检查期限，到期或读到
+`CodexError`、SDK 响应模型的 `ValidationError`、适配器的 `ThreadHistoryUnavailable`
+时停止本页后续读取。已读轮保留投影，未读轮保留 Summary 用户输入，仅对无 userMessage
+的未读轮显示“〔未能读取本轮首条输入〕”。legacy 的 `MethodNotFoundError`（`-32601`）
+不记 warning，其他失败或到期每页只记一次 warning，字段限 Thread ID、Turn ID 和错误类型。
+取消与外层超时继续传播，已经开始的 SDK 读取持有名额直至 worker 结束。
+十轮回退单轮时复用同一 Turn ID 已取得的输入投影（包括无输入与不可用），不重复补读。
+轮中加入的来信与 steer 不会单独展示；首项不可读时 Summary 中的 userMessage 可能是
+该轮的首条人工 steer。无轮、无回答、失败 error.message、读取失败和身份变化
+分别表达，不展示推理、commentary、其他工具参数/输出或输出文件。
 
 归档只读，不 resume/unarchive；不交互、不缓存、不预取、不写 SQLite。刷新丢弃更早页，
 重新读最新页。exact 身份前后校验、十秒请求期限和共享在途原生精读限额不变，超时
 不提前释放 worker。非法 cursor 明确拒绝并提示从最新重新读取，不回退完整 Thread。
 每次页读取的 Markdown 渲染和 JSON 编码合用文件预览 2 worker / 4 capacity 执行器的一次任务；
 十轮页回退到单轮时，同一请求最多提交两次任务。
-执行器繁忙时，本页输入、回答及展示元数据文本不超过 1 MiB，可在事件循环直接编码
+执行器繁忙时，本页输入、回答及展示元数据文本（含来信正文和来源会话 ID）不超过 1 MiB，可在事件循环直接编码
 无 Markdown HTML/图片的原文页，有回答时在页面级提示一次“排版预览暂不可用，已显示原文。”；超出才返回
 503。执行器关闭返回 503；排版执行器超时或 worker 结果未知（期限耗尽）改为返回 504，
 此前最近回答在这些情况下降级为原文。
@@ -3444,7 +3466,7 @@ callback 携带严格字段、类型及容量校验的只读展示快照，仅�
 单独提示重新发送 `/status` 获取可用入口；同一 render 的重复投递继续由 SDK 去重。
 动态字段使用纯文本组件，不解释 Markdown、HTML 或提及。
 卡片保留当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
-native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
+native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数（含加入该轮的会话协作来信）、上下文窗口
 用量、Model、Effort、Speed 和配置来源。若会话实际 cwd 位于 Git work tree 中，普通与
 Side `/status` 还会即时显示 Git `status --porcelain=v1 --branch` 的 branch header 内容；
 Netizen 只移除稳定的 `## ` 格式前缀，不自行解释普通分支、upstream、detached HEAD 或空
