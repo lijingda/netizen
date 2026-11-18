@@ -7,6 +7,48 @@
 旧版本、mock provider、API ACK、浏览器 fixture 和真实客户端证据不可互相替代。
 不在这里记录私有主机坐标；原始私有证据继续留在忽略文件或运维系统。
 
+<a id="sdk-0170-20261118"></a>
+
+## 2026-11-18：SDK 0.170.0 升级
+
+`0.169.0` → `0.170.0` 升级完成精确 Python 包与 bundled App Server 源码复核，并经独立复核
+交叉检查；中间版本 `0.169.1` 的 SDK 与 `0.169.0` 逐字节相同。SDK 手写层未变，只有生成模型
+中最终答案的审核展示指令改为版本化的 `show`/`hide`/`block`（openai/codex #60904），无法识别的
+指令收敛为已审核且无展示指令；Netizen 维持照常展示原生最终答案，决定见
+[design](design.md#暂缓接入的原生能力)。两版 App Server 的 stable 与 experimental 协议方法集合
+相同，resume 的两处改动只作用于带配置覆盖的 resume，Netizen 不传覆盖。cleanup 与 Activity
+保留原门禁，使用新版源码指纹
+`3ffb6a62903902887c952f04c6d0556223f22093a6693faf17ffae8458fb94b7`；没有字段门禁触发。
+
+本机 `make check` 通过，执行 4,344 项测试（15 项条件跳过），包括 ruff、mypy、编译、依赖一致性
+与 SDK synthetic 门禁。以下运行均在干净提交 `5b21bf9` 上经 `run_upgrade_regression.py --live`
+执行，Linux x86_64 源码 checkout、CPython 3.11；源码运行中未变，无残留进程、清理失败或超时，
+disposable cwd 已删除。后续提交只改文档、注释与测试。
+
+首轮全集 49 项中 36 项通过。13 项失败与账号请求限流同时发生：Codex 日志记录到模型请求反复收到
+`429 Too Many Requests` 与 `Selected model is at capacity`，服务端指示等待 100 秒以上，超过探针
+时限，Turn 停在进行中或要求的命令未执行。原生 phase 使用当时 Codex 配置的默认模型
+`gpt-6.2-astra`。失败项随后用 SDK 公开的进程级 `config_overrides` 指定模型重跑（只作用于本次
+验证进程，不写用户配置）：`gpt-6.2-sol` 下 5 项通过，其余 8 项仍遇 429；`gpt-6.1-sol` 下剩余 8 项
+全部通过。合计 49 项均有一次通过，无跳过；其中 3 项在 `gpt-6.2-sol` 重跑的失败时段没有直接的
+429 日志，只表现为相同的无采样进展，限流归因为推断。
+
+全部 17 个真实账号原生 phase 通过，facade inventory 无候选迁移。同一账号的只读额度、持久 fork、
+后台命名、child Files、只读 Skill roots 与 Skills 七阶段、调度五阶段及 Project 删除专项通过；
+调度 binding 阶段的 exact-Turn steer 在重跑中按回执交付并进入最终答案。
+
+真实 bundled App Server 加 loopback mock provider 的隔离探针 20 项通过：provider 保留与冷恢复
+拒绝；原生边界 7 项，其中 idle 场景 unsubscribe ACK 约 1 ms 返回，10.002 秒出现慢关闭告警，
+closing 期间得到精确 closing 文案，释放后关闭并按 exact ID 恢复，慢关闭注入的读取前提在 0.170
+未变；归档恢复、删除拒绝、阶段性答案、会话协作、取消、响应恢复 7 项（含 `cold_permissions`）、
+Admin 会话、历史分页、输入附件、定时 Worktree、定时自动归档与 cwd 探针。取消探针记录的 Goal
+续流观测缺口仍在。
+
+审核展示指令的真实出现形态只有协议、回落规则与合成检查证据；rollout 新增的模型 ID 序号在降级或
+与旧版客户端共享 `$CODEX_HOME` 时的兼容性、Bedrock/Vertex 增量工具声明的真实工具续轮、真实组织
+provider 策略均未验证。以上不包含真实飞书投递、客户端显示或 Linux/macOS 服务部署/ready 验收；
+本次没有发布、更新或重启已有实例。
+
 <a id="sdk-0169-20261115"></a>
 
 ## 2026-11-14 至 2026-11-15：SDK 0.169.0 升级
