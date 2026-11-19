@@ -22,6 +22,7 @@ from ..bindings import (
     ProjectNotFound,
     ThreadBinding,
 )
+from ..codex_runtime import CodexRuntime
 from .topics import TopicMessage, TopicPublishError, complete_fresh_topic, send_topic_message
 from ..feishu_links import topic_open_url
 from ..runtime.contracts import (
@@ -57,6 +58,7 @@ from ..message_history import (
 )
 from ..sdk_gap_adapter import SkillCatalogError
 from ..sdk_gap_adapter import GoalControlError
+from ..schedules.service import iso_minutes
 from ..delegation_envelope import SIDE_SOURCE_NOTICE, delegated_prompt
 from ..sessions.errors import SessionToolError
 from ..sessions.sources import SessionSource, resolve_session_source
@@ -72,8 +74,43 @@ from .forks import ForkChannel
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
 
 
+def _current_reply_turn(runtime: CodexRuntime, binding_id: str, thread_id: str, turn_id: str) -> str | None:
+    if runtime.lifecycle_state(binding_id) is not None:
+        return None
+    ordinary = runtime.turn_activity(binding_id, thread_id=thread_id, turn_id=turn_id)
+    if ordinary is not None and ordinary.state is ActiveState.RUNNING:
+        return ordinary.turn_id
+    goal = runtime.goal_activity(binding_id, thread_id=thread_id)
+    if goal is not None and goal.physical_turn_id == turn_id and goal.state is GoalOperationState.RUNNING:
+        return goal.logical_turn_id
+    return None
+
+
 class SessionToolChannel(ForkChannel):
     """Session collaboration tool entries and reply suppression."""
+
+    async def report_run_outcome(self, *, source_thread_id: str, source_turn_id: str, outcome: str) -> dict[str, Any]:
+        binding = self._bindings.find_by_native_thread_id(source_thread_id)
+        if binding is None or self._bindings.get_scope(binding.scope_key).app_id != self._app_id:
+            return {"error": {"code": "not_scheduled_topic", "message": "No scheduled task owns this session. Do not retry in this session."}}
+        schedules = self._bindings.schedules
+        run = schedules.new_topic_run_for_binding(binding.id)
+        if run is None:
+            return {"error": {"code": "not_scheduled_topic", "message": "No scheduled task owns this topic. Do not retry in this session."}}
+        if run.binding_removed:
+            return {"error": {"code": "run_unavailable", "message": "The scheduled task session was deleted. Do not retry in this session."}}
+        if _current_reply_turn(self._runtime, binding.id, source_thread_id, source_turn_id) is None:
+            return {"error": {"code": "invalid_call_context", "message": "Only the current physical Turn may report. Do not retry in this session."}}
+        plan = schedules.get(run.plan_id, include_deleted=True)
+        timezone = plan.schedule.timezone if plan.schedule else "UTC"
+        if not schedules.record_self_reported_outcome(run.id, binding.id, outcome):
+            return {"error": {"code": "run_unavailable", "message": "The scheduled task is unavailable. Do not retry in this session."}}
+        return {
+            "recorded": True, "outcome": outcome,
+            "task": {"plan_name": plan.name or None, "triggered_at": iso_minutes(run.due_at, timezone)},
+            "instruction": "Only this scheduled task's assessment was updated. Continue the Turn normally. "
+                           "Result delivery is unchanged. Report again if your assessment changes.",
+        }
 
     async def suppress_reply(self, *, source_thread_id: str, source_turn_id: str) -> dict[str, Any]:
         """Record a caller's exact physical Turn choice without changing execution."""
@@ -82,17 +119,7 @@ class SessionToolChannel(ForkChannel):
         )
         reply_turn_id = None
         if isinstance(source, ThreadBinding):
-            if self._runtime.lifecycle_state(source.id) is None:
-                ordinary = self._runtime.turn_activity(
-                    source.id, thread_id=source_thread_id, turn_id=source_turn_id,
-                )
-                if ordinary is not None and ordinary.state is ActiveState.RUNNING:
-                    reply_turn_id = ordinary.turn_id
-                else:
-                    goal = self._runtime.goal_activity(source.id, thread_id=source_thread_id)
-                    if (goal is not None and goal.physical_turn_id == source_turn_id
-                            and goal.state is GoalOperationState.RUNNING):
-                        reply_turn_id = goal.logical_turn_id
+            reply_turn_id = _current_reply_turn(self._runtime, source.id, source_thread_id, source_turn_id)
         else:
             side = self._runtime.side_turn_activity(
                 source.side_id, thread_id=source_thread_id, turn_id=source_turn_id,

@@ -393,9 +393,7 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
                         )
                     unarchived = True
                 try:
-                    thread = await self._codex.thread_resume(
-                        binding.native_thread_id, include_turns=False
-                    )
+                    thread = await self._resume_native_thread(binding.native_thread_id)
                 except InvalidRequestError as error:
                     provider_rejection = _model_provider_rejection(error)
                     if provider_rejection is not None:

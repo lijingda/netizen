@@ -26,7 +26,7 @@ from mcp.types import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
-from ..mcp_transport import EmbeddedMcpRunner, native_thread_id as _native_thread_id
+from ..mcp_transport import ProcessMcpRunner, native_thread_id as _native_thread_id
 from ..mcp_transport import MAX_BODY_BYTES  # noqa: F401 - re-exported with the schedule MCP limits
 from ..worktrees.policy import WorkspacePolicy, WorkspacePolicyError
 
@@ -74,6 +74,7 @@ For binding, omitted target_binding_id uses the calling ordinary Thread's exact 
 For new_topic, create copies the calling Binding's session settings once; later Binding changes do not change the plan. session_settings is a partial override: turn_settings=null explicitly inherits native Codex settings; a model override supplies all three IDs. Other fields control reaction pulse, progress card and message context. Use options to discover current model/effort/service-tier IDs and defaults when choosing settings; ordinary creation needs no preliminary options call. A private target supports only current-only; an inherited catch-up default is normalized, but explicitly requesting catch-up is rejected. Updating unrelated fields retains the plan's settings even if its model is no longer available.
 For new_topic, workspace is a complete policy object: {"mode":"project"}, {"mode":"existing","worktree_id":"exact managed ID"}, {"mode":"new"}, or {"mode":"new","ref":"refs/heads/main"}. Omitted workspace on create uses the Project directory; omitted workspace on update preserves the saved policy. It never reads chat defaults or inherits the caller's Worktree. existing shares that resource's current files and branch; new creates one detached Worktree per accepted run, using that execution's Project HEAD when ref is omitted. Saving/options never creates directories. Use options with project and optional expected_project_revision to discover available choices; an exact known ID can be used directly without another lookup. Missing, replaced or unreadable resources block execution without fallback; inspect workspace_error and can_run_now. enabled stays unchanged. Unrelated edits may preserve an unavailable policy. run_now cannot override workspace. Do not create Worktrees yourself to simulate the new policy.
 For new_topic, auto_archive is an optional boolean completion policy, disabled by default. When enabled, the created conversation is archived after its initial Turn completes without error and its existing result delivery to Feishu succeeds. This measures process success, not business-goal fulfillment. The saved value is fixed when a scheduled or manual occurrence is claimed; later plan edits do not change that occurrence. Restore archived conversations through /sessions archived. Omit auto_archive on update to retain it; binding targets and run_now arguments do not accept this field.
+For new topics with a created session, agent_self_assessment in list/view/runs is the agent's latest report (succeeded, failed, or unreported). It is independent of execution status, delivery, and automatic archiving.
 Recurring daily/weekly/interval schedules have no cutoff by default. Optional schedule.end_at is an inclusive cutoff timestamp with an explicit UTC offset and minute precision; turn a requested cutoff date into a specific time and timezone. Once schedules cannot use end_at.
 Providing schedule on update replaces the whole rule: include unchanged kind/time/timezone and end_at to keep them. To remove end_at, omit it or set it to null in the replacement schedule. Omitting schedule entirely keeps the existing rule and cutoff.
 Use the exact fields mode, instructions and schedule.kind. After invalid_request, correct the indicated fields and call cron_manage again; no shell commands or resource listing are needed to repair arguments.
@@ -326,7 +327,7 @@ def _error(code: str, message: str) -> CallToolResult:
     return _result({"ok": False, "error": {"code": code, "message": message}})
 
 
-class ScheduleMcpRunner(EmbeddedMcpRunner):
+class ScheduleMcpRunner(ProcessMcpRunner):
     """The scheduled-plan adapter over the shared process MCP transport."""
 
     def __init__(self) -> None:

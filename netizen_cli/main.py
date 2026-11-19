@@ -91,6 +91,7 @@ from .sdk_gap_adapter import (
 )
 from .settings import Settings
 from .schedules.mcp import ScheduleMcpRunner
+from .schedules.outcome_mcp import OutcomeMcpRunner
 from .schedules.scheduler import Scheduler
 from .sessions.mcp import SessionMcpRunner
 from .sessions.policy import SessionPolicyService
@@ -197,12 +198,18 @@ class ServiceCore:
         self._admin: AdminWebRunner | None = None
         self._schedule_mcp: ScheduleMcpRunner | None = None
         self._session_mcp: SessionMcpRunner | None = None
+        self._outcome_mcp: OutcomeMcpRunner | None = None
         self._session_service: SessionService | None = None
         self._session_policy: SessionPolicyService | None = None
         self._scheduler: Scheduler | None = None
         self.application: ChannelApplication | None = None
         self._started = False
         self._closed = False
+
+    def _outcome_thread_config(self, app_id: str) -> dict[str, object] | None:
+        if self._outcome_mcp is not None and app_id == self._settings.app_id:
+            return self._outcome_mcp.thread_config()
+        return None
 
     async def start(self) -> None:
         stage_started_at = time.monotonic()
@@ -246,6 +253,12 @@ class ServiceCore:
             await self._schedule_mcp.bind()
             self._session_mcp = SessionMcpRunner()
             await self._session_mcp.bind()
+            self._outcome_mcp = OutcomeMcpRunner()
+            try:
+                await self._outcome_mcp.bind()
+            except Exception as error:
+                logger.warning("scheduled outcome MCP bind failed: %s", type(error).__name__)
+                self._outcome_mcp = None
             stage_started_at = _log_startup_timing("Schedule MCP listener", stage_started_at)
 
             expired_sides = self._store.expire_live_side_topics()
@@ -265,6 +278,7 @@ class ServiceCore:
                         **os.environ,
                         **self._schedule_mcp.app_server_env,
                         **self._session_mcp.app_server_env,
+                        **(self._outcome_mcp.app_server_env if self._outcome_mcp else {}),
                         "NETIZEN_ROOT": str(self._instance_root),
                     },
                 )
@@ -310,6 +324,7 @@ class ServiceCore:
                 logger.warning("native Turn activity observation unavailable: %s", error)
             self._runtime = CodexRuntime(
                 codex=self._codex,
+                outcome_thread_config=self._outcome_thread_config if self._outcome_mcp else None,
                 bindings=self._store,
                 terminal_cleanup=terminal_cleanup,
                 skill_catalog=skill_catalog,
@@ -395,6 +410,8 @@ class ServiceCore:
                 worktrees=worktrees,
             )
             self._session_mcp.attach(self._session_service.call)
+            if self._outcome_mcp is not None:
+                self._outcome_mcp.attach(self.application.report_run_outcome)
             self._scheduler = Scheduler(
                 bindings=self._store, runtime=self._runtime,
                 app_id=self._settings.app_id,
@@ -422,6 +439,8 @@ class ServiceCore:
             self._schedule_mcp.open_admission()
         if self._session_mcp is not None:
             self._session_mcp.open_admission()
+        if self._outcome_mcp is not None:
+            self._outcome_mcp.open_admission()
         if self._scheduler is not None:
             self._scheduler.start()
 
@@ -447,6 +466,12 @@ class ServiceCore:
             self._session_mcp.close_admission()
             await _cleanup_with_budget(
                 "partial session MCP close", self._session_mcp.close,
+                deadline=deadline, cap=5,
+            )
+        if self._outcome_mcp is not None:
+            self._outcome_mcp.close_admission()
+            await _cleanup_with_budget(
+                "partial outcome MCP close", self._outcome_mcp.close,
                 deadline=deadline, cap=5,
             )
         if self._admin is not None:
@@ -501,6 +526,8 @@ class ServiceCore:
                 self._schedule_mcp.close_admission()
             if self._session_mcp is not None:
                 self._session_mcp.close_admission()
+            if self._outcome_mcp is not None:
+                self._outcome_mcp.close_admission()
             if self._admin is not None:
                 self._admin.close_admission()
             try:
@@ -547,6 +574,11 @@ class ServiceCore:
             if self._session_mcp is not None:
                 await _cleanup_with_budget(
                     "session MCP handler drain", lambda: self._session_mcp.drain(deadline),
+                    deadline=deadline, cap=10,
+                )
+            if self._outcome_mcp is not None:
+                await _cleanup_with_budget(
+                    "outcome MCP handler drain", lambda: self._outcome_mcp.drain(deadline),
                     deadline=deadline, cap=10,
                 )
             if self._scheduler is not None:
@@ -629,6 +661,11 @@ class ServiceCore:
                     if self._session_mcp is not None:
                         await _cleanup_with_budget(
                             "session MCP transport close", self._session_mcp.close,
+                            deadline=deadline, cap=5,
+                        )
+                    if self._outcome_mcp is not None:
+                        await _cleanup_with_budget(
+                            "outcome MCP transport close", self._outcome_mcp.close,
                             deadline=deadline, cap=5,
                         )
                     await _cleanup_with_budget(

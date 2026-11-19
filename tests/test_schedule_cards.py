@@ -1097,6 +1097,15 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertEqual(repeated.payload, {**decoded.payload,
             "schedule": {**decoded.payload["schedule"], "kind": "weekly", "weekdays": [0, 1, 2, 3, 4]}})
 
+    def test_self_assessment_in_summary_and_recent_runs(self):
+        plan = {**self.plan, "latest_run": {"due_local": "09:00", "agent_self_assessment": "failed"}}
+        card = schedule_manager_card(self.scope, {"plans": [plan]}, selected={"plan": plan},
+            runs={"runs": [{"status": "failed", "agent_self_assessment": "succeeded"},
+                           {"status": "completed", "agent_self_assessment": "unreported"},
+                           {"status": "starting", "agent_self_assessment": None}]})
+        for label in ("目标达成", "目标未达成", "未自评"):
+            self.assertEqual(str(card.card).count("Agent 自评：" + label), 1)
+
     def test_delete_uses_exact_native_confirmation_and_runs_stay_in_manager(self):
         detail = schedule_manager_card(self.scope, {"plans": [self.plan]}, selected={"plan": self.plan, "inflight": True})
         delete = decode_schedule_action(scope=self.scope, value=callback(detail, "删除计划"))

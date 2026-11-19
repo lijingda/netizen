@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1022,6 +1023,36 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(binding.id, "scheduled-native-" + claim.run.id)
         self.store.mark_scheduled_turn_started(claim.run.id, binding.id, "initial-turn")
         return plan, claim.run.id, self.store.get(binding.id)
+
+    async def test_agent_assessment_projection_for_all_management_modes(self):
+        plan, run_id, binding = await self.run_fixture()
+        run = self.store.schedules.get_run(run_id)
+        for changes, expected in (
+            ({}, "unreported"), ({"binding_removed": True}, None),
+            ({"initial_turn_id": None, "barrier": "released", "error_code": "input_rejected"}, "unreported"),
+            ({"binding_removed": True, "self_reported_outcome": "failed"}, "failed"),
+            ({"binding_id": "missing", "self_reported_outcome": "succeeded"}, "succeeded"),
+            ({"target_kind": "binding"}, None), ({"binding_id": None}, None),
+        ):
+            with self.subTest(changes=changes):
+                value = await self.service._run(replace(run, **changes), timezone="UTC", deadline=0,
+                                                slots=asyncio.Semaphore(1), observed="failed")
+                self.assertEqual(value["agent_self_assessment"], expected)
+                self.assertNotIn("self_reported_outcome", value)
+        self.store.schedules.record_self_reported_outcome(run_id, binding.id, "succeeded")
+        self.runtime.states[binding.id, "initial-turn"] = "failed"
+        for mode, args in (("list", {"all": True}), ("view", {"plan_id": plan["id"]}),
+                           ("runs", {"plan_id": plan["id"]})):
+            response = await self.service.manage({"mode": mode, **args})
+            self.assertTrue(response["ok"], response)
+            if mode == "runs":
+                value = response["runs"][0]
+            else:
+                projected = response["plans"][0] if mode == "list" else response["plan"]
+                self.assertEqual(projected["latest_run"]["agent_self_assessment"], "succeeded")
+                value = projected["execution"]
+            self.assertEqual((value["status"], value["agent_self_assessment"]), ("failed", "succeeded"))
+            self.assertNotIn("self_reported_outcome", str(response))
 
     async def test_pending_execution_precedes_newer_skipped_result_and_list_is_read_only(self):
         plan, run_id, binding = await self.run_fixture()

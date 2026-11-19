@@ -722,7 +722,7 @@ class ScheduleService:
                 value["execution"].update({
                     key: projection[key] for key in (
                         "status", "native_thread_id", "scope_key", "feishu_url",
-                        "worktree_id", "worktree",
+                        "worktree_id", "worktree", "agent_self_assessment",
                     )
                 })
         return [value for value, _run in snapshots]
@@ -775,7 +775,7 @@ class ScheduleService:
         value["target_label"] = plan.chat_id
         value["schedule"] = plan.schedule.to_dict() if plan.schedule else None
         timezone = plan.schedule.timezone if plan.schedule else "UTC"
-        value["next_due_local"] = _iso(plan.next_due_at, timezone) if plan.next_due_at is not None else None
+        value["next_due_local"] = iso_minutes(plan.next_due_at, timezone) if plan.next_due_at is not None else None
         pending = self._store.pending_for_plan(plan.id)
         lifecycle = plan_lifecycle(plan, now=now, has_pending=pending is not None)
         value["lifecycle"] = asdict(lifecycle)
@@ -788,10 +788,10 @@ class ScheduleService:
             run = latest[0]
             value["latest_run"] = {
                 "id": run.id, "due_at": run.due_at, "phase": run.phase,
-                "trigger_source": run.trigger_source,
+                "trigger_source": run.trigger_source, "agent_self_assessment": _agent_self_assessment(run),
                 "error_code": run.error_code, "binding_id": run.binding_id,
                 "worktree_id": run.worktree_id, "worktree": self._worktree_receipt(run),
-                "due_local": _iso(run.due_at, timezone),
+                "due_local": iso_minutes(run.due_at, timezone),
             }
         selected = pending or (latest[0] if latest else None)
         value["execution"] = {
@@ -799,9 +799,10 @@ class ScheduleService:
             "status": "expired" if lifecycle.ended else "not_started",
             "is_last": selected is not None and not lifecycle.has_trigger,
             "run_id": selected.id if selected else None,
+            "agent_self_assessment": None,
             "trigger_source": selected.trigger_source if selected else None,
             "due_at": selected.due_at if selected else None,
-            "due_local": _iso(selected.due_at, timezone) if selected else None,
+            "due_local": iso_minutes(selected.due_at, timezone) if selected else None,
             "native_thread_id": None, "scope_key": None, "feishu_url": None,
             "worktree_id": selected.worktree_id if selected else None,
             "worktree": self._worktree_receipt(selected) if selected else None,
@@ -855,11 +856,13 @@ class ScheduleService:
 
     async def _run(self, run: Run, *, timezone: str, deadline: float, slots: asyncio.Semaphore, observed: str | None = None) -> dict[str, Any]:
         value = asdict(run)
+        del value["self_reported_outcome"]
+        value["agent_self_assessment"] = _agent_self_assessment(run)
         value["worktree"] = self._worktree_receipt(run)
         status = run.error_code or ("starting" if run.barrier == "held" else "unknown")
         if run.barrier == "unknown" or run.error_code == "publishing_unknown":
             status = "unknown"
-        value.update(status=status, due_local=_iso(run.due_at, timezone), native_thread_id=None, scope_key=None, feishu_url=None)
+        value.update(status=status, due_local=iso_minutes(run.due_at, timezone), native_thread_id=None, scope_key=None, feishu_url=None)
         anchor_id = run.origin_message_id if run.target_kind == "binding" else run.root_message_id
         if anchor_id:
             value["feishu_url"] = "https://applink.feishu.cn/client/chat/open?" + urlencode({"openChatId": run.chat_id, "messageId": anchor_id})
@@ -918,6 +921,14 @@ class ScheduleService:
         except WorktreeNotFound:
             return {"id": run.worktree_id, "root": None, "cwd": None, "creation_state": None}
         return {"id": record.id, "root": record.root, "cwd": record.cwd, "creation_state": record.creation_state}
+
+
+def _agent_self_assessment(run: Run) -> str | None:
+    if run.target_kind != "new_topic" or not run.binding_id:
+        return None
+    if run.binding_removed:
+        return run.self_reported_outcome
+    return run.self_reported_outcome or "unreported"
 
 
 def _models(catalog: ModelCatalog | None) -> list[dict[str, Any]]:
@@ -980,12 +991,12 @@ def _decode_cursor(value: Any, identity: object) -> str | None:
         raise ScheduleError("分页游标无效或筛选条件已改变，请从第一页重新查询。") from error
 
 
-def _iso(stamp: float, timezone: str = "UTC") -> str:
+def iso_minutes(stamp: float, timezone: str = "UTC") -> str:
     return datetime.fromtimestamp(stamp, ZoneInfo(timezone)).isoformat(timespec="minutes")
 
 
 def _preview(rule: ScheduleRule, now: float) -> list[dict[str, str]]:
-    return [{"utc": _iso(stamp), "local": _iso(stamp, rule.timezone)}
+    return [{"utc": iso_minutes(stamp), "local": iso_minutes(stamp, rule.timezone)}
             for stamp in rule.preview(now)]
 
 

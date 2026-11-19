@@ -663,6 +663,13 @@ class FakeSessionMcpRunner(FakeScheduleMcpRunner):
     app_server_env = {"NETIZEN_SESSION_MCP_TOKEN_TEST": "temporary-session-token"}
 
 
+class FakeOutcomeMcpRunner(FakeScheduleMcpRunner):
+    app_server_env = {"NETIZEN_RUN_OUTCOME_TOKEN_TEST": "temporary-outcome-token"}
+
+    def thread_config(self):
+        return {"mcp_servers.netizen_run_outcome_test": {}}
+
+
 class FakeScheduler:
     def __init__(self, events: list[str], **options: object) -> None:
         self.events = events
@@ -741,6 +748,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             self.session_mcp_runners.append(runner)
             return runner
 
+        self.outcome_runner = FakeOutcomeMcpRunner([])
+        self.enterContext(patch("netizen_cli.main.OutcomeMcpRunner", return_value=self.outcome_runner))
         self.enterContext(patch("netizen_cli.main.ScheduleMcpRunner", make_mcp))
         self.enterContext(patch("netizen_cli.main.SessionMcpRunner", make_session_mcp))
         self.enterContext(patch("netizen_cli.main.Scheduler", make_scheduler))
@@ -823,6 +832,26 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.schedule_events.count("mcp:close"), 1)
         self.assertNotIn("mcp:open", self.schedule_events)
 
+    async def test_outcome_bind_failure_starts_without_thread_mount(self):
+        self.outcome_runner.bind_error = OSError("private diagnostic")
+        with tempfile.TemporaryDirectory() as raw:
+            core = self._make_core(Path(raw))
+            codex = SimpleNamespace(close=AsyncMock())
+            codex.__aenter__ = AsyncMock(return_value=codex)
+            cleanup = SimpleNamespace(clean_thread=AsyncMock(), has_running=AsyncMock(), unsubscribe=AsyncMock())
+            with (patch("netizen_cli.main.AsyncCodex", return_value=codex) as constructor,
+                  patch("netizen_cli.main.PinnedExperimentalTerminalCleanup", return_value=cleanup),
+                  patch("netizen_cli.main.AppServerThreadSubscriptionControl", return_value=cleanup),
+                  self.assertLogs("netizen_cli.main", "WARNING") as logs):
+                await core.start()
+                core.open_admission()
+                self.assertIsNone(core._outcome_mcp)
+                self.assertIsNone(core._runtime._outcome_thread_config)
+                self.assertNotIn("NETIZEN_RUN_OUTCOME_TOKEN_TEST", constructor.call_args.args[0].env)
+                await core.close()
+            self.assertEqual([entry.getMessage() for entry in logs.records if "outcome MCP" in entry.getMessage()],
+                             ["scheduled outcome MCP bind failed: OSError"])
+
     async def test_missing_administrator_rejects_before_listener_or_codex(self) -> None:
         from netizen_cli.cli_setup import SetupError
 
@@ -879,6 +908,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
 
             async def send_session_message(self, **kwargs: object) -> dict:
                 raise AssertionError("recovery cannot submit a session input")
+
+            async def report_run_outcome(self, **kwargs: object) -> dict:
+                raise AssertionError("recovery cannot report an assessment")
 
             async def suppress_reply(self, **kwargs: object) -> dict:
                 raise AssertionError("recovery cannot suppress a reply")
@@ -1058,6 +1090,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     core._session_mcp.callback, core._session_service.call,
                 )
                 self.assertEqual(core._session_service._suppress_reply, core.application.suppress_reply)
+                self.assertEqual(core._outcome_mcp.callback, core.application.report_run_outcome)
+                self.assertEqual(core._runtime._outcome_thread_config(configured.app_id), core._outcome_mcp.thread_config())
+                self.assertIsNone(core._runtime._outcome_thread_config("cli_other"))
                 self.assertNotIn("mcp:open", self.session_events)
                 self.assertEqual(core._management._updates.product_root, instance_root)
                 self.assertNotIn("admin:open", events)
@@ -1629,7 +1664,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             config.env,
             captured_environment | FakeScheduleMcpRunner.app_server_env
-            | FakeSessionMcpRunner.app_server_env
+            | FakeSessionMcpRunner.app_server_env | FakeOutcomeMcpRunner.app_server_env
             | {"NETIZEN_ROOT": str(root.resolve())},
         )
         self.assertEqual(len(cleanup_codex), 1)

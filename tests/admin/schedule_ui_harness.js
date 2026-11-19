@@ -125,7 +125,7 @@ async function fixtureResponse(path, options = {}) {
   if (mode === "runs" && failRuns) throw new Error("记录刷新失败");
   if (mode === "view") return { ok: true, plan: viewedPlan || fixturePlan(), preview: previewTimes || times, inflight: true };
   if (mode === "runs") return { ok: true, runs: runRecords || [
-    { id: "run-one", binding_id: "binding-exact", due_at: 1893459600, status: "released", trigger_source: "manual",
+    { id: "run-one", binding_id: "binding-exact", due_at: 1893459600, status: "released", trigger_source: "manual", agent_self_assessment: "unreported",
       feishu_url: "https://applink.feishu.cn/client/message/link?token=om_root" },
   ], next_cursor: "runs-page" };
   if (failList) throw new Error("列表暂不可用");
@@ -787,7 +787,7 @@ async function chooseScheduleTarget(value) {
     const manualPlan = { ...fixturePlan(), ...scenario };
     if (scenario.runNow === false) manualPlan.actions.run_now = null;
     manualPlan.lifecycle = { ended: scenario.ended || false, has_future: !scenario.ended, has_trigger: !scenario.ended };
-    manualPlan.execution = { kind: "latest", status: "completed", trigger_source: "manual" };
+    manualPlan.execution = { kind: "latest", status: "completed", agent_self_assessment: "failed", trigger_source: "manual" };
     plans = [manualPlan];
     await loadSchedules();
     const row = document.querySelector("#schedules-body").querySelector("tr");
@@ -796,6 +796,7 @@ async function chooseScheduleTarget(value) {
     assert.equal(button.disabled, scenario.runNow === false);
     assert.match(row.querySelector(".schedule-execution").textContent, /手动触发/);
     assert.match(row.querySelector(".schedule-execution").textContent, /上次已完成/);
+    assert.match(row.querySelector(".schedule-execution").textContent, /Agent 自评：目标未达成/);
     const before = posts.length;
     if (button.disabled) await runSchedule(state.schedules.plans[0], button);
     assert.equal(posts.length, before);
@@ -804,10 +805,15 @@ async function chooseScheduleTarget(value) {
   // The action grant governs availability even when display metadata differs.
   plans = [{ ...fixturePlan(), inflight: true, blocked_reason: "target_inactive" }];
   viewedPlan = fixturePlan();
-  viewedPlan.execution = { kind: "current", status: "starting", trigger_source: "manual" };
+  viewedPlan.execution = { kind: "current", status: "starting", agent_self_assessment: "succeeded", trigger_source: "manual" };
   await showSchedule("plan-exact");
   assert.match(scheduleInput("detail-state").textContent, /手动触发/);
+  assert.match(scheduleInput("detail-state").textContent, /Agent 自评：目标达成/);
+  assert.match(scheduleInput("runs-body").textContent, /Agent 自评：未自评/);
   assert.match(scheduleInput("runs-body").textContent, /手动触发/);
+  viewedPlan.execution.agent_self_assessment = "unknown_value";
+  await showSchedule("plan-exact");
+  assert.doesNotMatch(scheduleInput("detail-state").textContent, /·\s*(?:·|$)/);
 
   // One click starts an exact saved plan, without editing or confirmation.
   // Duplicate clicks cannot race the outstanding request or its consumed grant.

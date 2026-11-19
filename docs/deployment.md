@@ -207,6 +207,10 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 并执行后文规定的门禁。该流程落实 [ADR 0014](adr/0014-use-removable-sdk-gap-adapters.md#sdk-升级-harness)
 及[SDK 适配边界](design.md#sdk-适配边界)；测试通过只证明已覆盖行为，不能代替能力与产品语义审查。
 
+每次升级都运行[定时话题挂载探针](../scripts/probe_scheduled_outcome_mount.py)完整矩阵
+（[ADR 0102](adr/0102-record-agent-self-assessment-for-scheduled-topic-runs.md)）。若点号键合并、
+隔离、冷恢复挂载或原生调用身份退化，先停用该挂载再升级，保留正常任务执行。
+
 1. **确定比较基线。** 记录升级前实际锁定的 SDK/CLI 版本与目标版本；请求“最新版”时
    核实最新稳定发布，区分 SDK 包、随附 CLI/App Server 与模型目录的变化。阅读对应官方更新
    记录，并比较两个精确版本的安装包或源码；开发主线文档不能代替目标发布的实际实现。
@@ -431,6 +435,12 @@ Goal 管理/回复分离（ADR 0084）的控制变化另运行
 同流 resume、clear 不 interrupt，清除后当前 Turn 仍交付，以及 `/stop` 的 pause、exact
 interrupt 和 cleanup；同时复验 `goal_partial_rollover` 与受影响的取消场景。它们使用
 生产 Runtime/Adapter，不将本地 mock 模型结果宣称为真实模型或飞书展示验收。
+
+定时新话题自评挂载（ADR 0102）、原生 Thread 加载路径或 MCP 环境变化时，运行
+`timeout 300 .venv/bin/python scripts/probe_scheduled_outcome_mount.py`，可用 `--case`
+选取场景、`--output` 保存证据，完整验收运行全部场景。它使用生产自评 runner 与挂载构造函数、
+临时 HOME/CODEX_HOME 和本地 mock provider，覆盖点号键隔离、整表反例、冷暖恢复、重启、
+fork、子 agent 拒绝与不可达端点；不替代真实模型的自评时机或飞书展示验收。
 
 取消、incomplete response 或冷恢复权限变化时，另运行
 `scripts/probe_sdk_cancellation.py`（外部 180 秒 deadline）和
@@ -774,6 +784,7 @@ phase，以新结果为准。
 
 | 记录 / 版本 | 验证层级 | 未覆盖与复验入口 |
 | --- | --- | --- |
+| 2026-11-19，`0.170.0`（2026-11-18 另以 `0.169.0` 验证） | bundled App Server 和 mock provider 通过 Agent 自评挂载的点号键隔离、冷暖恢复、归档恢复、重启、fork、子 agent 拒绝和不可达端点测试，用户配置保持原值 | 升级或挂载变动须复验完整矩阵；真实模型自评时机和飞书展示另验 |
 | [2026-09-23](compatibility-history.md#scheduler-binding-20260923)，`0.155.1` / `gpt-5.6-sol` | 原生 binding start/steer 与 MCP CRUD；飞书替身 | 真实锚点/catch-up/客户端和归档恢复端到端；复验 binding、mcp |
 | [2026-09-22](compatibility-history.md#scheduler-phases-20260922)，`0.155.1` | 原生 mcp、mcp-recovery、dispatch、manual；传输替身 | 无新版真实飞书端到端证据；复验相应四阶段 |
 | 同记录中的 `0.147.0` 基线 | 真实飞书五类来源默认目标/Project，三类聊天首轮与结果归属 | 不证明 `0.155.1`、任意自然语言无歧义或模型即时发现/生成 |
@@ -846,7 +857,7 @@ Scheduler/MCP 的进程归属、环境继承、ready 前准入、停机排空及
 与[完成后策略](design.md#新话题完成后自动归档)。以下列出验证要求，实际结果另记于本节
 末尾；既有手动归档或旧调度探针的结果不能直接证明该策略已验收。本轮不包含部署或发布。
 
-- 数据与三个管理入口：冻结 v19 → v20、完整 v14 → v21 路径、新库等价、重复启动与
+- 数据与三个管理入口：冻结 v19 → v20、完整 v14 → v22 路径、新库等价、重复启动与
   失败回滚；旧计划和墓碑默认关闭。`auto_archive` 为独立严格布尔值，创建省略关闭、
   更新省略保留，原会话显式设置拒绝；Admin、`/cron` 和 MCP 查询、编辑、草稿恢复一致。
 - 认领与交接：自动到期和立即运行均从 `Claim.plan` 捕获选项，之后修改、暂停或删除
@@ -997,14 +1008,14 @@ timeout 90s .venv/bin/python scripts/probe_worktree_cwd.py --output /tmp/worktre
 ### 数据库迁移与中断恢复验收
 
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移移到每次实际
-启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v21，冻结转换为
+启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v22，冻结转换为
 v14 → v15 Worktree 元数据、v15 → v16 默认工作区策略与 v16 → v17 定时工作区策略/Run
 资源回执、v17 → v18 过程卡展示设置、v18 → v19 可空过程卡配置意图，以及 v19 → v20
 新话题计划自动归档选项。v18 → v19 不改表结构或已有值，仅允许既有 JSON 中表示未配置；
 已有默认值一律保留为显式值。v19 → v20 新增 `schedule_plans.auto_archive`，所有旧计划和
 墓碑默认关闭，不增加 Run 归档状态或执行结果历史。v20 → v21 仅创建五个非唯一索引，
 覆盖 TTL 到期、Binding-target Run/Plan 和 Project 未决 Run 查询；保留全部行与已有含义。
-相邻 v20 → v21、完整 v14 → v21 与已经 v21 的启动均需验收，缺失或错误的必要索引拒绝启动。
+v21 → v22 增加 Run 可空自评枚举，旧 Run 保持 NULL。相邻 v21 → v22、完整 v14 → v22 与已经 v22 的启动均需验收，缺失或错误的必要索引拒绝启动。
 v13 及更早 schema／旧布局不因此自动得到支持。
 以下为新 CLI 的验收要求，不是通过记录：
 

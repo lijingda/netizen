@@ -2905,6 +2905,11 @@ function scheduleWorktreeReceipt(run, { details = true } = {}) {
   return labels.join(" · ");
 }
 
+function scheduleAssessment(value) {
+  const label = {succeeded: "目标达成", failed: "目标未达成", unreported: "未自评"}[value];
+  return label ? `Agent 自评：${label}` : "";
+}
+
 function scheduleExecutionLabel(execution) {
   const label = scheduleRunStatus(execution.status);
   if (execution.kind === "none") return label;
@@ -4092,6 +4097,8 @@ async function loadSchedules(cursor = undefined, appliedQuery = scheduleListQuer
     execution.textContent = scheduleExecutionLabel(plan.execution);
     const source = scheduleTriggerSource(plan.execution.trigger_source);
     if (source) scheduleNote(execution, source);
+    const assessment = scheduleAssessment(plan.execution.agent_self_assessment);
+    if (assessment) scheduleNote(execution, assessment);
     if (plan.execution.due_local) scheduleNote(execution, scheduleLocalTime(plan.execution.due_local));
     if (plan.execution.worktree_id) scheduleNote(execution, scheduleWorktreeReceipt(plan.execution, { details: false }));
     row.append(execution);
@@ -4179,7 +4186,9 @@ async function showSchedule(planId, returnFocus = document.activeElement) {
     if (serial !== scheduleDetailSerial) return;
     scheduleInput("detail-title").textContent = data.plan.name;
     scheduleInput("detail-identity").textContent = `计划 ${data.plan.id} · 修订 ${data.plan.revision}`;
+    const assessment = scheduleAssessment(data.plan.execution.agent_self_assessment);
     scheduleInput("detail-state").textContent = `${schedulePlanState(data.plan).replace("\n", " · ")} · ${scheduleExecutionLabel(data.plan.execution)}`
+      + (assessment ? ` · ${assessment}` : "")
       + (scheduleTriggerSource(data.plan.execution.trigger_source) ? ` · ${scheduleTriggerSource(data.plan.execution.trigger_source)}` : "")
       + (scheduleBlockedLabel(data.plan) ? ` · ${scheduleBlockedLabel(data.plan)}` : "")
       + (data.plan.execution.worktree_id ? ` · ${scheduleWorktreeReceipt(data.plan.execution)}` : "")
@@ -4232,6 +4241,8 @@ async function loadScheduleRuns(page = scheduleRunsPage) {
       cell(row, scheduleDate(run.due_at));
       cell(row, scheduleTriggerSource(run.trigger_source));
       const result = cell(row, scheduleRunStatus(run.status || run.stage));
+      const assessment = scheduleAssessment(run.agent_self_assessment);
+      if (assessment) scheduleNote(result, assessment);
       if (run.worktree_id) scheduleNote(result, scheduleWorktreeReceipt(run));
       const links = actionsCell(row);
       if (run.feishu_url) {

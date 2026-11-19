@@ -37,7 +37,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0002](0002-separate-control-and-execution-planes.md) | 飞书控制面与 Codex 执行面分离 | 架构决策 | 已被 [0007](0007-use-official-typescript-sdk-as-codex-boundary.md) 取代 |  |
 | [0003](0003-codex-gateway-sdk-and-app-server.md) | 使用 Codex App Server 支持原生活动 Turn steering | 架构决策 | 已被 [0007](0007-use-official-typescript-sdk-as-codex-boundary.md) 取代 |  |
 | [0007](0007-use-official-typescript-sdk-as-codex-boundary.md) | 使用官方 TypeScript SDK 作为唯一 Codex 后端边界 | 架构决策 | 已被 [0008](0008-use-python-sdk-for-native-turn-control.md) 取代 |  |
-| [0008](0008-use-python-sdk-for-native-turn-control.md) | 使用官方 Python SDK 获得原生 Turn 控制 | 架构决策 | 有效 | 被 [0009](0009-use-version-gated-experimental-terminal-cleanup.md)、[0010](0010-correct-stop-and-background-cleanup-semantics.md)、[0012](0012-use-native-turn-model-settings.md)、[0013](0013-map-public-native-compaction-safely.md)、[0014](0014-use-removable-sdk-gap-adapters.md)、[0026](0026-upgrade-and-requalify-python-sdk-0147.md)、[0049](0049-bound-turn-observation-and-delegate-thread-removal.md)、[0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) 修订 |
+| [0008](0008-use-python-sdk-for-native-turn-control.md) | 使用官方 Python SDK 获得原生 Turn 控制 | 架构决策 | 有效 | 被 [0009](0009-use-version-gated-experimental-terminal-cleanup.md)、[0010](0010-correct-stop-and-background-cleanup-semantics.md)、[0012](0012-use-native-turn-model-settings.md)、[0013](0013-map-public-native-compaction-safely.md)、[0014](0014-use-removable-sdk-gap-adapters.md)、[0026](0026-upgrade-and-requalify-python-sdk-0147.md)、[0049](0049-bound-turn-observation-and-delegate-thread-removal.md)、[0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md)、[0102](0102-record-agent-self-assessment-for-scheduled-topic-runs.md) 修订 |
 | [0009](0009-use-version-gated-experimental-terminal-cleanup.md) | 用版本锁定的实验接口清理 Thread 后台终端 | 架构决策 | 有效 | 被 [0010](0010-correct-stop-and-background-cleanup-semantics.md)、[0014](0014-use-removable-sdk-gap-adapters.md)、[0026](0026-upgrade-and-requalify-python-sdk-0147.md) 修订 |
 | [0014](0014-use-removable-sdk-gap-adapters.md) | 用可逐项移除的薄 Adapter 补齐 Python SDK 高层能力缺口 | 架构决策 | 有效 | 被 [0018](0018-remove-skills-command.md)、[0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md)、[0069](0069-steer-the-current-physical-goal-turn.md)、[0083](0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0084](0084-separate-goal-controls-from-logical-turn-replies.md) 修订 |
 | [0020](0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md) | 用精确锁定的只读 Adapter 观察运行中 Turn 的原生 Plan | 架构决策 | 有效 | 被 [0026](0026-upgrade-and-requalify-python-sdk-0147.md)、[0052](0052-project-safe-turn-activity-with-one-consumer.md) 修订 |
@@ -136,9 +136,10 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 | ADR | 标题 | 类型 | 状态 | 修订 |
 | --- | --- | --- | --- | --- |
-| [0061](0061-schedule-ordinary-threads-in-feishu-topics.md) | 在独立飞书话题中调度普通持久会话 | 架构决策 | 有效 | 被 [0063](0063-mention-task-initiators-in-terminal-results.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0085](0085-manage-worktrees-independently-of-sessions.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
+| [0061](0061-schedule-ordinary-threads-in-feishu-topics.md) | 在独立飞书话题中调度普通持久会话 | 架构决策 | 有效 | 被 [0063](0063-mention-task-initiators-in-terminal-results.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0085](0085-manage-worktrees-independently-of-sessions.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md)、[0102](0102-record-agent-self-assessment-for-scheduled-topic-runs.md) 修订 |
 | [0068](0068-run-saved-scheduled-plans-manually.md) | 通过现有调度链路手动执行已保存的计划 | 功能契约 | 有效 | 被 [0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md) 修订 |
 | [0070](0070-schedule-inputs-in-existing-bindings.md) | 定时向原会话提交普通输入 | 架构决策 | 有效 | 被 [0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
+| [0102](0102-record-agent-self-assessment-for-scheduled-topic-runs.md) | 定时新话题会话由 Agent 自评任务是否达成 | 架构决策 | 有效 | 修订 [0008](0008-use-python-sdk-for-native-turn-control.md)、[0061](0061-schedule-ordinary-threads-in-feishu-topics.md) |
 
 ## Admin Web 与 Project 管理
 
@@ -193,4 +194,4 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 ## 统计
 
-共 100 个 ADR：架构决策 67 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。
+共 102 个 ADR：架构决策 69 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。
