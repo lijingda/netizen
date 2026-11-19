@@ -92,8 +92,8 @@ related: 0021, 0023, 0028, 0067, 0068, 0070, 0075, 0076, 0078, 0081
 
 ## 证据
 
-2026-11-18 用 openai-codex 及 bundled App Server 0.169.0，以及 PR #293 待升级的 0.170.0
-做了验证。环境是临时 CODEX_HOME 加 loopback mock Responses provider；进程级入口用生产的
+2026-11-18 用 openai-codex 及 bundled App Server 0.169.0 和 0.170.0 做了验证；2026-11-19
+合入 0.170.0 升级后，在固定版本上用下文探针复验通过。环境是临时 CODEX_HOME 加 loopback mock Responses provider；进程级入口用生产的
 Session/Schedule runner，`config.toml` 另放一个用户 MCP 入口，不使用模型账号或飞书。
 两份独立编写的探针分别完成，其中一份出自未看过另一份的盲审，按模型实际收到的工具集
 逐请求比对，两个版本结论一致：
@@ -105,6 +105,7 @@ Session/Schedule runner，`config.toml` 另放一个用户 MCP 入口，不使�
 | 传嵌套整表 `{"mcp_servers": {...}}` | 该 Thread 静默缺少两个 Netizen 进程级入口，Turn 仍正常完成 |
 | 已加载 Thread 的后续 Turn、加载中的 resume | 保留工具；对已加载 Thread 传 `config` 既不新增也不替换挂载 |
 | 卸载后或进程重启后 resume | 不传 `config` 时工具消失；传入时按本进程 namespace 重新挂载 |
+| 归档后 unarchive 再 resume | 同上：传入时重新挂载，不传时没有工具（只由下文收录的探针覆盖） |
 | 持久 fork、ephemeral fork | 不继承；fork 冷 Thread 不会把源 Thread 加载起来 |
 | 原生子 agent（无历史和全历史 spawn） | 继承并能调用；元数据带 `subagent_kind=thread_spawn` 及子执行者自己的 Thread/Turn ID |
 | 非 required 端点拒绝连接 | Thread 启动约 10–20 ms，Turn 正常完成，工具缺失 |

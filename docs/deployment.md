@@ -784,7 +784,7 @@ phase，以新结果为准。
 
 | 记录 / 版本 | 验证层级 | 未覆盖与复验入口 |
 | --- | --- | --- |
-| 2026-11-18，`0.169.0`（另以 `0.170.0` 预检） | bundled App Server 和 mock provider 通过 Agent 自评挂载的点号键隔离、冷暖恢复、重启、fork、子 agent 拒绝和不可达端点测试，用户配置保持原值 | 升级或挂载变动须复验完整矩阵；真实模型自评时机和飞书展示另验 |
+| 2026-11-19，`0.170.0`（2026-11-18 另以 `0.169.0` 验证） | bundled App Server 和 mock provider 通过 Agent 自评挂载的点号键隔离、冷暖恢复、归档恢复、重启、fork、子 agent 拒绝和不可达端点测试，用户配置保持原值 | 升级或挂载变动须复验完整矩阵；真实模型自评时机和飞书展示另验 |
 | [2026-09-23](compatibility-history.md#scheduler-binding-20260923)，`0.155.1` / `gpt-5.6-sol` | 原生 binding start/steer 与 MCP CRUD；飞书替身 | 真实锚点/catch-up/客户端和归档恢复端到端；复验 binding、mcp |
 | [2026-09-22](compatibility-history.md#scheduler-phases-20260922)，`0.155.1` | 原生 mcp、mcp-recovery、dispatch、manual；传输替身 | 无新版真实飞书端到端证据；复验相应四阶段 |
 | 同记录中的 `0.147.0` 基线 | 真实飞书五类来源默认目标/Project，三类聊天首轮与结果归属 | 不证明 `0.155.1`、任意自然语言无歧义或模型即时发现/生成 |
