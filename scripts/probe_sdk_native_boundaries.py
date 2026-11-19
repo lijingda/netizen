@@ -263,7 +263,7 @@ async def compaction_case(root: Path, *, fails: bool, remote: bool = False) -> d
 async def blocked_rollout_metadata(root: Path, rollout: Path):
     """Hold shutdown's metadata read; restore the exact file before releasing it.
 
-    0.169 live_writer::shutdown_thread awaits materialize_to_sqlite, which reads
+    In 0.169–0.170, live_writer::shutdown_thread awaits materialize_to_sqlite, which reads
     session metadata before projecting the rollout. The recorder retains its
     open descriptor to the saved regular file. Only the new metadata reader sees
     the empty FIFO; release supplies its original header and subsequent reads
