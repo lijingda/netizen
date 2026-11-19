@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import html
 from html.parser import HTMLParser
 import struct
 import unittest
@@ -10,6 +11,7 @@ import zlib
 from netizen_cli.admin.answer_previews import answer_file_link, render_answer_preview, render_conversation_page
 from netizen_cli.project_files import FileBrowseError, validate_image
 from netizen_cli.runtime.contracts import NativeAnswerImage, NativeLatestAnswer, NativeConversationPage, NativeConversationTurn
+from tests.admin.test_file_previews import ParsedHTML
 
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOesAAAAASUVORK5CYII="
@@ -86,7 +88,7 @@ class AnswerPreviewsTest(unittest.TestCase):
                 self.assertIsNone(answer_file_link(href))
 
     def test_conversation_links_cover_earlier_latest_image_fallback_and_raw_pages(self):
-        answer = "[local](/missing/a.py:12) ![image](/a.png)"
+        answer = '[local](/missing/a.py:12) ![image](/a.png) :codex-file-citation{path="/refs/book.xlsx" range=C27}'
         page = NativeConversationPage("thread", (
             NativeConversationTurn("earlier", "completed", answer=answer),
             NativeConversationTurn("latest", "completed", answer=answer, latest=True,
@@ -96,12 +98,66 @@ class AnswerPreviewsTest(unittest.TestCase):
             with self.subTest(limit=limit), patch("netizen_cli.admin.answer_previews.MAX_IMAGE_RESPONSE_BYTES", limit):
                 turns = render_conversation_page(page)["turns"]
                 for turn in turns:
+                    self.assertEqual(turn["answer"], answer)
                     self.assertIn('data-answer-file-root="/missing"', turn["markdownHtml"])
                     self.assertIn('data-answer-file-line="12"', turn["markdownHtml"])
+                    self.assertIn('data-answer-file-root="/refs"', turn["markdownHtml"])
+                    self.assertIn('data-answer-file-name="book.xlsx"', turn["markdownHtml"])
+                    self.assertIn(">book.xlsx · C27</a>", turn["markdownHtml"])
                     self.assertNotIn("data-file-browser-path", turn["markdownHtml"])
                 self.assertEqual(bool(turns[-1]["images"]), limit != 1)
         for turn in render_conversation_page(page, preview=False)["turns"]:
+            self.assertEqual(turn["answer"], answer)
             self.assertNotIn("markdownHtml", turn)
+
+    def test_citation_path_and_punctuation_survive_markdown_and_link_parsing(self):
+        name = "表 #?% ()<>_[]!`|&amp;.xlsx"
+        path = "/报告/" + name
+        text = f':codex-file-citation{{path="{path}" label="**x**"}}'
+        answer = NativeLatestAnswer("thread", "turn", "completed", text)
+        targets = []
+
+        def resolve(href):
+            targets.append(answer_file_link(href))
+            return targets[-1]
+
+        rendered = ParsedHTML(render_answer_preview(answer, answer_link=resolve)["markdownHtml"])
+        self.assertEqual(targets, [{"href": "#", "title": path, "data-answer-file-root": "/报告",
+                                    "data-answer-file-name": name}])
+        self.assertEqual(rendered.attributes("a"), targets)
+        self.assertEqual("".join(rendered.text).strip(), name + " · **x**")
+
+        text = '| h |\n| --- |\n| :codex-file-citation{path=/x label="a\\|b"} |'
+        answer = NativeLatestAnswer("thread", "turn", "completed", text)
+        table = ParsedHTML(render_answer_preview(answer, answer_link=answer_file_link)["markdownHtml"])
+        self.assertEqual(len(table.attributes("td")), 1)
+        self.assertEqual(table.attributes("a"), [answer_file_link("/x")])
+        self.assertIn(r"x · a\|b", "".join(table.text))
+
+    def test_static_and_unavailable_citations(self):
+        for path, label in (("sub/a", "a"), ("/dir/", "dir/"), ("/x:12", "x:12"), ("/x:10001", "x:10001"),
+                            ("/x%20y", "x%20y"), ("/a//x", "x"), ("/x\x00z", "xz"), ("/x\tz", "xz")):
+            with self.subTest(path=path):
+                text = f':codex-file-citation{{path="{path}"}}'
+                answer = NativeLatestAnswer("thread", "turn", "completed", text)
+                rendered = render_answer_preview(answer, answer_link=answer_file_link)["markdownHtml"]
+                self.assertIn("<code>" + html.escape(label) + "</code>", rendered)
+                self.assertNotIn("<a ", rendered)
+        for path in ("/repo/.git/config", "/proc/stat", "/sys/x", "/dev/null"):
+            answer = NativeLatestAnswer("thread", "turn", "completed", f":codex-file-citation{{path={path}}}")
+            attrs, = ParsedHTML(render_answer_preview(answer, answer_link=answer_file_link)["markdownHtml"]).attributes("a")
+            self.assertEqual(attrs, answer_file_link(path))
+
+    def test_citations_respect_original_preview_budgets(self):
+        citation = ":codex-file-citation{path=/a}"
+        for limit, maximum, text in (("MAX_MARKDOWN_BYTES", 20, citation),
+                                     ("MAX_MARKDOWN_TOKENS", 12, "|h|\n|---|\n|a|\n|" + citation + "|")):
+            with self.subTest(limit=limit), patch("netizen_cli.admin.file_previews." + limit, maximum):
+                page = NativeConversationPage("thread", (NativeConversationTurn("turn", "completed", answer=text),))
+                turn, = render_conversation_page(page)["turns"]
+                self.assertEqual(turn["answer"], text)
+                self.assertIn("previewMessage", turn)
+                self.assertNotIn("markdownHtml", turn)
 
     def test_only_exact_referenced_native_bytes_are_selected_without_file_access(self):
         path = "/missing/source-thread/猫 图.png"

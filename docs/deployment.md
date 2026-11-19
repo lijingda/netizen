@@ -241,6 +241,8 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
    | 观测、Activity、答案与 Files | `turn/completed`、`item/started`、`item/completed`、`turn/diff/updated`、`thread/tokenUsage/updated`、`thread/section/changed`、`thread/read` | 通知注册与归属、timestamp/phase/字段语义、先终态后 materialize 的时序、唯一消费与冷恢复保留。 |
    | 原生历史与 Skills | `thread/turns/list`、`thread/items/list`、`skills/list`、`skills/extraRoots/set` | 分页/游标与拒绝、历史引用、进程级根与配置保留、注册和加载时序。 |
 
+   Codex 客户端指令独立于协议字段；每次升级还需在对应精确 tag 的 TUI 中检索 `codex-file-citation`，比较指令语法并复核 Netizen 的展示改写。
+
    另列出生成模型与 App Server 新增的结构化错误和执行前校验，逐个核实是否能证明“未投递”。
    能证明的按 [ADR 0093](adr/0093-reject-only-the-operation-on-native-provider-mismatch.md)
    只拒绝本次操作，并更新设计/ADR 与针对性证据；不能证明的保持操作对应的未知结果规则

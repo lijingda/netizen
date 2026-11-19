@@ -22,6 +22,7 @@ from ..cards import (
     turn_files_card,
     turn_progress_card,
 )
+from ..cards.reply import feishu_answer_text
 from .completion_mentions import send_completion_mention
 from .reply_presenter import (
     _CardUpdateAttempt,
@@ -362,7 +363,10 @@ class CompletionPresentationChannel(ChannelReplies):
         outcome: TurnOutcome | SideTurnOutcome,
     ) -> str | None:
         content = outcome.final_response
-        if not content or "![" not in content:
+        if not content:
+            return content
+        content = feishu_answer_text(content)
+        if "![" not in content:
             return content
         return await self._prepare_result_images(content, cwd=outcome.cwd)
 

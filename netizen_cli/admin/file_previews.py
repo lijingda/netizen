@@ -26,7 +26,7 @@ class PreviewUnavailable(ValueError):
     """The source remains viewable, but its rendered preview exceeds a budget."""
 
 
-class _BoundedBlockTokens(list[Token]):
+class BoundedBlockTokens(list[Token]):
     def append(self, token: Token) -> None:
         # Tables pad missing cells while parsing. Stop before that expansion can
         # allocate an unbounded token graph, not merely after parse() returns.
@@ -36,7 +36,7 @@ class _BoundedBlockTokens(list[Token]):
 
 
 def _limit_block_tokens(state: StateCore) -> None:
-    state.tokens = _BoundedBlockTokens(state.tokens)
+    state.tokens = BoundedBlockTokens(state.tokens)
 
 
 _MARKDOWN.core.ruler.before("block", "preview_token_budget", _limit_block_tokens)
@@ -153,6 +153,15 @@ def _check_render_budget(tokens: Sequence[Token]) -> None:
             raise PreviewUnavailable("Markdown 预览内容过大，请查看源码。")
 
 
+def check_markdown_source_size(text: str) -> None:
+    try:
+        length = len(text.encode("utf-8"))
+    except UnicodeError as exc:
+        raise PreviewUnavailable("文件包含无法预览的文本编码，请查看源码。") from exc
+    if length > MAX_MARKDOWN_BYTES:
+        raise PreviewUnavailable("Markdown 文件超过 256 KiB，请查看源码。")
+
+
 def render_markdown(
     text: str,
     *,
@@ -175,12 +184,7 @@ def render_markdown(
     may select already validated native image data by opaque slot id; it never
     grants file access or creates a resource URL.
     """
-    try:
-        length = len(text.encode("utf-8"))
-    except UnicodeError as exc:
-        raise PreviewUnavailable("文件包含无法预览的文本编码，请查看源码。") from exc
-    if length > MAX_MARKDOWN_BYTES:
-        raise PreviewUnavailable("Markdown 文件超过 256 KiB，请查看源码。")
+    check_markdown_source_size(text)
     if path is not None and (not path or _local_path(path, []) != path):
         raise PreviewUnavailable("Markdown 文件路径无效，请查看源码。")
     directory = path.split("/")[:-1] if path is not None else []

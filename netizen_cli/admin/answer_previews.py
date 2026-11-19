@@ -9,13 +9,15 @@ from __future__ import annotations
 import base64
 import json
 import re
+import string
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
+from ..file_citations import FileCitation, citation_code, citation_label, rewrite_file_citations
 from ..project_files import FileBrowseError, validate_image
 from ..runtime.contracts import NativeLatestAnswer, NativeConversationPage
-from .file_previews import PreviewUnavailable, render_markdown
+from .file_previews import BoundedBlockTokens, PreviewUnavailable, check_markdown_source_size, render_markdown
 
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -67,7 +69,8 @@ def render_conversation_page(page: NativeConversationPage, *, preview: bool = Tr
                     ), answer_link=answer_file_link))
                 else:
                     item["markdownHtml"] = render_markdown(
-                        turn.answer, inert_image_reason="更早轮次不加载图片", answer_link=answer_file_link,
+                        _answer_markdown(turn.answer), inert_image_reason="更早轮次不加载图片",
+                        answer_link=answer_file_link,
                     )
             except PreviewUnavailable:
                 item["previewMessage"] = "回答超出排版预览限制，已显示原文。"
@@ -101,8 +104,7 @@ def _reference_path(value: str) -> str | None:
         return None
 
 
-def answer_file_link(href: str) -> dict[str, str] | None:
-    """Identify absolute links without resolving or testing filesystem paths."""
+def _answer_link_target(href: str) -> tuple[str, str | None, bool] | None:
     try:
         parts = urlsplit(href)
         if parts.scheme or parts.netloc or parts.query:
@@ -127,6 +129,15 @@ def answer_file_link(href: str) -> dict[str, str] | None:
     digits = line.lstrip("0") if line is not None else ""
     number = int(digits or "0") if line is not None and len(digits) <= 5 else None
     line = str(number) if number is not None and number <= 10_000 else None
+    return path, line, directory
+
+
+def answer_file_link(href: str) -> dict[str, str] | None:
+    """Identify absolute links without resolving or testing filesystem paths."""
+    target = _answer_link_target(href)
+    if target is None:
+        return None
+    path, line, directory = target
     segments = path.split("/")[1:]
     reason = None
     if any(part.casefold() == ".git" for part in segments):
@@ -144,6 +155,24 @@ def answer_file_link(href: str) -> dict[str, str] | None:
     if line:
         attributes["data-answer-file-line"] = line
     return attributes
+
+
+_ESCAPE_LINK_TEXT = str.maketrans({char: "\\" + char for char in string.punctuation})
+
+
+def _citation_link(citation: FileCitation) -> str:
+    destination = quote(citation.path)
+    if _answer_link_target(destination) != (citation.path, None, False):
+        return citation_code(citation)
+    label = citation_label(citation).translate(_ESCAPE_LINK_TEXT)
+    return f"[{label}]({destination})"
+
+
+def _answer_markdown(text: str) -> str:
+    if "codex-file-citation" not in text:
+        return text
+    check_markdown_source_size(text)
+    return rewrite_file_citations(text, _citation_link, block_tokens=BoundedBlockTokens)
 
 
 def render_answer_preview(
@@ -206,7 +235,8 @@ def render_answer_preview(
         selected[path] = slot
         return slot
 
-    html = render_markdown(answer.answer or "", answer_image=select, max_images=MAX_ANSWER_IMAGES,
+    markdown = _answer_markdown(answer.answer or "")
+    html = render_markdown(markdown, answer_image=select, max_images=MAX_ANSWER_IMAGES,
                            answer_link=answer_link)
     preview = {"markdownHtml": html, "images": images}
     # Include text plus HTML and leave room for the fixed identity/time envelope.
@@ -218,7 +248,7 @@ def render_answer_preview(
     response_size = len(json.dumps(envelope, ensure_ascii=True)) + sum(len(image["data"]) for image in images)
     if images and response_size + 4096 > MAX_IMAGE_RESPONSE_BYTES:
         return {
-            "markdownHtml": render_markdown(answer.answer or "", answer_image=lambda _: None,
+            "markdownHtml": render_markdown(markdown, answer_image=lambda _: None,
                                              answer_link=answer_link),
             "images": [],
             "previewMessage": "图片超过预览总量限制，已保留正文。",
