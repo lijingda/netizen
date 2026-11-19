@@ -41,6 +41,14 @@ Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确�
 start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收见
 [多实例与内置 Skills](deployment.md#多实例与内置-skills-验收)。
 
+修改 Runtime、SDK adapter、原生会话生命周期、定时任务或 Worktree 代码时，在仓库根目录
+另行运行 `make check-native`。它使用随包 App Server 和本机回环 mock provider，
+无需 Codex 账号或飞书；Linux 开发机实测约 3 分钟，耗时随机器而异。命令会打印临时证据目录，
+也可用 `make check-native NATIVE_EVIDENCE_DIR=/path/to/new-directory` 指定新目录或空目录。
+Code mode 的 V8 运行时会预留大量虚拟地址空间，请勿用 `ulimit -v` 或 `prlimit --as` 限制它，
+如需限制内存，可在 Linux 上使用 cgroup，例如 `systemd-run --user --scope -p MemoryMax=4G make check-native`。
+面向 main 的 PR 和每次 main push 的 CI 都在 Linux 与 macOS arm64 执行这组回归。
+
 ### 实现导航
 
 代码按职责归属组织，目录拆分不新增运行实例或状态所有者：

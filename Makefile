@@ -1,6 +1,6 @@
 PYTHON ?= .venv/bin/python
 
-.PHONY: check test lint typecheck
+.PHONY: check check-native test lint typecheck
 
 # Buffer passing tests while preserving output from failed tests.
 test:
@@ -19,3 +19,8 @@ check: lint typecheck test
 	$(PYTHON) -m compileall -q netizen_cli scripts tests
 	$(PYTHON) -m pip check
 	$(PYTHON) scripts/check_sdk.py
+
+check-native:
+	@evidence_dir="$${NATIVE_EVIDENCE_DIR:-$$(mktemp -d)}" && \
+		echo "Native regression evidence: $$evidence_dir" && \
+		$(PYTHON) scripts/run_upgrade_regression.py --group isolated --output-dir "$$evidence_dir"

@@ -295,13 +295,20 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在 Linux x64
 标准 CPython 3.11-3.14，以及 macOS arm64 标准 CPython 3.14 执行这一个统一本地门禁；
 这 5 个 job 都是 `Protect main` ruleset 的 required status checks。
+
+面向 main 的 PR 和每次 main push 还会运行 `Native isolated regression (Linux)` 和
+`Native isolated regression (macOS arm64)`。两者在 CPython 3.14 上执行 `make check-native`，
+按注册表串行运行 isolated 组，用随包 App Server 和本机回环 mock provider 验证原生行为，
+无需 Codex 账号或飞书。无论回归成功或失败，CI 都上传各平台的证据目录，保留 14 天；
+可从 artifact 的 `SUMMARY.md` 定位到每步结果和探针输出。
+
 发布可复用 exact main commit 的成功 CI 结论，但不能用旧 archive 门禁替代新包验收。
 固定 SDK synthetic probes 的命令、参数和执行顺序统一由 `scripts/check_sdk.py` 维护；
 `make check` 调用该入口，失败即停止后续探针；新 CLI 包安装不重复运行完整测试。
 SDK synthetic 门禁还要求 20 次快速完成通过原生 handle、20 次公开 read 恢复和
 40 次 usage/diff drain，交替覆盖先观察到运行中和启动响应前已经完成的 Turn，
 验证开始请求窗口内的通知保留与终态后唯一消费。
-Main Qualification 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
+运行 `make check` 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
 行为测试；在 `CI=true` 时缺少 Node.js 会使测试失败。Node.js 是开发和 CI 的测试工具，
 不参与前端构建，也不增加生产运行的前置依赖。本地开发
 缺少 Node.js 时该项测试会明确跳过，门禁通过不代表 JavaScript 行为测试已完成；其必跑保证
