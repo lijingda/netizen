@@ -2,12 +2,12 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
-const { once } = require("node:events");
 const { readFileSync } = require("node:fs");
 const { setTimeout: poll } = require("node:timers/promises");
 
 const config = JSON.parse(readFileSync(0, "utf8"));
-const result = { visits: [], interactions: [] };
+const result = { browserPath: config.browser, browserVersion: config.browserVersion, visits: [], interactions: [] };
+const launchTimeout = 30000;
 const stepTimeout = 8000;
 const deadline = performance.now() + 115000; // Leave time for the Python supervisor's cleanup.
 let step = "launch Chrome";
@@ -32,70 +32,67 @@ const landmarks = {
   "/question-notifications": "#question-notifications-refreshed-at",
 };
 
-function devtoolsEndpoint(browser) {
-  return new Promise((resolve, reject) => {
-    let tail = "";
-    const timeout = setTimeout(() => reject(new Error("Chrome did not publish its DevTools URL: " + tail)), stepTimeout);
-    browser.once("error", error => { clearTimeout(timeout); reject(error); });
-    browser.once("exit", (code, signal) => {
-      clearTimeout(timeout);
-      reject(new Error(`Chrome exited (${code ?? signal}): ${tail}`));
-    });
-    browser.stderr.setEncoding("utf8").on("data", chunk => {
-      tail = (tail + chunk).slice(-3000);
-      const match = tail.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:\d+)\/devtools\/browser\/[^\s]+/);
-      if (match) {
-        clearTimeout(timeout);
-        resolve(match[1].replace("ws:", "http:"));
-      }
-    });
-  });
-}
-
-async function attach(endpoint, onEvent) {
-  const signal = AbortSignal.timeout(stepTimeout);
-  let target;
-  while (!target) {
-    const targets = await fetch(endpoint + "/json/list", { signal });
-    target = (await targets.json()).find(item => item.type === "page");
-    if (!target) await poll(40, undefined, { signal });
-  }
-  const socket = new WebSocket(target.webSocketDebuggerUrl);
-  await once(socket, "open", { signal: AbortSignal.timeout(stepTimeout) });
+// Chrome reads NUL-terminated CDP messages from fd 3 and writes replies and
+// events to fd 4. A flattened session routes page commands over the same pipe.
+function devtoolsPipe(browser, onEvent) {
+  const [, , , input, output] = browser.stdio;
   const pending = new Map();
   let sequence = 0;
-  socket.addEventListener("message", ({ data }) => {
-    const { id, result, error, method, params } = JSON.parse(data);
-    if (!id) return onEvent(method, params);
-    const reply = pending.get(id);
-    if (reply) {
-      pending.delete(id);
-      clearTimeout(reply.timeout);
-      if (error) reply.reject(new Error(error.message));
-      else reply.resolve(result);
-    }
-  });
-  socket.addEventListener("close", () => {
+  let partial = "";
+  let failure;
+
+  function disconnect(error) {
+    failure ??= error;
     for (const reply of pending.values()) {
       clearTimeout(reply.timeout);
-      reply.reject(new Error("Chrome closed the DevTools connection"));
+      reply.reject(failure);
     }
     pending.clear();
+  }
+  browser.once("error", disconnect);
+  browser.once("exit", () => disconnect(new Error("Chrome exited")));
+  input.on("error", disconnect);
+  output.on("error", disconnect);
+  output.once("end", () => disconnect(new Error("Chrome closed the DevTools pipe")));
+  output.setEncoding("utf8").on("data", chunk => {
+    const messages = (partial + chunk).split("\0");
+    partial = messages.pop();
+    for (const message of messages) {
+      let packet;
+      try {
+        packet = JSON.parse(message);
+      } catch (error) {
+        disconnect(new Error("Invalid DevTools pipe response: " + error.message));
+        return;
+      }
+      const { id, result, error, method, params, sessionId } = packet;
+      if (!id) {
+        onEvent(method, params, sessionId);
+        continue;
+      }
+      const reply = pending.get(id);
+      if (reply) {
+        pending.delete(id);
+        clearTimeout(reply.timeout);
+        if (error) reply.reject(new Error(reply.method + ": " + error.message));
+        else reply.resolve(result);
+      }
+    }
   });
-  return {
-    close: () => socket.close(),
-    call(method, params = {}) {
-      return new Promise((resolve, reject) => {
-        const id = ++sequence;
-        if (performance.now() >= deadline) throw new Error("Overall smoke deadline exceeded");
-        const timeout = setTimeout(() => {
-          pending.delete(id);
-          reject(new Error(method + " timed out"));
-        }, Math.min(stepTimeout, deadline - performance.now()));
-        pending.set(id, { timeout, resolve, reject });
-        socket.send(JSON.stringify({ id, method, params }));
-      });
-    },
+
+  return function call(method, params, sessionId, end = Math.min(deadline, performance.now() + stepTimeout)) {
+    return new Promise((resolve, reject) => {
+      if (failure) throw failure;
+      const id = ++sequence;
+      const remaining = end - performance.now();
+      if (remaining <= 0) throw new Error(method + " timed out");
+      const timeout = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(method + " timed out"));
+      }, remaining);
+      pending.set(id, { method, timeout, resolve, reject });
+      input.write(JSON.stringify({ id, method, params, sessionId }) + "\0");
+    });
   };
 }
 
@@ -147,20 +144,36 @@ async function run() {
     "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-extensions",
     "--disable-background-networking", "--disable-sync", "--disable-gpu", "--disable-component-update",
     "--no-proxy-server", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
-    "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
+    "--remote-debugging-pipe",
     "--user-data-dir=" + config.profile, "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
-  let cdp;
+  ], { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
+  let stderrTail = "";
+  browser.stderr.setEncoding("utf8").on("data", chunk => { stderrTail = (stderrTail + chunk).slice(-3000); });
+  const closed = new Promise(resolve => browser.once("close", resolve));
+  let sessionId;
+  const call = devtoolsPipe(browser, (method, params, session) => {
+    if (sessionId && session === sessionId) onEvent(method, params);
+  });
+  const page = (method, params) => call(method, params, sessionId);
+  let launchError;
   try {
-    cdp = await attach(await devtoolsEndpoint(browser), onEvent);
-    for (const domain of ["Page", "Runtime", "Network", "Log"]) await cdp.call(domain + ".enable");
-    await cdp.call("Runtime.addBinding", { name: "reportSmokeCsp" });
-    await cdp.call("Page.addScriptToEvaluateOnNewDocument", {
+    const launchEnd = performance.now() + launchTimeout;
+    const launch = (method, params) => call(method, params, sessionId, launchEnd);
+    let target;
+    while (!target) {
+      const { targetInfos } = await launch("Target.getTargets");
+      target = targetInfos.find(info => info.type === "page");
+      if (!target) await poll(40);
+    }
+    ({ sessionId } = await launch("Target.attachToTarget", { targetId: target.targetId, flatten: true }));
+    for (const domain of ["Page", "Runtime", "Network", "Log"]) await launch(domain + ".enable");
+    await launch("Runtime.addBinding", { name: "reportSmokeCsp" });
+    await launch("Page.addScriptToEvaluateOnNewDocument", {
       source: "document.addEventListener('securitypolicyviolation', e => reportSmokeCsp(e.effectiveDirective + ' ' + e.blockedURI))",
     });
 
     async function evaluate(expression) {
-      const reply = await cdp.call("Runtime.evaluate", { expression, returnByValue: true });
+      const reply = await page("Runtime.evaluate", { expression, returnByValue: true });
       if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description || reply.exceptionDetails.text);
       return reply.result.value;
     }
@@ -186,14 +199,14 @@ async function run() {
     }
     for (const [viewport, width, height, mobile] of [["desktop", 1280, 800, false], ["phone", 390, 844, true]]) {
       const phoneWidth = mobile ? width : null;
-      await cdp.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile });
-      await cdp.call("Emulation.setTouchEmulationEnabled", { enabled: mobile });
-      await cdp.call("Network.clearBrowserCookies");
+      await page("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile });
+      await page("Emulation.setTouchEmulationEnabled", { enabled: mobile });
+      await page("Network.clearBrowserCookies");
       for (const path of ["/login", ...config.paths]) {
         step = `${viewport} ${path}`;
         if (!landmarks[path]) throw new Error("Missing ready landmark");
         const url = config.origin + path;
-        const nav = await cdp.call("Page.navigate", { url });
+        const nav = await page("Page.navigate", { url });
         if (nav.errorText) throw new Error(nav.errorText);
         await until("document response", () => documents.has(nav.loaderId));
         const response = documents.get(nav.loaderId);
@@ -203,7 +216,7 @@ async function run() {
         await settled(phoneWidth);
         result.visits.push(step);
         if (path === "/login") {
-          const cookie = await cdp.call("Network.setCookie", { ...config.cookie, url: config.origin, httpOnly: true });
+          const cookie = await page("Network.setCookie", { ...config.cookie, url: config.origin, httpOnly: true });
           if (!cookie.success) throw new Error("Could not install fixture session cookie");
         } else if (path === "/projects") {
           step += " · Project Markdown preview";
@@ -236,14 +249,26 @@ async function run() {
       }
     }
     checkErrors();
+  } catch (error) {
+    if (step !== "launch Chrome") throw error;
+    launchError = error;
   } finally {
-    if (cdp && browser.exitCode === null && browser.signalCode === null) {
-      const exited = once(browser, "exit", { signal: AbortSignal.timeout(2000) }).catch(() => {});
-      try { await cdp.call("Browser.close"); } catch { /* Chrome may close the socket first. */ }
-      cdp.close();
-      await exited;
+    if (sessionId && !launchError) {
+      try { await call("Browser.close", {}, undefined, performance.now() + 1000); } catch { /* Pipe may close first. */ }
     }
-    browser.kill("SIGKILL");
+    browser.stdio[3].end();
+    // Wait for close (including stderr EOF), even after a handshake failure.
+    // A wrapper's descendants can hold the inherited descriptors open after exit.
+    const kill = setTimeout(() => browser.kill("SIGKILL"), 1000);
+    const drain = setTimeout(() => {
+      for (const stream of browser.stdio.slice(2)) stream.destroy();
+    }, 2500);
+    await closed;
+    clearTimeout(kill);
+    clearTimeout(drain);
+  }
+  if (launchError) {
+    throw new Error(`${launchError.message} (handshake budget ${launchTimeout / 1000} s, exit code=${browser.exitCode}, signal=${browser.signalCode})\nChrome stderr (tail): ${stderrTail || "<empty>"}`);
   }
 }
 

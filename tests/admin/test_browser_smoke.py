@@ -77,27 +77,44 @@ async def seed(fixture):
     fixture.management.enable_worktrees(settings=WorktreeSettingsService(default_root=project.parent / "worktrees"))
 
 
-async def run_driver(node, config):
-    # Chromium inherits the driver's private process group. The parent owns the
-    # profile and can reap the group even if Node hangs or dies during startup.
+async def run_in_group(args, *, deadline, data=None):
+    # Reap descendants even if the version probe or the driver hangs during launch.
     process = await asyncio.create_subprocess_exec(
-        node, str(_DRIVER), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, start_new_session=True,
     )
     try:
-        async with asyncio.timeout(120):
-            out, err = await process.communicate(json.dumps(config).encode())
-        try:
-            result = json.loads(out)
-        except ValueError:
-            result = {"error": f"Driver exited {process.returncode} without JSON: {err.decode(errors='replace')[:1000]}"}
-        return process.returncode, result
-    except TimeoutError:
-        return 1, {"error": "Driver exceeded the 120 s deadline"}
+        async with asyncio.timeout_at(deadline):
+            out, err = await process.communicate(data)
+        return process.returncode, out, err
     finally:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         await process.wait()
+
+
+async def run_driver(node, config):
+    now = asyncio.get_running_loop().time()
+    info = {"browserPath": config["browser"]}
+    try:
+        status, out, err = await run_in_group([config["browser"], "--version"], deadline=now + 5)
+        version = (out.strip() or err.strip()).decode(errors="replace")[:500]
+        info["browserVersion"] = version if status == 0 and version else f"unavailable (exit {status}): {version}"
+    except TimeoutError:
+        info["browserVersion"] = "unavailable (--version timed out after 5 s)"
+    except OSError as error:
+        info["browserVersion"] = f"unavailable ({error})"
+
+    try:
+        status, out, err = await run_in_group(
+            [node, str(_DRIVER)], deadline=now + 120, data=json.dumps({**config, **info}).encode(),
+        )
+        try:
+            return status, json.loads(out)
+        except ValueError:
+            return 1, {**info, "error": f"Driver exited {status} without JSON: {err.decode(errors='replace')[-1000:]}"}
+    except TimeoutError:
+        return 1, {**info, "error": "Driver exceeded the 120 s deadline"}
 
 
 @unittest.skipUnless(os.environ.get("NETIZEN_BROWSER_SMOKE") == "1", "set NETIZEN_BROWSER_SMOKE=1 to run")
