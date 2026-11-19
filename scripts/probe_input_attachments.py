@@ -127,7 +127,8 @@ async def probe(*, timeout: float) -> dict[str, Any]:
     async with asyncio.timeout(timeout):
         for mode in (Sandbox.read_only, Sandbox.workspace_write):
             with tempfile.TemporaryDirectory(prefix="netizen-input-attachments-probe-") as temporary:
-                cases.append(await native_case(mode, Path(temporary)))
+                # macOS temp dirs sit under the /var -> /private/var symlink.
+                cases.append(await native_case(mode, Path(temporary).resolve()))
     return {
         "passed": True,
         "sdk": openai_codex.__version__,

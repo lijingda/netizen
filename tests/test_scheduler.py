@@ -177,7 +177,8 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         return self.store.set_run(run_id, phase="handed_off", binding_id="binding-" + run_id, initial_turn_id=turn_id)
 
     async def until(self, predicate):
-        async with asyncio.timeout(1):
+        # Bounded condition wait; slow macOS runners need more than 1 s for 201 plans.
+        async with asyncio.timeout(10):
             while not predicate():
                 await asyncio.sleep(0)
 

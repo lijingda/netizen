@@ -245,9 +245,12 @@ The usage guides are not implementation guides.
   [static checks](docs/CONTRIBUTING.md#静态检查与类型债务) rules and never grow the typing
   debt list. Run affected live phases only under
   the [documented triggers](docs/deployment.md#代码门禁与按需实时兼容性验证).
-  Formal Releases reuse successful CI for the exact main commit; package changes
-  require isolated wheel/sdist validation. Synthetic tests do not replace platform/live
+  Package changes require isolated wheel/sdist validation. Synthetic tests do not replace platform/live
   acceptance; historical release-installer evidence does not certify the new CLI.
+- Formal releases classify the range with `scripts/release.py` (ADR 0103). Routine
+  releases use exact-main CI, including native isolated and Admin browser smoke, and
+  isolated wheel/sdist validation. Triggered manual areas require recorded evidence
+  or explicit risk acceptance.
 - Read the relevant acceptance gates before deployment changes. Before rollout, read
   the multi-instance/Skills gates and report platform and live validation separately.
 - Review the final diff and report checks, results, and material verification gaps.

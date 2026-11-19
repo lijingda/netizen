@@ -295,13 +295,27 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在 Linux x64
 标准 CPython 3.11-3.14，以及 macOS arm64 标准 CPython 3.14 执行这一个统一本地门禁；
 这 5 个 job 都是 `Protect main` ruleset 的 required status checks。
+
+面向 main 的 PR 和每次 main push 还会运行 `Native isolated regression (Linux)` 和
+`Native isolated regression (macOS arm64)`。两者在 CPython 3.14 上执行 `make check-native`，
+按注册表串行运行 isolated 组，用随包 App Server 和本机回环 mock provider 验证原生行为，
+无需 Codex 账号或飞书。无论回归成功或失败，CI 都上传各平台的证据目录，保留 14 天；
+可从 artifact 的 `SUMMARY.md` 定位到每步结果和探针输出。macOS job 目前仅报告、不使 workflow 失败：
+`session-collaboration` 与 `scheduled-worktree` 在 macOS runner 上偶发等不到预期事件，原因待查；
+查明并稳定后再改为阻塞。Linux job 的失败照常使 workflow 失败。
+`Native isolated regression (Linux)` 与下述 `Admin browser smoke (Linux) (3.14)`（GitHub 为矩阵 job
+附加 Python 版本后缀）也是 `Protect main` 的 required status checks；修改 job 名称或矩阵版本时须同步规则集。
+
+同一批 PR 和 main push 也运行 `Admin browser smoke (Linux)`，用无头 Chrome 在桌面和手机尺寸
+检查 Admin 页面与文件预览。失败时可从 `admin-browser-failure` artifact 查看浏览器的 JSON 结果，保留 3 天。
+
 发布可复用 exact main commit 的成功 CI 结论，但不能用旧 archive 门禁替代新包验收。
 固定 SDK synthetic probes 的命令、参数和执行顺序统一由 `scripts/check_sdk.py` 维护；
 `make check` 调用该入口，失败即停止后续探针；新 CLI 包安装不重复运行完整测试。
 SDK synthetic 门禁还要求 20 次快速完成通过原生 handle、20 次公开 read 恢复和
 40 次 usage/diff drain，交替覆盖先观察到运行中和启动响应前已经完成的 Turn，
 验证开始请求窗口内的通知保留与终态后唯一消费。
-Main Qualification 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
+运行 `make check` 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
 行为测试；在 `CI=true` 时缺少 Node.js 会使测试失败。Node.js 是开发和 CI 的测试工具，
 不参与前端构建，也不增加生产运行的前置依赖。本地开发
 缺少 Node.js 时该项测试会明确跳过，门禁通过不代表 JavaScript 行为测试已完成；其必跑保证
@@ -1244,13 +1258,28 @@ Publisher。流程使用 OIDC，不新增长期 PyPI token secret。GitHub 的 I
 
 ### 发布步骤
 
-1. 维护者明确决定发布并完成上述外部准备；按实际变更补齐 SDK、浏览器及两平台 live
-   验收，明确记录未完成范围；SDK 升级审查中的未覆盖项逐个核对“发布前补验”或
-   “接受的残留风险（附重新评估条件）”，补验项完成后才进入发布。`scripts/release.py` 执行版本推导／指定、notes、版本 PR、
-   exact main CI、受保护 annotated tag 与 workflow dispatch 的完整链，不自动响应 push
-   或 tag 发布。两处包版本均已准备为目标版本时复用当前 main，仍等待该精确提交的成功
-   CI；均为上一版本时才创建版本 PR，混合或其他版本在修改前拒绝。
-   运行该脚本意味着请求正式发布，不是只构建或 dry-run。
+1. 用 `python scripts/release.py --plan` 查看本地上一版本 tag 到 HEAD 的已提交变更。
+   输出列出区域、触发文件、验收要求及尚缺的参数。该命令只读，可在工作分支运行。
+   维护者明确决定发布并确认上述外部准备后，在 main 上去掉 `--plan` 即请求正式发布。
+   按命中的 manual 区域补齐受影响的 SDK、浏览器、飞书客户端及两平台 live 验收，分别记录
+   平台与 live 结果。每个区域只给一个参数，例如 `--verified platform-service="检查内容、平台与证据出处"`
+   或 `--accept-risk codex-sdk="未覆盖项、接受理由及重新评估条件"`。说明限 1–500 个可打印字符、单行，
+   会公开写入 Release notes，可引用已有验收报告。`codex-sdk` 的依据是[升级审查](#codex-sdk-升级审查)的逐项处置。
+   “发布前补验”须完成，仍未完成的项必须由维护者明确改记“接受的残留风险（附重新评估条件）”。
+   有残留风险时用 `--accept-risk` 记录。缺项或参数无效时脚本在版本 PR、tag 和 dispatch 前停止。
+   automated 区域复用 exact main push CI 的五个代码门禁、两平台原生隔离回归和 Linux Admin 浏览器冒烟，
+   继续执行下列包验证。仅修改 wheel／sdist 必备文件条目、setuptools 的 `package-data` 或包发现清单、
+   随包示例 `config.example.yaml` 时，由 CI 资源测试及隔离安装验证覆盖。区域依据见 [ADR 0103](adr/0103-classify-release-verification-by-changed-area.md)。
+
+   以下检查由触及相应边界的 PR 记录证据或具体缺口。发布时复用这些记录，维护者也可选择在发布前复验。
+
+   - 材料、引用、转发投影、发送者归属与历史 catch-up 的真实飞书客户端检查（ADR 0029/0039/0064/0099）。
+   - 迁移框架本身变化时，两平台 Linux/macOS 的真实启动迁移、中断恢复和 ready 检查（ADR 0075/0076）。
+   - Admin 跨受信主机的访问检查，以及[开发期按变更触发的 live probes](#代码门禁与按需实时兼容性验证)。
+
+   正式调用仍执行版本推导／指定、notes、版本 PR、exact main CI、受保护 annotated tag 与
+   workflow dispatch 的完整链。两处包版本均为目标版本时复用当前 main，仍等待该精确提交的
+   成功 CI。均为上一版本时才创建版本 PR，混合或其他版本在修改前拒绝。push 或 tag 本身不触发发布。
 2. `release.yml` 只接受显式 workflow_dispatch，核对 exact tag 和同一 main commit 的
    成功 CI；固定 `setuptools==80.9.0`，由 `scripts/build_cli_distribution.py` 先构建
    sdist，再从该 sdist 构建 wheel，生成带 SHA-256 的 `netizen-cli-release.json`。

@@ -1050,7 +1050,9 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                 runtime.set_completion_handler(completed)
 
                 async def next_outcome() -> TurnOutcome:
-                    outcome = await asyncio.wait_for(outcomes.get(), 20)
+                    # macOS CI runners occasionally need more than 20 s for the first
+                    # scheduled Turn; the probe's --timeout still bounds the phase.
+                    outcome = await asyncio.wait_for(outcomes.get(), 60)
                     if isinstance(outcome, BaseException):
                         raise outcome
                     assert outcome.status == "completed", outcome.status
@@ -1207,7 +1209,8 @@ async def probe(*, phase: str, model: str | None, timeout: float) -> dict[str, A
     if phase == "worktree":
         async with asyncio.timeout(timeout):
             with tempfile.TemporaryDirectory(prefix="netizen-scheduled-worktree-probe-") as temporary:
-                result = await _worktree_phase(Path(temporary))
+                # macOS temp dirs sit under the /var -> /private/var symlink.
+                result = await _worktree_phase(Path(temporary).resolve())
         return {**result, "temporary_state_cleaned": True}
     _require(bool(model), "real_model_phase_requires_model")
     config_path = _user_config_path()

@@ -173,7 +173,8 @@ async def native_case(root: Path) -> dict[str, object]:
 async def probe() -> dict[str, object]:
     async with asyncio.timeout(60):
         with tempfile.TemporaryDirectory(prefix="netizen-worktree-cwd-probe-") as temporary:
-            result = await native_case(Path(temporary))
+            # macOS temp dirs sit under the /var -> /private/var symlink.
+            result = await native_case(Path(temporary).resolve())
     return {**result, "temporary_state_cleaned": True}
 
 

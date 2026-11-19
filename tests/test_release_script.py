@@ -4,6 +4,8 @@ import json
 import re
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -13,11 +15,14 @@ from scripts.release import (
     ReleaseEscalation,
     ReleaseError,
     bump_text,
+    classify,
     dispatch_release_workflow,
+    main,
     merge_pull_request,
     next_version,
     needs_version_bump,
     parse_log,
+    range_areas,
     release,
     render_notes,
     summarize_rollup,
@@ -60,6 +65,194 @@ class ParseLogTest(unittest.TestCase):
         self.assertIn(
             "BREAKING CHANGE: behavior", parse_log(raw)[0].body
         )
+
+
+class VerificationAreasTest(unittest.TestCase):
+    def test_path_boundaries_and_automated_fallback(self) -> None:
+        for path, areas in (
+            ("netizen_cli/cli_update_restore.py", {"platform-service"}),
+            ("netizen_cli/deployment/restart_worker.py", {"platform-service"}),
+            ("config.example.yaml", {"other"}),
+            ("netizen_cli/builtin_skills.py", {"skills-loading"}),
+            ("scripts/feishu_app_permissions.py", {"feishu-app-setup"}),
+            ("netizen_cli/cli_setup.py", {"feishu-app-setup"}),
+            ("netizen_cli/lark_app.py", {"feishu-app-setup"}),
+            ("netizen_cli/feishu_app_onboarding.py", {"feishu-app-setup"}),
+            ("netizen_cli/card_content.py", {"runtime"}),
+            ("netizen_cli/message_history.py", {"runtime"}),
+            ("netizen_cli/admin/credentials.py", {"admin-login"}),
+            ("netizen_cli/admin/login.py", {"admin-login"}),
+            ("netizen_cli/admin/static/login.js", {"admin-login"}),
+            ("netizen_cli/admin/static/login.html", {"admin"}),
+            ("netizen_cli/admin/auth.py", {"admin"}),
+            ("netizen_cli/admin/users.py", {"admin"}),
+            ("netizen_cli/admin/port_config.py", {"admin"}),
+            ("netizen_cli/database_migrations.py", {"migrations"}),
+            ("netizen_cli/migrations/v22.py", {"migrations"}),
+            (".github/workflows/release.yml", {"release-publisher"}),
+            ("netizen_cli/runtime/goals.py", {"runtime"}),
+            ("netizen_cli/admin/static/content-preview.css", {"admin"}),
+            ("netizen_cli/cards/reply.py", {"cards"}),
+            ("tests/fixtures/channel_v21.sql", {"migrations"}),
+            ("skills/netizen-lark/SKILL.md", {"docs"}),
+            ("Makefile", {"other"}),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(set(classify([path], {})), areas)
+
+    def test_dependency_changes_by_pin_in_either_manifest(self) -> None:
+        for name, area in (
+            ("openai-codex", "codex-sdk"), ("openai-codex-cli-bin", "codex-sdk"),
+            ("lark-channel-sdk", "feishu-sdk"), ("lark-oapi", "feishu-sdk"),
+        ):
+            for path, template in (
+                ("requirements.lock", "# locked\n{}==1\nother==1"),
+                ("pyproject.toml", '[project]\ndependencies = ["{}==1", "other==1"]'),
+            ):
+                with self.subTest(name=name, path=path):
+                    old = template.format(name)
+                    new = old.replace(name + "==1", name + "==2")
+                    self.assertEqual(classify([path], {path: (old, new)}), {area: [path]})
+                    unrelated = old.replace("other==1", "other==2") + "\n# " + name + "==3"
+                    self.assertEqual(classify([path], {path: (old, unrelated)}), {"other": [path]})
+
+    def test_python_matrix_and_packaging_fields(self) -> None:
+        path = "pyproject.toml"
+        for line, area in (
+            ('[project]\nrequires-python = "3.13"', "python-matrix"),
+            ('[project]\nclassifiers = ["Programming Language :: Python :: 3.13"]', "python-matrix"),
+            ('[build-system]\nrequires = ["setuptools==1"]', "platform-service"),
+            ('[project.scripts]\nnetizen = "cli:main"', "platform-service"),
+            ('[project.gui-scripts]\nnetizen = "cli:main"', "platform-service"),
+            ('[project.entry-points.plugins]\nnetizen = "cli:plugin"', "platform-service"),
+            ('[project]\ndynamic = ["version"]', "platform-service"),
+            ('[tool.setuptools.dynamic]\nversion = {attr = "netizen_cli.__version__"}', "platform-service"),
+            ('[tool.setuptools.cmdclass]\nbuild_py = "_build.BuildPy"', "platform-service"),
+            ('[tool.setuptools.packages.find]\ninclude = ["netizen*"]', "other"),
+            ('[tool.setuptools]\npackages = ["netizen_cli"]', "other"),
+            ('[project]\nversion = "1.0.0"', "other"),
+            ('[tool.mypy]\npython_version = "3.13"', "other"),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(classify([path], {path: ("", line)}), {area: [path]})
+
+        original = '[project]\nrequires-python=">=3.11,<3.15"\nclassifiers=["Programming Language :: Python :: 3.11"]'
+        edited = original.replace(">=3.11,<3.15", "<3.15, >=3.11").replace(
+            '3.11"]', '3.11", "Development Status :: 4 - Beta"]')
+        self.assertEqual(classify([path], {path: (original, edited)}), {"other": [path]})
+
+    def test_package_data_and_discovery_edits_are_routine_but_entry_point_edits_are_manual(self) -> None:
+        path = "pyproject.toml"
+        old = ('[project.scripts]\nnetizen = "cli:main"\n'
+               '[tool.setuptools.packages.find]\ninclude = ["netizen_cli"]\n'
+               '[tool.setuptools.package-data]\nnetizen_cli = ["admin/static/*.js"]')
+        inventory = old.replace('"admin/static/*.js"', '"admin/static/*.js", "resources/skills/**"')
+        self.assertEqual(classify([path], {path: (old, inventory)}), {"other": [path]})
+        discovery = old.replace('["netizen_cli"]', '["netizen_cli*"]')
+        self.assertEqual(classify([path], {path: (old, discovery)}), {"other": [path]})
+        for new in (old, inventory):
+            with self.subTest(new=new):
+                changed_entry = new.replace("cli:main", "cli:replacement")
+                self.assertEqual(classify([path], {path: (old, changed_entry)}), {"platform-service": [path]})
+
+    def test_builder_required_file_inventory_edits_are_routine(self) -> None:
+        path = "scripts/build_cli_distribution.py"
+        for source in (
+            'REQUIRED_WHEEL_FILES = frozenset({\n    "index.html",\n})\n',
+            'REQUIRED_SDIST_FILES: list[str] = ["index.html"]\n',
+            'def verify_sdist(root):\n    required = {f"{root}/{n}" for n in ("index.html",)}\n',
+        ):
+            with self.subTest(source=source):
+                edited = source.replace('"index.html"', '"index.html", "menu.js"')
+                self.assertEqual(classify([path], {path: (source, edited)}), {"other": [path]})
+
+    def test_builder_edits_outside_required_file_lists_are_manual(self) -> None:
+        path = "scripts/build_cli_distribution.py"
+        old = ('REQUIRED_WHEEL_FILES = frozenset({"index.html"})\n'
+               'def verify_sdist(root):\n'
+               '    required = {f"{root}/{n}" for n in ("index.html",)}\n'
+               '    return required.issubset(files)\n')
+        for new in (
+            old.replace("issubset", "isdisjoint"),
+            old.replace('"index.html"', '"menu.js"').replace("issubset", "isdisjoint"),
+            old.replace('"index.html"', 'collect_files()'),
+            old.replace('f"{root}/{n}"', 'f"{root}/static/{n}"'),
+            old + "# revised build procedure\n",
+        ):
+            with self.subTest(new=new):
+                self.assertEqual(classify([path], {path: (old, new)}), {"platform-service": [path]})
+
+    def test_python_versions_across_ci_workflows(self) -> None:
+        path = ".github/workflows/ci.yml"
+        old = "jobs:\n  check:\n    strategy:\n      matrix:\n        python:\n          - '3.13'\n"
+        self.assertEqual(classify([path], {path: (old, old.replace("3.13", "3.14"))}), {"python-matrix": [path]})
+        self.assertEqual(classify([path], {path: (old, old + "    timeout-minutes: 30\n")}), {"other": [path]})
+
+        repeated = old + "  smoke:\n    strategy:\n      matrix:\n        python: ['3.13']\n"
+        self.assertEqual(classify([path], {path: (old, repeated)}), {"other": [path]})
+        same = repeated + "  python:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: |\n          python-version: 99\n"
+        self.assertEqual(classify([path], {path: (old, same)}), {"other": [path]})
+        inline = "jobs:\n  smoke:\n    strategy: {matrix: {python: ['3.13', '3.15']}}\n"
+        self.assertEqual(classify([path], {path: (old, inline)}), {"python-matrix": [path]})
+        sibling = ".github/workflows/browser.yaml"
+        step = "jobs:\n  smoke:\n    steps:\n      - uses: actions/setup-python@v7\n        with:\n          python-version: '3.13'\n"
+        for endpoints in (("", step), (step, "")):
+            self.assertEqual(classify([sibling], {path: (old, old), sibling: endpoints}), {"other": [sibling]})
+        self.assertEqual(classify([sibling], {path: (old, old), sibling: ("", step.replace("3.13", "3.15"))}),
+                         {"python-matrix": [sibling]})
+
+    def test_range_includes_unchanged_workflows_in_version_union(self) -> None:
+        with patch("scripts.release.git") as git_mock:
+            git_mock.side_effect = [
+                "A\0.github/workflows/extra.yaml\0", "jobs:\n  b:\n    strategy:\n      matrix:\n        python: ['3.13']",
+                ".github/workflows/ci.yml\0", "jobs:\n  a:\n    strategy:\n      matrix:\n        python: ['3.13']",
+            ]
+            self.assertEqual(range_areas("v1.0.0", "sha"), {"other": [".github/workflows/extra.yaml"]})
+            self.assertIn(call("show", "v1.0.0:.github/workflows/ci.yml"), git_mock.call_args_list)
+
+    def test_packaging_checks_only_skill_inclusion_rules(self) -> None:
+        for path, old, edit, areas in (
+            ("MANIFEST.in", "graft skills", "prune skills", {"platform-service", "skills-loading"}),
+            ("MANIFEST.in", "graft skills", "graft skills\ninclude config.example.yaml", {"platform-service"}),
+            ("_build.py", 'for name in ("guide",):\n copytree(src / "skills" / name, dst)',
+             'for name in ("guide", "extra"):\n copytree(src / "skills" / name, dst)', {"platform-service", "skills-loading"}),
+            ("_build.py", 'copyfile("config.yaml", dst)', 'copyfile("other.yaml", dst)', {"platform-service"}),
+            ("pyproject.toml", "", '[tool.setuptools.exclude-package-data]\nnetizen_cli=["resources/skills/**"]',
+             {"platform-service", "skills-loading"}),
+        ):
+            with self.subTest(path=path, edit=edit):
+                self.assertEqual(set(classify([path], {path: (old, edit)})), areas)
+
+    def test_ready_and_skill_registration_in_mixed_modules(self) -> None:
+        for path, old, new, areas in (
+            ("netizen_cli/main.py", "def _publish_ready_marker(p): pass", "", {"platform-service"}),
+            ("netizen_cli/main.py", "class ServiceCore:\n async def start(self): await start_scheduler()",
+             "class ServiceCore:\n async def start(self): await start_outcome_mcp()", {"runtime"}),
+            ("netizen_cli/main.py", "def show(): pass", "def show(): return 0", {"runtime"}),
+            ("netizen_cli/sdk_gap_adapter.py", "class AppServerSkillRoots: pass", "", {"skills-loading"}),
+            ("netizen_cli/sdk_gap_adapter.py", "class AppServerGoalControl: pass", "", {"runtime"}),
+            ("netizen_cli/main.py", "if _EARLY_LIFETIME_DESCRIPTOR:\n os.set_inheritable(fd, False)", "", {"platform-service"}),
+            ("netizen_cli/main.py", "def build_channel(): pass", "def build_channel(): return channel", {"runtime"}),
+            ("netizen_cli/admin/web.py", '_SELECTOR_CSP = "a"', '_SELECTOR_CSP = "b"', {"admin"}),
+            ("netizen_cli/sdk_gap_adapter.py", "def _initialized_client(): pass", "", {"runtime"}),
+        ):
+            with self.subTest(path=path, old=old):
+                self.assertEqual(set(classify([path], {path: (old, new)})), areas)
+
+    def test_moves_and_deleted_pins_use_both_committed_endpoints(self) -> None:
+        with patch("scripts.release.git") as git_mock:
+            git_mock.side_effect = [
+                "D\0requirements.lock\0A\0locks/new name\0A\0pyproject.toml\0",
+                "openai-codex-cli-bin==1\n", '[project]\ndependencies = ["lark-oapi==2"]',
+            ]
+            self.assertEqual(range_areas("v1.0.0", "sha"), {
+                "codex-sdk": ["requirements.lock"], "feishu-sdk": ["pyproject.toml"],
+                "other": ["locks/new name"],
+            })
+            self.assertEqual(git_mock.call_args_list, [
+                call("diff", "--no-ext-diff", "--no-renames", "--name-status", "-z", "v1.0.0..sha", "--"),
+                call("show", "v1.0.0:requirements.lock"), call("show", "sha:pyproject.toml"),
+            ])
 
 
 class NextVersionTest(unittest.TestCase):
@@ -238,6 +431,26 @@ class ValidateExplicitVersionTest(unittest.TestCase):
 
 
 class ReleaseOrchestrationTest(unittest.TestCase):
+    def test_plan_allows_missing_evidence_on_a_work_branch_and_only_reads_git(self) -> None:
+        # Exercise the CLI down to its git/gh ports without allowing even a fetch.
+        responses = {
+            ("tag", "-l", "v*"): "v1.0.0\n",
+            ("rev-parse", "HEAD"): "local-sha\n",
+            ("diff", "--no-ext-diff", "--no-renames", "--name-status", "-z", "v1.0.0..local-sha", "--"):
+                "M\0netizen_cli/builtin_skills.py\0M\0README.md\0",
+        }
+        with (
+            patch("scripts.release.git", side_effect=lambda *args: responses[args]),
+            patch("scripts.release.gh") as gh_mock,
+            redirect_stdout(StringIO()) as out,
+        ):
+            self.assertEqual(main(["--plan"]), 0)
+        for fragment in ("v1.0.0..HEAD", "local-sha", "[manual] skills-loading",
+                         "netizen_cli/builtin_skills.py", "[automated] docs", "README.md",
+                         '--verified skills-loading="', '--accept-risk skills-loading="'):
+            self.assertIn(fragment, out.getvalue())
+        gh_mock.assert_not_called()
+
     def test_maintainer_release_requests_full_publication_explicitly(self) -> None:
         with patch("scripts.release.gh") as gh_mock:
             dispatch_release_workflow("v1.2.3", Path("/tmp/netizen-notes.md"))
@@ -311,7 +524,7 @@ class ReleaseCandidateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.mocks = {}
         for name in (
-            "require_clean_release_base", "latest_tag", "collect_entries",
+            "require_clean_release_base", "latest_tag", "range_areas", "collect_entries",
             "repository", "needs_version_bump", "create_bump_pull_request",
             "wait_for_pull_request_checks", "merge_pull_request",
             "wait_for_main_ci", "dispatch_release_workflow",
@@ -319,6 +532,7 @@ class ReleaseCandidateTest(unittest.TestCase):
         ):
             self.mocks[name] = self.enterContext(patch(f"scripts.release.{name}"))
         self.mocks["latest_tag"].return_value = "v0.9.1"
+        self.mocks["range_areas"].return_value = {"docs": ["README.md"]}
         self.mocks["collect_entries"].return_value = [entry("feat: CLI")]
         self.mocks["repository"].return_value = "lijingda/netizen"
         self.mocks["create_bump_pull_request"].return_value = 42
@@ -327,6 +541,75 @@ class ReleaseCandidateTest(unittest.TestCase):
             "prepared-main\n" if args == ("rev-parse", "HEAD") else ""
         )
         self.mocks["gh"].return_value = json.dumps({"url": "release-url"})
+        self.mocks["wait_for_main_ci"].return_value = "https://example.invalid/main-ci"
+
+    def test_missing_evidence_exits_two_before_fetch_or_release_writes(self) -> None:
+        self.mocks["range_areas"].return_value = {"platform-service": ["netizen_cli/cli.py"],
+                                                   "codex-sdk": ["requirements.lock"]}
+        with redirect_stderr(StringIO()) as err:
+            self.assertEqual(main([]), 2)
+        for area in ("platform-service", "codex-sdk"):
+            self.assertIn(f"--verified {area}=", err.getvalue())
+            self.assertIn(f"--accept-risk {area}=", err.getvalue())
+        self.mocks["require_clean_release_base"].assert_not_called()
+        self.mocks["git"].assert_called_once_with("rev-parse", "HEAD")
+        for name in ("gh", "create_bump_pull_request", "dispatch_release_workflow"):
+            self.mocks[name].assert_not_called()
+
+    def test_rejects_stale_unknown_duplicate_and_invalid_records(self) -> None:
+        self.mocks["range_areas"].return_value = {"codex-sdk": ["requirements.lock"], "docs": ["README.md"]}
+        for args in (
+            ["--verified", "codx-sdk=checked"], ["--accept-risk", "feishu-sdk=stale"],
+            ["--verified", "docs=automated"], ["--verified", "codex-sdk= "],
+            ["--accept-risk", "codex-sdk"], ["--verified", "codex-sdk=x\n"],
+            ["--verified", "codex-sdk=x\ry"], ["--accept-risk", "codex-sdk=" + "x" * 501],
+            ["--verified", "codex-sdk=a", "--verified", "codex-sdk=b"],
+            ["--accept-risk", "codex-sdk=a", "--accept-risk", "codex-sdk=b"],
+            ["--verified", "codex-sdk=a", "--accept-risk", "codex-sdk=b"],
+        ):
+            with self.subTest(args=args), redirect_stderr(StringIO()):
+                self.assertEqual(main(args), 2)
+        self.mocks["require_clean_release_base"].assert_not_called()
+        self.mocks["create_bump_pull_request"].assert_not_called()
+
+    def test_plan_with_partial_evidence_lists_only_the_remaining_flags(self) -> None:
+        self.mocks["range_areas"].return_value = {
+            "codex-sdk": ["requirements.lock"], "platform-service": ["netizen_cli/cli.py"],
+        }
+        with redirect_stdout(StringIO()) as out:
+            self.assertEqual(main(["--plan", "--verified", "codex-sdk=review and checks in PR 42"]), 0)
+        self.assertIn("verified — review and checks in PR 42", out.getvalue())
+        self.assertNotIn("--verified codex-sdk=", out.getvalue())
+        self.assertIn("--accept-risk platform-service=", out.getvalue())
+        self.mocks["require_clean_release_base"].assert_not_called()
+
+    def test_dispatch_notes_record_ci_and_each_disposition_in_table_order(self) -> None:
+        self.mocks["range_areas"].return_value = {"codex-sdk": ["requirements.lock"],
+                                                 "feishu-sdk": ["requirements.lock"]}
+        self.mocks["needs_version_bump"].return_value = False
+        notes = []
+        self.mocks["dispatch_release_workflow"].side_effect = lambda tag, path: notes.append(path.read_text())
+        release(None, verified=["feishu-sdk=desktop callback in test tenant"],
+                accept_risk=["codex-sdk=provider unavailable, repeat when enabled"])
+        self.assertIn("## Verification\n", notes[0])
+        self.assertIn("[Exact main CI](https://example.invalid/main-ci) passed", notes[0])
+        for gate in ("make check (", "make check-native", "make check-browser"):
+            self.assertIn(gate, notes[0])
+        self.assertIn("codex-sdk: risk accepted — provider unavailable, repeat when enabled\n"
+                      "- feishu-sdk: verified — desktop callback in test tenant", notes[0])
+
+    def test_refreshed_tag_or_concurrent_merge_requires_new_plan(self) -> None:
+        self.mocks["latest_tag"].side_effect = ["v0.9.1", "v0.9.2"]
+        with self.assertRaises(ReleaseEscalation):
+            release(None)
+        self.mocks["create_bump_pull_request"].assert_not_called()
+        self.mocks["latest_tag"].side_effect = None
+        self.mocks["needs_version_bump"].return_value = True
+        self.mocks["git"].side_effect = lambda *args: "other-tree" if args[-1] == "merge-oid^{tree}" else ""
+        with self.assertRaises(ReleaseEscalation):
+            release(None)
+        self.mocks["wait_for_main_ci"].assert_not_called()
+        self.mocks["dispatch_release_workflow"].assert_not_called()
 
     def test_prepared_candidate_requires_exact_main_ci_before_tagging(self) -> None:
         self.mocks["needs_version_bump"].return_value = False
@@ -359,7 +642,9 @@ class ReleaseCandidateTest(unittest.TestCase):
             release("v0.10.0")
         self.mocks["create_bump_pull_request"].assert_not_called()
         self.mocks["wait_for_main_ci"].assert_not_called()
-        self.mocks["git"].assert_called_once_with("tag", "-l", "v0.10.0")
+        self.assertEqual(self.mocks["git"].call_args_list, [
+            call("rev-parse", "HEAD"), call("rev-parse", "HEAD"), call("tag", "-l", "v0.10.0"),
+        ])
         self.mocks["dispatch_release_workflow"].assert_not_called()
 
     def test_prepared_candidate_failed_ci_never_pushes_tag_or_publishes(self) -> None:
@@ -369,7 +654,7 @@ class ReleaseCandidateTest(unittest.TestCase):
             release("v0.10.0")
         self.assertEqual(
             self.mocks["git"].call_args_list,
-            [call("tag", "-l", "v0.10.0"), call("rev-parse", "HEAD")],
+            [call("rev-parse", "HEAD"), call("rev-parse", "HEAD"), call("tag", "-l", "v0.10.0")],
         )
         self.mocks["dispatch_release_workflow"].assert_not_called()
 

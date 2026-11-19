@@ -31,6 +31,14 @@ Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确�
 测试会明确跳过；此时 `make check` 通过不代表 JavaScript 测试已完成。CI 安装 Node.js
 并强制执行该项测试。
 
+在本机运行 `make check-browser` 可用真实无头浏览器检查 Admin。需要 Node.js 22 和已安装的
+Chrome 或 Chromium。测试从 PATH 和 macOS 标准 Chrome 应用目录查找浏览器，也可通过
+`NETIZEN_TEST_BROWSER` 指定可执行文件的绝对路径。Linux 开发机实测约 16 秒、浏览器峰值内存约 1 GB，普通
+`make check` 默认跳过它。面向 main 的 PR 和每次 main push 都在 Linux CI 执行此项检查。
+测试以桌面和手机尺寸逐页打开管理页及匿名登录页，检查脚本、CSP、请求错误和手机页面横向溢出，
+并打开对话中的图片与文件链接以及 Project 文件预览。Safari、Firefox、真实飞书登录以及
+溢出以外的视觉布局仍需单独验收。
+
 `make check` 先执行 `make lint`（ruff：语法、pyflakes 与未持有引用的 asyncio 任务）和
 `make typecheck`（mypy），再执行 unittest（含 wheel／sdist 构建与隔离资源加载）、Python 编译检查、
 依赖一致性检查与 SDK synthetic probes。打包测试要求开发环境安装上述固定构建后端；也可
@@ -40,6 +48,14 @@ Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确�
 内置 Skill discovery 另启动真实 bundled App Server 做只读发现；这不能证明普通
 start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收见
 [多实例与内置 Skills](deployment.md#多实例与内置-skills-验收)。
+
+修改 Runtime、SDK adapter、原生会话生命周期、定时任务或 Worktree 代码时，在仓库根目录
+另行运行 `make check-native`。它使用随包 App Server 和本机回环 mock provider，
+无需 Codex 账号或飞书；Linux 开发机实测约 3 分钟，耗时随机器而异。命令会打印临时证据目录，
+也可用 `make check-native NATIVE_EVIDENCE_DIR=/path/to/new-directory` 指定新目录或空目录。
+Code mode 的 V8 运行时会预留大量虚拟地址空间，请勿用 `ulimit -v` 或 `prlimit --as` 限制它，
+如需限制内存，可在 Linux 上使用 cgroup，例如 `systemd-run --user --scope -p MemoryMax=4G make check-native`。
+面向 main 的 PR 和每次 main push 的 CI 都在 Linux 与 macOS arm64 执行这组回归。
 
 ### 实现导航
 

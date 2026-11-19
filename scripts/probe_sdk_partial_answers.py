@@ -19,6 +19,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import socketserver
 import threading
 from typing import Any, Iterator
 
@@ -49,6 +50,12 @@ def response_events(response_id: str, *items: dict[str, Any]) -> bytes:
 
 class ResponsesServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind() names the address with socket.getfqdn(); on
+        # macOS runners that reverse lookup of 127.0.0.1 waits ~30 s per server.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def __init__(self, replies: list[tuple[int, bytes]]) -> None:
         super().__init__(("127.0.0.1", 0), ResponsesHandler)

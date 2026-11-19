@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-08-31
 amends: 0043
+amended_by: 0076, 0103
 ---
 
 # 由脚本在维护者指令后执行发布全链

@@ -187,11 +187,12 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0043](0043-remove-redundant-release-approval.md) | 移除冗余的正式发布人工审批 | 功能契约 | 有效 |  |
 | [0044](0044-decouple-existing-app-repair-from-terminal-input.md) | 将已有飞书应用补权与终端输入解耦 | 功能契约 | 有效 | 被 [0062](0062-decouple-initial-app-onboarding-from-terminal-input.md) 修订 |
 | [0045](0045-model-chat-info-as-an-alternative-scope-requirement.md) | 将群信息权限建模为等价 scope 能力 | 功能契约 | 有效 |  |
-| [0050](0050-agent-executed-release-chain.md) | 由脚本在维护者指令后执行发布全链 | 功能契约 | 有效 |  |
+| [0050](0050-agent-executed-release-chain.md) | 由脚本在维护者指令后执行发布全链 | 功能契约 | 有效 | 被 [0076](0076-separate-cli-installations-from-instance-data.md)、[0103](0103-classify-release-verification-by-changed-area.md) 修订 |
 | [0062](0062-decouple-initial-app-onboarding-from-terminal-input.md) | 将首次飞书应用初始化与终端输入解耦 | 功能契约 | 有效 | 被 [0066](0066-share-lark-app-credentials-with-optional-cli.md) 修订 |
 | [0074](0074-deploy-independent-instances-by-root.md) | 按根目录部署独立实例，继续共享 Codex 用户状态 | 架构决策 | 有效 |  |
 | [0076](0076-separate-cli-installations-from-instance-data.md) | 用普通 Python CLI 分发程序，以实例启动负责数据准入 | 架构决策 | 有效 |  |
+| [0103](0103-classify-release-verification-by-changed-area.md) | 按发布范围内的变更确定验收要求 | 架构决策 | 有效 | 修订 [0050](0050-agent-executed-release-chain.md) |
 
 ## 统计
 
-共 102 个 ADR：架构决策 69 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。
+共 103 个 ADR：架构决策 70 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，无草案。

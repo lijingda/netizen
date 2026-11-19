@@ -85,7 +85,7 @@ REGISTRY = (
     Step("provider-admission", "isolated", "probe_model_provider_admission.py",
          ("--timeout", "100", "--output", "{json}"), deadline=120, grace=5, evidence_source="json"),
     Step("scheduled-outcome-mount", "isolated", "probe_scheduled_outcome_mount.py",
-         ("--output", "{json}"), deadline=300, evidence="cases", evidence_source="json", case_count=5),
+         ("--output", "{json}"), deadline=300, evidence="cases", evidence_source="json", case_count=6),
     Step("thread-restore", "isolated", "probe_thread_restore.py",
          ("--output", "{json}"), deadline=90, grace=5, evidence_source="json"),
     Step("thread-delete-rejection", "isolated", "probe_thread_delete_rejection.py",

@@ -23,15 +23,18 @@ jobs:
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - name: Check out source
+      - &checkout
+        name: Check out source
         uses: actions/checkout@v7
 
-      - name: Set up Node.js for Admin JavaScript behavior tests
+      - &setup-node
+        name: Set up Node.js for Admin JavaScript behavior tests
         uses: actions/setup-node@v7
         with:
           node-version: '22'
 
-      - name: Set up supported Python
+      - &setup-python
+        name: Set up supported Python
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
@@ -40,7 +43,8 @@ jobs:
             requirements.lock
             requirements-dev.lock
 
-      - name: Install the locked dependency set
+      - &locked-install
+        name: Install the locked dependency set
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install --disable-pip-version-check --no-input setuptools==80.9.0
@@ -66,22 +70,11 @@ jobs:
       matrix:
         python: ["3.14"]
     steps:
-      - name: Check out source
-        uses: actions/checkout@v7
+      - *checkout
 
-      - name: Set up Node.js for Admin JavaScript behavior tests
-        uses: actions/setup-node@v7
-        with:
-          node-version: '22'
+      - *setup-node
 
-      - name: Set up supported Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: |
-            requirements.lock
-            requirements-dev.lock
+      - *setup-python
 
       - name: Confirm the standard arm64 runtime
         run: |
@@ -93,20 +86,7 @@ jobs:
           assert sys.version_info[:2] == (3, 14)
           PY
 
-      - name: Install the locked dependency set
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --disable-pip-version-check --no-input setuptools==80.9.0
-          .venv/bin/python -m pip install \
-            --disable-pip-version-check \
-            --no-input \
-            --constraint requirements.lock \
-            .
-          .venv/bin/python -m pip install \
-            --disable-pip-version-check \
-            --no-input \
-            --constraint requirements.lock \
-            --requirement requirements-dev.lock
+      - *locked-install
 
       - name: Verify macOS system trust integration
         run: >-
@@ -116,3 +96,67 @@ jobs:
 
       - name: Run the repository gate
         run: make check
+
+  admin-browser-smoke:
+    name: Admin browser smoke (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python: ["3.14"]
+    steps:
+      - *checkout
+      - *setup-node
+      - *setup-python
+      - *locked-install
+
+      - name: Run Admin smoke in the preinstalled Chrome
+        env:
+          CI: 'true'
+          NETIZEN_BROWSER_RESULT: ${{ runner.temp }}/admin-browser.json
+        run: make check-browser
+
+      - name: Upload browser failure details
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: admin-browser-failure
+          path: ${{ runner.temp }}/admin-browser.json
+          retention-days: 3
+
+  native-isolated:
+    name: Native isolated regression (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    # The serial isolated deadlines total about 100 minutes, before cleanup and setup.
+    timeout-minutes: 120
+    # macOS intermittently misses session-collaboration and scheduled-worktree
+    # waits (under investigation); report it without failing the workflow.
+    continue-on-error: ${{ matrix.os == 'macos-15' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.14"]
+        os: [ubuntu-latest, macos-15]
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+          - os: macos-15
+            platform: macOS arm64
+    steps:
+      - *checkout
+      - *setup-python
+      - *locked-install
+
+      - name: Run the isolated group
+        env:
+          NATIVE_EVIDENCE_DIR: ${{ runner.temp }}/native-evidence
+        run: make check-native
+
+      - name: Upload native regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-isolated-${{ matrix.os }}
+          path: ${{ runner.temp }}/native-evidence
+          retention-days: 14
+          if-no-files-found: error
