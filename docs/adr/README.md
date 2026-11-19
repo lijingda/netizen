@@ -121,7 +121,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0056](0056-count-successful-patches-in-task-files.md) | 按成功 patch 累计本轮文件行数 | 功能契约 | 有效 |  |
 | [0058](0058-use-page-selection-for-file-cards.md) | 文件卡片统一使用页码选择与跳转 | 功能契约 | 有效 |  |
 | [0063](0063-mention-task-initiators-in-terminal-results.md) | 在任务结束时提及任务发起人 | 功能契约 | 有效 | 被 [0068](0068-run-saved-scheduled-plans-manually.md)、[0070](0070-schedule-inputs-in-existing-bindings.md) 修订 |
-| [0065](0065-preview-local-images-in-result-markdown.md) | 在结果正文中预览明确引用的本地图片 | 功能契约 | 有效 |  |
+| [0065](0065-preview-local-images-in-result-markdown.md) | 在结果正文中预览明确引用的本地图片 | 功能契约 | 有效 | 当前预览限额与失败提示见[工程设计](../design.md#最终正文中的本地图片) |
 | [0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) | 在现有回复形态中交付阶段性答案 | 架构决策 | 有效 | 被 [0084](0084-separate-goal-controls-from-logical-turn-replies.md) 修订 |
 | [0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md) | 用有界活动分段配置过程卡展示 | 功能契约 | 有效 |  |
 | [0087](0087-use-instance-progress-card-settings-for-missing-session-intent.md) | 未配置过程卡的会话使用实例级兜底 | 功能契约 | 有效 |  |
