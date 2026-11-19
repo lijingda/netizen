@@ -1254,13 +1254,28 @@ Publisher。流程使用 OIDC，不新增长期 PyPI token secret。GitHub 的 I
 
 ### 发布步骤
 
-1. 维护者明确决定发布并完成上述外部准备；按实际变更补齐 SDK、浏览器及两平台 live
-   验收，明确记录未完成范围；SDK 升级审查中的未覆盖项逐个核对“发布前补验”或
-   “接受的残留风险（附重新评估条件）”，补验项完成后才进入发布。`scripts/release.py` 执行版本推导／指定、notes、版本 PR、
-   exact main CI、受保护 annotated tag 与 workflow dispatch 的完整链，不自动响应 push
-   或 tag 发布。两处包版本均已准备为目标版本时复用当前 main，仍等待该精确提交的成功
-   CI；均为上一版本时才创建版本 PR，混合或其他版本在修改前拒绝。
-   运行该脚本意味着请求正式发布，不是只构建或 dry-run。
+1. 用 `python scripts/release.py --plan` 查看本地上一版本 tag 到 HEAD 的已提交变更。
+   输出列出区域、触发文件、验收要求及尚缺的参数。该命令只读，可在工作分支运行。
+   维护者明确决定发布并确认上述外部准备后，在 main 上去掉 `--plan` 即请求正式发布。
+   按命中的 manual 区域补齐受影响的 SDK、浏览器、飞书客户端及两平台 live 验收，分别记录
+   平台与 live 结果。每个区域只给一个参数，例如 `--verified platform-service="检查内容、平台与证据出处"`
+   或 `--accept-risk codex-sdk="未覆盖项、接受理由及重新评估条件"`。说明限 1–500 个可打印字符、单行，
+   会公开写入 Release notes，可引用已有验收报告。`codex-sdk` 的依据是[升级审查](#codex-sdk-升级审查)的逐项处置。
+   “发布前补验”须完成，仍未完成的项必须由维护者明确改记“接受的残留风险（附重新评估条件）”。
+   有残留风险时用 `--accept-risk` 记录。缺项或参数无效时脚本在版本 PR、tag 和 dispatch 前停止。
+   automated 区域复用 exact main push CI 的五个代码门禁、两平台原生隔离回归和 Linux Admin 浏览器冒烟，
+   继续执行下列包验证。仅修改 wheel／sdist 必备文件条目、setuptools 的 `package-data` 或包发现清单、
+   随包示例 `config.example.yaml` 时，由 CI 资源测试及隔离安装验证覆盖。区域依据见 [ADR 0103](adr/0103-classify-release-verification-by-changed-area.md)。
+
+   以下检查由触及相应边界的 PR 记录证据或具体缺口。发布时复用这些记录，维护者也可选择在发布前复验。
+
+   - 材料、引用、转发投影、发送者归属与历史 catch-up 的真实飞书客户端检查（ADR 0029/0039/0064/0099）。
+   - 迁移框架本身变化时，两平台 Linux/macOS 的真实启动迁移、中断恢复和 ready 检查（ADR 0075/0076）。
+   - Admin 跨受信主机的访问检查，以及[开发期按变更触发的 live probes](#代码门禁与按需实时兼容性验证)。
+
+   正式调用仍执行版本推导／指定、notes、版本 PR、exact main CI、受保护 annotated tag 与
+   workflow dispatch 的完整链。两处包版本均为目标版本时复用当前 main，仍等待该精确提交的
+   成功 CI。均为上一版本时才创建版本 PR，混合或其他版本在修改前拒绝。push 或 tag 本身不触发发布。
 2. `release.yml` 只接受显式 workflow_dispatch，核对 exact tag 和同一 main commit 的
    成功 CI；固定 `setuptools==80.9.0`，由 `scripts/build_cli_distribution.py` 先构建
    sdist，再从该 sdist 构建 wheel，生成带 SHA-256 的 `netizen-cli-release.json`。
