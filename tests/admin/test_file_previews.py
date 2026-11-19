@@ -33,6 +33,12 @@ class ParsedHTML(HTMLParser):
 
 
 class FilePreviewsTest(unittest.TestCase):
+    def test_markdown_file_keeps_file_citations_literal(self):
+        text = ':codex-file-citation{path="/tmp/f.txt" purpose="source"}'
+        preview = self.render(text)
+        self.assertEqual("".join(preview.text).strip(), text)
+        self.assertEqual(preview.attributes("a"), [])
+
     def test_answer_callback_is_separate_from_file_links_and_external_links(self):
         text = "[absolute](/tmp/a.md) [relative](a.md) [web](https://example.org) [mail](mailto:a@example.org) [file](file:///tmp/a.md)"
         answer = ParsedHTML(render_markdown(text, answer_link=answer_file_link))

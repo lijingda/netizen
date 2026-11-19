@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any, Protocol
 from lark_channel import OutboundCard, new_card
 
 from ..completion_mention import valid_completion_mention_user_id
+from ..file_citations import citation_code, rewrite_file_citations
 from ..progress_card_settings import ProgressCardSettings
 from ..domain import (
     ACTIVE_STATE_VALUES,
@@ -346,12 +348,20 @@ def _normalize_partial_answer_module(
     return partial_answer
 
 
+def feishu_answer_text(text: str) -> str:
+    try:
+        return rewrite_file_citations(text, citation_code)
+    except Exception:
+        logging.getLogger(__name__).exception("could not prepare file citations; preserving answer")
+        return text
+
+
 def _partial_answer_module(
     partial_answers: tuple[_PartialAnswerLike, ...],
 ) -> ReplyCardPartialAnswerModule | None:
     if not partial_answers:
         return None
-    return ReplyCardPartialAnswerModule(tuple(item.text for item in partial_answers))
+    return ReplyCardPartialAnswerModule(tuple(feishu_answer_text(item.text) for item in partial_answers))
 
 
 def _sanitize_turn_progress_manifest(

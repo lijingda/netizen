@@ -11,27 +11,31 @@ from mdformat.renderer import MDRenderer
 
 
 _GFM = PARSER_EXTENSIONS["gfm"]
-_MARKDOWN = MarkdownIt("commonmark", {
-    "mdformat": {"wrap": "keep", "number": True},
-    "parser_extension": [_GFM],
-}, renderer_cls=MDRenderer)
-_GFM.update_mdit(_MARKDOWN)
-_DEFAULT_VALIDATE_LINK = _MARKDOWN.validateLink
 
 
-def _validate_local_file_link(target: str) -> bool:
-    # The default rejects file: links. Permit local file URLs for image reads,
-    # but never network shares or the other schemes rejected by CommonMark.
-    try:
-        parts = urlsplit(target)
-    except ValueError:
-        return False
-    if parts.scheme == "file":
-        return not (parts.netloc or parts.query or parts.fragment)
-    return _DEFAULT_VALIDATE_LINK(target)
+def answer_markdown_parser() -> MarkdownIt:
+    parser = MarkdownIt("commonmark", {
+        "mdformat": {"wrap": "keep", "number": True},
+        "parser_extension": [_GFM],
+    }, renderer_cls=MDRenderer)
+    _GFM.update_mdit(parser)
+    default_validate_link = parser.validateLink
+
+    def validate_local_file_link(target: str) -> bool:
+        # Permit local file URLs for image reads, retaining the other default restrictions.
+        try:
+            parts = urlsplit(target)
+        except ValueError:
+            return False
+        if parts.scheme == "file":
+            return not (parts.netloc or parts.query or parts.fragment)
+        return default_validate_link(target)
+
+    parser.validateLink = validate_local_file_link  # type: ignore[method-assign, assignment]  # markdown-it hook
+    return parser
 
 
-_MARKDOWN.validateLink = _validate_local_file_link  # type: ignore[method-assign, assignment]  # markdown-it hook
+_MARKDOWN = answer_markdown_parser()
 
 
 def parse_markdown(content: str) -> tuple[list[Token], dict[str, Any]]:

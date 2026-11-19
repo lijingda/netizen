@@ -546,6 +546,39 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
     def post_text(message):
         return message.markdown if isinstance(message, OutboundPost) else message
 
+    async def test_result_and_partial_file_citations_on_cards_and_posts(self):
+        final = ':codex-file-citation{path="/host/out.pdf" purpose="output"}'
+        partial_text = ':codex-file-citation{path="/host/ref.pdf" page_number=4}'
+        partial = answer(partial_text)
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                self.channel.replies.clear()
+                outcome = replace(self.outcome(progress=progress, content=final, partials=(partial,)),
+                                  cwd=self.fixture.project)
+                if progress:
+                    outcome = await self.start_progress(outcome)
+                await self.app.handle_completion(outcome)
+                if progress:
+                    rendered = str(self.channel.updates[-1][1])
+                    self.assertIn("`out.pdf`", rendered)
+                    self.assertIn("`ref.pdf · 第 4 页`", rendered)
+                    self.assertNotIn("本轮文件", rendered)
+                    self.assertNotIn("/host", rendered)
+                else:
+                    self.assertEqual([self.post_text(post) for _, post in self.channel.replies],
+                                     ["**阶段性答案**\n\n`ref.pdf · 第 4 页`", "`out.pdf`"])
+                self.assertEqual(outcome.final_response, final)
+                self.assertEqual(outcome.partial_answers[0].text, partial_text)
+
+    async def test_citation_rewrite_failure_delivers_original(self):
+        final = ":codex-file-citation{path=/tmp/original}"
+        outcome = replace(self.outcome(progress=False, content=final), cwd=self.fixture.project)
+        with patch("netizen_cli.cards.reply.rewrite_file_citations", side_effect=ValueError), self.assertLogs(
+            "netizen_cli.cards.reply", level="ERROR",
+        ):
+            await self.app.handle_completion(outcome)
+        self.assertEqual([self.post_text(post) for _, post in self.channel.replies], [final])
+
     async def test_same_card_recovery_or_exhausted_updates_choose_one_terminal_delivery(self):
         partials = (answer("first original<br><br>", "one"), answer("second original", "two"))
         for side in (False, True):

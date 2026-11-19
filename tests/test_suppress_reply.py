@@ -272,6 +272,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
     async def test_nonempty_final_preserves_images_and_files_with_and_without_existing_progress(self):
         (self.fixture.project / "result.txt").write_text("task file")
         (self.fixture.project / "result.png").write_bytes(PNG)
+        final = 'visible answer :codex-file-citation{path="/sources/read.pdf"}\n\n![image](result.png)'
         for progress in (False, True):
             with self.subTest(progress=progress):
                 self.channel.replies.clear()
@@ -279,7 +280,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 self.channel.upload_calls.clear()
                 outcome = self.outcome(
                     result=completed_turn_result(
-                        file_change_item("result.txt"), final_response="visible answer\n\n![image](result.png)",
+                        file_change_item("result.txt"), final_response=final,
                     ),
                     task_feedback=replace(self.feedback, progress_card_enabled=progress),
                 )
@@ -299,7 +300,8 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIsInstance(self.channel.replies[0][1], OutboundCard)
                     card = self.channel.replies[0][1].card
                 rendered = str(card)
-                self.assertIn("visible answer", rendered)
+                self.assertIn("visible answer `read.pdf`", rendered)
+                self.assertEqual(outcome.final_response, final)
                 self.assertIn("img_uploaded_1", rendered)
                 self.assertIn("result.txt", rendered)
                 self.assertTrue(_elements(card, "button"))

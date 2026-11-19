@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from ..cards import turn_progress_card
+from ..cards.reply import feishu_answer_text
 from ..codex_runtime import CodexRuntime
 from ..partial_answers import PartialAnswer
 from ..runtime.contracts import (
@@ -314,7 +315,7 @@ class _ReplyCardPresenter:
             ):
                 continue
             try:
-                post = OutboundPost(markdown=f"**阶段性答案**\n\n{answer.text}")
+                post = OutboundPost(markdown=f"**阶段性答案**\n\n{feishu_answer_text(answer.text)}")
             except Exception:
                 # No transport call has happened: final delivery may retry
                 # this known unpublished item after rendering recovers.
