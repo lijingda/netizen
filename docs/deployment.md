@@ -300,7 +300,9 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 `Native isolated regression (macOS arm64)`。两者在 CPython 3.14 上执行 `make check-native`，
 按注册表串行运行 isolated 组，用随包 App Server 和本机回环 mock provider 验证原生行为，
 无需 Codex 账号或飞书。无论回归成功或失败，CI 都上传各平台的证据目录，保留 14 天；
-可从 artifact 的 `SUMMARY.md` 定位到每步结果和探针输出。
+可从 artifact 的 `SUMMARY.md` 定位到每步结果和探针输出。macOS job 目前仅报告、不使 workflow 失败：
+`session-collaboration` 与 `scheduled-worktree` 在 macOS runner 上偶发等不到预期事件，原因待查；
+查明并稳定后再改为阻塞。Linux job 的失败照常使 workflow 失败。
 
 同一批 PR 和 main push 也运行 `Admin browser smoke (Linux)`，用无头 Chrome 在桌面和手机尺寸
 检查 Admin 页面与文件预览。失败时可从 `admin-browser-failure` artifact 查看浏览器的 JSON 结果，保留 3 天。
