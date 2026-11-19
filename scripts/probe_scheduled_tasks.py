@@ -1209,7 +1209,8 @@ async def probe(*, phase: str, model: str | None, timeout: float) -> dict[str, A
     if phase == "worktree":
         async with asyncio.timeout(timeout):
             with tempfile.TemporaryDirectory(prefix="netizen-scheduled-worktree-probe-") as temporary:
-                result = await _worktree_phase(Path(temporary))
+                # macOS temp dirs sit under the /var -> /private/var symlink.
+                result = await _worktree_phase(Path(temporary).resolve())
         return {**result, "temporary_state_cleaned": True}
     _require(bool(model), "real_model_phase_requires_model")
     config_path = _user_config_path()
