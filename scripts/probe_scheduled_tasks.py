@@ -29,6 +29,7 @@ import tempfile
 import time
 import tomllib
 import uuid
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,10 +51,11 @@ from netizen_cli.channel_app import ChannelApplication  # noqa: E402
 from netizen_cli.chat_targets import ValidatedChatTarget  # noqa: E402
 from netizen_cli.codex_runtime import CodexRuntime, StopDisposition, _native_cwd  # noqa: E402
 from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
+from netizen_cli.error_messages import describe_error  # noqa: E402
 from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
 from netizen_cli.management.service import InstanceManagementService, ManagementRuntimePort  # noqa: E402
 from netizen_cli.projects import ProjectRegistry  # noqa: E402
-from netizen_cli.runtime.contracts import TurnOutcome  # noqa: E402
+from netizen_cli.runtime.contracts import TurnObservationUnavailableOutcome, TurnOutcome  # noqa: E402
 from netizen_cli.schedules.mcp import ScheduleMcpRunner  # noqa: E402
 from netizen_cli.schedules.models import ScheduleRule  # noqa: E402
 from netizen_cli.schedules.scheduler import Scheduler  # noqa: E402
@@ -1020,7 +1022,7 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                     codex=codex, bindings=store,
                     terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
                     thread_subscription_control=AppServerThreadSubscriptionControl(codex),
-                    automatic_thread_naming=False, poll_interval_seconds=0.01,
+                    automatic_thread_naming=False,
                 )
                 management = InstanceManagementService(
                     bindings=store, projects=projects,
@@ -1036,9 +1038,11 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                     projects=projects, management=management,
                     instance_root=root / "instance",
                 )
-                outcomes: asyncio.Queue[TurnOutcome | BaseException] = asyncio.Queue()
+                outcomes: asyncio.Queue[TurnOutcome | TurnObservationUnavailableOutcome | BaseException] = asyncio.Queue()
 
                 async def completed(outcome: object) -> None:
+                    if isinstance(outcome, TurnObservationUnavailableOutcome):
+                        outcomes.put_nowait(outcome)
                     try:
                         await application.handle_completion(outcome)
                     except BaseException as error:
@@ -1049,12 +1053,17 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
 
                 runtime.set_completion_handler(completed)
 
-                async def next_outcome() -> TurnOutcome:
-                    # macOS CI runners occasionally need more than 20 s for the first
-                    # scheduled Turn; the probe's --timeout still bounds the phase.
+                async def next_outcome(binding_id: str, turn_id: str) -> TurnOutcome:
                     outcome = await asyncio.wait_for(outcomes.get(), 60)
                     if isinstance(outcome, BaseException):
                         raise outcome
+                    _require((outcome.binding_id, outcome.turn_id) == (binding_id, turn_id),
+                             "worktree_outcome_identity_mismatch")
+                    if isinstance(outcome, TurnObservationUnavailableOutcome):
+                        raise ProbeCompletionFailure("worktree_turn_observation_unavailable", {
+                            "binding_id": binding_id, "turn_id": turn_id,
+                            "cause": describe_error(outcome.error),
+                        }) from outcome.error
                     assert outcome.status == "completed", outcome.status
                     assert outcome.error is None, "worktree_turn_failed"
                     assert await runtime.wait_idle(timeout=5)
@@ -1108,7 +1117,7 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                         assert _worktree_git(selected_cwd, "branch", "--show-current") == ""
                         assert (selected_cwd / "committed.txt").read_text() == "COMMITTED-PROBE-CONTENT\n"
                         assert not (selected_cwd / "untracked.txt").exists()
-                        first = await next_outcome()
+                        first = await next_outcome(binding.id, run.initial_turn_id)
                         assert first.cwd == selected_cwd
                         assert first.thread_id == binding.native_thread_id
                         assert first.turn_id == run.initial_turn_id
@@ -1139,7 +1148,7 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                         assert followup.disposition.value == "started"
                         assert followup.release_receipt_attempt is not None
                         followup.release_receipt_attempt()
-                        second = await next_outcome()
+                        second = await next_outcome(binding.id, followup.turn_id)
                         assert second.cwd == selected_cwd
                         assert second.thread_id == binding.native_thread_id
                         assert second.turn_id == followup.turn_id != run.initial_turn_id
@@ -1177,12 +1186,19 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                             "only_committed_content_copied": True,
                         })
                 finally:
-                    await scheduler.close()
-                    await scheduler.drain(asyncio.get_running_loop().time() + 3)
-                    await runtime.interrupt_all()
-                    await runtime.cancel_tasks()
-                    await application.close()
-                    await management.close(deadline=asyncio.get_running_loop().time() + 10)
+                    phase_error = sys.exception()
+                    try:
+                        async with AsyncExitStack() as cleanup:
+                            cleanup.push_async_callback(management.close, deadline=asyncio.get_running_loop().time() + 10)
+                            cleanup.push_async_callback(application.close)
+                            cleanup.push_async_callback(runtime.cancel_tasks)
+                            cleanup.push_async_callback(runtime.interrupt_all)
+                            await scheduler.close()
+                            await scheduler.drain(asyncio.get_running_loop().time() + 3)
+                    except Exception as error:
+                        if phase_error is None:
+                            raise
+                        _cleanup_error(error, operation="worktree_teardown")
                 assert len(set(native_ids)) == 2
                 assert len(provider.requests) == 4
                 assert not provider.errors, "mock_provider_error"

@@ -14,12 +14,13 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
-from openai_codex import ExternalMessage, InternalRpcError, InvalidRequestError
+from openai_codex import ExternalMessage, InternalRpcError, InvalidRequestError, MethodNotFoundError
 
 from ..model_settings import TurnModelSettings
 from ..sdk_gap_adapter import ThreadSubscriptionControl
 from ..terminal_cleanup import TerminalCleanup
 from .contracts import NativeCodex, NativeThread, NativeTurnHandle
+from .native_values import _is_paginated_turn_read_unavailable
 
 
 logger = logging.getLogger(__name__)
@@ -346,6 +347,9 @@ class ThreadNamer:
                             job,
                             self._worker(job, job.parent.read(include_turns=summary_ready)),
                         )
+                    except MethodNotFoundError as error:
+                        if not summary_ready or not _is_paginated_turn_read_unavailable(error):
+                            raise
                     except (InternalRpcError, InvalidRequestError) as error:
                         not_materialized = (
                             isinstance(error, InvalidRequestError)

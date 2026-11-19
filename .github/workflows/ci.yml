@@ -129,9 +129,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The serial isolated deadlines total about 100 minutes, before cleanup and setup.
     timeout-minutes: 120
-    # macOS intermittently misses session-collaboration and scheduled-worktree
-    # waits (under investigation); report it without failing the workflow.
-    continue-on-error: ${{ matrix.os == 'macos-15' }}
     strategy:
       fail-fast: false
       matrix:
