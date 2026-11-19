@@ -1050,7 +1050,9 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                 runtime.set_completion_handler(completed)
 
                 async def next_outcome() -> TurnOutcome:
-                    outcome = await asyncio.wait_for(outcomes.get(), 20)
+                    # macOS CI runners occasionally need more than 20 s for the first
+                    # scheduled Turn; the probe's --timeout still bounds the phase.
+                    outcome = await asyncio.wait_for(outcomes.get(), 60)
                     if isinstance(outcome, BaseException):
                         raise outcome
                     assert outcome.status == "completed", outcome.status
