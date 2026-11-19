@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator, Sequence
 from typing import Any
+from unicodedata import category
 from urllib.parse import urlsplit
 
 from markdown_it import MarkdownIt
@@ -75,8 +76,13 @@ def render_markdown(tokens: Sequence[Token], env: dict[str, Any]) -> str:
     return _MARKDOWN.renderer.render(tokens, _MARKDOWN.options, env).rstrip("\n")
 
 
-def replace_image_with_text(token: Token, detail: str) -> None:
-    label = " ".join(token.content.split())[:120] or "图片"
+def replace_image_with_text(token: Token, detail: str, *, fallback_label: str = "") -> None:
+    label = " ".join(token.content.split())[:120]
+    if not label:
+        label = "".join(" " if category(char) == "Cc" else char for char in fallback_label) or "图片"
+        # A Markdown target can exceed filesystem name limits. Keep its identifying suffix.
+        if len(label) > 255:
+            label = label[:127] + "…" + label[-127:]
     token.type, token.tag = "text", ""
     token.content = f"〔图片：{label}；{detail}〕"
     token.attrs, token.children = {}, None
