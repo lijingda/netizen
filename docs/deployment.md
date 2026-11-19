@@ -302,6 +302,9 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 无需 Codex 账号或飞书。无论回归成功或失败，CI 都上传各平台的证据目录，保留 14 天；
 可从 artifact 的 `SUMMARY.md` 定位到每步结果和探针输出。
 
+同一批 PR 和 main push 也运行 `Admin browser smoke (Linux)`，用无头 Chrome 在桌面和手机尺寸
+检查 Admin 页面与文件预览。失败时可从 `admin-browser-failure` artifact 查看浏览器的 JSON 结果，保留 3 天。
+
 发布可复用 exact main commit 的成功 CI 结论，但不能用旧 archive 门禁替代新包验收。
 固定 SDK synthetic probes 的命令、参数和执行顺序统一由 `scripts/check_sdk.py` 维护；
 `make check` 调用该入口，失败即停止后续探针；新 CLI 包安装不重复运行完整测试。

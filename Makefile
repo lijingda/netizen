@@ -1,6 +1,6 @@
 PYTHON ?= .venv/bin/python
 
-.PHONY: check check-native test lint typecheck
+.PHONY: check check-browser check-native test lint typecheck
 
 # Buffer passing tests while preserving output from failed tests.
 test:
@@ -19,6 +19,9 @@ check: lint typecheck test
 	$(PYTHON) -m compileall -q netizen_cli scripts tests
 	$(PYTHON) -m pip check
 	$(PYTHON) scripts/check_sdk.py
+
+check-browser:
+	NETIZEN_BROWSER_SMOKE=1 $(PYTHON) -m unittest tests.admin.test_browser_smoke
 
 check-native:
 	@evidence_dir="$${NATIVE_EVIDENCE_DIR:-$$(mktemp -d)}" && \

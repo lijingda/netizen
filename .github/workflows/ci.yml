@@ -27,7 +27,8 @@ jobs:
         name: Check out source
         uses: actions/checkout@v7
 
-      - name: Set up Node.js for Admin JavaScript behavior tests
+      - &setup-node
+        name: Set up Node.js for Admin JavaScript behavior tests
         uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -71,10 +72,7 @@ jobs:
     steps:
       - *checkout
 
-      - name: Set up Node.js for Admin JavaScript behavior tests
-        uses: actions/setup-node@v7
-        with:
-          node-version: '22'
+      - *setup-node
 
       - *setup-python
 
@@ -98,6 +96,33 @@ jobs:
 
       - name: Run the repository gate
         run: make check
+
+  admin-browser-smoke:
+    name: Admin browser smoke (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python: ["3.14"]
+    steps:
+      - *checkout
+      - *setup-node
+      - *setup-python
+      - *locked-install
+
+      - name: Run Admin smoke in the preinstalled Chrome
+        env:
+          CI: 'true'
+          NETIZEN_BROWSER_RESULT: ${{ runner.temp }}/admin-browser.json
+        run: make check-browser
+
+      - name: Upload browser failure details
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: admin-browser-failure
+          path: ${{ runner.temp }}/admin-browser.json
+          retention-days: 3
 
   native-isolated:
     name: Native isolated regression (${{ matrix.platform }})
