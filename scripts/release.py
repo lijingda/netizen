@@ -80,7 +80,7 @@ class ReleaseEscalation(ReleaseError):
 Projection = Callable[[str, str], object]
 CI_COVERAGE = (
     "make check (Linux CPython matrix and macOS arm64), make check-native "
-    "(Linux; macOS arm64 reported, not yet required), and make check-browser (Linux Admin smoke)"
+    "(Linux and macOS arm64), and make check-browser (Linux Admin smoke)"
 )
 
 

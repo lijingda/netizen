@@ -7,7 +7,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from openai_codex import ExternalMessage, InternalRpcError, InvalidRequestError
+from openai_codex import ExternalMessage, InternalRpcError, InvalidRequestError, MethodNotFoundError
 from openai_codex.types import ThreadItem
 
 from netizen_cli.model_settings import TurnModelSettings
@@ -596,6 +596,31 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.parent.full_read_count, 2)
         self.assertEqual(len(self.commits), 1)
+
+    async def test_full_read_retries_transient_paginated_history_before_naming(self) -> None:
+        self.parent.full_read_errors.append(MethodNotFoundError(-32601, "list_turns is not supported yet"))
+        self.start()
+        await self.running()
+        self.codex.child.handle.finished.set()
+        await self.drain()
+        self.assertEqual(self.parent.full_read_count, 2)
+        self.assertEqual(self.codex.fork_calls, [("parent", {"ephemeral": True, "include_turns": False})])
+        self.assertEqual(self.commits, [("binding", "parent", "会话自动命名")])
+
+    async def test_paginated_history_error_on_summary_read_does_not_retry_or_fork(self) -> None:
+        self.parent.summary_read_errors.append(MethodNotFoundError(-32601, "list_turns is not supported yet"))
+        self.start()
+        await self.drain()
+        self.assertEqual(self.parent.summary_read_count, 1)
+        self.assertEqual(self.parent.full_read_count, 0)
+        self.assertEqual(self.codex.fork_calls, [])
+
+    async def test_unknown_missing_method_on_full_read_does_not_retry_or_fork(self) -> None:
+        self.parent.full_read_errors.append(MethodNotFoundError(-32601, "thread/read is not supported yet"))
+        self.start()
+        await self.drain()
+        self.assertEqual(self.parent.full_read_count, 1)
+        self.assertEqual(self.codex.fork_calls, [])
 
     async def test_initial_summary_empty_rollout_can_become_readable(self) -> None:
         self.parent.summary_read_errors.append(InternalRpcError(
