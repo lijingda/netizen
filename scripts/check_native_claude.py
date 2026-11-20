@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 import json
 import os
@@ -26,6 +27,34 @@ def fixture_environment(home: Path) -> dict[str, str]:
         # Every child initially points at a refusing address until the worker opens its fixture.
         "ANTHROPIC_BASE_URL": "http://127.0.0.1:9", "CLAUDE_CODE_MAX_RETRIES": "2",
     }
+
+
+def validate_worker_fixture(cwd: Path, environment: MutableMapping[str, str], platform: str) -> None:
+    home = Path(environment.get("HOME", ""))
+    try:
+        same_parent = home.is_absolute() and cwd.parent.resolve(strict=True) == home.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        same_parent = False
+    expected = fixture_environment(home)
+    darwin_keys = {"__CF_USER_TEXT_ENCODING", "__PYVENV_LAUNCHER__"} if platform == "darwin" else set()
+    missing = expected.keys() - environment.keys()
+    unexpected = environment.keys() - expected.keys() - {"LC_CTYPE"} - darwin_keys
+    mismatched = {key for key in expected.keys() & environment.keys() if environment[key] != expected[key]}
+    failures = []
+    if not same_parent:
+        failures.append("working directory")
+    if missing:
+        failures.append("missing keys=" + ",".join(sorted(missing)))
+    if unexpected:
+        failures.append("unexpected keys=" + ",".join(sorted(unexpected)))
+    if mismatched:
+        failures.append("mismatched keys=" + ",".join(sorted(mismatched)))
+    if failures:
+        raise RuntimeError("worker requires its disposable fixture (" + "; ".join(failures)
+                           + f"; resolved cwd.parent == resolved HOME: {same_parent})")
+    # The framework launcher's process metadata is unnecessary for the CLI.
+    for key in darwin_keys:
+        environment.pop(key, None)
 
 
 @dataclass
@@ -318,14 +347,10 @@ async def main_cases(cwd, provider, evidence):
 
 
 async def worker():
+    cwd = Path.cwd()
+    validate_worker_fixture(cwd, os.environ, sys.platform)
     from tests.support.claude_provider import Provider
 
-    home = Path(os.environ["HOME"])
-    cwd = Path.cwd()
-    expected = fixture_environment(home)
-    if (cwd.parent != home or any(os.environ.get(k) != v for k, v in expected.items())
-            or set(os.environ) - expected.keys() - {"LC_CTYPE"}):
-        raise RuntimeError("worker requires its disposable fixture")
     gate = cwd / "wait-for-fixture"
     gate.write_text("#!/bin/sh\n: > starts-toolstop\ni=0\nwhile [ ! -e release-toolstop ] && [ \"$i\" -lt 250 ]; do\n"
                     "  sleep .1\n  i=$((i+1))\ndone\n")
