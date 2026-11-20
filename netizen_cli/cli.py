@@ -174,24 +174,12 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
     from .deployment.restart_worker import assert_no_pending_restart
 
     if command == "setup":
-        from .cli_setup import (SetupError, admin_binding_ready, prepare_configuration, read_setup_config,
-                                require_codex_login, setup_backend)
+        from .cli_setup import (admin_binding_ready, prepare_configuration, require_codex_login,
+                                resolve_setup_backend)
 
         existing = manager.inspect(root)
-        registered = existing is not None and admin_binding_ready(root)
-        try:
-            config = read_setup_config(root / "config.yaml")
-        except (OSError, SetupError):
-            if not registered or args.backend is not None:
-                raise
-            config = None
-        if registered and config is None:
-            if args.backend is not None:
-                raise SetupError("cannot verify --backend without the registered instance configuration")
-            backend = None
-        else:
-            backend = setup_backend(config, args.backend)
-        if registered:
+        if existing is not None and admin_binding_ready(root):
+            backend = resolve_setup_backend(root, args.backend, already_registered=True)
             _emit({"phase": "setup", "status": "already_registered",
                    **({"backend": backend} if json_output and backend is not None else {}),
                    "instance": _status_value(existing, root),
@@ -208,6 +196,7 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                 f"administrator configuration is missing; stop this instance with netizen stop --root {root}, "
                 "then rerun setup to authorize or supply --admin-open-id"
             )
+        backend = resolve_setup_backend(root, args.backend)
         if existing is None and backend == "codex":
             require_codex_login()
         ensure_instance_root(root)
@@ -224,7 +213,7 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                 else:
                     validate_prepared_instance(root)
                 report.update(phase="prepare_configuration")
-                backend = prepare_configuration(root, backend=backend, admin_port=args.admin_port,
+                backend = prepare_configuration(root, backend=args.backend, admin_port=args.admin_port,
                                                 admin_open_id=args.admin_open_id)
                 if existing is None:
                     report.update(phase="initialize", completed=1)

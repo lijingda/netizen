@@ -160,7 +160,9 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(config.read_bytes(), content)
 
     def test_existing_setup_does_not_rebind_or_initialize(self):
-        root = Path("/tmp/cli-existing-setup").resolve()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
         binding = ServiceBinding(root, Path("/env-a/bin/python"), Path("/env-a"))
         for enabled in (True, False):
             with self.subTest(enabled=enabled):
@@ -175,6 +177,7 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(code, 0)
                 result = json.loads(output)
                 self.assertEqual(result["status"], "already_registered")
+                self.assertNotIn("backend", result)
                 self.assertEqual(result["instance"]["enabled"], enabled)
                 self.assertEqual(result["instance"]["binding"]["python"], "/env-a/bin/python")
                 self.assertTrue(result["recommendation"])
@@ -185,7 +188,12 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(manager.method_calls, [call.inspect(root)])
 
     def test_existing_setup_missing_administrator_does_not_return_success_while_running(self):
-        root = Path("/tmp/cli-existing-running").resolve()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        config = root / "config.yaml"
+        config.write_bytes(b"instance: [")
+        config.chmod(0o600)
         manager = Mock()
         manager.inspect.return_value = ServiceStatus(cli._current_binding(root), True, True, True)
         with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \

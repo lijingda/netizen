@@ -270,6 +270,21 @@ def setup_backend(config: dict[str, Any] | None, requested: str | None) -> str:
     return saved
 
 
+def resolve_setup_backend(root: Path, requested: str | None, *, already_registered: bool = False) -> str | None:
+    try:
+        config = read_setup_config(root / "config.yaml")
+        if config is None and already_registered:
+            if requested is not None:
+                raise SetupError("cannot verify --backend without the registered instance configuration")
+            return None
+        return setup_backend(config, requested)
+    except Exception:
+        # Optional metadata must never prevent an idempotent setup result.
+        if already_registered and requested is None:
+            return None
+        raise
+
+
 def prepare_configuration(root: Path, *, backend: str | None = None, admin_port: int | None = None,
                           admin_open_id: str | None = None,
                           runner: Callable = subprocess.run,

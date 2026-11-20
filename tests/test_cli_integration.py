@@ -24,6 +24,7 @@ from netizen_cli import cli
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.cli_data import prepare_instance
 from netizen_cli.cli_services import ServiceBinding, ServiceManager, _service_environment
+from netizen_cli.cli_setup import prepare_configuration
 from tests.test_cli_services import ManagerDouble
 
 
@@ -111,13 +112,31 @@ class LinuxCliIntegrationTest(unittest.TestCase):
                     code, report, _ = self.invoke("setup", "--backend", "codex")
                     self.assertEqual((code, report["status"], report["backend"]), (0, status, "codex"))
                     self.assertEqual(config.read_bytes(), original)
-        saved["instance"]["backend"] = "other"
-        original = yaml.safe_dump(saved).encode()
-        config.write_bytes(original)
-        code, report, _ = self.invoke("setup", "--backend", "codex")
-        self.assertEqual(code, 1)
-        self.assertIn("invalid instance.backend", report["reason"])
-        self.assertEqual(config.read_bytes(), original)
+
+    def test_registered_setup_requires_readable_valid_backend_only_when_requested(self) -> None:
+        self.setup_instance()
+        config = self.root / "config.yaml"
+        for content, mode, error in (
+            (b"instance: {backend: other}", 0o600, "invalid instance.backend"),
+            (b"instance: {backend: null}", 0o600, "invalid instance.backend"),
+            (b"instance: [", 0o600, "configuration is invalid"),
+            (b"instance: {}", 0o644, "expected a private current-user regular file"),
+            (None, None, "cannot verify --backend"),
+        ):
+            with self.subTest(content=content, mode=mode):
+                if content is None:
+                    config.unlink()
+                else:
+                    config.write_bytes(content)
+                    config.chmod(mode)
+                code, report, _ = self.invoke("setup")
+                self.assertEqual((code, report["status"]), (0, "already_registered"), report)
+                self.assertNotIn("backend", report)
+                code, report, _ = self.invoke("setup", "--backend", "codex")
+                self.assertEqual(code, 1)
+                self.assertIn(error, report["reason"])
+                if content is not None:
+                    self.assertEqual(config.read_bytes(), content)
 
     def test_registered_setup_repairs_missing_administrator_without_rebinding(self) -> None:
         self.setup_instance()
@@ -131,6 +150,25 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         self.assertEqual(self.manager.service_file(self.root).read_bytes(), definition)
         self.assertEqual((self.root / "state/channel.sqlite3").read_bytes(), database)
         self.assertEqual(AdminUsers(self.root, "cli_testapp").list()[0].identity.open_id, "ou_repaired")
+
+    def test_setup_rechecks_backend_under_lock_without_implying_an_explicit_request(self) -> None:
+        self.setup_instance()
+        self.assertEqual(self.invoke("remove", "-y")[0], 0)
+        config = self.root / "config.yaml"
+        saved = yaml.safe_load(config.read_bytes())
+
+        def prepare_after_change(root, **kwargs):
+            saved["instance"]["backend"] = "other"
+            config.write_text(yaml.safe_dump(saved))
+            return prepare_configuration(root, **kwargs)
+
+        with (
+            patch("netizen_cli.backends.KNOWN_BACKENDS", ("codex", "other")),
+            patch("netizen_cli.cli_setup.prepare_configuration", side_effect=prepare_after_change),
+        ):
+            code, report, _ = self.invoke("setup")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["backend"], "other")
 
     def test_start_rejects_missing_administrator_without_starting_service(self) -> None:
         self.setup_instance()
