@@ -7,7 +7,9 @@ from pathlib import Path
 
 from openai_codex.types import ThreadItem
 
-from netizen_cli.turn_files import extract_turn_files, turn_patch_summary
+from netizen_cli.turn_files import (
+    extract_turn_files, project_file_evidence, resolve_evidenced_files, summarize_file_evidence, turn_patch_summary,
+)
 from netizen_cli.turn_patch_children import TaskPatchChildren, TurnPatchBatch
 
 
@@ -38,6 +40,22 @@ class TurnPatchStatisticsTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def test_file_evidence_resolves_changes_at_delivery(self) -> None:
+        evidence = project_file_evidence((patch_item("write", "out", "one line", kind="add"),))
+        first, second = self.root / "first", self.root / "second"
+        first.write_text("first")
+        second.write_text("second")
+        output = self.root / "out"
+        output.symlink_to(first)
+        self.assertEqual(summarize_file_evidence(evidence, self.root).files[0].path, str(first))
+        output.unlink()
+        output.symlink_to(second)
+        summary = summarize_file_evidence(evidence, self.root)
+        files = resolve_evidenced_files(evidence, self.root, summary)
+        self.assertEqual([(f.resolved_path, f.size, f.additions) for f in files], [(second, 6, 1)])
+        second.unlink()
+        self.assertEqual(resolve_evidenced_files(evidence, self.root, summary), ())
 
     def test_add_then_update_accumulates_instead_of_reconstructing_net_diff(self) -> None:
         before = "".join(f"line {i}\n" for i in range(337))

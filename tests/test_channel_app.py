@@ -35,6 +35,7 @@ from openai_codex.errors import InternalRpcError
 from openai_codex.types import ThreadItem, TurnError
 
 from netizen_cli import channel_app
+from netizen_cli.turn_files import summarize_file_evidence
 from netizen_cli.channel import constants as channel_constants
 from netizen_cli.channel.session_pages import SessionCardPage
 from netizen_cli.channel import input_preparation
@@ -1162,8 +1163,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         with (
             self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
             patch(
-                "netizen_cli.channel.presentation.turn_patch_summary",
-                wraps=channel_app.turn_patch_summary,
+                "netizen_cli.channel.presentation.summarize_file_evidence",
+                wraps=summarize_file_evidence,
             ) as parse_diff,
         ):
             await self.app.handle_completion(
@@ -2029,8 +2030,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         report.write_text("research", encoding="utf-8")
 
         with patch(
-            "netizen_cli.channel.presentation.turn_patch_summary",
-            wraps=channel_app.turn_patch_summary,
+            "netizen_cli.channel.presentation.summarize_file_evidence",
+            wraps=summarize_file_evidence,
         ) as parse_diff:
             await self.app.handle_completion(
                 TurnOutcome(

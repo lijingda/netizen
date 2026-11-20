@@ -56,9 +56,8 @@ from ..turn_files import (
     TurnDiffSummary,
     TurnFile,
     TurnFileError,
-    extract_turn_files,
-    has_turn_file_references,
-    turn_patch_summary,
+    resolve_evidenced_files,
+    summarize_file_evidence,
 )
 from ..schedules.models import ScheduleNotFound
 
@@ -409,10 +408,7 @@ class CompletionPresentationChannel(ChannelReplies):
             final_response = None if suppress_result else (
                 prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
             )
-            if not suppress_result and has_turn_file_references(
-                tuple(getattr(outcome.result, "items", ())),
-                diff_summary=diff_summary,
-            ):
+            if not suppress_result and (outcome.files.outputs or diff_summary.files):
                 try:
                     scope, files, file_provenance_id = (
                         self._task_completion_files(outcome, diff_summary)
@@ -495,12 +491,7 @@ class CompletionPresentationChannel(ChannelReplies):
             cwd = outcome.cwd
             if cwd is None:
                 raise TurnFileError("本轮工作目录未确认，不能使用项目默认目录解释文件。")
-            return turn_patch_summary(
-                tuple(getattr(outcome.result, "items", ())),
-                cwd,
-                children=outcome.patch_children,
-                turn_diff=outcome.turn_diff if isinstance(outcome, TurnOutcome) else None,
-            )
+            return summarize_file_evidence(outcome.files, cwd)
         except Exception:
             logger.exception("failed to prepare completed patch statistics")
             return TurnDiffSummary()
@@ -519,11 +510,7 @@ class CompletionPresentationChannel(ChannelReplies):
             raise TurnFileError("本轮文件与完成消息的会话身份不一致。")
         if outcome.cwd is None:
             raise TurnFileError("本轮工作目录未确认，无法解析相对文件路径。")
-        return scope, extract_turn_files(
-            tuple(getattr(outcome.result, "items", ())),
-            outcome.cwd,
-            diff_summary=diff_summary,
-        )
+        return scope, resolve_evidenced_files(outcome.files, outcome.cwd, diff_summary)
 
     def _side_completion_files(
         self,
@@ -539,11 +526,7 @@ class CompletionPresentationChannel(ChannelReplies):
             or record.topic_id != scope.topic_id
         ):
             raise TurnFileError("本轮文件与 Side 完成消息的身份不一致。")
-        return scope, extract_turn_files(
-            tuple(getattr(outcome.result, "items", ())),
-            outcome.cwd,
-            diff_summary=diff_summary,
-        )
+        return scope, resolve_evidenced_files(outcome.files, outcome.cwd, diff_summary)
 
     def _task_completion_files(
         self,
@@ -568,11 +551,7 @@ class CompletionPresentationChannel(ChannelReplies):
         file_turn_id: str | None = None,
     ) -> None:
         final_response = prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
-        items = tuple(getattr(outcome.result, "items", ()))
-        if not has_turn_file_references(
-            items,
-            diff_summary=diff_summary,
-        ):
+        if not (outcome.files.outputs or diff_summary.files):
             await self._reply_task_result(
                 outcome, final_response,
             )

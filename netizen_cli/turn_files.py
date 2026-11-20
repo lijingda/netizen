@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import ast
+import logging
 import re
 import stat
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Literal
 
 from openai_codex.generated.v2_all import FileChangeThreadItem
 from openai_codex.types import ThreadItem
 
+from .file_evidence import DiffPath, FileEvidence, OutputPath, PatchCount
 from .pagination import ItemPage, PageError, paginate_items
-from .turn_patch_children import TaskPatchChildren, TurnPatchBatch
+from .turn_patch_children import TaskPatchChildren
 
 
 TURN_FILE_PAGE_SIZE = 8
@@ -64,15 +67,6 @@ class TurnDiffSummary:
 
 
 @dataclass(frozen=True, slots=True)
-class _ReportedTurnPath:
-    item_type: Literal["turnDiff", "fileChange", "imageGeneration"]
-    value: str
-    additions: int | None = None
-    deletions: int | None = None
-    deleted: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class _ParsedDiffBlock:
     path: str | None
     deleted: bool
@@ -98,19 +92,53 @@ def turn_patch_summary(
     diffs supplement paths only, so their overlapping counts are never added.
     Unreadable children or patches omit the total, retaining known file counts.
     """
-    counts: dict[str, tuple[int, int] | None] = {}
-    deleted_paths: set[str] = set()
-    additions = deletions = 0
+    evidence = project_file_evidence(items, children=children, turn_diff=turn_diff)
+    return summarize_file_evidence(evidence, project_cwd)
+
+
+def project_file_evidence(
+    items: Sequence[object], *, children: TaskPatchChildren = TaskPatchChildren(), turn_diff: str | None = None,
+) -> FileEvidence:
+    """Translate exact native facts without resolving a path or inspecting disk."""
+    outputs = tuple(_item_paths(items))
+    try:
+        patches, complete = _patch_counts(items, children)
+        aggregate = tuple(
+            DiffPath(block.path, block.deleted)
+            for block in map(_parse_diff_block, _diff_blocks(turn_diff or ""))
+        )
+        return FileEvidence(patches, complete, aggregate, outputs)
+    except Exception:
+        logging.getLogger(__name__).exception("failed to prepare completed patch statistics")
+        return FileEvidence(outputs=outputs, patch_counts_complete=False)
+
+
+def completed_file_evidence(
+    result: object | None, *, children: TaskPatchChildren, turn_diff: str | None = None,
+) -> FileEvidence:
+    """Files are best effort and can never prevent delivery of the conclusion."""
+    try:
+        return project_file_evidence(tuple(getattr(result, "items", ())), children=children, turn_diff=turn_diff)
+    except Exception:
+        logging.getLogger(__name__).exception("failed to project completed Turn file evidence")
+        return FileEvidence()
+
+
+def _patch_counts(
+    items: Sequence[object], children: TaskPatchChildren,
+) -> tuple[tuple[PatchCount, ...], bool]:
+    changes: list[PatchCount] = []
     complete = children.complete
-    saw_counts = False
-    root_paths: set[str] = set()
     seen: set[tuple[str, str, str]] = set()
-    batches = (TurnPatchBatch("", "", project_cwd, tuple(items)), *children.batches)
-    for batch in batches:
+    batches = chain(
+        (("", "", None, items),),
+        ((child.thread_id, child.turn_id, child.cwd, child.items) for child in children.batches),
+    )
+    for thread_id, turn_id, cwd, batch_items in batches:
         # Final item views replace earlier lifecycle views of the same item.
         patches: dict[str, FileChangeThreadItem] = {}
         conflicting: set[str] = set()
-        for wrapped in batch.items:
+        for wrapped in batch_items:
             item = getattr(wrapped, "root", wrapped)
             if type(item) is not FileChangeThreadItem:
                 continue
@@ -124,7 +152,7 @@ def turn_patch_summary(
                 conflicting.add(item.id)
             patches[item.id] = item
         for item in patches.values():
-            identity = (batch.thread_id, batch.turn_id, item.id)
+            identity = (thread_id, turn_id, item.id)
             if identity in seen:
                 continue
             seen.add(identity)
@@ -135,38 +163,50 @@ def turn_patch_summary(
             for change in item.changes:
                 kind = change.kind.root
                 raw_path = getattr(kind, "move_path", None) or change.path
-                try:
-                    path = _patch_path(raw_path, batch.cwd)
-                except (OSError, RuntimeError, ValueError):
-                    complete = False
-                    continue
-                if not batch.thread_id:
-                    root_paths.add(path)
-                if kind.type == "delete" and item.id not in conflicting:
-                    deleted_paths.add(path)
                 value = (
                     None if item.id in conflicting else _file_change_counts(
                         change.diff, kind.type, getattr(kind, "move_path", None),
                     )
                 )
-                if value is None:
-                    complete = False
-                else:
-                    additions += value[0]
-                    deletions += value[1]
-                    saw_counts = True
-                if path not in counts:
-                    counts[path] = value
-                elif counts[path] is None or value is None:
-                    counts[path] = None
-                else:
-                    previous = counts[path]
-                    assert previous is not None
-                    counts[path] = (previous[0] + value[0], previous[1] + value[1])
+                changes.append(PatchCount(
+                    raw_path, cwd, value, kind.type == "delete" and item.id not in conflicting,
+                ))
+    return tuple(changes), complete
 
-    # Preserve aggregate-only file discovery without mixing two count metrics.
-    for lines in _diff_blocks(turn_diff or ""):
-        block = _parse_diff_block(lines)
+
+def summarize_file_evidence(evidence: FileEvidence, project_cwd: Path) -> TurnDiffSummary:
+    """Resolve and combine patch paths at the time the reply is prepared."""
+    counts: dict[str, tuple[int, int] | None] = {}
+    deleted_paths: set[str] = set()
+    additions = deletions = 0
+    complete = evidence.patch_counts_complete
+    saw_counts = False
+    root_paths: set[str] = set()
+    for patch in evidence.patches:
+        try:
+            path = _patch_path(patch.path, patch.cwd or project_cwd)
+        except (OSError, RuntimeError, ValueError):
+            complete = False
+            continue
+        if patch.cwd is None:
+            root_paths.add(path)
+        if patch.deleted:
+            deleted_paths.add(path)
+        value = patch.counts
+        if value is None:
+            complete = False
+        else:
+            additions += value[0]
+            deletions += value[1]
+            saw_counts = True
+        if path not in counts:
+            counts[path] = value
+        else:
+            previous = counts[path]
+            counts[path] = (previous[0] + value[0], previous[1] + value[1]) if previous and value else None
+
+    # Aggregate diffs supplement discovery only, never the patch operation totals.
+    for block in evidence.aggregate_paths:
         if block.path is None:
             complete = False
             continue
@@ -250,6 +290,19 @@ def extract_turn_files(
     directory to infer extra outputs.
     """
 
+    reported = _reported_paths(items, turn_diff=turn_diff, diff_summary=diff_summary)
+    return _current_files(reported, project_cwd, home_directory)
+
+
+def resolve_evidenced_files(
+    evidence: FileEvidence, project_cwd: Path, summary: TurnDiffSummary,
+) -> tuple[TurnFile, ...]:
+    return _current_files(chain(_summary_paths(summary), evidence.outputs), project_cwd, None)
+
+
+def _current_files(
+    paths: Iterable[OutputPath], project_cwd: Path, home_directory: Path | None,
+) -> tuple[TurnFile, ...]:
     try:
         root = project_cwd.resolve(strict=True)
     except (OSError, RuntimeError) as error:
@@ -266,11 +319,7 @@ def extract_turn_files(
 
     results: list[TurnFile] = []
     seen: set[Path] = set()
-    for reported in _reported_paths(
-        items,
-        turn_diff=turn_diff,
-        diff_summary=diff_summary,
-    ):
+    for reported in paths:
         turn_file = _resolve_turn_file(reported, root, home)
         if turn_file is None or turn_file.resolved_path in seen:
             continue
@@ -525,18 +574,20 @@ def _reported_paths(
     *,
     turn_diff: str | None = None,
     diff_summary: TurnDiffSummary | None = None,
-) -> Iterator[_ReportedTurnPath]:
+) -> Iterator[OutputPath]:
     summary = diff_summary if diff_summary is not None else TurnDiffSummary(
         files=tuple(TurnDiffFileStats(path) for path in turn_diff_paths(turn_diff))
     )
-    for file_stats in summary.files:
-        yield _ReportedTurnPath(
-            "turnDiff",
-            file_stats.path,
-            file_stats.additions,
-            file_stats.deletions,
-            deleted=file_stats.deleted,
-        )
+    yield from _summary_paths(summary)
+    yield from _item_paths(items)
+
+
+def _summary_paths(summary: TurnDiffSummary) -> Iterator[OutputPath]:
+    for stats in summary.files:
+        yield OutputPath(stats.path, deleted=stats.deleted, additions=stats.additions, deletions=stats.deletions)
+
+
+def _item_paths(items: Sequence[object]) -> Iterator[OutputPath]:
     for item in items:
         root = getattr(item, "root", item)
         item_type = getattr(root, "type", None)
@@ -553,22 +604,22 @@ def _reported_paths(
                     if isinstance(move_path, str) and move_path:
                         raw_path = move_path
                 if isinstance(raw_path, str) and raw_path:
-                    yield _ReportedTurnPath(
-                        "fileChange", raw_path, deleted=change_type == "delete",
+                    yield OutputPath(
+                        raw_path, deleted=change_type == "delete",
                     )
         elif item_type == "imageGeneration" and status == "completed":
             saved_path = _path_value(getattr(root, "saved_path", None))
             if saved_path is not None:
-                yield _ReportedTurnPath("imageGeneration", saved_path)
+                yield OutputPath(saved_path, generated_image=True)
 
 
 def _resolve_turn_file(
-    reported: _ReportedTurnPath,
+    reported: OutputPath,
     root: Path,
     home: Path | None,
 ) -> TurnFile | None:
     try:
-        candidate = Path(reported.value)
+        candidate = Path(reported.path)
         if not candidate.is_absolute():
             candidate = root / candidate
         resolved = candidate.resolve(strict=True)
@@ -612,7 +663,7 @@ def _resolve_turn_file(
     )
 
 def _display_path(
-    reported: _ReportedTurnPath,
+    reported: OutputPath,
     resolved: Path,
     *,
     project_root: Path,
@@ -620,7 +671,7 @@ def _display_path(
 ) -> str:
     if resolved.is_relative_to(project_root):
         return resolved.relative_to(project_root).as_posix()
-    if reported.item_type == "imageGeneration":
+    if reported.generated_image:
         return f"生成图片/{resolved.name}"
     if home is not None and resolved.is_relative_to(home):
         return f"~/{resolved.relative_to(home).as_posix()}"
