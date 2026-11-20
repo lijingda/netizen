@@ -427,6 +427,15 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         client = self.clients.calls[-1]
         client.stream.put_nowait(None)
         await asyncio.wait_for(client.closing.wait(), 1)
+        # The slot is released only after the owned close is confirmed, which can
+        # take a few more loop iterations; wait for that boundary, not a fixed delay.
+        async with asyncio.timeout(1):
+            while True:
+                try:
+                    await self.runtime.capture_submission_admission(self.binding.id)
+                    break
+                except OrdinaryInputRejected:
+                    await asyncio.sleep(0)
         # Feishu still owns the first receipt barrier when the caller resumes the same UUID.
         second = await self.submit()
         self.assertEqual(first.thread_id, second.thread_id)
