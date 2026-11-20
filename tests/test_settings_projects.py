@@ -62,13 +62,13 @@ class SettingsTest(unittest.TestCase):
     def test_instance_backend_accepts_only_known_identifiers(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = self.write_config(Path(raw))
-            template = config.read_text().replace("instance:\n", "instance:\n  backend: {}\n")
-            config.write_text(template.format("codex"))
+            template = config.read_text().replace("instance:\n", "instance:\n  backend: __BACKEND__\n")
+            config.write_text(template.replace("__BACKEND__", "codex", 1))
             self.assertEqual(Settings.from_file(config, {}).backend, "codex")
             for value, kind in (("unknown" * 200, "str"), ("''", "str"), ("null", "NoneType"),
                                 ("123", "int"), ("[]", "list")):
                 with self.subTest(kind=kind, value=value):
-                    config.write_text(template.format(value))
+                    config.write_text(template.replace("__BACKEND__", value, 1))
                     with self.assertRaisesRegex(SettingsError, rf"instance.backend.*{kind}.*supports only: codex") as error:
                         Settings.from_file(config, {})
                     self.assertLess(len(str(error.exception)), 200)
