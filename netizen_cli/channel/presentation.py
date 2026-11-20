@@ -127,6 +127,20 @@ class CompletionPresentationChannel(ChannelReplies):
             except ScheduleNotFound:
                 pass  # A completed receipt may have allowed normal pruning.
 
+    async def _projection_failed(self, outcome: TurnOutcome | GoalOutcome) -> None:
+        turn_id = (outcome.turn_id if isinstance(outcome, TurnOutcome)
+                   else outcome.logical_turn_id or outcome.final_physical_turn_id or "goal")
+        try:
+            try:
+                await self._finish_task_reactions(outcome.origin, turn_id, constants.ERROR_REACTION)
+            finally:
+                await self._progress_cards.abandon(
+                    binding_id=outcome.binding_id, thread_id=outcome.thread_id, turn_id=turn_id,
+                )
+        finally:
+            if isinstance(outcome, TurnOutcome):
+                self._finish_ordinary_completion(outcome)
+
     async def _archive_scheduled_completion(self, outcome: OrdinaryConclusion) -> None:
         origin = outcome.origin
         assert isinstance(origin, ScheduledOrigin)
@@ -252,9 +266,7 @@ class CompletionPresentationChannel(ChannelReplies):
             terminal_reaction = constants.INTERRUPTED_REACTION
         else:
             terminal_reaction = constants.ERROR_REACTION
-        await self._reactions.freeze(outcome.turn_id)
-        await self._safe_add_reaction(outcome.origin, terminal_reaction)
-        await self._reactions.stop(outcome.turn_id)
+        await self._finish_task_reactions(outcome.origin, outcome.turn_id, terminal_reaction)
         task_files = _TaskFiles()
         prepared_response = None
         if not silent and not _task_has_error(outcome) and outcome.status == "completed":
@@ -352,6 +364,11 @@ class CompletionPresentationChannel(ChannelReplies):
                 )
         finally:
             await self._abandon_task_progress_card(outcome)
+
+    async def _finish_task_reactions(self, origin: object, turn_id: str, reaction: str) -> None:
+        await self._reactions.freeze(turn_id)
+        await self._safe_add_reaction(origin, reaction)
+        await self._reactions.stop(turn_id)
 
     async def _prepare_task_result(
         self, outcome: OrdinaryConclusion | SideTurnOutcome, evidence: FileEvidence,
@@ -653,6 +670,21 @@ class CompletionPresentationChannel(ChannelReplies):
         )
 
     async def _complete_goal(self, outcome: GoalOutcome) -> None:
+        try:
+            task = self._goal_conclusion(outcome)
+        except BaseException:
+            await self._projection_failed(outcome)
+            raise
+        await self._complete_task(
+            task, file_evidence=lambda: outcome_file_evidence(outcome),
+            file_turn_id=outcome.final_physical_turn_id, logical_turn=True,
+            allow_suppression=(outcome.error is None
+                               and outcome.finalization is not GoalFinalizationStatus.UNKNOWN
+                               and outcome.finalization_error is None),
+        )
+
+    @staticmethod
+    def _goal_conclusion(outcome: GoalOutcome) -> OrdinaryConclusion:
         # The SDK logical stream is one reply lifecycle. Its identifier is only
         # the presenter key; Files always retain the verified final physical ID.
         origin = outcome.origin
@@ -674,7 +706,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 notices.append(f"Goal 已完成，但自动结束结果未确认：{detail}")
             if notices:
                 response = "\n\n".join(filter(None, [response, *notices]))
-        task = OrdinaryConclusion(
+        return OrdinaryConclusion(
             binding_id=outcome.binding_id, thread_id=outcome.thread_id,
             turn_id=outcome.logical_turn_id or outcome.final_physical_turn_id or "goal",
             owner_id=outcome.owner_id, origin=origin,
@@ -690,13 +722,6 @@ class CompletionPresentationChannel(ChannelReplies):
             feedback_revision=outcome.feedback_revision,
             activity=None if outcome.activity is None else _goal_reply_activity(outcome.activity),
             partial_answers=outcome.partial_answers,
-        )
-        await self._complete_task(
-            task, file_evidence=lambda: outcome_file_evidence(outcome),
-            file_turn_id=outcome.final_physical_turn_id, logical_turn=True,
-            allow_suppression=(outcome.error is None
-                               and outcome.finalization is not GoalFinalizationStatus.UNKNOWN
-                               and outcome.finalization_error is None),
         )
 
     async def _present_running_goal(

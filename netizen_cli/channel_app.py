@@ -152,7 +152,7 @@ class ChannelApplication(ChannelEntry):
         self._reply_suppression = ReplySuppression()
         self._progress_cards = _ReplyCardPresenter(channel, runtime, ordinary=self._ordinary)
         self.handle_completion = codex_completion_handler(
-            self.handle_ordinary_completion, self.handle_codex_completion, self._finish_ordinary_completion,
+            self.handle_ordinary_completion, self.handle_codex_completion, self._projection_failed,
         )
         runtime.set_completion_handler(self.handle_completion)
         runtime.set_question_handler(self.handle_questions)

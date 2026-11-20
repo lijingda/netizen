@@ -163,6 +163,37 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app._progress_cards._sessions, {})
         self.assertEqual(self.app._reactions._pulses, {})
 
+    async def test_failed_projection_finishes_running_reactions_and_progress(self):
+        projection_error = ValueError("could not format error")
+
+        class UnformattableError(RuntimeError):
+            def __str__(self):
+                raise projection_error
+
+        feedback = replace(self.feedback, progress_card_enabled=True, reaction_pulse_enabled=True)
+        for outcome in (self.outcome(task_feedback=feedback), self.goal_outcome(task_feedback=feedback)):
+            with self.subTest(kind=type(outcome).__name__):
+                outcome = await self.start_progress(outcome)
+                await self.suppress(outcome)
+                if isinstance(outcome, GoalOutcome):
+                    turn_id = outcome.logical_turn_id
+                    failed = replace(outcome, final_physical_turn_id=None, error=UnformattableError())
+                else:
+                    turn_id = outcome.turn_id
+                    await self.app._reactions.start(turn_id, self.origin.id, pulse_enabled=True)
+                    failed = replace(outcome, error=UnformattableError())
+                self.assertIn((self.binding.id, outcome.thread_id, turn_id), self.app._progress_cards._sessions)
+                pulse = self.app._reactions._pulses[turn_id]
+                running_ids = (pulse.typing_reaction_id, pulse.thinking_reaction_id)
+                self.channel.reactions.clear()
+                with self.assertRaises(ValueError) as raised:
+                    await self.app.handle_completion(failed)
+                self.assertIs(raised.exception, projection_error)
+                self.assertIn((self.origin.id, "ERROR"), self.channel.reactions)
+                for reaction_id in running_ids:
+                    self.assertIn((self.origin.id, reaction_id), self.channel.reaction_removals)
+                self.assert_cleaned(outcome)
+
     async def test_tool_is_idempotent_without_ending_native_execution_or_sending_messages(self):
         outcome = self.outcome()
         first = await self.suppress(outcome)

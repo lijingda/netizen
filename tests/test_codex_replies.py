@@ -2,7 +2,7 @@ import unittest
 from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 from openai_codex.types import TurnError
 
@@ -52,7 +52,7 @@ class CompletionDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_ordinary_sink_receives_only_projected_result_and_exact_notice(self):
         ordinary = AsyncMock()
         feature = AsyncMock()
-        dispatch = codex_completion_handler(ordinary, feature, Mock())
+        dispatch = codex_completion_handler(ordinary, feature, AsyncMock())
         origin = object()
         turn = TurnOutcome(
             "binding", "thread", "turn", "owner", origin,
