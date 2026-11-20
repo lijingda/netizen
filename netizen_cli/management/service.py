@@ -52,6 +52,8 @@ from ..bindings import (
 )
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
+from ..ordinary_sessions import OrdinarySessionPort
+from ..runtime.codex_ordinary import CodexOrdinarySessions
 from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
@@ -532,10 +534,11 @@ class ManagementRuntimePort:
     it.
     """
 
-    __slots__ = ("__runtime",)
+    __slots__ = ("__runtime", "__ordinary")
 
-    def __init__(self, runtime: CodexRuntime) -> None:
+    def __init__(self, runtime: CodexRuntime, *, ordinary: OrdinarySessionPort | None = None) -> None:
         self.__runtime = runtime
+        self.__ordinary: OrdinarySessionPort = ordinary if ordinary is not None else CodexOrdinarySessions(runtime)
 
     async def read_scheduled_turn(
         self, binding_id: str, turn_id: str, *, deadline: float | None = None,
@@ -657,12 +660,7 @@ class ManagementRuntimePort:
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
     ) -> StopDisposition:
-        if expected_activity_revision is None:
-            return await self.__runtime.stop_exact(
-                binding_id,
-                acknowledge=acknowledge,
-            )
-        return await self.__runtime.stop_exact(
+        return await self.__ordinary.stop_exact(
             binding_id,
             acknowledge=acknowledge,
             expected_activity_revision=expected_activity_revision,
@@ -676,7 +674,7 @@ class ManagementRuntimePort:
         expected_activity_revision: int,
         expected_turn_id: str,
     ) -> ActiveTurnSnapshot:
-        return await self.__runtime.recheck_turn_exact(
+        return await self.__ordinary.recheck_turn_exact(
             binding_id,
             expected_activity_revision=expected_activity_revision,
             expected_turn_id=expected_turn_id,

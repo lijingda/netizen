@@ -169,7 +169,7 @@ async def _assembled_channel(
     runtime.binding_store = store
     projects = ProjectRegistry(store=store, project_root=root, projects={project_alias: project})
     management = InstanceManagementService(
-        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
+        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=ordinary),
         scope_coordinator=ScopeCoordinator(),
         chat_directory=FakeChatTargetDirectory(channel),
     )

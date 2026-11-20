@@ -96,6 +96,7 @@ from .schedules.scheduler import Scheduler
 from .sessions.mcp import SessionMcpRunner
 from .sessions.policy import SessionPolicyService
 from .sessions.service import SessionService
+from .ordinary_sessions import SessionShutdownPort
 from .runtime.codex_ordinary import CodexOrdinarySessions
 from .runtime.codex_session_reads import CodexSessionReads
 from .thread_history import AppServerThreadHistory
@@ -355,7 +356,7 @@ class ServiceCore:
             self._management = InstanceManagementService(
                 bindings=self._store,
                 projects=self._projects,
-                runtime=ManagementRuntimePort(self._runtime),
+                runtime=ManagementRuntimePort(self._runtime, ordinary=ordinary),
                 scope_coordinator=scope_coordinator,
                 chat_labels=self._channel,
                 chat_directory=FeishuChatDirectory(self._feishu_read_client),
@@ -448,6 +449,10 @@ class ServiceCore:
         if self._scheduler is not None:
             self._scheduler.start()
 
+    @property
+    def _session_shutdown(self) -> SessionShutdownPort | None:
+        return self._runtime
+
     async def _close_partial_start(self) -> None:
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
         if self._scheduler is not None:
@@ -499,11 +504,11 @@ class ServiceCore:
                 deadline=deadline,
                 cap=10,
             )
-        if self._runtime is not None:
-            self._runtime.close_admission()
+        if (shutdown := self._session_shutdown) is not None:
+            shutdown.close_admission()
             await _cleanup_with_budget(
                 "partial Runtime task cleanup",
-                self._runtime.cancel_tasks,
+                shutdown.cancel_tasks,
                 deadline=deadline,
                 cap=5,
             )
@@ -541,8 +546,8 @@ class ServiceCore:
                 )
             except Exception:
                 logger.exception("failed to disable Feishu admission")
-            if self._runtime is not None:
-                self._runtime.close_admission()
+            if (shutdown := self._session_shutdown) is not None:
+                shutdown.close_admission()
             if self._scheduler is not None:
                 await _cleanup_with_budget(
                     "Scheduler timer close", self._scheduler.close,
@@ -597,10 +602,10 @@ class ServiceCore:
                     deadline=deadline,
                     cap=15,
                 )
-            if self._runtime is not None:
+            if (shutdown := self._session_shutdown) is not None:
                 interrupted = await _cleanup_with_budget(
                     "native Turn interrupt",
-                    self._runtime.interrupt_all,
+                    shutdown.interrupt_all,
                     deadline=deadline,
                     cap=15,
                 )
@@ -609,7 +614,7 @@ class ServiceCore:
                         0.0,
                         min(15.0, deadline - asyncio.get_running_loop().time()),
                     )
-                    idle = remaining > 0 and await self._runtime.wait_idle(
+                    idle = remaining > 0 and await shutdown.wait_idle(
                         timeout=remaining
                     )
                     if not idle:
@@ -648,10 +653,10 @@ class ServiceCore:
                             cap=10,
                         )
                 finally:
-                    if self._runtime is not None:
+                    if (shutdown := self._session_shutdown) is not None:
                         await _cleanup_with_budget(
                             "Runtime task cleanup",
-                            self._runtime.cancel_tasks,
+                            shutdown.cancel_tasks,
                             deadline=deadline,
                             cap=5,
                         )

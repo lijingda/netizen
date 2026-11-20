@@ -7,12 +7,13 @@ from netizen_cli.bindings import BindingTaskFeedback, ThreadBinding
 from netizen_cli.channel import constants
 from netizen_cli.domain import ActiveState
 from netizen_cli.file_evidence import FileEvidence
+from netizen_cli.management import ExactBindingTarget, RuntimePrecondition
 from netizen_cli.ordinary_sessions import (
-    OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt,
+    OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, StopPreview,
 )
 from netizen_cli.runtime.contracts import (
-    ContextCursorCommit, Submission, SubmissionAdmission, SubmitDisposition, TerminalStateUnknown,
-    TurnActivitySnapshot, TurnObservationUnavailableOutcome,
+    ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission, SubmitDisposition, TerminalStateUnknown,
+    ThreadActivityChanged, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -29,6 +30,8 @@ class StartOnlySessions:
         self.receipt_released = asyncio.Event()
         self.sink: OrdinaryCompletionHandler
         self.revision = 0
+        self.previewed = asyncio.Event()
+        self.interrupts: list[str] = []
 
     async def capture_submission_admission(self, binding_id: str) -> SubmissionAdmission:
         if self.activity is not None:
@@ -61,6 +64,37 @@ class StartOnlySessions:
 
     def reply_blocked_by_lifecycle(self, binding_id: str) -> bool:
         return False
+
+    async def preview_stop(self, binding: ThreadBinding) -> StopPreview | None:
+        self.previewed.set()
+        return StopPreview("正在停止任务。") if self.activity is not None else None
+
+    def _require_current(self, binding_id: str, revision: int, turn_id: str | None) -> TurnActivitySnapshot:
+        current = self.activity
+        if current is None or (current.binding_id, current.revision, current.turn_id) != (binding_id, revision, turn_id):
+            raise ThreadActivityChanged("stale activity")
+        return current
+
+    async def stop_exact(
+        self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
+        expected_activity_revision: int | None = None, expected_turn_id: str | None = None,
+    ) -> StopDisposition:
+        if expected_activity_revision is not None:
+            self._require_current(binding_id, expected_activity_revision, expected_turn_id)
+        current = self.activity
+        if current is None or current.binding_id != binding_id:
+            return StopDisposition.NOT_RUNNING
+        self.activity = replace(current, state=ActiveState.STOPPING)
+        self.interrupts.append(current.turn_id)
+        if acknowledge is not None:
+            await acknowledge()
+        return StopDisposition.REQUESTED
+
+    async def recheck_turn_exact(
+        self, binding_id: str, *, expected_activity_revision: int, expected_turn_id: str,
+    ) -> ActiveTurnSnapshot:
+        current = self._require_current(binding_id, expected_activity_revision, expected_turn_id)
+        return ActiveTurnSnapshot(binding_id, current.thread_id, current.turn_id, "ou_user", current.state)
 
 
 class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
@@ -111,3 +145,35 @@ class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any("recovered answer" in str(item) for _, item in fixture.channel.replies))
             self.assertEqual(fixture.runtime.submit_calls, [])
             self.assertEqual(fixture.runtime.capture_calls, [])
+
+    async def test_bare_stop_selects_current_execution_and_card_controls_keep_exact_target(self):
+        backend = StartOnlySessions()
+        async with channel_fixture(ordinary=backend) as fixture:
+            await fixture.new()
+            message = FakeMessage("/stop", message_id="om_stop")
+            scope = fixture.app._scope(message)
+            binding = fixture.store.active_binding(scope.key)
+            target = ExactBindingTarget(scope.key, binding.id, binding.id)
+            backend.activity = TurnActivitySnapshot(
+                binding.id, "thread", "first", 1, ActiveState.RUNNING, 0, False, False, False, (),
+            )
+            async with asyncio.TaskGroup() as tasks:
+                async with fixture.management.scope_coordinator.hold(scope.key):
+                    tasks.create_task(fixture.app.handle_message(message))
+                    await asyncio.wait_for(backend.previewed.wait(), timeout=2)
+                    backend.activity = replace(backend.activity, turn_id="second", revision=2)
+            self.assertEqual(backend.interrupts, ["second"])
+            self.assertIn((message.id, "正在停止任务。"), fixture.channel.replies)
+
+            stale = RuntimePrecondition(1, "first")
+            with self.assertRaises(ThreadActivityChanged):
+                await fixture.management.stop_exact_binding(target=target, runtime_precondition=stale)
+            with self.assertRaises(ThreadActivityChanged):
+                await fixture.management.recheck_exact_turn(target=target, runtime_precondition=stale)
+            self.assertEqual(backend.interrupts, ["second"])
+            current = await fixture.management.recheck_exact_turn(
+                target=target, runtime_precondition=RuntimePrecondition(2, "second"),
+            )
+            self.assertEqual((current.thread_id, current.turn_id, current.state),
+                             ("thread", "second", ActiveState.STOPPING))
+            self.assertEqual(fixture.runtime.stop_calls, [])

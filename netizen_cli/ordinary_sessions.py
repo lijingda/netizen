@@ -9,7 +9,8 @@ from .bindings import BindingTaskFeedback, ThreadBinding
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .runtime.contracts import (
-    ContextCursorCommit, Submission, SubmissionAdmission, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
+    ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
+    TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
 
 
@@ -63,6 +64,13 @@ class OrdinaryInputRejected(RuntimeError):
     """The backend verified that this input was never submitted."""
 
 
+@dataclass(frozen=True, slots=True)
+class StopPreview:
+    """Receipt text captured before the stop operation selects its target."""
+
+    acknowledgement: str
+
+
 class OrdinarySessionPort(Protocol):
     """Admission, submission and exact activity for an ordinary Binding."""
 
@@ -79,3 +87,24 @@ class OrdinarySessionPort(Protocol):
     ) -> TurnActivitySnapshot | None: ...
 
     def reply_blocked_by_lifecycle(self, binding_id: str) -> bool: ...
+
+    async def preview_stop(self, binding: ThreadBinding) -> StopPreview | None: ...
+
+    async def stop_exact(
+        self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
+        expected_activity_revision: int | None = None, expected_turn_id: str | None = None,
+    ) -> StopDisposition: ...
+
+    async def recheck_turn_exact(
+        self, binding_id: str, *, expected_activity_revision: int, expected_turn_id: str,
+    ) -> ActiveTurnSnapshot: ...
+
+
+class SessionShutdownPort(Protocol):
+    def close_admission(self) -> None: ...
+
+    async def interrupt_all(self) -> None: ...
+
+    async def wait_idle(self, timeout: float) -> bool: ...
+
+    async def cancel_tasks(self) -> None: ...
