@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 DEFAULT_BACKEND = "codex"
-KNOWN_BACKENDS = (DEFAULT_BACKEND,)
+KNOWN_BACKENDS = (DEFAULT_BACKEND, "claude")
 
 
 class BackendError(ValueError):

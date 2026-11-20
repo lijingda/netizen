@@ -696,7 +696,6 @@ class ManagementRuntimePort:
         self, side_id: str, *, acknowledge: StopAcknowledger | None = None,
         expected_revision: int | None = None, expected_turn_id: str | None = None,
     ) -> StopDisposition:
-        self._require_codex_feature("Side")
         if expected_revision is None:
             return await self.__runtime.stop_side(side_id, acknowledge=acknowledge)
         return await self.__runtime.stop_side(
@@ -2380,6 +2379,7 @@ class InstanceManagementService:
         acknowledge: StopAcknowledger | None = None,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> StopDisposition:
+        self._require_codex_feature("Side")
         record = self._bindings.get_side_topic(target.side_id)
         self._require_side_identity(record, target)
         if record.state is not SideTopicState.OPEN:

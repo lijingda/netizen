@@ -19,8 +19,8 @@ from netizen_cli.settings import AdminWebSettings, Settings, SettingsError
 
 
 class SettingsTest(unittest.TestCase):
-    def test_private_pilot_policy_defaults_to_an_explicit_gap(self):
-        self.assertNotIn("claude", KNOWN_BACKENDS)
+    def test_claude_pilot_policy_defaults_to_an_explicit_gap(self):
+        self.assertIn("claude", KNOWN_BACKENDS)
         policy = BackendPolicy("claude", owner_id="owner")
         for op in ("stop", "list_bindings", "context", "reactions", "worktrees"):
             self.assertIsNone(policy.operation_refusal(op, op))
@@ -78,6 +78,8 @@ class SettingsTest(unittest.TestCase):
             template = config.read_text().replace("instance:\n", "instance:\n  backend: __BACKEND__\n")
             config.write_text(template.replace("__BACKEND__", "codex", 1))
             self.assertEqual(Settings.from_file(config, {}).backend, "codex")
+            config.write_text(template.replace("__BACKEND__", "claude", 1))
+            self.assertEqual(Settings.from_file(config, {}).backend, "claude")
             for value, kind in (("unknown" * 200, "str"), ("''", "str"), ("null", "NoneType"),
                                 ("123", "int"), ("[]", "list")):
                 with self.subTest(kind=kind, value=value):

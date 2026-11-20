@@ -132,4 +132,3 @@ class Provider:
         await emit("message_stop")
         await stream.write_eof()
         return stream
-

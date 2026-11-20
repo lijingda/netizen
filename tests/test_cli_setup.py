@@ -22,6 +22,19 @@ class TerminalInput(io.StringIO):
         return True
 
 
+class ClaudeSetupVerificationTests(unittest.TestCase):
+    def test_bound_verification_uses_original_venv_launch_path_and_fails_closed(self):
+        bound = Path("/first-venv/bin/python")
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("python", 30)) as run:
+            with self.assertRaisesRegex(setup.SetupError, r"netizen-cli\[claude\]"):
+                setup.verify_setup_backend("claude", bound)
+        args, kwargs = run.call_args
+        self.assertEqual(args[0][0:3], [str(bound), "-I", "-B"])
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+        self.assertTrue(kwargs["check"])
+
+
 class SetupFileTests(unittest.TestCase):
     def test_private_atomic_write_preserves_parent_mode_and_previous_file_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

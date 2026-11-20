@@ -288,6 +288,26 @@ def resolve_setup_backend(root: Path, requested: str | None, *, already_register
         raise
 
 
+def verify_setup_backend(backend: str | None, bound_python: Path | None = None) -> None:
+    if backend != "claude":
+        return
+    from .claude_installation import REPAIR, verified_claude_cli
+
+    if bound_python is None or bound_python == Path(sys.executable):
+        verified_claude_cli()
+        return
+    # Bindings keep their original interpreter, including its venv symlink.
+    try:
+        subprocess.run(
+            [str(bound_python), "-I", "-B", "-c",
+             "from netizen_cli.claude_installation import verified_claude_cli; verified_claude_cli()"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30, check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupError(REPAIR) from exc
+
+
 def check_unbound_start_backend(root: Path) -> None:
     try:
         config = read_setup_config(root / "config.yaml")
@@ -295,11 +315,11 @@ def check_unbound_start_backend(root: Path) -> None:
         # Service startup handles unreadable configuration after registration.
         return
     if config is not None:
-        instance_backend(config["instance"])
+        verify_setup_backend(instance_backend(config["instance"]))
 
 
 def prepare_configuration(root: Path, *, backend: str | None = None, admin_port: int | None = None,
-                          admin_open_id: str | None = None,
+                          admin_open_id: str | None = None, bound_python: Path | None = None,
                           runner: Callable = subprocess.run,
                           input_stream: IO[str] | None = None,
                           secret_prompt: Callable[[str], str] = getpass.getpass) -> str:
@@ -311,6 +331,7 @@ def prepare_configuration(root: Path, *, backend: str | None = None, admin_port:
     config_file = root / "config.yaml"
     existing = read_setup_config(config_file)
     effective_backend = setup_backend(existing, backend, root=root)
+    verify_setup_backend(effective_backend, bound_python)
     if existing is None:
         config = {
             "instance": {"backend": effective_backend, "dataDir": str(root / "state"),

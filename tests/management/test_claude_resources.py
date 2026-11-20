@@ -2,7 +2,7 @@ import asyncio
 from unittest import IsolatedAsyncioTestCase
 
 from netizen_cli.domain import FeishuScope, ScopeKind
-from netizen_cli.management.service import BackendUnsupported, ExactBindingTarget, SessionInventoryState, SessionQuery
+from netizen_cli.management.service import BackendUnsupported, CurrentSideTarget, ExactBindingTarget, SessionInventoryState, SessionQuery
 from netizen_cli.runtime.contracts import ThreadOccupied
 from tests.support.channel_messages import FakeMessage
 from tests.test_claude_channel import owner_channel
@@ -53,6 +53,8 @@ class ClaudeResourcesTests(IsolatedAsyncioTestCase):
             for query in (SessionQuery(sort_by="updated_at"), SessionQuery(inventory_state=SessionInventoryState.ARCHIVED)):
                 with self.assertRaises(BackendUnsupported):
                     await app._management.query_sessions(query=query, deadline=deadline)
+            with self.assertRaises(BackendUnsupported):
+                await app._management.stop_side(target=CurrentSideTarget("missing", "cli_test", "oc_direct", None, None))
             with self.assertRaises(BackendUnsupported):
                 await app._management.delete_exact_lazy_binding(target=ExactBindingTarget(scope.key, binding.id, binding.id))
             args = {"alias": "test", "deadline": deadline, "expected_revision": fx.store.get_project("test").revision}
