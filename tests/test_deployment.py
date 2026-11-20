@@ -54,7 +54,8 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertEqual(
             set(config), {"instance", "projects", "channel", "adminWeb", "sessionTools", "worktrees", "questionNotifications", "groupAccess"}
         )
-        self.assertEqual(set(config["instance"]), {"dataDir", "projectRoot"})
+        self.assertEqual(set(config["instance"]), {"backend", "dataDir", "projectRoot"})
+        self.assertEqual(config["instance"]["backend"], "codex")
         self.assertEqual(config["instance"]["projectRoot"], "/home/your-user/projects")
         self.assertEqual(config["projects"], {"test": "/home/your-user/projects/test"})
         self.assertEqual(config["channel"], {"securityMode": "audit"})
