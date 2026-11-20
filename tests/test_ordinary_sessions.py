@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from netizen_cli.bindings import BindingTaskFeedback, ThreadBinding
 from netizen_cli.channel import constants
@@ -11,6 +12,7 @@ from netizen_cli.management import ExactBindingTarget, RuntimePrecondition
 from netizen_cli.ordinary_sessions import (
     OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, StopPreview,
 )
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission, SubmitDisposition, TerminalStateUnknown,
     ThreadActivityChanged, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
@@ -95,6 +97,23 @@ class StartOnlySessions:
     ) -> ActiveTurnSnapshot:
         current = self._require_current(binding_id, expected_activity_revision, expected_turn_id)
         return ActiveTurnSnapshot(binding_id, current.thread_id, current.turn_id, "ou_user", current.state)
+
+
+class CodexOrdinarySessionsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_exact_preserves_preconditions(self):
+        runtime = AsyncMock()
+        sessions = CodexOrdinarySessions(runtime)
+        with self.assertRaisesRegex(ValueError, "expected_activity_revision"):
+            await sessions.stop_exact("binding", expected_turn_id="turn")
+        runtime.stop_exact.assert_not_awaited()
+
+        for turn_id in ("turn", None):
+            await sessions.stop_exact("binding", expected_activity_revision=3, expected_turn_id=turn_id)
+            runtime.stop_exact.assert_awaited_with(
+                "binding", acknowledge=None, expected_activity_revision=3, expected_turn_id=turn_id,
+            )
+        await sessions.stop_exact("binding")
+        runtime.stop_exact.assert_awaited_with("binding", acknowledge=None)
 
 
 class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
