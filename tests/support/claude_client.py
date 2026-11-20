@@ -94,6 +94,6 @@ class FakeClaudeClients:
         self.created.set()
         return client
 
-    async def session_cwd(self, session_id):
+    async def session_cwd(self, session_id, candidates=()):
         self.lookups.append(session_id)
         return self.cwds.get(session_id)

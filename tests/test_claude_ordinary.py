@@ -318,6 +318,56 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.clients.calls[-1].interrupts, 0)
         await self.finish(second)
 
+    async def test_public_scoped_read_recovers_large_image_without_a_summary(self):
+        import json
+        import os
+        from uuid import uuid4
+
+        from claude_agent_sdk import get_session_info, project_key_for_directory
+
+        config = self.cwd / "claude"
+        project = config / "projects" / project_key_for_directory(self.cwd)
+        project.mkdir(parents=True)
+        session = str(uuid4())
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 100_000}}
+        entry = {"type": "user", "sessionId": session, "uuid": str(uuid4()), "parentUuid": None,
+                 "cwd": str(self.cwd), "message": {"role": "user", "content": [image]}}
+        (project / f"{session}.jsonl").write_text(json.dumps(entry, separators=(",", ":")) + "\n")
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(config)}):
+            self.assertIsNone(get_session_info(session))
+            self.assertEqual(await BundledClaudeClients().session_cwd(session, (self.cwd,)), self.cwd)
+
+    async def test_summaryless_lookup_requires_exactly_one_positive_candidate(self):
+        from types import SimpleNamespace
+        candidates = (self.cwd / "worktree", self.cwd)
+        candidates[0].mkdir()
+        clients = BundledClaudeClients()
+        for results, expected in (
+            ([[], [SimpleNamespace(session_id="id")]], self.cwd),
+            ([[], []], None),
+            ([[SimpleNamespace(session_id="id")], [SimpleNamespace(session_id="id")]], None),
+            ([[SimpleNamespace(session_id="foreign")]], None),
+        ):
+            with (patch("netizen_cli.runtime.claude_client.get_session_info", return_value=None),
+                  patch("netizen_cli.runtime.claude_client.get_session_messages", side_effect=results) as read):
+                self.assertEqual(await clients.session_cwd("id", candidates), expected)
+                self.assertTrue(all(call.kwargs["limit"] == 1 for call in read.call_args_list))
+
+    async def test_missing_summary_cwd_requires_positive_messages_and_conflicts_refuse(self):
+        from types import SimpleNamespace
+        clients = BundledClaudeClients()
+        for summary, expected, scoped in (
+            (SimpleNamespace(session_id="id", cwd=None), self.cwd, True),
+            (SimpleNamespace(session_id="id", cwd=""), self.cwd, True),
+            (SimpleNamespace(session_id="id", cwd=str(self.cwd.parent)), None, False),
+            (SimpleNamespace(session_id="foreign", cwd=None), None, False),
+        ):
+            with (patch("netizen_cli.runtime.claude_client.get_session_info", return_value=summary),
+                  patch("netizen_cli.runtime.claude_client.get_session_messages",
+                        return_value=[SimpleNamespace(session_id="id")]) as read):
+                self.assertEqual(await clients.session_cwd("id", (self.cwd,)), expected)
+                self.assertEqual(read.called, scoped)
+
     async def test_public_factory_selects_exact_verified_cli_and_native_defaults(self):
         with (patch("netizen_cli.runtime.claude_client.verified_claude_cli", return_value=self.cwd/"bundled"),
               patch("netizen_cli.runtime.claude_client.ClaudeSDKClient") as create):
@@ -526,7 +576,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         first = await self.submit()
         await self.finish(first)
         entered, release = asyncio.Event(), asyncio.Event()
-        async def slow_lookup(_):
+        async def slow_lookup(_, candidates):
             entered.set()
             await release.wait()
             return self.cwd

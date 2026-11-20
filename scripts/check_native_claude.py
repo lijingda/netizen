@@ -96,8 +96,8 @@ class ObservedClients:
         self.calls.append(client)
         return client
 
-    async def session_cwd(self, session_id):
-        return await self.bundled.session_cwd(session_id)
+    async def session_cwd(self, session_id, candidates=()):
+        return await self.bundled.session_cwd(session_id, candidates)
 
 
 async def main_cases(cwd, provider, evidence):
@@ -128,6 +128,20 @@ async def main_cases(cwd, provider, evidence):
                                      on_completion=completions.put, notice=notice, clock=lambda: clock[0])
     runtime.open_admission()
     clock[0] = 3.
+    def image_first_input():
+        # Real, deterministic PNG large enough to span the SDK summary window.
+        import base64
+        import random
+        import struct
+        import zlib
+        def chunk(tag, data):
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+        rng = random.Random(104)
+        pixels = b"".join(b"\0" + rng.randbytes(256) for _ in range(256))
+        header = struct.pack(">2I5B", 256, 256, 8, 0, 0, 0, 0)
+        png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b"")
+        return PromptImage("fixture image", "data:image/png;base64," + base64.b64encode(png).decode("ascii"))
+
     def native_settings(fallback=False):
         # Only the exact benign fixture commands are pre-approved by this test account.
         values = {"model": "claude-sonnet-4-6", "permissions": {"allow": ["Bash(exit 17)", "Bash(./wait-for-fixture)"]}}
@@ -190,6 +204,15 @@ async def main_cases(cwd, provider, evidence):
         evidence.check("SDK resumes CLI transcript and reports strict fallback", resumed.thread_id == session and
                        clients.calls[-1].modes == [("default", False)] and notices.count(DEFAULT_MODE) == 1 and
                        any("fixture-reply-cli" in item["answers"] for row in rows("resumed") for item in row["history"]))
+
+        image_session = new_binding()
+        with_image = await submit(image_session, "text", "image-first", (image_first_input(),))
+        await done("image-first")
+        resumed_image = await submit(image_session, "text", "image-resume")
+        await done("image-resume")
+        evidence.check("large image first message resumes exact native transcript",
+                       resumed_image.thread_id == with_image.thread_id and
+                       any("fixture-reply-image-first" in item["answers"] for row in rows("image-resume") for item in row["history"]))
 
         missing = new_binding()
         store.assign_native_thread_id(missing.id, str(uuid4()))

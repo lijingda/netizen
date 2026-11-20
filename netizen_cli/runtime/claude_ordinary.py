@@ -230,16 +230,20 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if self._revisions[binding_id] != execution.revision or self._current(binding_id) != execution.binding:
             raise OrdinaryInputRejected(STALE)
 
+    def _candidate_dirs(self, binding: ThreadBinding) -> tuple[Path, ...]:
+        project = Path(self._bindings.get_project(binding.project_alias).cwd)
+        return (Path(binding.working_cwd), project) if binding.working_cwd else (project,)
+
     async def _cwd(self, execution: _Execution, requested: Path | None) -> Path:
         binding = execution.binding
         if binding.native_thread_id is not None:
             try:
                 UUID(execution.session)
-                cwd = await self._clients.session_cwd(execution.session)
+                cwd = await self._clients.session_cwd(execution.session, self._candidate_dirs(binding))
             except Exception:
                 cwd = None
             if cwd is None or not cwd.is_absolute() or not cwd.is_dir():
-                raise OrdinaryInputRejected("无法恢复原 Claude 会话的实际目录，本条输入未发送。")
+                raise OrdinaryInputRejected("无法恢复原 Claude 会话的实际目录，本条输入未发送。请检查原会话或使用 /new 新建会话。")
             return cwd.resolve()
         return self._creation_cwd(binding, requested)
 
@@ -453,13 +457,15 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 return {"cwd": str(owned), "status": "active"}
             if binding.native_thread_id is None:
                 return {"cwd": binding.working_cwd, "status": "active" if snapshot.turn else "idle"}
+            candidates = self._candidate_dirs(binding)
         try:
             async with asyncio.timeout(_CONTROL_SECONDS):
-                cwd = await self._clients.session_cwd(binding.native_thread_id)
+                cwd = await self._clients.session_cwd(binding.native_thread_id, candidates)
         except Exception:
             cwd = None
         async with lock:
-            if self._bindings.get(binding_id) != binding or snapshot != self.local_snapshot(binding_id):
+            if (self._bindings.get(binding_id) != binding or snapshot != self.local_snapshot(binding_id)
+                    or self._candidate_dirs(binding) != candidates):
                 return {"cwd": None, "status": "unknown"}
             return {"cwd": str(cwd.resolve()) if cwd else None, "status": "unknown"}
 
