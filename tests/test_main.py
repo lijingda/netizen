@@ -970,7 +970,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 first.result(result="native answer")
                 self.assertTrue(await core._claude.wait_idle(2))
                 self.assertIn(DEFAULT_MODE, [reply for _, reply in channel.replies])
-                self.assertEqual(channel.replies[-1][1], "native answer")
+                reply = channel.replies[-1][1]
+                self.assertEqual(reply.markdown, "native answer")
+                self.assertEqual([mention.open_id for mention in reply.mentions], ["ou_admin"])
                 await send("second", "om_second")
                 second = clients.calls[-1]
                 second.init()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from lark_channel import SendOpts
@@ -25,6 +26,7 @@ from ..cards.scheduled import (
 from ..cards.questions import (
     is_question_card_action,
 )
+from ..cards.controls import local_form_fields
 from ..cards.defaults import is_defaults_card_action
 from ..cards.status import (
     is_status_command,
@@ -49,12 +51,14 @@ from ..runtime.contracts import (
 )
 from ..domain import (
     CardControlIntent,
+    CardControlName,
     ControlIntent,
     ControlName,
     PromptInput,
 )
 from ..experience import (
     InvalidInteraction,
+    require_command,
 )
 from ..model_settings import ModelCatalogError
 from ..management import (
@@ -163,6 +167,25 @@ class ChannelEntry(CommandChannel):
         except Exception as error:
             await self._report_input_error(message, error)
 
+    def _check_local_card(self, value: Any, form: Any) -> None:
+        if isinstance(value, Mapping):
+            if is_status_command(value):
+                if value.get("target_kind") == "side":
+                    raise CardActionError("Claude 试点暂不支持【Side】。")
+                require_command(self._policy, str(value.get("command", "")))
+            elif value.get("intent"):
+                try:
+                    name = CardControlName(value["intent"])
+                except (TypeError, ValueError):
+                    raise CardActionError("未知卡片动作。") from None
+                self._require_local_card_operation(name)
+        if isinstance(form, Mapping):
+            if any(isinstance(key, str) and key.startswith("rename_name_v1__") for key in form):
+                self._require_local_card_operation(CardControlName.RENAME_BINDING)
+            for prefix in ("new", "config", "defaults_session"):
+                if any(isinstance(key, str) and key.startswith(prefix + "_") for key in form):
+                    local_form_fields(form, prefix)
+
     async def handle_card_action(self, event: Any) -> None:
         group_rule, _ = self._group_access.snapshot()
         chat_id = str(getattr(event, "chat_id", "") or "")
@@ -184,8 +207,9 @@ class ChannelEntry(CommandChannel):
                 else:
                     assert self._management.local is not None
                     try:
+                        self._check_local_card(value, form)
                         self._management.local.require_admission()
-                    except OrdinaryInputRejected as error:
+                    except (CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
                         refusal = str(error)
             if refusal:
                 message_id = getattr(event, "message_id", "")

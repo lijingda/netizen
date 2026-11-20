@@ -508,6 +508,7 @@ def _session_settings_sections(
         if context_fields:
             sections.append(_form_section("消息上下文", context_fields))
         sections.append(_form_section("执行中表情闪烁", feedback_fields[1:2]))
+        sections.append(_form_section("结束时 @ 提醒", feedback_fields[7:8]))
         return sections
     model_elements = [*model_notices, model_fields[1]]
     if len(model_fields) > 2:
@@ -1947,6 +1948,7 @@ def binding_created_card(
     settings: TurnModelSettings | None = None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
+    local_only: bool = False,
     workspace_cwd: str | None = None,
 ) -> OutboundCard:
     builder = _builder(
@@ -1965,7 +1967,7 @@ def binding_created_card(
         "如果刚才的任务因没有会话而未执行，请重新发送。\n"
         "在群聊和群话题中，每条消息都需要 @机器人。"
     )
-    builder.markdown(_model_source_summary(settings))
+    builder.markdown("模型来源：原生 Claude 设置。" if local_only else _model_source_summary(settings))
     builder.markdown(_context_mode_summary(message_context_mode))
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
@@ -2330,8 +2332,6 @@ def local_form_fields(payload: Mapping[str, Any], prefix: str) -> dict[str, Any]
         raise CardActionError("Claude 试点暂不支持【过程卡】。")
     fields.setdefault(progress, _progress_card_reference(False, None))
     mention = f"{prefix}_completion_mention"
-    if mention in fields and not _decode_task_feedback_reference(fields[mention], mention):
-        raise CardActionError("Claude 试点暂不支持【结束时提醒设置】。")
     fields.setdefault(mention, _task_feedback_reference(True))
     return fields
 

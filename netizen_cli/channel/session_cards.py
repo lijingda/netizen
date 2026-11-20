@@ -165,10 +165,9 @@ class SessionCardChannel(QuestionChannel):
             for record in records.items:
                 local_binding = record.binding
                 live = self._management.local.local_snapshot(local_binding.id)
-                state = "状态未知" if live.unavailable else live.turn.state.value if live.turn else "空闲"
                 items_local.append(SessionCardItem(
                     binding_id=local_binding.id, short_id=local_binding.short_id, project_alias=local_binding.project_alias,
-                    native_thread_id=local_binding.native_thread_id, title="", state=state, active=local_binding.active,
+                    native_thread_id=local_binding.native_thread_id, title="", state=live.label, active=local_binding.active,
                     activity_revision=live.revision, turn_id=live.turn.turn_id if live.turn else None,
                 ))
             after = navigation.next(records.next_cursor).encode(scope) if records.next_cursor else None

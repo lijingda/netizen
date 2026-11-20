@@ -826,9 +826,10 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.users.add(AdminIdentity("cli_test", "ou_other"), actor=self.member.identity, expected_revision=self.users.revision)
         status, _, data = await self.json_get("/api/v1/schedules", "invalid")
         self.assertEqual(status, 401)
-        status, _, page = await self.request("GET", "/admins", headers=[("Cookie", f"netizen_admin_session={session}")])
-        self.assertEqual(status, 200)
-        self.assertIn(b'data-backend="claude"', page)
+        for path in ("/admins", "/schedules", "/progress-card", "/sessions/temporary"):
+            status, _, page = await self.request("GET", path, headers=[("Cookie", f"netizen_admin_session={session}")])
+            self.assertEqual(status, 200, path)
+            self.assertIn(b'data-backend="claude"', page)
         self.runner.application._backend_policy = BackendPolicy("claude", "ou_other")
         status, _, result = await self.json_get("/api/v1/projects", session)
         self.assertEqual((status, result["code"]), (403, "owner_only"))

@@ -1440,6 +1440,7 @@ function subscriptionStateLabel(value) {
 }
 
 function runtimeLabel(runtime) {
+  if (runtime.localLabel) return runtime.localLabel;
   if (runtime.primaryStatusResolution === "archived") return "—";
   if (runtime.primaryStatus != null) {
     const label = localizedLabel(runtimeLabels, runtime.primaryStatus);
@@ -1776,8 +1777,8 @@ function renderSessions(data, batchActions) {
     sessionState.append(runtime);
     cell(row, session.projectAlias);
     const settings = session.sessionSettings;
-    cell(row, [sessionConfigurationSummary(settings), progressCardSourceLabel(settings)].filter(Boolean).join(" · "));
-    cell(row, session.catalogState === "lazy" ? sessionDateLabel(session.registeredAt) : nativeSessionDateLabel(session.createdAt), "session-time");
+    cell(row, [sessionConfigurationSummary(settings), claudeBackend ? "" : progressCardSourceLabel(settings)].filter(Boolean).join(" · "));
+    cell(row, claudeBackend || session.catalogState === "lazy" ? sessionDateLabel(session.registeredAt) : nativeSessionDateLabel(session.createdAt), "session-time");
     cell(row, sessionUpdatedAtLabel(session), "session-time");
     const actions = actionsCell(row);
     wireSessionActions(actions, session);
@@ -3438,6 +3439,7 @@ function messageContextLabel(value) {
 function sessionConfigurationSummary(settings, models = []) {
   const turn = settings.turn_settings;
   const context = messageContextLabel(settings.message_context_mode);
+  if (claudeBackend) return `${context} · 原生 Claude 设置`;
   if (!turn) return `${context} · 继承 Codex`;
   const model = models.find((item) => item.id === turn.model_id);
   const effort = model?.efforts?.find((item) => item.id === turn.effort_id);
@@ -3494,11 +3496,12 @@ function scheduleSelectOptions(node, choices, selected) {
 
 function renderSessionSettingsFields(input, settings, models, contextAvailable) {
   if (claudeBackend) {
-    for (const field of ["model", "effort", "tier", "progress", "completion-mention"]) {
+    for (const field of ["model", "effort", "tier", "progress"]) {
       input(field).closest("label").hidden = true;
     }
     input("progress-settings").hidden = true;
     input("progress-reset").hidden = true;
+    input("completion-mention").checked = settings.completion_mention_enabled;
     input("context").value = settings.message_context_mode;
     input("context").disabled = !contextAvailable;
     input("reactions").checked = settings.reaction_pulse_enabled;

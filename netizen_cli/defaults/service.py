@@ -100,8 +100,6 @@ class SessionDefaultsService:
                 raise DefaultConfigurationError("Claude 试点暂不支持【模型、思考强度或速度设置】。", code="backend_unsupported")
             if settings.task_feedback.progress_card_enabled or settings.task_feedback.progress_card_settings is not None:
                 raise DefaultConfigurationError("Claude 试点暂不支持【过程卡】。", code="backend_unsupported")
-            if not settings.task_feedback.completion_mention_enabled:
-                raise DefaultConfigurationError("Claude 试点暂不支持【结束时提醒设置】。", code="backend_unsupported")
         if rule.app_id != self.app_id:
             raise DefaultConfigurationError("当前应用下没有这个默认配置。", code="not_found")
         try:

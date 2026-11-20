@@ -107,7 +107,7 @@ class CompletionPresentationChannel(ChannelReplies):
             else:
                 reaction, content = constants.ERROR_REACTION, outcome.error_detail or "Claude 本次执行失败。"
             await self._finish_task_reactions(outcome.origin, outcome.turn_id, reaction)
-            await self._reply_task_result(outcome, content, allow_completion_mention=False)
+            await self._reply_task_result(outcome, content)
             return
         if isinstance(outcome, TurnObservationUnavailableOutcome):
             await self._park_observation(outcome)

@@ -205,21 +205,24 @@ class CardControlChannel(TurnFileChannel):
             if self._rename_name_generations.get(intent.source_id) is generation:
                 self._rename_name_generations.pop(intent.source_id)
 
+    def _require_local_card_operation(self, name: CardControlName) -> None:
+        allowed = {
+            CardControlName.OPEN_SETTINGS_SECTION, CardControlName.REFRESH_SETTINGS,
+            CardControlName.REGISTER_PROJECT, CardControlName.SET_PROJECT_ENABLED,
+            CardControlName.PREPARE_NEW_WORKSPACE, CardControlName.CREATE_BINDING, CardControlName.CONFIGURE_BINDING,
+            CardControlName.ACTIVATE_BINDING, CardControlName.STOP_EXACT_BINDING,
+            CardControlName.RECHECK_EXACT_TURN, CardControlName.SESSIONS_PAGE,
+        }
+        if name not in allowed:
+            value = name.value
+            label = ("Goal" if value.startswith("goal.") else "Side" if value.startswith("side.")
+                     else "会话命名" if value in {"binding.rename", "binding.name.generate"}
+                     else "会话删除" if "delete" in value else "会话恢复" if "unarchive" in value else "会话归档")
+            raise CardActionError(f"Claude 试点暂不支持【{label}】。")
+
     async def _card_control(self, intent: CardControlIntent) -> None:
         if self._policy.backend == "claude":
-            allowed = {
-                CardControlName.OPEN_SETTINGS_SECTION, CardControlName.REFRESH_SETTINGS,
-                CardControlName.REGISTER_PROJECT, CardControlName.SET_PROJECT_ENABLED,
-                CardControlName.PREPARE_NEW_WORKSPACE, CardControlName.CREATE_BINDING, CardControlName.CONFIGURE_BINDING,
-                CardControlName.ACTIVATE_BINDING, CardControlName.STOP_EXACT_BINDING,
-                CardControlName.RECHECK_EXACT_TURN, CardControlName.SESSIONS_PAGE,
-            }
-            if intent.name not in allowed:
-                name = intent.name.value
-                label = ("Goal" if name.startswith("goal.") else "Side" if name.startswith("side.")
-                         else "会话命名" if name in {"binding.rename", "binding.name.generate"}
-                         else "会话删除" if "delete" in name else "会话恢复" if "unarchive" in name else "会话归档")
-                raise CardActionError(f"Claude 试点暂不支持【{label}】。")
+            self._require_local_card_operation(intent.name)
             if intent.model_id or intent.effort_id or intent.service_tier_id:
                 raise CardActionError("Claude 试点暂不支持【模型、思考强度或速度设置】。")
             if intent.progress_card_enabled or intent.progress_card_settings is not None:
@@ -350,6 +353,9 @@ class CardControlChannel(TurnFileChannel):
         )
 
     async def _card_prepare_new_workspace(self, intent: CardControlIntent) -> None:
+        if self._policy.backend == "claude" and self._open_new_cards.get(intent.source_id) != intent.scope.key:
+            await self._safe_reply_to_card(intent, "这张新建会话卡片已失效，请重新发送 /new。")
+            return
         assert intent.project_alias is not None
         assert intent.expected_revision is not None
         chat_kind = _public_chat_kind(await self._channel.get_chat_info(intent.scope.chat_id))
@@ -359,6 +365,8 @@ class CardControlChannel(TurnFileChannel):
             allow_context_mode=chat_kind == "group",
             settings_draft=intent.new_settings_draft,
         )
+        if self._policy.backend == "claude" and self._open_new_cards.get(intent.source_id) != intent.scope.key:
+            return
         if not await self._safe_update_card(intent.source_id, card):
             await self._safe_reply_to_card(
                 intent, "worktree 选项已查询，但卡片更新失败；未创建会话。请重新发送 /new。",
@@ -370,6 +378,13 @@ class CardControlChannel(TurnFileChannel):
         assert intent.reaction_pulse_enabled is not None
         assert intent.progress_card_enabled is not None
         assert intent.completion_mention_enabled is not None
+        if self._policy.backend == "claude":
+            if self._open_new_cards.get(intent.source_id) != intent.scope.key:
+                await self._safe_reply_to_card(intent, "这张新建会话卡片已失效，请重新发送 /new。")
+                return
+            # Claim before any await or worktree creation. An uncertain outcome
+            # requires a new owner action, even if Feishu cannot replace the form.
+            del self._open_new_cards[intent.source_id]
         message_context_mode = (
             intent.message_context_mode or MentionContextMode.CURRENT_ONLY
         )
@@ -399,9 +414,6 @@ class CardControlChannel(TurnFileChannel):
             worktree_id=intent.worktree_id,
             worktree_create=intent.worktree_create,
         )
-        if self._policy.backend == "claude":
-            await self._safe_reply_to_card(intent, f"已创建并切换到会话 {binding.short_id}（{binding.project_alias}）。")
-            return
         workspace_cwd = binding.working_cwd
         workspace_summary = (
             f"实际工作目录：`{_markdown_code(workspace_cwd)}`。" if workspace_cwd else ""
@@ -415,8 +427,12 @@ class CardControlChannel(TurnFileChannel):
                 task_feedback=binding.task_feedback,
                 message_context_mode=binding.message_context_mode,
                 workspace_cwd=workspace_cwd,
+                local_only=self._policy.backend == "claude",
             ),
         )
+        if not updated and self._policy.backend == "claude":
+            await self._safe_reply_to_card(intent, f"已创建并切换到会话 {binding.short_id}（{binding.project_alias}）。")
+            return
         if not updated:
             await self._safe_reply_to_card(
                 intent,

@@ -217,6 +217,7 @@ class BindingStatusProjection:
     catalog_state: NativeThreadCatalogState | None
     can_stop: bool
     can_release: bool
+    local_label: str | None = None
 
     @property
     def binding_id(self) -> str:
@@ -1633,9 +1634,10 @@ class InstanceManagementService:
 
     def _local_binding_status(self, binding: ThreadBinding, snapshot: BindingRuntimeSnapshot) -> BindingStatusProjection:
         assert self.local is not None
-        unavailable = self.local.local_snapshot(binding.id).unavailable
-        return _project_binding_status(binding=binding, snapshot=snapshot, primary_status_unavailable=unavailable,
-                                       persisted_goal_resolved=True)
+        local = self.local.local_snapshot(binding.id)
+        status = _project_binding_status(binding=binding, snapshot=snapshot, primary_status_unavailable=local.unavailable,
+                                         persisted_goal_resolved=True)
+        return replace(status, local_label=local.label)
 
     async def binding_status_exact(
         self,
@@ -1801,8 +1803,6 @@ class InstanceManagementService:
                 raise BackendUnsupported("模型、思考强度或速度设置")
             if task_feedback and (task_feedback.progress_card_enabled or task_feedback.progress_card_settings is not None):
                 raise BackendUnsupported("过程卡")
-            if task_feedback and not task_feedback.completion_mention_enabled:
-                raise BackendUnsupported("结束时提醒设置")
         parameters = dict(
             scope=scope, creator_id=creator_id, project_alias=project_alias,
             expected_project_revision=expected_project_revision,
@@ -2016,8 +2016,6 @@ class InstanceManagementService:
                 raise BackendUnsupported("模型、思考强度或速度设置")
             if task_feedback and (task_feedback.progress_card_enabled or task_feedback.progress_card_settings is not None):
                 raise BackendUnsupported("过程卡")
-            if task_feedback and not task_feedback.completion_mention_enabled:
-                raise BackendUnsupported("结束时提醒设置")
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             return await self._runtime.configure_context_exact(
@@ -2168,8 +2166,6 @@ class InstanceManagementService:
                 raise BackendUnsupported("模型、思考强度或速度设置")
             if task_feedback and (task_feedback.progress_card_enabled or task_feedback.progress_card_settings is not None):
                 raise BackendUnsupported("过程卡")
-            if task_feedback and not task_feedback.completion_mention_enabled:
-                raise BackendUnsupported("结束时提醒设置")
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             if binding.settings_revision != expected_settings_revision:

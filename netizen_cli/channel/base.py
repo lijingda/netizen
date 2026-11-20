@@ -363,6 +363,7 @@ class ChannelState:
     _management: InstanceManagementService
     _scope_coordinator: ScopeCoordinator
     _scheduled_completions: dict[str, _ScheduledCompletion]
+    _open_new_cards: dict[str, str]
     _rename_name_generations: dict[str, _RenameNameGeneration]
     _reactions: _ReactionController
     _reply_suppression: ReplySuppression

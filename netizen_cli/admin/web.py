@@ -633,6 +633,8 @@ class AdminWebApplication:
         session = self._authenticate(context)
         if self._backend_policy.sender_refusal(session.identity.open_id):
             raise AdminWebError(403, "owner_only", "这个 Claude 实例仅限所有者使用。")
+        if not context.path.startswith("/api/v1/"):
+            return
         path = context.path.removeprefix("/api/v1")
         if path in {"/admin-users/add", "/admin-users/selector-config"}:
             raise OwnerOnly()

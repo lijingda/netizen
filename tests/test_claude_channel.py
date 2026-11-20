@@ -1,4 +1,8 @@
+import asyncio
 import json
+from unittest.mock import AsyncMock
+
+from lark_channel import SendResult
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 import unittest
@@ -115,27 +119,48 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2.
             scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            fx.channel.fetch_message = AsyncMock(wraps=fx.channel.fetch_message)
+            fx.channel.get_chat_info = AsyncMock(wraps=fx.channel.get_chat_info)
             for kind, feature in (("netizen_cron", "定时任务"), ("netizen_fork", "会话分支"), ("netizen_question", "原生提问")):
                 event = direct_card_event(fx.channel, {})
                 event.action.value = {"kind": kind}
                 await app.handle_card_action(event)
                 self.assertIn(feature, fx.channel.replies[-1][1])
+            fx.channel.reply_results.append(SendResult.ok(message_id="om_card"))
             await app.handle_message(FakeMessage("/new", message_id="new"))
             card = fx.channel.replies[-1][1]
             form = form_values(card)
             form["new_project"] = next(item for item in elements(card.card, "select_static") if item["name"] == "new_project")["options"][0]["value"]
+            fx.channel.fetch_message.reset_mock()
+            fx.channel.get_chat_info.reset_mock()
             event = direct_card_event(fx.channel, {**form, "new_effort": "high"})
             await app.handle_card_action(event)
             self.assertIn("模型、思考强度或速度", fx.channel.replies[-1][1])
             self.assertIsNone(fx.store.active_binding(scope.key))
-            await app.handle_card_action(direct_card_event(fx.channel, form))
+            await app.handle_card_action(direct_card_event(fx.channel, {"defaults_session_effort": "high"}))
+            self.assertIn("模型、思考强度或速度", fx.channel.replies[-1][1])
+            fx.channel.fetch_message.assert_not_awaited()
+            fx.channel.get_chat_info.assert_not_awaited()
+            form["new_completion_mention"] = next(item for item in elements(card.card, "select_static")
+                if item["name"] == "new_completion_mention")["options"][0]["value"]
+            await asyncio.gather(*(app.handle_card_action(direct_card_event(fx.channel, form)) for _ in range(2)))
+            self.assertIn("会话创建成功", json.dumps(fx.channel.updates[-1], ensure_ascii=False))
+            self.assertFalse(elements(fx.channel.updates[-1][1], "form"))
+            self.assertEqual(len(fx.store.list_bindings(scope.key)), 1)
             binding = fx.store.active_binding(scope.key)
             self.assertIsNotNone(binding, fx.channel.replies[-1])
+            self.assertFalse(binding.task_feedback.completion_mention_enabled)
+            await app.handle_message(FakeMessage("without a mention", message_id="om-input"))
+            client = clients.calls[-1]
+            client.init()
+            client.result(result="plain answer")
+            self.assertTrue(await ordinary.wait_idle(2))
+            self.assertEqual(fx.channel.replies[-1][1], "plain answer")
             await app.handle_message(FakeMessage("/config", message_id="config"))
             form = form_values(fx.channel.replies[-1][1])
             await app.handle_card_action(direct_card_event(fx.channel, form))
             self.assertIn("设置已保存", fx.channel.replies[-1][1])
-            self.assertFalse(clients.calls)
+            self.assertEqual(len(clients.calls), 1)
 
     async def test_terminal_and_unknown_are_text_only(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
@@ -155,5 +180,10 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     client.result(result="answer with ![file](unavailable.png)")
                 self.assertTrue(await ordinary.wait_idle(2))
-                self.assertEqual(fx.channel.replies[-1][1], UNKNOWN if index else "answer with ![file](unavailable.png)")
+                reply = fx.channel.replies[-1][1]
+                if index:
+                    self.assertEqual(reply, UNKNOWN)
+                else:
+                    self.assertEqual(reply.markdown, "answer with ![file](unavailable.png)")
+                    self.assertEqual([mention.open_id for mention in reply.mentions], ["ou_user"])
             self.assertFalse(fx.channel.upload_calls)

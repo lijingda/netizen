@@ -158,6 +158,7 @@ class ChannelApplication(ChannelEntry):
         # Only the final send writes the aggregate Scheduled Run receipt. Keep
         # this completion's receipt through pruning of the persisted Run.
         self._scheduled_completions: dict[str, _ScheduledCompletion] = {}
+        self._open_new_cards: dict[str, str] = {}
         self._rename_name_generations: dict[str, _RenameNameGeneration] = {}
         self._reactions = _ReactionController(channel)
         self._reply_suppression = ReplySuppression()

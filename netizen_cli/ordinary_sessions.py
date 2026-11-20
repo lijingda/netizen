@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
-from .domain import MessageContextAnchor, MentionContextMode
+from .domain import ActiveState, MessageContextAnchor, MentionContextMode
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
@@ -101,6 +101,15 @@ class LocalExecutionSnapshot:
     revision: int
     turn: ActiveTurnSnapshot | None
     unavailable: bool
+
+    @property
+    def label(self) -> str:
+        if self.unavailable:
+            return "无法确认 Claude 客户端已关闭"
+        if self.turn is None:
+            return "空闲"
+        return {ActiveState.RUNNING: "执行中", ActiveState.STOPPING: "正在停止",
+                ActiveState.OBSERVATION_UNAVAILABLE: "状态待确认"}[self.turn.state]
 
 
 class LocalSessionManagement(Protocol):

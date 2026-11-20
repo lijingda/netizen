@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from lark_channel import (
@@ -351,6 +352,7 @@ class ChannelReplies(ChannelState):
         content: Any,
         *,
         completion_mention_user_id: str | None = None,
+        on_sent: Callable[[str], None] | None = None,
     ) -> None:
         if isinstance(content, str) and completion_mention_user_id is not None:
             content = OutboundPost(
@@ -358,6 +360,8 @@ class ChannelReplies(ChannelState):
                 mentions=[Identity(open_id=completion_mention_user_id)],
             )
         result = await self._send_completion_reply(message, content)
+        if on_sent is not None and result.success and result.message_id:
+            on_sent(result.message_id)
         failure_notice = _reply_failure_notice(result)
         if failure_notice is None:
             return

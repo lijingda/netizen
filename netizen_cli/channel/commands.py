@@ -388,10 +388,16 @@ class CommandChannel(CardControlChannel):
             initial_project_alias=initial_project_alias,
             allow_context_mode=(_message_chat_type(message) == "group"),
         )
+        def remember_card(message_id: str) -> None:
+            if len(self._open_new_cards) >= 1024:
+                self._open_new_cards.pop(next(iter(self._open_new_cards)))
+            self._open_new_cards[message_id] = intent.scope.key
+
         try:
             await self._reply(
                 message,
                 card,
+                **({"on_sent": remember_card} if self._policy.backend == "claude" else {}),
             )
         except asyncio.CancelledError:
             raise
@@ -597,9 +603,8 @@ class CommandChannel(CardControlChannel):
         if self._policy.backend == "claude":
             assert self._management.local is not None
             snapshot = self._management.local.local_snapshot(binding.id)
-            task = "无法确认 Claude 客户端已关闭" if snapshot.unavailable else snapshot.turn.state.value if snapshot.turn else "空闲"
             await self._reply(message, f"Project：{binding.project_alias}\n会话：{binding.short_id}\n"
-                              f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}\n本地任务：{task}\n"
+                              f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}\n本地任务：{snapshot.label}\n"
                               "模型用量及执行详情在 Claude 试点中不可用。")
             return
         state = await self._binding_state(binding)

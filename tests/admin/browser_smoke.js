@@ -236,6 +236,19 @@ async function run() {
           for (const selector of unsupported) {
             if (await evaluate(visible(selector))) throw Error("Unsupported owner action is visible: " + selector);
           }
+          if (path === "/sessions/ordinary") {
+            const created = '[data-session-sort="session"][data-sort-by="createdAt"]';
+            const updated = '[data-session-sort="session"][data-sort-by="updatedAt"]';
+            const verify = () => evaluate(`document.querySelector('${created} .sort-label').textContent === "登记时间"
+              && document.querySelector('${updated}').disabled
+              && [...document.querySelectorAll("#sessions-body [data-binding-id]")].some(row =>
+                row.textContent.includes("原生 Claude 设置") && row.textContent.includes("空闲")
+                && /[0-9]/.test(row.querySelector(".session-time")?.textContent))`);
+            await until("local registration time, settings and status", verify);
+            await click(created);
+            await until("local sort after refresh", () => evaluate(`document.querySelector('${created}').parentElement.getAttribute("aria-sort") === "ascending"`));
+            await until("local columns after refresh", verify);
+          }
           result.interactions.push(step);
         } else if (path === "/sessions/ordinary") {
           step += " · conversation";
