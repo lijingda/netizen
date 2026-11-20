@@ -18,6 +18,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 from netizen_cli import cli
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.cli_data import prepare_instance
@@ -90,6 +92,32 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         code, report, _ = self.invoke("setup")
         self.assertEqual(code, 0, report)
         self.assertEqual(report["status"], "prepared")
+
+    def test_setup_reports_fixed_backend_and_preserves_explicit_and_legacy_configs(self) -> None:
+        code, report, _ = self.invoke("setup")
+        self.assertEqual((code, report["status"], report["backend"]), (0, "prepared", "codex"))
+        config = self.root / "config.yaml"
+        saved = yaml.safe_load(config.read_bytes())
+        self.assertEqual(saved["instance"]["backend"], "codex")
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                if legacy:
+                    del saved["instance"]["backend"]
+                original = b"# preserved setup configuration\n" + yaml.safe_dump(saved).encode()
+                config.write_bytes(original)
+                for status in ("already_registered", "configured"):
+                    if status == "configured":
+                        (self.root / "state/admin-users.json").unlink()
+                    code, report, _ = self.invoke("setup", "--backend", "codex")
+                    self.assertEqual((code, report["status"], report["backend"]), (0, status, "codex"))
+                    self.assertEqual(config.read_bytes(), original)
+        saved["instance"]["backend"] = "other"
+        original = yaml.safe_dump(saved).encode()
+        config.write_bytes(original)
+        code, report, _ = self.invoke("setup", "--backend", "codex")
+        self.assertEqual(code, 1)
+        self.assertIn("fixed at setup", report["reason"])
+        self.assertEqual(config.read_bytes(), original)
 
     def test_registered_setup_repairs_missing_administrator_without_rebinding(self) -> None:
         self.setup_instance()

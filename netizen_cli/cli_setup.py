@@ -12,8 +12,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Callable, IO
+from typing import Any, Callable, IO
 
+from .backends import DEFAULT_BACKEND
 from .lark_app import encode_lark_app, load_lark_app
 
 
@@ -242,20 +243,51 @@ def _bind_admin(root: Path, *, open_id: str | None, source: IO[str]) -> None:
     users.add_initial(open_id, name=name, avatar_url=avatar_url)
 
 
-def prepare_configuration(root: Path, *, admin_port: int | None = None,
+def read_setup_config(path: Path) -> dict[str, Any] | None:
+    """Read the instance config even when interrupted setup has no credentials yet."""
+    import yaml
+
+    try:
+        _private_file(path)
+    except FileNotFoundError:
+        return None
+    try:
+        config = yaml.safe_load(path.read_bytes())
+    except (UnicodeError, yaml.YAMLError):
+        raise SetupError("existing configuration is invalid; repair it before retrying setup") from None
+    if not isinstance(config, dict) or not isinstance(config.get("instance"), dict):
+        raise SetupError("existing configuration must contain an instance mapping")
+    return config
+
+
+def setup_backend(config: dict[str, Any] | None, requested: str | None) -> str:
+    from .settings import validate_backend
+
+    if config is None:
+        return validate_backend(DEFAULT_BACKEND if requested is None else requested)
+    saved = config["instance"].get("backend", DEFAULT_BACKEND)
+    if requested is not None and requested != saved:
+        raise SetupError("--backend differs from existing configuration. The backend is fixed at setup. "
+                         "A different backend needs a new root.")
+    return validate_backend(saved)
+
+
+def prepare_configuration(root: Path, *, backend: str | None = None, admin_port: int | None = None,
                           admin_open_id: str | None = None,
                           runner: Callable = subprocess.run,
                           input_stream: IO[str] | None = None,
-                          secret_prompt: Callable[[str], str] = getpass.getpass) -> None:
+                          secret_prompt: Callable[[str], str] = getpass.getpass) -> str:
     """Root/maintenance/lifetime locks belong to the caller; no service is started."""
     from .settings import Settings
     import yaml
 
     source = sys.stdin if input_stream is None else input_stream
     config_file = root / "config.yaml"
-    if not config_file.exists() and not config_file.is_symlink():
+    existing = read_setup_config(config_file)
+    effective_backend = setup_backend(existing, backend)
+    if existing is None:
         config = {
-            "instance": {"dataDir": str(root / "state"),
+            "instance": {"backend": effective_backend, "dataDir": str(root / "state"),
                          "projectRoot": str(Path(pwd.getpwuid(os.geteuid()).pw_dir) / "projects")},
             "projects": {}, "channel": {"securityMode": "audit"},
             "adminWeb": {"host": "0.0.0.0"},
@@ -263,17 +295,11 @@ def prepare_configuration(root: Path, *, admin_port: int | None = None,
         if admin_port is not None:
             config["adminWeb"]["port"] = admin_port
         _write_atomic(config_file, yaml.safe_dump(config, sort_keys=False).encode(), mode=0o600)
-    else:
-        _private_file(config_file)
-        if admin_port is not None:
-            try:
-                existing = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-            except (UnicodeError, yaml.YAMLError):
-                raise SetupError("existing configuration is invalid; repair it before retrying setup") from None
-            admin = existing.get("adminWeb") if isinstance(existing, dict) else None
-            port = admin.get("port") if isinstance(admin, dict) else None
-            if type(port) is not int or port != admin_port:
-                raise SetupError("--admin-port differs from existing configuration; edit the config explicitly")
+    elif admin_port is not None:
+        admin = existing.get("adminWeb")
+        port = admin.get("port") if isinstance(admin, dict) else None
+        if type(port) is not int or port != admin_port:
+            raise SetupError("--admin-port differs from existing configuration; edit the config explicitly")
     profile = root / "lark-app/config.json"
     if not profile.exists() and not profile.is_symlink():
         _write_atomic(profile, encode_lark_app("", ""), mode=0o600)
@@ -308,3 +334,4 @@ def prepare_configuration(root: Path, *, admin_port: int | None = None,
     if settings.data_dir.resolve() != root / "state":
         raise SetupError("instance.dataDir must be this instance's state directory")
     _bind_admin(root, open_id=admin_open_id, source=source)
+    return settings.backend

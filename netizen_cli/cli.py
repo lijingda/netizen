@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import __version__
+from .backends import KNOWN_BACKENDS
 from .instance import resolve_instance_root
 
 
@@ -39,6 +40,7 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--purge", action="store_true", help="also delete the displayed owned instance data")
             command.add_argument("-y", "--yes", action="store_true", help="skip confirmation, not safety checks")
         if name == "setup":
+            command.add_argument("--backend", choices=KNOWN_BACKENDS, help="native backend, fixed at setup")
             command.add_argument("--admin-port", type=_port)
             command.add_argument("--admin-open-id", help="first administrator's Open ID in this instance's bound app")
         if name == "logs":
@@ -172,11 +174,26 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
     from .deployment.restart_worker import assert_no_pending_restart
 
     if command == "setup":
-        from .cli_setup import admin_binding_ready, prepare_configuration, require_codex_login
+        from .cli_setup import (SetupError, admin_binding_ready, prepare_configuration, read_setup_config,
+                                require_codex_login, setup_backend)
 
         existing = manager.inspect(root)
-        if existing is not None and admin_binding_ready(root):
+        registered = existing is not None and admin_binding_ready(root)
+        try:
+            config = read_setup_config(root / "config.yaml")
+        except (OSError, SetupError):
+            if not registered or args.backend is not None:
+                raise
+            config = None
+        if registered and config is None:
+            if args.backend is not None:
+                raise SetupError("cannot verify --backend without the registered instance configuration")
+            backend = None
+        else:
+            backend = setup_backend(config, args.backend)
+        if registered:
             _emit({"phase": "setup", "status": "already_registered",
+                   **({"backend": backend} if json_output and backend is not None else {}),
                    "instance": _status_value(existing, root),
                    "recommendation": (
                        "Existing binding and autostart setting retained; use start for this root to run it. "
@@ -191,7 +208,7 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                 f"administrator configuration is missing; stop this instance with netizen stop --root {root}, "
                 "then rerun setup to authorize or supply --admin-open-id"
             )
-        if existing is None:
+        if existing is None and backend == "codex":
             require_codex_login()
         ensure_instance_root(root)
         with root_maintenance_lock(root) as maintenance_descriptor:
@@ -207,13 +224,15 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                 else:
                     validate_prepared_instance(root)
                 report.update(phase="prepare_configuration")
-                prepare_configuration(root, admin_port=args.admin_port, admin_open_id=args.admin_open_id)
+                backend = prepare_configuration(root, backend=backend, admin_port=args.admin_port,
+                                                admin_open_id=args.admin_open_id)
                 if existing is None:
                     report.update(phase="initialize", completed=1)
                     initialize_instance_data(root, lifetime_descriptor=descriptor)
                     report.update(phase="register", completed=2)
                     manager.register(_current_binding(root), lifetime_descriptor=descriptor)
         _emit({"phase": "setup", "status": "prepared" if existing is None else "configured", "root": str(root),
+               **({"backend": backend} if json_output else {}),
                "recommendation": f"Run netizen start --root {root}"}, json_output=json_output)
         return 0
 

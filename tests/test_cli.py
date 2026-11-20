@@ -118,6 +118,44 @@ class CliTest(unittest.TestCase):
         manager.remove.assert_not_called()
         purge.assert_not_called()
 
+    def test_new_codex_root_checks_login_before_creating_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "instance"
+            with (
+                patch("netizen_cli.cli_services.ServiceManager") as manager,
+                patch("netizen_cli.cli_setup.require_codex_login", side_effect=RuntimeError("login required")) as login,
+            ):
+                manager.return_value.inspect.return_value = None
+                code, output, _ = self.invoke(["setup", "--root", str(root), "--json"])
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(output)["reason"], "login required")
+            login.assert_called_once_with()
+            self.assertFalse(root.exists())
+
+    def test_interrupted_setup_rejects_unknown_or_unreadable_backend_before_login_and_writes(self):
+        cases = (
+            (b"instance: {backend: other}", [], "supports only: codex"),
+            (b"instance: {backend: other}", ["--backend", "codex"], "fixed at setup"),
+            (b"instance: {backend: ", [], "configuration is invalid"),
+        )
+        for content, arguments, reason in cases:
+            with self.subTest(content=content, arguments=arguments), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = root / "config.yaml"
+                config.write_bytes(content)
+                config.chmod(0o600)
+                with (
+                    patch("netizen_cli.cli_services.ServiceManager") as manager,
+                    patch("netizen_cli.cli_setup.require_codex_login") as login,
+                ):
+                    manager.return_value.inspect.return_value = None
+                    code, output, _ = self.invoke(["setup", "--root", str(root), "--json", *arguments])
+                self.assertEqual(code, 1)
+                self.assertIn(reason, json.loads(output)["reason"])
+                login.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [config])
+                self.assertEqual(config.read_bytes(), content)
+
     def test_existing_setup_does_not_rebind_or_initialize(self):
         root = Path("/tmp/cli-existing-setup").resolve()
         binding = ServiceBinding(root, Path("/env-a/bin/python"), Path("/env-a"))
