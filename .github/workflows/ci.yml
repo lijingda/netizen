@@ -97,6 +97,24 @@ jobs:
       - name: Run the repository gate
         run: make check
 
+  artifact-installs:
+    name: Clean artifact installs (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+        python: ["3.11", "3.14"]
+    steps:
+      - *checkout
+      - *setup-python
+      - name: Build and install the wheel and sdist with and without Claude
+        run: |
+          python -m pip install setuptools==80.9.0
+          version=$(python -c 'from netizen_cli import __version__; print(__version__)')
+          python scripts/build_cli_distribution.py --tag "v$version" --commit "$GITHUB_SHA" \
+            --output-dir "$RUNNER_TEMP/netizen-dist" --smoke-installs
+
   admin-browser-smoke:
     name: Admin browser smoke (Linux)
     runs-on: ubuntu-latest

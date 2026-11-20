@@ -25,6 +25,9 @@ dependencies = [
   "uvicorn==0.52.4",
 ]
 
+[project.optional-dependencies]
+claude = ["claude-agent-sdk==0.2.186"]
+
 [project.scripts]
 netizen = "netizen_cli.cli:main"
 
