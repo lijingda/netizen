@@ -1,0 +1,37 @@
+name: Spike macOS LaunchAgent crash cleanup
+
+on:
+  push:
+    branches: [spike/macos-launchagent-reap]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    if: github.ref == 'refs/heads/spike/macos-launchagent-reap'
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install the SDK and the checkout
+        run: |
+          python -m venv "$RUNNER_TEMP/reap-venv"
+          "$RUNNER_TEMP/reap-venv/bin/python" -m pip install -e . claude-agent-sdk==0.2.186 aiohttp psutil
+          "$RUNNER_TEMP/reap-venv/bin/python" -m pip check
+      - name: Measure two LaunchAgents and one plain host
+        run: |
+          "$RUNNER_TEMP/reap-venv/bin/python" -B spike/macos-reap/observe.py "$RUNNER_TEMP/reap-work" "$RUNNER_TEMP/reap-evidence"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-reap-evidence
+          path: ${{ runner.temp }}/reap-evidence
+          retention-days: 14
+          if-no-files-found: error
