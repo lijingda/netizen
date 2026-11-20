@@ -28,10 +28,10 @@ from .reply_presenter import (
     _CardUpdateAttempt,
     _PartialAnswerDelivery,
 )
+from ..runtime.codex_contracts import GoalOutcome
 from ..runtime.contracts import (
     CompactionOutcome,
     GoalFinalizationStatus,
-    GoalOutcome,
     GoalSubmission,
     GoalStateUnknown,
     SideLifecycleOutcome,

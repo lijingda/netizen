@@ -7,6 +7,7 @@ from dataclasses import replace
 
 
 from ..partial_answers import PartialAnswer, partial_answers_from_items
+from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot
 from .contracts import (
     SideSessionState,
     ActiveTurnSnapshot,
@@ -14,8 +15,6 @@ from .contracts import (
     TurnActivitySnapshot,
     SideTurnActivitySnapshot,
     GoalActivitySnapshot,
-    ActiveGoalSnapshot,
-    BindingRuntimeSnapshot,
 )
 from ..turn_activity import (
     TurnActivityEntrySnapshot,

@@ -45,6 +45,7 @@ from .domain import (
 from .progress_card_settings import ProgressCardSettings
 from .runtime.thread_naming import ThreadNamer
 # Preserve existing public imports as aliases of the shared contract types.
+from .runtime.codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot, GoalOutcome, CompletionHandler
 from .runtime.contracts import (
     NativeCodex,
     RuntimeClosed,
@@ -115,10 +116,8 @@ from .runtime.contracts import (
     NativeThreadCatalog,
     NativeThreadCatalogPage,
     ContextWindowUsage,
-    ActiveGoalSnapshot,
     ThreadLifecycleSnapshot,
     ThreadSubscriptionSnapshot,
-    BindingRuntimeSnapshot,
     SideSessionSnapshot,
     SubmissionAdmission,
     ContextCursorCommit,
@@ -126,10 +125,8 @@ from .runtime.contracts import (
     TurnObservationUnavailableOutcome,
     ThreadActivityDiscardedOutcome,
     CompactionOutcome,
-    GoalOutcome,
     SideTurnOutcome,
     SideLifecycleOutcome,
-    CompletionHandler,
 )
 from .sdk_gap_adapter import (
     GoalControl,

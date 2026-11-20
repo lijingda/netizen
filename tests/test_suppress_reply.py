@@ -13,9 +13,9 @@ from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel import reply_presenter
 from netizen_cli.domain import ActiveState, FeishuScope, GoalOperationState, GoalStatus, ScopeKind
 from netizen_cli.partial_answers import PartialAnswer
+from netizen_cli.runtime.codex_contracts import GoalOutcome
 from netizen_cli.runtime.contracts import (
     GoalFinalizationStatus,
-    GoalOutcome,
     GoalSubmission,
     SideSessionSnapshot,
     SideSessionState,

@@ -48,9 +48,9 @@ from ..bindings import (
 )
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
+from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
-    BindingRuntimeSnapshot,
     NativeConversationPage,
     RuntimeClosed,
     NativeThreadCatalog,
