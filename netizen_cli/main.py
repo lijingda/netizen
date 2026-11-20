@@ -205,6 +205,7 @@ class ServiceCore:
         self.application: ChannelApplication | None = None
         self._started = False
         self._closed = False
+        self._start_loop: asyncio.AbstractEventLoop | None = None
 
     def _outcome_thread_config(self, app_id: str) -> dict[str, object] | None:
         if self._outcome_mcp is not None and app_id == self._settings.app_id:
@@ -212,6 +213,7 @@ class ServiceCore:
         return None
 
     async def start(self) -> None:
+        self._start_loop = asyncio.get_running_loop()
         stage_started_at = time.monotonic()
         try:
             # Admin is mandatory. Identity validation and the closed listener
@@ -733,7 +735,18 @@ async def run(
     finally:
         try:
             if core_started:
-                await _await_channel_future(channel.schedule(core.close()))
+                # A failed Channel start tears down the SDK loop that hosts the
+                # core; its objects cannot be closed from the replacement loop.
+                start_loop = core._start_loop
+                if start_loop is not None and (
+                    start_loop.is_closed() or not start_loop.is_running()
+                ):
+                    logger.warning(
+                        "Feishu Channel stopped the service event loop after a failed start. "
+                        "Skipping service-core cleanup because admission was never opened."
+                    )
+                else:
+                    await _await_channel_future(channel.schedule(core.close()))
         finally:
             try:
                 await asyncio.to_thread(channel.stop)
