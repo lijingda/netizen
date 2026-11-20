@@ -388,12 +388,9 @@ class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
         ):
             with (
                 self.subTest(host=host),
-                patch("netizen_cli.admin.web.socket.gethostname", return_value="server"),
-                patch("netizen_cli.admin.web.socket.getfqdn", return_value="server.example.test"),
                 patch("netizen_cli.admin.web.psutil.net_if_addrs", return_value={"net0": [discovered]}),
             ):
                 authorities = accepted_authorities(host, 8890, (bound,))
-                self.assertIn("server.example.test:8890", authorities)
                 self.assertEqual(admin_access_urls(host, (bound,), authorities), (expected,))
 
     def test_interface_discovery_survives_dns_failure_and_preserves_unlisted_hosts(self) -> None:
@@ -421,8 +418,6 @@ class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
         ):
             with (
                 self.subTest(host=host),
-                patch("netizen_cli.admin.web.socket.gethostname", return_value="unresolvable"),
-                patch("netizen_cli.admin.web.socket.getfqdn", return_value="unresolvable"),
                 patch("netizen_cli.admin.web.socket.getaddrinfo", side_effect=socket.gaierror("not known")),
                 patch("netizen_cli.admin.web.psutil.net_if_addrs", return_value=interfaces),
             ):
@@ -442,13 +437,10 @@ class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
         ):
             with (
                 self.subTest(host=host),
-                patch("netizen_cli.admin.web.socket.gethostname", return_value="server"),
-                patch("netizen_cli.admin.web.socket.getfqdn", return_value="server.example.test"),
                 patch("netizen_cli.admin.web.psutil.net_if_addrs", side_effect=OSError("unavailable")),
                 self.assertLogs("netizen_cli.admin.web", level="WARNING"),
             ):
                 authorities = accepted_authorities(host, 8787, (bound,))
-            self.assertIn("server.example.test:8890", authorities)
             self.assertEqual(admin_access_urls(host, (bound,), authorities), (expected,))
 
     def test_explicit_access_hostname_is_preserved_for_single_family_listener(self) -> None:

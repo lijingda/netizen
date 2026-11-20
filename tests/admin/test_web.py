@@ -3413,16 +3413,21 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(hasattr(owner, name), f"{owner.__name__}.{name}")
 
     def test_authority_builder_uses_canonical_bracketed_ipv6(self) -> None:
+        with patch("netizen_cli.admin.web.psutil.net_if_addrs", return_value={}):
+            authorities = accepted_authorities("::", 8787, (("::1", 8787, 0, 0),))
+        self.assertIn("[::1]:8787", authorities)
+        self.assertIn("127.0.0.1:8787", authorities)
+
+    def test_authority_builder_does_not_accept_machine_host_names(self) -> None:
         with (
             patch("netizen_cli.admin.web.socket.gethostname", return_value="host.test"),
             patch("netizen_cli.admin.web.socket.getfqdn", return_value="host.example"),
             patch("netizen_cli.admin.web.psutil.net_if_addrs", return_value={}),
         ):
-            authorities = accepted_authorities("::", 8787, (("::1", 8787, 0, 0),))
-        self.assertIn("[::1]:8787", authorities)
-        self.assertIn("127.0.0.1:8787", authorities)
-        self.assertIn("host.test:8787", authorities)
-        self.assertIn("host.example:8787", authorities)
+            authorities = accepted_authorities("0.0.0.0", 8787, (("0.0.0.0", 8787),))
+        self.assertIn("localhost:8787", authorities)
+        self.assertNotIn("host.test:8787", authorities)
+        self.assertNotIn("host.example:8787", authorities)
 
 
 class _AdminAssetParser(HTMLParser):

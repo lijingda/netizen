@@ -453,7 +453,10 @@ class AdminWebApplication:
     def _context(self, request: Request) -> _RequestContext:
         authority = _single_header(request, b"host").decode("ascii").lower()
         if authority not in self._authorities:
-            raise AdminWebError(400, "invalid_host", "请求 Host 不受信任。")
+            raise AdminWebError(
+                400, "invalid_host",
+                "请求 Host 不受信任。请使用 /admin 返回的地址访问；用主机名访问需配置 adminWeb.accessHost。",
+            )
         try:
             target = request.target.decode("ascii")
         except UnicodeDecodeError:
@@ -3050,7 +3053,11 @@ def accepted_authorities(
     configured_port: int,
     addresses: Sequence[object],
 ) -> tuple[str, ...]:
-    """Build the exact Host allowlist from local names and bound sockets."""
+    """Build the exact Host allowlist from loopback, interface and bound addresses.
+
+    Machine host names are not discovered; name access is the explicit
+    ``adminWeb.accessHost`` setting.
+    """
 
     ports: set[int] = set()
     hosts: set[str] = {"localhost", "127.0.0.1", "::1"}
@@ -3064,9 +3071,6 @@ def accepted_authorities(
         ports.add(configured_port)
     if bind_host not in {"0.0.0.0", "::", ""}:
         hosts.add(bind_host.split("%", 1)[0])
-    for name in (socket.gethostname(), socket.getfqdn()):
-        if name:
-            hosts.add(name.rstrip(".").lower())
     try:
         interfaces = psutil.net_if_addrs()
     except OSError as error:
