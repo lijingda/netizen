@@ -7,7 +7,8 @@ from aiohttp import web
 
 
 class Provider:
-    def __init__(self, log):
+    def __init__(self, log, *, command=None):
+        self.command = command
         self.log = log
         self.rows = []
 
@@ -42,7 +43,7 @@ class Provider:
             return web.Response(status=404)
 
         tool = marker and not tool_result
-        command = ("SECONDS=0; echo $$ >> starts-reap; for ((i=0;i<1200;i++)); do "
+        command = self.command or ("SECONDS=0; echo $$ >> starts-reap; for ((i=0;i<1200;i++)); do "
                    "if test -e release-reap; then echo released; exit 0; fi; "
                    "if (( SECONDS >= 119 )); then exit 33; fi; sleep .1; done; exit 33")
         content = ({"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex, "name": "Bash",

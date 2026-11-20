@@ -1,0 +1,44 @@
+name: Spike generation lock after a host crash
+
+on:
+  push:
+    branches: [spike/macos-launchagent-reap]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: ${{ matrix.os }}
+    if: github.ref == 'refs/heads/spike/macos-launchagent-reap'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install the pinned SDK and the checkout
+        timeout-minutes: 5
+        run: |
+          python -m venv "$RUNNER_TEMP/lock-venv"
+          "$RUNNER_TEMP/lock-venv/bin/python" -m pip install -e . claude-agent-sdk==0.2.186 aiohttp psutil
+          "$RUNNER_TEMP/lock-venv/bin/python" -m pip check
+      - name: Measure foreground, nohup and setsid with two trials per case
+        timeout-minutes: 11
+        run: |
+          "$RUNNER_TEMP/lock-venv/bin/python" -B spike/macos-lock/measure.py "$RUNNER_TEMP/lock-work" "$RUNNER_TEMP/lock-evidence"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: generation-lock-${{ matrix.os }}
+          path: ${{ runner.temp }}/lock-evidence
+          retention-days: 14
+          if-no-files-found: error

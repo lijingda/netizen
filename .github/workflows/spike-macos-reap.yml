@@ -1,8 +1,6 @@
 name: Spike macOS LaunchAgent crash cleanup
 
 on:
-  push:
-    branches: [spike/macos-launchagent-reap]
   workflow_dispatch:
 
 permissions:
