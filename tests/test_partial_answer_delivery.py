@@ -17,6 +17,7 @@ from netizen_cli.codex_runtime import (
 )
 from netizen_cli.domain import FeishuScope, NativeCapability, ScopeKind
 from netizen_cli.partial_answers import PartialAnswer
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.sdk_gap_adapter import GoalStatus
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeChannel, FakeMessage
@@ -25,6 +26,10 @@ from tests.support.channel_results import (
     sent_result, side_turn_activity_snapshot, turn_activity_snapshot,
 )
 from tests.support.channel_runtime import StubRuntime
+
+
+def presenter_for(channel, runtime, **options):
+    return _ReplyCardPresenter(channel, runtime, ordinary=CodexOrdinarySessions(runtime), **options)
 
 
 def answer(text="first stable answer", item="partial-one", *, thread="native-one", turn="turn-one"):
@@ -36,7 +41,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         for side in (False, True):
             with self.subTest(side=side):
                 channel, runtime = FakeChannel(), StubRuntime()
-                presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=0.001)
+                presenter = presenter_for(channel, runtime, poll_seconds=0.001)
                 self.addAsyncCleanup(presenter.close)
                 owner = "side-one" if side else "binding-one"
                 thread = "native-side-1" if side else "native-one"
@@ -77,7 +82,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_lost_send_receipt_is_not_replayed_after_observation_unavailable(self):
         channel, runtime = FakeChannel(), StubRuntime()
-        presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=0.001)
+        presenter = presenter_for(channel, runtime, poll_seconds=0.001)
         self.addAsyncCleanup(presenter.close)
         partial = answer()
         runtime.turn_activity_values["binding-one"] = replace(
@@ -103,7 +108,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_inflight_partial_finishes_before_terminal_and_stops_remaining_running_sends(self):
         channel, runtime = FakeChannel(), StubRuntime()
-        presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=0.001)
+        presenter = presenter_for(channel, runtime, poll_seconds=0.001)
         self.addAsyncCleanup(presenter.close)
         partials = (answer(), answer("second", "two"))
         runtime.turn_activity_values["binding-one"] = replace(
@@ -137,7 +142,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_formatting_failure_before_transport_can_be_retried_at_terminal(self):
         channel, runtime = FakeChannel(), StubRuntime()
-        presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=10)
+        presenter = presenter_for(channel, runtime, poll_seconds=10)
         self.addAsyncCleanup(presenter.close)
         partial = answer()
         runtime.turn_activity_values["binding-one"] = turn_activity_snapshot(binding_id="binding-one")
@@ -158,7 +163,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         for stalled in (False, True):
             with self.subTest(stalled=stalled):
                 channel, runtime = FakeChannel(), StubRuntime()
-                presenter = _ReplyCardPresenter(channel, runtime,
+                presenter = presenter_for(channel, runtime,
                     poll_seconds=10, operation_timeout_seconds=0.01)
                 self.addAsyncCleanup(presenter.close)
                 runtime.turn_activity_values["binding-one"] = turn_activity_snapshot(binding_id="binding-one")
@@ -188,7 +193,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                     continue
                 with self.subTest(side=side, failure=failure):
                     channel, runtime = FakeChannel(), StubRuntime()
-                    presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=0.001)
+                    presenter = presenter_for(channel, runtime, poll_seconds=0.001)
                     self.addAsyncCleanup(presenter.close)
                     owner = "side-one" if side else "binding-one"
                     thread = "native-side-1" if side else "native-one"
@@ -230,7 +235,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_prepare_receipts_survive_failed_terminal_card_then_fill_only_missing_items(self):
         channel, runtime = FakeChannel(), StubRuntime()
-        presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=10)
+        presenter = presenter_for(channel, runtime, poll_seconds=10)
         self.addAsyncCleanup(presenter.close)
         runtime.turn_activity_values["binding-one"] = turn_activity_snapshot(binding_id="binding-one")
         reply = AsyncMock(return_value=sent_result("om_partial", chat_id="oc_direct"))
@@ -258,7 +263,8 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.call_args.args[0].markdown, "**阶段性答案**\n\nsecond")
 
     async def test_terminal_delivery_budget_covers_whole_batch_and_does_not_replay_timeout(self):
-        presenter = _ReplyCardPresenter(FakeChannel(), StubRuntime(), operation_timeout_seconds=1)
+        runtime = StubRuntime()
+        presenter = presenter_for(FakeChannel(), runtime, operation_timeout_seconds=1)
         self.addAsyncCleanup(presenter.close)
         entered = asyncio.Event()
         posts = []
@@ -287,7 +293,8 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivery.confirmed_partials, set())
 
     async def test_goal_delivery_allows_multiple_physical_turns_but_requires_exact_thread(self):
-        presenter = _ReplyCardPresenter(FakeChannel(), StubRuntime())
+        runtime = StubRuntime()
+        presenter = presenter_for(FakeChannel(), runtime)
         self.addAsyncCleanup(presenter.close)
         reply = AsyncMock(return_value=sent_result("om_partial", chat_id="oc_direct"))
         delivery = await presenter.prepare_partial_answers(owner_id="binding-one", thread_id="native-one",
@@ -309,7 +316,7 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         self.runtime = self.fixture.runtime
         self.channel = self.fixture.channel
         self.binding = self.fixture.store.active_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key)
-        self.app._progress_cards = _ReplyCardPresenter(self.channel, self.runtime, poll_seconds=0.001)
+        self.app._progress_cards = _ReplyCardPresenter(self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.001)
 
     async def test_running_without_progress_sends_answer_without_completion_side_effects(self):
         snapshot = replace(turn_activity_snapshot(binding_id=self.binding.id), partial_answers=(answer(),), revision=2)
@@ -513,7 +520,7 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.fixture.store.assign_native_thread_id(binding.id, "native-one")
         self.binding = self.fixture.store.get(binding.id)
         self.origin = FakeMessage("work", message_id="om_origin")
-        self.app._progress_cards = _ReplyCardPresenter(self.channel, self.runtime, poll_seconds=3600)
+        self.app._progress_cards = _ReplyCardPresenter(self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=3600)
 
     def outcome(self, *, side=False, content="final original", partials=(), progress=True, mention=False, result=None):
         values = dict(
@@ -695,7 +702,7 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
     async def test_logical_reply_keeps_rollover_answers_on_one_card_then_releases_session(self):
         from netizen_cli.cards import turn_progress_card
         channel, runtime = FakeChannel(), StubRuntime()
-        presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=0.001)
+        presenter = presenter_for(channel, runtime, poll_seconds=0.001)
         self.addAsyncCleanup(presenter.close)
         first = answer("first turn answer", turn="physical-one")
         second = answer("second turn answer", turn="physical-two")
@@ -732,7 +739,7 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_resuming_same_logical_reply_keeps_running_delivery_and_card(self):
         channel, runtime = FakeChannel(), StubRuntime()
-        presenter = _ReplyCardPresenter(channel, runtime)
+        presenter = presenter_for(channel, runtime)
         self.addAsyncCleanup(presenter.close)
         first = answer(turn="physical-one")
         snapshot = replace(turn_activity_snapshot(binding_id="binding-one", turn_id="logical-one"),

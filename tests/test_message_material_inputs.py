@@ -32,6 +32,7 @@ from netizen_cli.domain import (
     NativeCapability,
     ScopeKind,
 )
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
@@ -123,16 +124,17 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
             project_root=root,
             projects={"test": self.project},
         )
+        ordinary = CodexOrdinarySessions(self.runtime)
         self.management = InstanceManagementService(
             bindings=self.store,
             projects=self.projects,
-            runtime=ManagementRuntimePort(self.runtime),
+            runtime=ManagementRuntimePort(self.runtime, ordinary=ordinary),
             scope_coordinator=ScopeCoordinator(),
         )
         self.app = ChannelApplication(
             app_id="cli_test",
             channel=self.channel,
-            runtime=self.runtime,
+            runtime=self.runtime, ordinary=ordinary,
             bindings=self.store,
             projects=self.projects,
             management=self.management,

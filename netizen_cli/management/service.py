@@ -50,7 +50,6 @@ from ..bindings import (
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
 from ..ordinary_sessions import OrdinarySessionPort
-from ..runtime.codex_ordinary import CodexOrdinarySessions
 from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
@@ -521,9 +520,9 @@ class ManagementRuntimePort:
 
     __slots__ = ("__runtime", "__ordinary")
 
-    def __init__(self, runtime: CodexRuntime, *, ordinary: OrdinarySessionPort | None = None) -> None:
+    def __init__(self, runtime: CodexRuntime, *, ordinary: OrdinarySessionPort) -> None:
         self.__runtime = runtime
-        self.__ordinary: OrdinarySessionPort = ordinary if ordinary is not None else CodexOrdinarySessions(runtime)
+        self.__ordinary: OrdinarySessionPort = ordinary
 
     async def read_scheduled_turn(
         self, binding_id: str, turn_id: str, *, deadline: float | None = None,

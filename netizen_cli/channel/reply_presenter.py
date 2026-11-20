@@ -13,7 +13,6 @@ from ..cards import turn_progress_card
 from ..cards.reply import feishu_answer_text
 from ..codex_runtime import CodexRuntime
 from ..ordinary_sessions import OrdinarySessionPort
-from ..runtime.codex_ordinary import CodexOrdinarySessions
 from ..partial_answers import PartialAnswer
 from ..runtime.contracts import (
     SideTurnActivitySnapshot,
@@ -106,7 +105,7 @@ class _ReplyCardPresenter:
         channel: ReplyChannel,
         runtime: CodexRuntime,
         *,
-        ordinary: OrdinarySessionPort | None = None,
+        ordinary: OrdinarySessionPort,
         poll_seconds: float = _PROGRESS_CARD_POLL_SECONDS,
         operation_timeout_seconds: float = _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS,
     ) -> None:
@@ -116,7 +115,7 @@ class _ReplyCardPresenter:
             raise ValueError("progress card operation timeout must be positive")
         self._channel = channel
         self._runtime = runtime
-        self._ordinary = ordinary if ordinary is not None else CodexOrdinarySessions(runtime)
+        self._ordinary = ordinary
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
         self._sessions: dict[

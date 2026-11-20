@@ -52,6 +52,7 @@ from netizen_cli.chat_targets import ValidatedChatTarget  # noqa: E402
 from netizen_cli.codex_runtime import CodexRuntime, StopDisposition, _native_cwd  # noqa: E402
 from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
 from netizen_cli.error_messages import describe_error  # noqa: E402
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions  # noqa: E402
 from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
 from netizen_cli.management.service import InstanceManagementService, ManagementRuntimePort  # noqa: E402
 from netizen_cli.projects import ProjectRegistry  # noqa: E402
@@ -648,8 +649,15 @@ async def _dispatch_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, own
     channel = FakeFeishu()
     runtime = CodexRuntime(codex=codex, bindings=store, terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
                            thread_subscription_control=AppServerThreadSubscriptionControl(codex), thread_delete_control=owned)
-    management = InstanceManagementService(bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator(), chat_directory=channel)
-    application = ChannelApplication(app_id="probe", channel=channel, runtime=runtime, bindings=store, projects=projects, management=management)
+    ordinary = CodexOrdinarySessions(runtime)
+    management = InstanceManagementService(
+        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=ordinary),
+        scope_coordinator=ScopeCoordinator(), chat_directory=channel,
+    )
+    application = ChannelApplication(
+        app_id="probe", channel=channel, runtime=runtime, ordinary=ordinary,
+        bindings=store, projects=projects, management=management,
+    )
     outcomes: asyncio.Queue[TurnOutcome | ProbeCompletionFailure] = asyncio.Queue()
 
     async def completed(outcome: object) -> None:
@@ -746,8 +754,15 @@ async def _manual_phase(
     channel = FakeFeishu()
     runtime = CodexRuntime(codex=codex, bindings=store, terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
                            thread_subscription_control=AppServerThreadSubscriptionControl(codex), thread_delete_control=owned)
-    management = InstanceManagementService(bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator(), chat_directory=channel)
-    application = ChannelApplication(app_id="probe", channel=channel, runtime=runtime, bindings=store, projects=projects, management=management)
+    ordinary = CodexOrdinarySessions(runtime)
+    management = InstanceManagementService(
+        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=ordinary),
+        scope_coordinator=ScopeCoordinator(), chat_directory=channel,
+    )
+    application = ChannelApplication(
+        app_id="probe", channel=channel, runtime=runtime, ordinary=ordinary,
+        bindings=store, projects=projects, management=management,
+    )
     outcomes: asyncio.Queue[TurnOutcome | ProbeCompletionFailure] = asyncio.Queue()
 
     async def completed(outcome: object) -> None:
@@ -850,12 +865,13 @@ async def _binding_phase(
         thread_subscription_control=AppServerThreadSubscriptionControl(codex),
         thread_delete_control=owned, automatic_thread_naming=False,
     )
+    ordinary = CodexOrdinarySessions(runtime)
     management = InstanceManagementService(
-        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
+        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=ordinary),
         scope_coordinator=ScopeCoordinator(), chat_directory=channel,
     )
     application = ChannelApplication(
-        app_id="probe", channel=channel, runtime=runtime, bindings=store,
+        app_id="probe", channel=channel, runtime=runtime, ordinary=ordinary, bindings=store,
         projects=projects, management=management,
     )
     outcomes: asyncio.Queue[TurnOutcome | ProbeCompletionFailure] = asyncio.Queue()
@@ -1024,9 +1040,10 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                     thread_subscription_control=AppServerThreadSubscriptionControl(codex),
                     automatic_thread_naming=False,
                 )
+                ordinary = CodexOrdinarySessions(runtime)
                 management = InstanceManagementService(
                     bindings=store, projects=projects,
-                    runtime=ManagementRuntimePort(runtime),
+                    runtime=ManagementRuntimePort(runtime, ordinary=ordinary),
                     scope_coordinator=ScopeCoordinator(), chat_directory=channel,
                     root=root / "instance",
                 )
@@ -1034,7 +1051,7 @@ async def _worktree_phase(root: Path) -> dict[str, object]:
                     default_root=root / "managed-worktrees",
                 ))
                 application = ChannelApplication(
-                    app_id="probe", channel=channel, runtime=runtime, bindings=store,
+                    app_id="probe", channel=channel, runtime=runtime, ordinary=ordinary, bindings=store,
                     projects=projects, management=management,
                     instance_root=root / "instance",
                 )

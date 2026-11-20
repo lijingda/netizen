@@ -15,6 +15,7 @@ from netizen_cli.bindings import BindingStore, BindingTaskFeedback
 from netizen_cli.cards import goal_card
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, NativeCapability, ScopeKind
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
@@ -167,6 +168,8 @@ async def _assembled_channel(
     channel = FakeChannel()
     runtime = StubRuntime()
     runtime.binding_store = store
+    if ordinary is None:
+        ordinary = CodexOrdinarySessions(runtime)
     projects = ProjectRegistry(store=store, project_root=root, projects={project_alias: project})
     management = InstanceManagementService(
         bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=ordinary),

@@ -87,6 +87,7 @@ from netizen_cli.codex_runtime import (
     ThreadOccupied,
 )
 from netizen_cli.domain import GoalStatus, MentionContextMode, ScopeKind
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.contracts import ThreadCatalogError
 from netizen_cli.session_settings import BindingTaskFeedback, SessionSettings
 from netizen_cli.progress_card_settings import ProgressCardSettings
@@ -2331,7 +2332,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
 
             native = object.__new__(CodexRuntime)
             native.thread_conversation = AsyncMock()
-            port = ManagementRuntimePort(native)
+            port = ManagementRuntimePort(native, ordinary=CodexOrdinarySessions(native))
 
             async def exact_read(binding_id, **kwargs):
                 return await port.thread_conversation_exact(**kwargs)

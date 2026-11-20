@@ -15,6 +15,7 @@ from netizen_cli.codex_runtime import (
 )
 from netizen_cli.model_settings import TurnModelSettings
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management.coordination import ScopeCoordinator
 from netizen_cli.management.service import (
     CurrentBindingTarget,
@@ -614,7 +615,7 @@ class RuntimeThreadNamingTest(unittest.IsolatedAsyncioTestCase):
         service = InstanceManagementService(
             bindings=self.store,
             projects=ProjectRegistry(store=self.store, project_root=self.cwd, projects={}),
-            runtime=ManagementRuntimePort(self.runtime), scope_coordinator=coordinator,
+            runtime=ManagementRuntimePort(self.runtime, ordinary=CodexOrdinarySessions(self.runtime)), scope_coordinator=coordinator,
         )
         try:
             calls = (

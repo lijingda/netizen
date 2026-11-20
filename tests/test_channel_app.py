@@ -55,6 +55,7 @@ from netizen_cli.cards import (
     reply_card,
 )
 from netizen_cli.channel_app import ChannelApplication, SideTopicCreateFailed
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
@@ -220,6 +221,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
         self.presenter = reply_presenter._ReplyCardPresenter(
             self.channel,
             self.runtime,  # type: ignore[arg-type]
+            ordinary=CodexOrdinarySessions(self.runtime),
             poll_seconds=0.01,
         )
         self.addAsyncCleanup(self.presenter.close)
@@ -553,15 +555,16 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         runtime = StubRuntime()
         runtime.binding_store = store
         projects = ProjectRegistry(store=store, project_root=self.project_root, projects={})
+        ordinary = CodexOrdinarySessions(runtime)
         management = InstanceManagementService(
-            bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
+            bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=ordinary),
             scope_coordinator=ScopeCoordinator(),
         )
         self.addAsyncCleanup(management.close)
         root = self.project_root / "team 中文"
         urls = ("http://192.0.2.15:8789/", "http://[2001:db8::1]:8789/")
         app = ChannelApplication(
-            app_id="cli_test", channel=self.channel, runtime=runtime, bindings=store,
+            app_id="cli_test", channel=self.channel, runtime=runtime, ordinary=ordinary, bindings=store,
             projects=projects, management=management, admin_urls=urls, instance_root=root,
         )
         self.addAsyncCleanup(app.close)
@@ -868,6 +871,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.app._progress_cards = reply_presenter._ReplyCardPresenter(
             self.channel,
             self.runtime,  # type: ignore[arg-type]
+            ordinary=self.app._ordinary,
             poll_seconds=0.01,
         )
         released = False
@@ -1220,6 +1224,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.app._progress_cards = reply_presenter._ReplyCardPresenter(
             self.channel,
             self.runtime,  # type: ignore[arg-type]
+            ordinary=self.app._ordinary,
             poll_seconds=0.01,
         )
         self.runtime.submission = Submission(
@@ -2372,17 +2377,18 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(self.store.active_binding(scope.key).id, binding.id)
         restarted_runtime = StubRuntime()
         restarted_runtime.binding_store = self.store
+        ordinary = CodexOrdinarySessions(restarted_runtime)
         restarted_management = InstanceManagementService(
             bindings=self.store,
             projects=self.projects,
-            runtime=ManagementRuntimePort(restarted_runtime),  # type: ignore[arg-type]
+            runtime=ManagementRuntimePort(restarted_runtime, ordinary=ordinary),  # type: ignore[arg-type]
             scope_coordinator=ScopeCoordinator(),
         )
         self.addAsyncCleanup(restarted_management.close)
         restarted_app = ChannelApplication(
             app_id="cli_test",
             channel=self.channel,
-            runtime=restarted_runtime,  # type: ignore[arg-type]
+            runtime=restarted_runtime, ordinary=ordinary,  # type: ignore[arg-type]
             bindings=self.store,
             projects=self.projects,
             management=restarted_management,
@@ -2436,16 +2442,17 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         ]
         restarted_runtime = StubRuntime()
         restarted_runtime.binding_store = self.store
+        ordinary = CodexOrdinarySessions(restarted_runtime)
         restarted_management = InstanceManagementService(
             bindings=self.store,
             projects=self.projects,
-            runtime=ManagementRuntimePort(restarted_runtime),  # type: ignore[arg-type]
+            runtime=ManagementRuntimePort(restarted_runtime, ordinary=ordinary),  # type: ignore[arg-type]
             scope_coordinator=ScopeCoordinator(),
         )
         self.addAsyncCleanup(restarted_management.close)
         restarted_app = ChannelApplication(
             app_id="cli_test", channel=self.channel,
-            runtime=restarted_runtime,  # type: ignore[arg-type]
+            runtime=restarted_runtime, ordinary=ordinary,  # type: ignore[arg-type]
             bindings=self.store, projects=self.projects, management=restarted_management,
         )
         self.addAsyncCleanup(restarted_app.close)
@@ -9297,6 +9304,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.app._progress_cards = reply_presenter._ReplyCardPresenter(
             self.channel,
             self.runtime,  # type: ignore[arg-type]
+            ordinary=self.app._ordinary,
             poll_seconds=0.01,
         )
         self.channel.reply_results.append(
@@ -9396,6 +9404,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.app._progress_cards = reply_presenter._ReplyCardPresenter(
             self.channel,
             self.runtime,  # type: ignore[arg-type]
+            ordinary=self.app._ordinary,
             poll_seconds=0.01,
         )
         self.channel.reply_results.append(

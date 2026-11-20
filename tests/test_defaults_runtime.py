@@ -9,6 +9,7 @@ from unittest.mock import patch
 from netizen_cli.bindings import BindingStore
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.codex_runtime import CodexRuntime
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
@@ -42,13 +43,14 @@ class DefaultsRuntimeTest(unittest.IsolatedAsyncioTestCase):
             store=self.store, project_root=self.root,
             projects={"default": self.default_cwd, "existing": self.existing_cwd},
         )
+        ordinary = CodexOrdinarySessions(self.runtime)
         self.management = InstanceManagementService(
             bindings=self.store, projects=self.projects,
-            runtime=ManagementRuntimePort(self.runtime),
+            runtime=ManagementRuntimePort(self.runtime, ordinary=ordinary),
             scope_coordinator=ScopeCoordinator(),
         )
         self.app = ChannelApplication(
-            app_id="cli_test", channel=self.channel, runtime=self.runtime,
+            app_id="cli_test", channel=self.channel, runtime=self.runtime, ordinary=ordinary,
             bindings=self.store, projects=self.projects, management=self.management,
         )
         self.addAsyncCleanup(self.management.close)

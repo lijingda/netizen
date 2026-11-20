@@ -815,7 +815,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         native_id = "native-" + claim.run.id
         partial = PartialAnswer(native_id, "turn-initial", "partial-one", "stable answer")
         self.app._progress_cards = reply_presenter._ReplyCardPresenter(
-            self.channel, self.runtime, poll_seconds=0.001,
+            self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.001,
         )
 
         async def submit_initial(**kwargs):
@@ -1051,7 +1051,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.store.set_configuration(binding_id=binding.id, expected_settings_revision=binding.settings_revision,
             expected_context_revision=binding.context_revision, expected_feedback_revision=binding.feedback_revision,
             settings=binding.turn_settings, task_feedback=feedback, message_context_mode=binding.message_context_mode, context_anchor=None)
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, self.runtime, poll_seconds=0.01)
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.01)
         source_activity = turn_activity_snapshot(binding_id=source.id, thread_id="native-source", turn_id="turn-followup",
             steps=(TurnPlanStepSnapshot("source scope activity", TurnPlanStepState.IN_PROGRESS),))
         initial = turn_activity_snapshot(binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-followup")
