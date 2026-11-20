@@ -254,8 +254,6 @@ class SubmissionRuntime(CompactionRuntime):
         skill_names: tuple[str, ...] = (),
     ) -> Submission:
         """Submit input; cwd is only a lazy Thread's creation-directory intent."""
-        if isinstance(input, PreparedPrompt):
-            input = to_codex_input(input)
         active = self._active.get(binding.id)
         if (
             admission is None
@@ -371,6 +369,8 @@ class SubmissionRuntime(CompactionRuntime):
         external_model: str | None = None,
         preferred_title: str | None = None,
     ) -> Submission:
+        if isinstance(input, PreparedPrompt):
+            input = to_codex_input(input)
         if isinstance(input, ExternalMessage) != external:
             raise TypeError("ExternalMessage must use the verified external input entry")
         initial_run_id = initial.run_id if initial is not None else None
