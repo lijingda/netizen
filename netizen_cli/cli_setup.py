@@ -260,8 +260,11 @@ def read_setup_config(path: Path) -> dict[str, Any] | None:
     return config
 
 
-def setup_backend(config: dict[str, Any] | None, requested: str | None) -> str:
+def setup_backend(config: dict[str, Any] | None, requested: str | None, *, root: Path) -> str:
     if config is None:
+        from .cli_data import has_retained_setup_data
+        if requested is None and has_retained_setup_data(root):
+            raise SetupError("Retained instance data has no config.yaml. Specify its original --backend to repair setup.")
         return instance_backend({} if requested is None else {"backend": requested})
     saved = instance_backend(config["instance"])
     if requested is not None and requested != saved:
@@ -277,7 +280,7 @@ def resolve_setup_backend(root: Path, requested: str | None, *, already_register
             if requested is not None:
                 raise SetupError("cannot verify --backend without the registered instance configuration")
             return None
-        return setup_backend(config, requested)
+        return setup_backend(config, requested, root=root)
     except (OSError, ValueError, SetupError):
         # Optional metadata must never prevent an idempotent setup result.
         if already_registered and requested is None:
@@ -307,7 +310,7 @@ def prepare_configuration(root: Path, *, backend: str | None = None, admin_port:
     source = sys.stdin if input_stream is None else input_stream
     config_file = root / "config.yaml"
     existing = read_setup_config(config_file)
-    effective_backend = setup_backend(existing, backend)
+    effective_backend = setup_backend(existing, backend, root=root)
     if existing is None:
         config = {
             "instance": {"backend": effective_backend, "dataDir": str(root / "state"),

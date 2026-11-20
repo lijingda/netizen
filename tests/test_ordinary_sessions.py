@@ -196,3 +196,26 @@ class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((current.thread_id, current.turn_id, current.state),
                              ("thread", "second", ActiveState.STOPPING))
             self.assertEqual(fixture.runtime.stop_calls, [])
+
+    async def test_exact_stop_preview_cannot_follow_a_replacement_execution(self):
+        class ExactPreviewSessions(StartOnlySessions):
+            async def preview_stop(self, binding):
+                self.previewed.set()
+                return StopPreview("正在停止任务。", self.activity.revision, self.activity.turn_id)
+
+        backend = ExactPreviewSessions()
+        async with channel_fixture(ordinary=backend) as fixture:
+            await fixture.new()
+            message = FakeMessage("/stop", message_id="om_stop")
+            scope = fixture.app._scope(message)
+            binding = fixture.store.active_binding(scope.key)
+            backend.activity = TurnActivitySnapshot(
+                binding.id, "thread", "first", 1, ActiveState.RUNNING, 0, False, False, False, (),
+            )
+            async with fixture.management.scope_coordinator.hold(scope.key):
+                task = asyncio.create_task(fixture.app.handle_message(message))
+                await asyncio.wait_for(backend.previewed.wait(), 2)
+                backend.activity = replace(backend.activity, turn_id="second", revision=2)
+            await asyncio.wait_for(task, 2)
+            self.assertEqual(backend.interrupts, [])
+            self.assertNotIn((message.id, "正在停止任务。"), fixture.channel.replies)

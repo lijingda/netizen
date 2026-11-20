@@ -151,6 +151,31 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         self.assertEqual((self.root / "state/channel.sqlite3").read_bytes(), database)
         self.assertEqual(AdminUsers(self.root, "cli_testapp").list()[0].identity.open_id, "ou_repaired")
 
+    def test_retained_unregistered_root_with_lost_config_requires_explicit_backend(self):
+        self.setup_instance()
+        self.assertEqual(self.invoke("remove", "-y")[0], 0)
+        config = self.root / "config.yaml"
+        config.unlink()
+        code, report, _ = self.invoke("setup")
+        self.assertEqual(code, 1, report)
+        self.assertIn("original --backend", report["reason"])
+        self.assertFalse(config.exists())
+        self.assertIsNone(self.manager.inspect(self.root))
+        code, report, _ = self.invoke("setup", "--backend", "codex")
+        self.assertEqual((code, report["status"], report["backend"]), (0, "prepared", "codex"))
+
+    def test_config_disappearing_after_preflight_is_not_regenerated_implicitly(self):
+        self.setup_instance()
+        self.assertEqual(self.invoke("remove", "-y")[0], 0)
+        def lose_config(root, **kwargs):
+            (root / "config.yaml").unlink()
+            return prepare_configuration(root, **kwargs)
+        with patch("netizen_cli.cli_setup.prepare_configuration", side_effect=lose_config):
+            code, report, _ = self.invoke("setup")
+        self.assertEqual(code, 1, report)
+        self.assertIn("original --backend", report["reason"])
+        self.assertFalse((self.root / "config.yaml").exists())
+
     def test_setup_rechecks_backend_under_lock_without_implying_an_explicit_request(self) -> None:
         self.setup_instance()
         self.assertEqual(self.invoke("remove", "-y")[0], 0)

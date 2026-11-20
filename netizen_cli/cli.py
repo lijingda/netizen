@@ -178,7 +178,7 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                                 resolve_setup_backend)
 
         existing = manager.inspect(root)
-        if existing is not None and admin_binding_ready(root):
+        if existing is not None and (admin_binding_ready(root) or not (root / "config.yaml").exists()):
             backend = resolve_setup_backend(root, args.backend, already_registered=True)
             _emit({"phase": "setup", "status": "already_registered",
                    **({"backend": backend} if json_output and backend is not None else {}),

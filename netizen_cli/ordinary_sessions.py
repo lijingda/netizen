@@ -58,6 +58,12 @@ class StopPreview:
     """Receipt text captured before the stop operation selects its target."""
 
     acknowledgement: str
+    activity_revision: int | None = None
+    turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.activity_revision is None) != (self.turn_id is None):
+            raise ValueError("exact stop preview requires both revision and execution ID")
 
 
 class OrdinarySessionPort(Protocol):

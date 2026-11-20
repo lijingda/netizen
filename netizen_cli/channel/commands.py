@@ -54,6 +54,7 @@ from ..management import (
     CurrentBindingChanged,
     CurrentBindingTarget,
     NoCurrentBinding,
+    RuntimePrecondition,
 )
 
 from . import constants
@@ -658,10 +659,14 @@ class CommandChannel(CardControlChannel):
             acknowledged = True
 
         try:
-            stopped = await self._management.stop_current_binding(
-                target=CurrentBindingTarget(intent.scope.key, binding.id),
-                acknowledge=acknowledge,
-            )
+            target = CurrentBindingTarget(intent.scope.key, binding.id)
+            if preview.activity_revision is None:
+                stopped = await self._management.stop_current_binding(target=target, acknowledge=acknowledge)
+            else:
+                stopped = await self._management.stop_current_binding(
+                    target=target, acknowledge=acknowledge,
+                    runtime_precondition=RuntimePrecondition(preview.activity_revision, preview.turn_id),
+                )
         except (NoCurrentBinding, CurrentBindingChanged) as error:
             raise SteerRace(
                 "active 会话已切换，本次停止未执行；请重新发送 /stop。"
