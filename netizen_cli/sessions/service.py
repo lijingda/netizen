@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..backends import BackendPolicy
 from ..runtime.codex_session_reads import CodexSessionReads
 
 from ..bindings import BindingCursor, BindingNotFound, BindingQuery, BindingStore, ProjectNotFound, ScopeNotFound
@@ -53,11 +54,13 @@ class SessionService:
                  policy: SessionPolicyService, create_thread: Callable[..., Awaitable[dict[str, Any]]],
                  send_message: Callable[..., Awaitable[dict[str, Any]]],
                  reads: CodexSessionReads | None = None, history: ThreadHistory | None = None, worktrees: Any = None,
+                 backend_policy: BackendPolicy = BackendPolicy("codex"),
                  suppress_reply: Callable[..., Awaitable[dict[str, Any]]] | None = None) -> None:
         if (reads is None) == (codex is None):
             raise TypeError("SessionService requires exactly one of reads or codex")
         if reads is not None and history is not None:
             raise TypeError("history cannot be supplied with reads")
+        self._backend_policy = backend_policy
         self._bindings, self._runtime = bindings, runtime
         self._app_id, self._policy = app_id, policy
         self._create, self._send = create_thread, send_message
@@ -105,6 +108,8 @@ class SessionService:
         fit = _fit_worktree_result if tool_name in _WORKTREE_TOOLS else fit_result
         invoked = False
         try:
+            if refusal := self._backend_policy.operation_refusal("collaboration", "会话协作"):
+                raise SessionToolError("backend_unsupported", refusal)
             data = validate_arguments(tool_name, arguments)
             if tool_name == "suppress_reply":
                 if any(not isinstance(value, str) or not value.strip() for value in (native_thread_id, source_turn_id)):

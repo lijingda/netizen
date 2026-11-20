@@ -146,6 +146,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 raise OrdinaryInputRejected(STALE)
             self._bindings.require_project_not_deleting(binding.project_alias)
             self._bindings.get_project(binding.project_alias)
+            self._bindings.worktrees.require_binding_not_deleting(binding_id)
         except (BindingNotFound, ScopeNotFound, ProjectDeleting, ProjectNotFound):
             raise OrdinaryInputRejected(STALE) from None
         return binding
@@ -247,6 +248,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 await execution.client.connect()
             async with self._lock(binding.id):
                 self._check_opening(execution)
+                self._bindings.worktrees.require_cwd_not_deleting(actual)
                 if binding.native_thread_id is None:
                     if self._creation_cwd(binding, cwd) != actual:
                         raise OrdinaryInputRejected(STALE)
@@ -380,6 +382,30 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                           status, answer, detail, task_feedback=execution.binding.task_feedback,
                                           feedback_revision=execution.binding.feedback_revision, cwd=cwd)
         raise TerminalStateUnknown(UNKNOWN)
+
+    async def resource_usage(self, binding_id: str) -> dict[str, str | None]:
+        async with self._lock(binding_id):
+            binding = self._bindings.get(binding_id)
+            busy = binding_id in self._active or binding_id in self._unavailable
+            if binding.native_thread_id is None:
+                return {"cwd": binding.working_cwd, "status": "active" if busy else "idle"}
+            try:
+                async with asyncio.timeout(_CONTROL_SECONDS):
+                    cwd = await self._clients.session_cwd(binding.native_thread_id)
+            except Exception:
+                cwd = None
+            # Exact transcript metadata proves cwd. The SDK cannot prove that an
+            # external writer or detached tool has stopped using that directory.
+            return {"cwd": str(cwd) if cwd else None, "status": "active" if busy else "unknown"}
+
+    async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding:
+        async with self._lock(binding_id):
+            self._idle(binding_id)
+            if self._bindings.get(binding_id).native_thread_id is not None:
+                raise OrdinaryInputRejected("Claude 试点暂不支持【已建立的会话删除】。")
+            removed = self._bindings.delete_binding(binding_id)
+            self._advance(binding_id)
+            return removed
 
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot:
         execution = self._active.get(binding_id)

@@ -1,5 +1,18 @@
 "use strict";
 
+const claudeBackend = document.body.dataset.backend === "claude";
+if (claudeBackend) {
+  for (const id of ["nav-temporary", "nav-schedules", "nav-progress-card", "nav-question-notifications", "nav-session-tools",
+                    "session-search-help", "admin-user-add"]) {
+    document.getElementById(id).hidden = true;
+  }
+  document.querySelector("#session-search").closest("label").hidden = true;
+  document.querySelector("#session-inventory-state option[value=archived]").remove();
+  document.querySelector("#session-inventory-state option[value=active]").textContent = "全部本地会话";
+  document.querySelector("[data-time-range-id=session-updated]").hidden = true;
+  for (const header of document.querySelectorAll("[data-session-sort=session][data-sort-by=updatedAt]")) header.disabled = true;
+}
+
 const state = {
   tab: "projects",
   sessionTab: "ordinary",
@@ -2034,7 +2047,7 @@ async function loadSessionSettingsOptions() {
   const serial = ++editor.optionsSerial;
   editor.loading = true;
   renderSessionSettingsEditor();
-  const progressRead = editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
+  const progressRead = !claudeBackend && editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
   try {
     const data = await api("/api/v1/sessions/options");
     if (sessionSettingsEditor !== editor || serial !== editor.optionsSerial) return;
@@ -2452,7 +2465,7 @@ async function loadDefaultOptions(resolveChat = false) {
   editor.workspaceOptions = null;
   editor.workspaceError = "";
   renderDefaultSettings();
-  let progressRead = editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
+  let progressRead = !claudeBackend && editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
   try {
     let view = null;
     if (resolveChat && chatId) {
@@ -2497,7 +2510,7 @@ async function loadDefaultOptions(resolveChat = false) {
   } finally {
     if (defaultsEditor === editor && serial === editor.serial
         && editor.settings.progress_card_settings === null && !progressRead) {
-      progressRead = window.NetizenProgressCard.read();
+      progressRead = claudeBackend ? null : window.NetizenProgressCard.read();
     }
     await progressRead;
     if (defaultsEditor === editor && serial === editor.serial) {
@@ -3359,7 +3372,7 @@ function resetScheduleEndOffset() {
 }
 
 function defaultScheduleSessionSettings() {
-  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true,
+  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: !claudeBackend, completion_mention_enabled: true,
     message_context_mode: "current-only", progress_card_settings: null };
 }
 
@@ -3480,6 +3493,17 @@ function scheduleSelectOptions(node, choices, selected) {
 }
 
 function renderSessionSettingsFields(input, settings, models, contextAvailable) {
+  if (claudeBackend) {
+    for (const field of ["model", "effort", "tier", "progress", "completion-mention"]) {
+      input(field).closest("label").hidden = true;
+    }
+    input("progress-settings").hidden = true;
+    input("progress-reset").hidden = true;
+    input("context").value = settings.message_context_mode;
+    input("context").disabled = !contextAvailable;
+    input("reactions").checked = settings.reaction_pulse_enabled;
+    return null;
+  }
   const turn = settings.turn_settings;
   const model = models.find((item) => item.id === turn?.model_id);
   scheduleSelectOptions(input("model"), [["", "继承 Codex"],
@@ -4365,6 +4389,10 @@ function pageQuery(tab, sessionTab, raw = "") {
     if (!query.has("pageSize")) query.set("pageSize", "20");
     if (!query.has("sortBy")) query.set("sortBy", "updatedAt");
     if (!query.has("sortDirection")) query.set("sortDirection", "desc");
+  }
+  if (claudeBackend && tab === "sessions" && sessionTab === "ordinary") {
+    query.set("sortBy", "createdAt");
+    for (const key of ["updatedRange", "updatedFrom", "updatedBefore", "searchTerm"]) query.delete(key);
   }
   if (tab === "schedules" && !query.has("ended")) query.set("ended", "false");
   return query;

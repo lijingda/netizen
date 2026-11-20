@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 from jsonschema import Draft202012Validator
 from mcp.types import CallToolRequestParams
 
+from netizen_cli.backends import BackendPolicy
 from netizen_cli.bindings import BindingStore, SideTopicState
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.runtime.contracts import NativeThreadCatalogPage, NativeThreadMetadata, SideSessionSnapshot, SideSessionState
@@ -119,6 +120,15 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.target = self.binding("chat-b", "target")
         self.patch = patch("netizen_cli.runtime.codex_session_reads.AsyncThread", self.catalog.handle)
         self.patch.start()
+
+    async def test_owner_backend_refuses_collaboration_tools_before_access(self):
+        self.service._backend_policy = BackendPolicy("claude", "owner")
+        for tool in ("create_thread", "list_threads", "list_archived_threads", "read_thread", "wait_threads",
+                     "send_message_to_thread", "list_worktrees", "create_worktree", "suppress_reply"):
+            with self.subTest(tool=tool):
+                result = await self.service.call(tool, {}, "source")
+                self.assertEqual(result["error"]["code"], "backend_unsupported")
+        self.assertFalse(self.calls)
 
     def test_construction_requires_one_read_source(self):
         common = dict(bindings=self.store, runtime=self.catalog, app_id="app", policy=self.policy,

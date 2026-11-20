@@ -285,6 +285,33 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         (Path(resource["root"]) / "local.txt").write_text("keep")
         self.assertFalse((await self.service.preview_delete(resource["id"], delete_sessions=True))["safe"])
 
+    async def test_owner_backend_checks_cwd_and_blocks_materialized_cascade(self):
+        from netizen_cli.management import ManagementRuntimePort
+        from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
+        from tests.support.claude_client import FakeClaudeClients
+        from unittest.mock import AsyncMock
+
+        clients = FakeClaudeClients()
+        local = ClaudeOrdinarySessions(bindings=self.store, clients=clients, owner_id="owner",
+                                      on_completion=AsyncMock(), notice=AsyncMock())
+        manager = InstanceManagementService(bindings=self.store, projects=self.projects, scope_coordinator=ScopeCoordinator(),
+            runtime=ManagementRuntimePort(None, ordinary=local, local=local))
+        self.addAsyncCleanup(manager.close)
+        worktrees = manager.enable_worktrees(settings=WorktreeSettingsService(default_root=self.root / "managed"))
+        resource = await self.resource()
+        binding = await self.binding(resource, native="native-owner")
+        for cwd in (None, Path(resource["cwd"])):
+            if cwd:
+                clients.cwds["native-owner"] = cwd
+            preview = await worktrees.preview_delete(resource["id"], delete_sessions=True)
+            self.assertFalse(preview["safe"])
+            with self.assertRaises(WorktreeError):
+                await worktrees.delete(resource["id"], delete_sessions=True, expected_fingerprint=preview["fingerprint"])
+            self.assertTrue(Path(resource["root"]).is_dir())
+            self.assertEqual(self.store.get(binding.id).native_thread_id, "native-owner")
+        self.assertTrue(clients.lookups)
+        self.assertFalse(clients.calls)
+
     async def test_delete_cascade_choice_and_inventory_are_sealed(self):
         resource = await self.resource()
         preview = await self.service.preview_delete(resource["id"])

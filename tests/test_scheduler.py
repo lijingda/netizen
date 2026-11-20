@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from netizen_cli.backends import BackendPolicy
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, ScopeKind
@@ -185,6 +186,33 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
     async def start(self):
         await self.scheduler.recover()
         self.scheduler.start()
+
+    async def test_claude_policy_disables_scheduler_before_any_claim(self):
+        plan_id = self.plan()
+        self.now += 120
+        from netizen_cli.schedules.service import ScheduleService
+
+        pending_plan = self.occurrence().plan_id
+        before_runs = self.store.list_runs(pending_plan)
+        before = self.store.get(plan_id)
+        scheduler = Scheduler(self.bindings, self.reader, "app", self.dispatch, wall_clock=lambda: self.now,
+                              backend_policy=BackendPolicy("claude", "ou_owner"))
+        with self.assertRaisesRegex(Exception, "定时任务"):
+            await scheduler.recover()
+        with self.assertRaisesRegex(Exception, "定时任务"):
+            await scheduler.tick()
+        with self.assertRaisesRegex(Exception, "定时任务"):
+            scheduler.start()
+        with self.assertRaisesRegex(Exception, "定时任务"):
+            await scheduler.refresh(plan_id)
+        self.assertEqual(before, self.store.get(plan_id))
+        self.assertFalse(self.store.list_runs(plan_id))
+        self.assertEqual(self.store.list_runs(pending_plan), before_runs)
+        service = ScheduleService(bindings=self.bindings, runtime=self.reader, app_id="app", backend_policy=BackendPolicy("claude", "ou_owner"))
+        for mode in ("view", "options", "create", "run_now", "delete"):
+            result = await service.manage({"mode": mode, "plan_id": plan_id})
+            self.assertEqual(result["error"]["code"], "backend_unsupported")
+        self.assertFalse(self.dispatched)
 
     async def test_tick_yields_after_attachment_and_keeps_reentrant_tick_out(self):
         plans = {self.plan(), self.plan()}

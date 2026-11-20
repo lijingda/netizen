@@ -230,6 +230,13 @@ async function run() {
           await until("closed file browser", () => evaluate('!document.querySelector("#file-browser-drawer").open'));
           await settled(phoneWidth);
           result.interactions.push(step);
+        } else if (config.ownerOnly && path !== "/login") {
+          step += " · owner controls";
+          const unsupported = ["#nav-temporary", "#nav-schedules", "#nav-progress-card", "#nav-question-notifications", "#nav-session-tools", "#admin-user-add"];
+          for (const selector of unsupported) {
+            if (await evaluate(visible(selector))) throw Error("Unsupported owner action is visible: " + selector);
+          }
+          result.interactions.push(step);
         } else if (path === "/sessions/ordinary") {
           step += " · conversation";
           await click('#sessions-body [aria-haspopup="menu"]');

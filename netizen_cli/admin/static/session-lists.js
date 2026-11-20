@@ -226,6 +226,10 @@ window.NetizenSessionLists = (() => {
           : new URLSearchParams(page.query);
         if (!query.has("sortBy")) query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : "updatedAt");
         if (!query.has("sortDirection")) query.set("sortDirection", "desc");
+        if (kind === "session" && document.body.dataset.backend === "claude") {
+          query.set("sortBy", "createdAt");
+          for (const key of ["updatedFrom", "updatedBefore", "updatedRange", "searchTerm"]) query.delete(key);
+        }
         const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
         // Options own their control-level failure handling, independently of this page.
         void options.loadProjectOptions(isCurrent);

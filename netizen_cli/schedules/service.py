@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ..backends import BackendPolicy
 from ..bindings import BindingNotFound, BindingQuery, BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout, BindingStore, ProjectConflict, ProjectDeleting, ProjectDisabled, ProjectNotFound, ScopeNotFound
 from ..channel.messages import public_chat_kind
 from ..chat_targets import ChatTargetError, ChatTargetValidator
@@ -81,10 +82,11 @@ class ScheduleService:
     def __init__(
         self, *, bindings: BindingStore, runtime: Any, app_id: str,
         chat_info: Any = None, wall_clock: Callable[[], float] = time.time,
-        default_timezone: str | None = None,
+        default_timezone: str | None = None, backend_policy: BackendPolicy = BackendPolicy("codex"),
         chat_target_validator: ChatTargetValidator | None = None,
         worktrees: Callable[[], WorktreeService | None] | None = None,
     ) -> None:
+        self._backend_policy = backend_policy
         self.app_id = app_id
         self._bindings = bindings
         self._store = bindings.schedules
@@ -132,6 +134,8 @@ class ScheduleService:
         self, request: Mapping[str, Any], *, native_thread_id: str | None = None,
         scope_key: str | None = None, source: str = "mcp",
     ) -> dict[str, Any]:
+        if refusal := self._backend_policy.operation_refusal("schedule", "定时任务"):
+            return {"error": {"code": "backend_unsupported", "message": refusal}}
         try:
             if not self._accepting:
                 raise _InputError("unavailable", "服务正在停止，暂不接受定时任务管理。")
