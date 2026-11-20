@@ -5,7 +5,7 @@
 > 本文保留的旧 release／激活回滚记录均为历史证据，不能证明 CLI 的安装、更新或两平台
 > 服务验收已经通过。源码测试、实际 SDK 执行、浏览器流程与平台服务验收分别记录。
 
-Netizen 使用用户选择的 Python 安装，服务以当前账号运行，共享原生 Codex 状态。
+Netizen 使用用户选择的 Python 安装，服务以当前账号运行。Codex 实例共享该账号的原生 Codex 状态。
 不下载 Python、不创建隐藏 venv，不在每个实例保存程序 release。Linux 使用 systemd
 user manager，macOS 14+ 使用当前 GUI 用户的 LaunchAgent，不提供 LaunchDaemon。
 一个账号可运行多个独立 root，每实例一个机器人、Channel DB、Admin listener 和业务
@@ -16,6 +16,7 @@ user manager，macOS 14+ 使用当前 GUI 用户的 LaunchAgent，不提供 Laun
 | 要完成的任务 | 阅读入口 |
 | --- | --- |
 | 首次安装 | [选择部署目标](#选择部署目标) → [前置门禁](#前置门禁) → [安装](#安装)；Agent 使用 [CLI 安装与 setup](cli.md#安装与首次使用)，按输出继续。 |
+| 为所有者部署 Claude Code 试点 | [安装、认证与平台验收](#部署-claude-code-试点) |
 | 更换飞书应用或补齐权限 | [更换飞书应用与权限修复](#更换飞书应用与权限修复)；新增权限契约先看[维护飞书权限契约](#维护飞书权限契约)。 |
 | 升级、启停或卸载 | [CLI 操作与成功判据](#升级启停和卸载)、[程序更新边界](#从-admin-升级)、[管理页重启](#从-admin-重启)。 |
 | 调整工具环境、代理或证书 | [服务环境](#服务环境)及[安装前提](#安装)；修改账号 profile 后重启服务。 |
@@ -97,7 +98,8 @@ purge 删除 Channel 数据库后受管工作区登记也消失；磁盘目录�
 
 ## 前置门禁
 
-先在将运行 Netizen 的账户中，通过 Codex CLI 或 Codex App 完成登录。若选择 CLI，可以
+Claude 实例请先按[试点部署步骤](#部署-claude-code-试点)准备认证，然后完成本节的飞书应用授权。
+Codex 实例先在将运行 Netizen 的账户中，通过 Codex CLI 或 Codex App 完成登录。若选择 CLI，可以
 独立确认：
 
 ```bash
@@ -1307,6 +1309,33 @@ install.sh 的零退出证明 CLI 环境识别、schema 启动迁移或 update �
 uninstall.sh 入口已停用，只返回 CLI 指引；不会生成 release/current 或隐藏 venv。
 源码安装使用选定 Python 的 `pip install .` 或开发期 `pip install -e .`，再 setup/start。
 
+### 部署 Claude Code 试点
+
+1. 在所有者的系统账号下选择长期 Python 环境，安装含试点功能的 `netizen-cli[claude]`。从候选
+   checkout 安装可用 `python -m pip install '.[claude]'`。pip、uv pip 和 uv tool 的发行包安装命令见
+   [CLI 手册](cli.md#claude-code-试点实例)。
+2. 所有者亲自通过未经修改的官方 Claude Code 完成登录，或按厂商支持的方式为同一服务账号配置原生认证。
+   Claude Code 使用自己的凭据、原生设置和服务环境。setup 会核对 Claude 安装，后续模型请求使用哪种认证由 Claude Code 决定。
+   请勿向飞书、Admin 或 setup 提交 Claude 凭据。Netizen 不读取或改写原生凭据，也不采集或代设
+   `ANTHROPIC_*` 变量。所有者负责确认飞书身份和实际使用的 Claude 身份都属于本人。
+3. 在新 root 执行 `netizen setup --root ~/.netizen-claude --backend claude`。按 setup 提示绑定飞书应用，
+   将所有者本人设为首管理员，然后执行 `netizen start --root ~/.netizen-claude`。
+   每次实际启动都要求当前应用恰有这一个管理员，并核对官方 SDK 0.2.186、随附 CLI 2.1.329 和可执行文件。
+   服务使用随附的 CLI。版本或文件有误时，在服务绑定的环境修复 `netizen-cli[claude]` 后重试。
+
+新建和续接普通会话都申请原生 `auto` 权限，只对本次执行生效。Claude Code 负责加载原生设置和执行权限规则。
+退回默认模式时，所有者会收到一次提示，未预先允许的操作会被拒绝。若在提交前启动失败，机器人明确回复输入未发送。
+若有效模式无法确认，服务会请求中断并提示所有者检查原会话。Netizen 不写入用户的允许规则。
+
+**平台与验收进度。** 服务每次启动后约两秒才接收 Claude 任务，过早提交会看到“服务刚启动，请稍后重发”。
+此等待降低崩溃重启时两个 CLI 重叠写入的概率。Linux systemd 会清理服务 cgroup 内的进程。
+macOS LaunchAgent 可能在上一代 Claude CLI 退出前重启，工具启动的已脱离进程也可能继续运行。
+验收须分别记录旧 CLI 退出、新服务开放准入的时刻、崩溃后的模型请求，以及脱离工具的状态。
+无账号的 `make check-native-claude` 用随附 CLI 和本地模拟服务验证会话续接、权限回退、停止和关闭。
+试点仍待真实飞书与服务账号的认证、身份与权限验证，以及 Linux systemd 和 macOS LaunchAgent 的崩溃和停服验收。
+macOS 还须在所有者开启 SIP 的真实 Mac 上覆盖登录项启动、注销和重启。详见
+[试点接受条件](adr/0104-host-native-agent-backends-per-instance.md#接受条件)。
+
 ### 维护飞书权限契约
 
 权限和回调的单一契约仍是[前置门禁](#前置门禁)。修改
@@ -1333,7 +1362,7 @@ enabled 配置或旧服务模板的兼容迁移。
 
 ### Agent 驱动首次安装
 
-使用选定环境的 `netizen setup --root "<NETIZEN_ROOT>" </dev/null`，在出现验证链接时
+使用选定环境的 `netizen setup --root "<NETIZEN_ROOT>" </dev/null`，新建 Claude 实例时加上 `--backend claude`。出现验证链接时
 逐次转交给用户并保留同一进程，继续读取 stderr 进度。应用注册和首管理员身份确认是
 两个阶段；后者通过当前 exact App 的 Device Flow 和本人资料确认，未经同应用证据核对
 的注册 Open ID 不直接入名单。stdout 的 helper 凭据通道只由程序私下消费，不能展示到
@@ -1544,6 +1573,7 @@ purge 继续按精确清单处理旧文件。
 接受阈值；类型、期限、身份和私密文件校验保留。上游响应仍完整读入、解析后提取必要
 字段，处理后不缓存完整响应；更大的响应仍增加本次调用的临时内存及解析成本。
 
+Claude 实例的名单只含所有者本人，Admin 不开放添加管理员。在 Codex 实例中，
 “访问控制 → 管理员”使用飞书官方 Selector 搜索选人，管理员确认后由后端
 复核当前资格与名单 revision 再添加。管理员同权，可删除自己但不能删除最后一人；
 删除立即撤销其所有 session 和未消费操作授权，并清理用户凭证，在途结果不得重新
@@ -1552,11 +1582,10 @@ purge 继续按精确清单处理旧文件。
 HTTP，不得把端口直接暴露到不受信网络。正式链路的真人和平台验收状态见
 [专项验收](#admin-飞书登录与管理员维护验收)。
 
-实例的原生后端在首次 setup 时固定，新建的 `<root>/config.yaml` 会显式写入
-`instance.backend: codex`。已有配置缺少该键时按 Codex 处理，重跑 setup 也会保留原文件。
-当前仅支持 `codex`，服务每次启动都会校验后端，遇到未知值会在 Runtime 接受输入前拒绝启动。
-引入此键之前的程序会忽略它，把其他后端的实例按 Codex 打开。这是已接受的兼容风险，使用其他后端的实例须由支持该后端的版本启动。
-见 [ADR 0104](adr/0104-host-native-agent-backends-per-instance.md)。
+实例的原生后端在首次 setup 时固定。`<root>/config.yaml` 中的 `instance.backend` 保存所选的
+`codex`（默认）或 `claude`。已有配置缺少该键时按 Codex 处理。每次启动都校验后端，遇到未知值会拒绝启动。
+引入此键之前的程序会忽略它，误把 Claude 实例当作 Codex 打开。更新或切换环境时，务必选择支持该实例后端的版本。
+见 [CLI 的后端选择与修复步骤](cli.md#claude-code-试点实例)。
 
 `instance.projectRoot` 是必填绝对路径，只限制飞书自动创建的空 Project，不是 Binding 默认 cwd。
 `worktrees.root` 默认 `<instance-root>/worktrees`，`fetchBeforeCreate` 默认 false；修改只影响
