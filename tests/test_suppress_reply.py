@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from lark_channel import Identity, OutboundCard, OutboundText
 
+from netizen_cli import turn_files
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel import reply_presenter
 from netizen_cli.domain import ActiveState, FeishuScope, GoalOperationState, GoalStatus, ScopeKind
@@ -308,11 +309,26 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
             result=completed_turn_result(file_change_item("secret.txt", "secret.png"), final_response=""),
         )
         await self.suppress(outcome)
-        await self.app.handle_completion(outcome)
+        with patch.object(turn_files, "_file_change_counts", wraps=turn_files._file_change_counts) as counts:
+            await self.app.handle_completion(outcome)
+        counts.assert_not_called()
         self.assertEqual(self.channel.upload_calls, [])
         self.assertEqual(self.channel.replies, [])
         self.assertEqual(self.channel.send_calls, [])
         self.assert_cleaned(outcome)
+
+    async def test_done_reaction_precedes_ordinary_file_parsing(self):
+        parser = turn_files._file_change_counts
+        reactions_at_parse = []
+
+        def record_parse(*args):
+            reactions_at_parse.append(tuple(self.channel.reactions))
+            return parser(*args)
+
+        outcome = self.outcome(result=completed_turn_result(file_change_item("result.txt"), final_response="answer"))
+        with patch.object(turn_files, "_file_change_counts", side_effect=record_parse):
+            await self.app.handle_completion(outcome)
+        self.assertEqual(reactions_at_parse, [((self.origin.id, "DONE"),)])
 
     async def test_nonempty_final_preserves_images_and_files_with_and_without_existing_progress(self):
         (self.fixture.project / "result.txt").write_text("task file")

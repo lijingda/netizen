@@ -32,7 +32,7 @@ class OrdinaryConclusion:
     activity: TurnActivitySnapshot | None = None
     partial_answers: tuple[PartialAnswer, ...] = ()
     cwd: Path | None = None
-    files: FileEvidence = FileEvidence()
+    file_evidence: Callable[[], FileEvidence] = FileEvidence
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:

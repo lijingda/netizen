@@ -157,7 +157,7 @@ class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
                 binding.id, "thread", "turn", "ou_user", message, "completed", "recovered answer",
                 cwd=fixture.project, task_feedback=binding.task_feedback,
             )
-            self.assertEqual(conclusion.files, FileEvidence())
+            self.assertEqual(conclusion.file_evidence(), FileEvidence())
             backend.activity = None
             await backend.sink(conclusion)
             self.assertIn(("om_first", constants.DONE_REACTION), fixture.channel.reactions)

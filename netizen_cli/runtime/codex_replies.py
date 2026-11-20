@@ -1,6 +1,7 @@
 """Route the existing Codex consumer into the ordinary and feature-specific sinks."""
 
 from collections.abc import Awaitable, Callable
+from functools import cache
 
 from ..error_messages import describe_error, native_turn_failure
 from ..file_evidence import FileEvidence
@@ -38,10 +39,14 @@ def outcome_file_evidence(outcome: TurnOutcome | SideTurnOutcome | GoalOutcome) 
 
 
 def ordinary_conclusion(turn: TurnOutcome) -> OrdinaryConclusion:
+    @cache
+    def file_evidence() -> FileEvidence:
+        return outcome_file_evidence(turn)
+
     return OrdinaryConclusion(
         binding_id=turn.binding_id, thread_id=turn.thread_id, turn_id=turn.turn_id,
         owner_id=turn.owner_id, origin=turn.origin, status=turn.status,
-        final_response=turn.final_response, files=outcome_file_evidence(turn), cwd=turn.cwd,
+        final_response=turn.final_response, file_evidence=file_evidence, cwd=turn.cwd,
         error_detail=describe_error(turn.error) if turn.error is not None else None,
         native_failure_detail=native_failure_detail(turn.result),
         background_cleanup_requested=turn.background_cleanup_requested,

@@ -103,7 +103,7 @@ class CompletionPresentationChannel(ChannelReplies):
         if scheduled is not None:
             self._scheduled_completions[scheduled.run_id] = completion
         try:
-            await self._complete_task(outcome, file_evidence=lambda: outcome.files)
+            await self._complete_task(outcome, file_evidence=outcome.file_evidence)
             if (scheduled is not None and scheduled.auto_archive and outcome.error_detail is None
                     and outcome.status == "completed" and completion.delivery_state == "sent"):
                 # The initial submission carries the immutable claim policy.
@@ -270,7 +270,7 @@ class CompletionPresentationChannel(ChannelReplies):
         task_files = _TaskFiles()
         prepared_response = None
         if not silent and not _task_has_error(outcome) and outcome.status == "completed":
-            task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence())
+            task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence)
         if outcome.task_feedback.progress_card_enabled:
             # A missing card stays silent; failure of an existing card uses
             # the original result fallback below. Successful updates return.
@@ -312,14 +312,14 @@ class CompletionPresentationChannel(ChannelReplies):
                     return
             if silent and fallback_to_result:
                 silent = False
-                task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence())
+                task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence)
         try:
             if silent:
                 async def finish_silent_reply(content: str) -> None:
                     # Only the existing partial-delivery failure notice is nonempty.
                     if content:
                         await self._complete_task_with_files(
-                            outcome, self._prepare_task_files(outcome.cwd, file_evidence()),
+                            outcome, self._prepare_task_files(outcome.cwd, file_evidence),
                             prepared_response=content, file_turn_id=file_turn_id,
                         )
                         return
@@ -371,9 +371,9 @@ class CompletionPresentationChannel(ChannelReplies):
         await self._reactions.stop(turn_id)
 
     async def _prepare_task_result(
-        self, outcome: OrdinaryConclusion | SideTurnOutcome, evidence: FileEvidence,
+        self, outcome: OrdinaryConclusion | SideTurnOutcome, file_evidence: Callable[[], FileEvidence],
     ) -> tuple[_TaskFiles, str | None]:
-        task_files = self._prepare_task_files(outcome.cwd, evidence)
+        task_files = self._prepare_task_files(outcome.cwd, file_evidence)
         response = await self._prepare_task_result_images(outcome)
         if not response and outcome.partial_answers:
             response = "任务已完成，答案见阶段性答案。"
@@ -506,8 +506,10 @@ class CompletionPresentationChannel(ChannelReplies):
             turn_id=outcome.turn_id,
         )
 
-    def _prepare_task_files(self, cwd: Path | None, evidence: FileEvidence) -> _TaskFiles:
+    def _prepare_task_files(self, cwd: Path | None, file_evidence: Callable[[], FileEvidence]) -> _TaskFiles:
+        evidence = FileEvidence()
         try:
+            evidence = file_evidence()
             if cwd is None:
                 raise TurnFileError("本轮工作目录未确认，不能使用项目默认目录解释文件。")
             summary = summarize_file_evidence(evidence, cwd)

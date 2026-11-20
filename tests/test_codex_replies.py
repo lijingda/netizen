@@ -41,9 +41,11 @@ class OrdinaryProjectionTests(unittest.TestCase):
             with self.subTest(field=name):
                 self.assertEqual(getattr(conclusion, name), value)
         self.assertEqual((conclusion.status, conclusion.final_response), ("completed", "answer"))
-        self.assertEqual(conclusion.files.outputs, (OutputPath("written"),))
-        self.assertEqual(conclusion.files.aggregate_paths, (DiffPath("aggregate", False),))
-        self.assertFalse(conclusion.files.patch_counts_complete)
+        files = conclusion.file_evidence()
+        self.assertIs(conclusion.file_evidence(), files)
+        self.assertEqual(files.outputs, (OutputPath("written"),))
+        self.assertEqual(files.aggregate_paths, (DiffPath("aggregate", False),))
+        self.assertFalse(files.patch_counts_complete)
         failed = ordinary_conclusion(replace(turn, error=RuntimeError("delivery failed")))
         self.assertEqual(failed.error_detail, "delivery failed")
 

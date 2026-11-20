@@ -203,7 +203,7 @@ class WorktreeChannelCwdTest(unittest.IsolatedAsyncioTestCase):
         for cwd in (self.selected, alias):
             with self.subTest(cwd=cwd):
                 outcome = ordinary_conclusion(self.outcome(cwd=cwd))
-                task_files = self.app._prepare_task_files(cwd, outcome.files)
+                task_files = self.app._prepare_task_files(cwd, outcome.file_evidence)
                 _, files = self.app._completion_files(outcome, task_files)
                 self.assertEqual(files[0].resolved_path, (self.selected / "answer.txt").resolve())
                 self.assertEqual(files[0].size, len("correct source"))
@@ -213,7 +213,7 @@ class WorktreeChannelCwdTest(unittest.IsolatedAsyncioTestCase):
         (self.fixture.project / "answer.txt").write_text("must not be attributed")
         outcome = ordinary_conclusion(self.outcome())
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
-            task_files = self.app._prepare_task_files(outcome.cwd, outcome.files)
+            task_files = self.app._prepare_task_files(outcome.cwd, outcome.file_evidence)
         with self.assertRaises(TurnFileError):
             self.app._completion_files(outcome, task_files)
 
