@@ -181,6 +181,7 @@ NETIZEN_ROOT=/absolute/path/netizen-dev/.netizen .venv/bin/python -m netizen_cli
 
 配置和凭据布局见[目录](deployment.md#目录)与
 [配置与管理页访问](deployment.md#配置与管理页访问)。`config.example.yaml` 只是示例；
+`instance.backend` 在 setup 时固定，缺省为 Codex。
 `instance.dataDir` 必须是选定 root 的 `state`。`projectRoot` 限制自动创建的空
 Project，不是默认 cwd；`projects` 只引导尚未登记项，后续使用飞书／Admin 管理。
 服务默认 Admin host 为 0.0.0.0，缺省端口首次实际绑定后写回，已有端口不漂移；

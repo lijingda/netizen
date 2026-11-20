@@ -1552,6 +1552,12 @@ purge 继续按精确清单处理旧文件。
 HTTP，不得把端口直接暴露到不受信网络。正式链路的真人和平台验收状态见
 [专项验收](#admin-飞书登录与管理员维护验收)。
 
+实例的原生后端在首次 setup 时固定，新建的 `<root>/config.yaml` 会显式写入
+`instance.backend: codex`。已有配置缺少该键时按 Codex 处理，重跑 setup 也会保留原文件。
+当前仅支持 `codex`，服务每次启动都会校验后端，遇到未知值会在 Runtime 接受输入前拒绝启动。
+引入此键之前的程序会忽略它，把其他后端的实例按 Codex 打开。这是已接受的兼容风险，使用其他后端的实例须由支持该后端的版本启动。
+见 [ADR 0104](adr/0104-host-native-agent-backends-per-instance.md)。
+
 `instance.projectRoot` 是必填绝对路径，只限制飞书自动创建的空 Project，不是 Binding 默认 cwd。
 `worktrees.root` 默认 `<instance-root>/worktrees`，`fetchBeforeCreate` 默认 false；修改只影响
 以后创建，不移动已有 checkout 或修改 Codex App 配置。`projects` 只引导尚未登记项；
