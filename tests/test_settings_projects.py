@@ -52,11 +52,26 @@ class SettingsTest(unittest.TestCase):
             )
 
         self.assertEqual(settings.app_id, "cli_test")
+        self.assertEqual(settings.backend, "codex")
         self.assertEqual(settings.app_secret, "secret")
         self.assertEqual(settings.projects["test"].name, "project")
         self.assertEqual(settings.project_root.name, "projects")
         self.assertEqual(settings.admin_web.host, "0.0.0.0")
         self.assertIsNone(settings.admin_web.port)
+
+    def test_instance_backend_accepts_only_known_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = self.write_config(Path(raw))
+            template = config.read_text().replace("instance:\n", "instance:\n  backend: {}\n")
+            config.write_text(template.format("codex"))
+            self.assertEqual(Settings.from_file(config, {}).backend, "codex")
+            for value, kind in (("unknown" * 200, "str"), ("''", "str"), ("null", "NoneType"),
+                                ("123", "int"), ("[]", "list")):
+                with self.subTest(kind=kind, value=value):
+                    config.write_text(template.format(value))
+                    with self.assertRaisesRegex(SettingsError, rf"instance.backend.*{kind}.*supports only: codex") as error:
+                        Settings.from_file(config, {})
+                    self.assertLess(len(str(error.exception)), 200)
 
     def test_project_root_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
