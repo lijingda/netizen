@@ -61,6 +61,7 @@ class PackagePreflightTest(unittest.TestCase):
             "environment_python": str(self.python), "prefix": str(self.prefix),
             "base_prefix": "/synthetic/base-python", "package_dir": str(package),
             "dist_info": str(info), "version": "1.0", "installer": "pip",
+            "has_claude": False, "claude_metadata": None,
             "pip_available": True, "scripts_dir": str(scripts), "externally_managed": False,
         }
 
@@ -115,6 +116,40 @@ class PackagePreflightTest(unittest.TestCase):
     def test_dependency_only_change_still_requires_update(self) -> None:
         self.report = {"version": "1", "install": [{"metadata": {"name": "dependency", "version": "2"}}]}
         self.assertTrue(self.prepare()["changes_required"])
+
+    def install_claude_metadata(self):
+        path = Path(self.info["dist_info"]).with_name("claude_agent_sdk-1.dist-info") / "METADATA"
+        path.parent.mkdir()
+        path.write_text("Name: claude-agent-sdk\nVersion: 1\n")
+        self.info.update(has_claude=True, claude_metadata=str(path))
+        return str(path)
+
+    def test_pip_and_uv_pip_preserve_extra_in_planning_and_replacement(self):
+        metadata_path = self.install_claude_metadata()
+        for backend in ("pip", "uv-pip"):
+            with self.subTest(backend=backend):
+                plan = self.prepare(backend=backend)
+                self.assertEqual(plan["command"][-1], "netizen-cli[claude]")
+                self.assertIn(metadata_path, plan["revalidation_files"])
+                self.assertTrue(json.loads(plan["validation_command"][-2])["has_claude"])
+                self.assertTrue(any(call[:len(plan["command"])] == plan["command"] for call in self.calls))
+
+    def test_tool_extra_requires_matching_receipt_and_local_install(self):
+        receipt = self.tool_layout()
+        base = receipt.read_text()
+        receipt.write_text(base.replace('specifier=', 'extras=["claude"], specifier='))
+        with self.assertRaisesRegex(packages.PackageUpdateError, "disagree"):
+            self.prepare()
+        self.install_claude_metadata()
+        plan = self.prepare()
+        self.assertTrue(plan["tool_requests_claude"])
+        self.assertEqual(plan["command"][-3:], ["tool", "upgrade", "netizen-cli"])
+        receipt.write_text(base)
+        with self.assertRaisesRegex(packages.PackageUpdateError, "disagree"):
+            self.prepare()
+        receipt.write_text(base.replace('specifier=', 'extras="claude", specifier='))
+        with self.assertRaisesRegex(packages.PackageUpdateError, "uv tool identity"):
+            self.prepare()
 
     def test_pip_report_version_and_shape_are_validated(self) -> None:
         for report in ({"version": "2", "install": []}, {"version": "1"},
@@ -532,6 +567,24 @@ class InstalledIdentityProbeTest(unittest.TestCase):
             self.assertEqual(identity["prefix"], str(prefix))
             self.assertEqual(identity["version"], "1.0")
             self.assertFalse(identity["pip_available"])
+            self.assertFalse(identity["has_claude"])
+            for version in ("1.0", "2.0"):
+                sdk = site / f"claude_agent_sdk-{version}.dist-info"
+                sdk.mkdir()
+                (sdk / "METADATA").write_text(f"Name: claude-agent-sdk\nVersion: {version}\n")
+                (sdk / "RECORD").write_text(f"{sdk.name}/METADATA,,\n")
+                checked = subprocess.run(
+                    [str(python), "-I", "-c", packages._PROBE, '{"has_claude": true}', "validate"],
+                    cwd=root, capture_output=True, text=True,
+                )
+                self.assertNotEqual(checked.returncode, 0)
+                self.assertIn("claude_installation" if version == "1.0" else "unique claude-agent-sdk",
+                              json.loads(checked.stdout)["error"])
+            # Restore the base fixture for the independent direct-URL check.
+            for sdk in site.glob("claude_agent_sdk-*.dist-info"):
+                (sdk / "RECORD").unlink()
+                (sdk / "METADATA").unlink()
+                sdk.rmdir()
             (info / "direct_url.json").write_text('{"dir_info":{"editable":true},"url":"file:///source"}')
             rejected = subprocess.run(
                 [str(python), "-I", "-c", packages._PROBE], cwd=root,
