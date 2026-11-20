@@ -96,6 +96,7 @@ from .schedules.scheduler import Scheduler
 from .sessions.mcp import SessionMcpRunner
 from .sessions.policy import SessionPolicyService
 from .sessions.service import SessionService
+from .runtime.codex_session_reads import CodexSessionReads
 from .thread_history import AppServerThreadHistory
 from .terminal_cleanup import PinnedExperimentalTerminalCleanup
 from .turn_plan_observer import (
@@ -402,13 +403,12 @@ class ServiceCore:
             self._session_service = SessionService(
                 bindings=self._store,
                 runtime=self._runtime,
-                codex=self._codex,
                 app_id=self._settings.app_id,
                 policy=self._session_policy,
                 create_thread=self.application.create_session_thread,
                 send_message=self.application.send_session_message,
                 suppress_reply=self.application.suppress_reply,
-                history=AppServerThreadHistory(self._codex),
+                reads=CodexSessionReads(self._codex, AppServerThreadHistory(self._codex)),
                 worktrees=worktrees,
             )
             self._session_mcp.attach(self._session_service.call)

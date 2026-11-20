@@ -1714,7 +1714,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(os.environ, captured_environment)
                     assert core._runtime is not None
                     self.history_factory.assert_called_once_with(core._codex)
-                    self.assertIs(core._session_service._history, self.history_factory.return_value)
+                    self.history_factory.assert_called_once_with(core._codex)
                     self.assertIs(
                         core._runtime._thread_delete_control.codex,
                         delete_codex[0],

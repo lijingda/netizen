@@ -117,7 +117,7 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
                                       policy=self.policy, create_thread=create, send_message=send, history=self.catalog)
         self.source = self.binding("chat-a", "source")
         self.target = self.binding("chat-b", "target")
-        self.patch = patch("netizen_cli.sessions.service.AsyncThread", self.catalog.handle)
+        self.patch = patch("netizen_cli.runtime.codex_session_reads.AsyncThread", self.catalog.handle)
         self.patch.start()
 
     async def asyncTearDown(self):
