@@ -92,7 +92,7 @@ def turn_patch_summary(
     diffs supplement paths only, so their overlapping counts are never added.
     Unreadable children or patches omit the total, retaining known file counts.
     """
-    evidence = project_file_evidence(items, children=children, turn_diff=turn_diff)
+    evidence = _patch_evidence(items, children, turn_diff)
     return summarize_file_evidence(evidence, project_cwd)
 
 
@@ -102,12 +102,7 @@ def project_file_evidence(
     """Translate exact native facts without resolving a path or inspecting disk."""
     outputs = tuple(_item_paths(items))
     try:
-        patches, complete = _patch_counts(items, children)
-        aggregate = tuple(
-            DiffPath(block.path, block.deleted)
-            for block in map(_parse_diff_block, _diff_blocks(turn_diff or ""))
-        )
-        return FileEvidence(patches, complete, aggregate, outputs)
+        return _patch_evidence(items, children, turn_diff, outputs=outputs)
     except Exception:
         logging.getLogger(__name__).exception("failed to prepare completed patch statistics")
         return FileEvidence(outputs=outputs, patch_counts_complete=False)
@@ -124,6 +119,14 @@ def completed_file_evidence(
     except Exception:
         logging.getLogger(__name__).exception("failed to project completed Turn file evidence")
         return FileEvidence()
+
+
+def _patch_evidence(
+    items: Sequence[object], children: TaskPatchChildren, turn_diff: str | None,
+    *, outputs: tuple[OutputPath, ...] = (),
+) -> FileEvidence:
+    patches, complete = _patch_counts(items, children)
+    return FileEvidence(patches, complete, tuple(_aggregate_paths(turn_diff or "")), outputs)
 
 
 def _patch_counts(
@@ -292,18 +295,14 @@ def extract_turn_files(
     directory to infer extra outputs.
     """
 
-    reported = _reported_paths(items, turn_diff=turn_diff, diff_summary=diff_summary)
-    return _current_files(reported, project_cwd, home_directory)
+    summary = _reference_summary(diff_summary, turn_diff)
+    return resolve_evidenced_files(
+        project_file_evidence(items), project_cwd, summary, home_directory=home_directory,
+    )
 
 
 def resolve_evidenced_files(
-    evidence: FileEvidence, project_cwd: Path, summary: TurnDiffSummary,
-) -> tuple[TurnFile, ...]:
-    return _current_files(chain(_summary_paths(summary), evidence.outputs), project_cwd, None)
-
-
-def _current_files(
-    paths: Iterable[OutputPath], project_cwd: Path, home_directory: Path | None,
+    evidence: FileEvidence, project_cwd: Path, summary: TurnDiffSummary, *, home_directory: Path | None = None,
 ) -> tuple[TurnFile, ...]:
     try:
         root = project_cwd.resolve(strict=True)
@@ -321,7 +320,7 @@ def _current_files(
 
     results: list[TurnFile] = []
     seen: set[Path] = set()
-    for reported in paths:
+    for reported in chain(_summary_paths(summary), evidence.outputs):
         turn_file = _resolve_turn_file(reported, root, home)
         if turn_file is None or turn_file.resolved_path in seen:
             continue
@@ -338,14 +337,12 @@ def has_turn_file_references(
 ) -> bool:
     """Return whether supported structured items name at least one output path."""
 
-    return next(
-        _reported_paths(
-            items,
-            turn_diff=turn_diff,
-            diff_summary=diff_summary,
-        ),
-        None,
-    ) is not None
+    summary = _reference_summary(diff_summary, turn_diff)
+    return has_file_evidence(project_file_evidence(items), summary)
+
+
+def has_file_evidence(evidence: FileEvidence, summary: TurnDiffSummary) -> bool:
+    return bool(summary.files or evidence.outputs)
 
 
 def turn_diff_paths(diff: str | None) -> tuple[str, ...]:
@@ -358,11 +355,16 @@ def turn_diff_paths(diff: str | None) -> tuple[str, ...]:
 
     if not isinstance(diff, str) or not diff:
         return ()
-    blocks = (_parse_diff_block(lines) for lines in _diff_blocks(diff))
     return tuple(dict.fromkeys(
-        block.path for block in blocks
+        block.path for block in _aggregate_paths(diff)
         if block.path is not None and not block.deleted
     ))
+
+
+def _aggregate_paths(diff: str) -> Iterator[DiffPath]:
+    for lines in _diff_blocks(diff):
+        block = _parse_diff_block(lines)
+        yield DiffPath(block.path, block.deleted)
 
 
 def _diff_blocks(diff: str) -> Iterable[tuple[str, ...]]:
@@ -571,17 +573,12 @@ def require_turn_file_path(path: str, display_path: str = "") -> TurnFile:
     return turn_file
 
 
-def _reported_paths(
-    items: Sequence[object],
-    *,
-    turn_diff: str | None = None,
-    diff_summary: TurnDiffSummary | None = None,
-) -> Iterator[OutputPath]:
-    summary = diff_summary if diff_summary is not None else TurnDiffSummary(
-        files=tuple(TurnDiffFileStats(path) for path in turn_diff_paths(turn_diff))
-    )
-    yield from _summary_paths(summary)
-    yield from _item_paths(items)
+def _reference_summary(summary: TurnDiffSummary | None, turn_diff: str | None) -> TurnDiffSummary:
+    # Without supplied statistics these callers report aggregate paths first,
+    # then item outputs in native order, with no inferred patch counts.
+    if summary is not None:
+        return summary
+    return TurnDiffSummary(files=tuple(TurnDiffFileStats(path) for path in turn_diff_paths(turn_diff)))
 
 
 def _summary_paths(summary: TurnDiffSummary) -> Iterator[OutputPath]:

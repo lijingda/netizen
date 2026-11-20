@@ -59,6 +59,7 @@ from ..turn_files import (
     TurnDiffSummary,
     TurnFile,
     TurnFileError,
+    has_file_evidence,
     resolve_evidenced_files,
     summarize_file_evidence,
 )
@@ -88,10 +89,6 @@ logger = logging.getLogger(CHANNEL_LOGGER_NAME)
 class _TaskFiles:
     evidence: FileEvidence = FileEvidence()
     summary: TurnDiffSummary = TurnDiffSummary()
-
-    @property
-    def has_references(self) -> bool:
-        return bool(self.evidence.outputs or self.summary.files)
 
 
 class CompletionPresentationChannel(ChannelReplies):
@@ -416,7 +413,7 @@ class CompletionPresentationChannel(ChannelReplies):
             final_response = None if suppress_result else (
                 prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
             )
-            if not suppress_result and task_files.has_references:
+            if not suppress_result and has_file_evidence(task_files.evidence, task_files.summary):
                 try:
                     scope, files, file_provenance_id = (
                         self._task_completion_files(outcome, task_files)
@@ -557,7 +554,7 @@ class CompletionPresentationChannel(ChannelReplies):
         file_turn_id: str | None = None,
     ) -> None:
         final_response = prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
-        if not task_files.has_references:
+        if not has_file_evidence(task_files.evidence, task_files.summary):
             await self._reply_task_result(
                 outcome, final_response,
             )

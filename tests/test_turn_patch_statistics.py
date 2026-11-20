@@ -4,6 +4,7 @@ import difflib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from openai_codex.types import ThreadItem
 
@@ -40,6 +41,12 @@ class TurnPatchStatisticsTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def test_patch_summary_propagates_parser_failures(self) -> None:
+        item = patch_item("write", "out", "@@ -1 +1 @@\n-old\n+new\n")
+        with patch("netizen_cli.turn_files._parse_diff_block", side_effect=ValueError("broken diff")):
+            with self.assertRaisesRegex(ValueError, "broken diff"):
+                turn_patch_summary((item,), self.root)
 
     def test_file_evidence_resolves_changes_at_delivery(self) -> None:
         evidence = project_file_evidence((patch_item("write", "out", "one line", kind="add"),))
