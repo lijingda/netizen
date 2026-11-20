@@ -48,6 +48,7 @@ from ..domain import (
     NativeCapability,
 )
 from ..experience import (
+    require_command,
     InvalidInteraction,
 )
 from ..management import (
@@ -116,6 +117,10 @@ class CommandChannel(CardControlChannel):
                 app_id=self._app_id, chat_id=chat_id, topic_id=scope.topic_id,
                 root_message_id=None,
             )
+            if self._policy.backend == "claude":
+                if decoded.target_kind == "side" or side is not None:
+                    raise InvalidInteraction("Claude 试点暂不支持【Side】。")
+                require_command(self._policy, decoded.command.name.value, archived=bool(decoded.command.arguments))
             if decoded.target_kind == "side":
                 if side is None or side.id != decoded.target_id:
                     raise CardActionError("状态卡对应的 Side 已变化或不可用，本次未执行。")
@@ -128,7 +133,8 @@ class CommandChannel(CardControlChannel):
             else:
                 if side is not None:
                     raise CardActionError("状态卡与当前 Side 话题不一致，本次未执行。")
-                renewed_card = decoded.card()
+                if self._policy.backend == "codex":
+                    renewed_card = decoded.card()
                 await self._control(origin, decoded.command, expected_binding_id=decoded.target_id)
         except CardActionError as error:
             await self._report_input_error(origin, InvalidInteraction(str(error)))
@@ -146,6 +152,11 @@ class CommandChannel(CardControlChannel):
     async def _control(
         self, message: Any, intent: ControlIntent, *, expected_binding_id: str | None = None,
     ) -> None:
+        if self._policy.backend == "claude":
+            require_command(self._policy, intent.name.value, archived=bool(intent.arguments))
+            if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.DEFAULTS}:
+                assert self._management.local is not None
+                self._management.local.require_admission()
         if expected_binding_id is not None:
             # No await before the selected command captures its Binding. The
             # ordinary command's existing exact-target checks protect mutations
@@ -268,53 +279,62 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        goal = await self._runtime.goal_snapshot(binding)
-        active_goal = self._runtime.active_goal(binding.id)
-        if active_goal is not None or (
-            goal is not None and goal.status is GoalStatus.ACTIVE
-        ):
-            await self._reply(
-                message,
-                "当前 Goal 正在执行或状态未完成，不能修改会话配置；"
-                "请先使用 /stop 停止当前任务，或等待执行结束。",
-            )
-            return
-        active = self._runtime.active_turn(binding.id)
-        if self._runtime.is_compacting(binding.id):
-            await self._reply(
-                message,
-                "当前会话正在压缩上下文，完成前不能修改会话配置。",
-            )
-            return
-        if active is not None:
-            if active.state is ActiveState.STOPPING:
-                notice = (
-                    "当前 Turn 正在停止，不能修改会话配置；"
-                    "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
+        if self._policy.backend == "claude":
+            assert self._management.local is not None
+            snapshot = self._management.local.local_snapshot(binding.id)
+            if snapshot.turn is not None or snapshot.unavailable:
+                await self._reply(message, "当前会话不允许修改配置。")
+                return
+            catalog = catalog_error = None
+        else:
+            goal = await self._runtime.goal_snapshot(binding)
+            active_goal = self._runtime.active_goal(binding.id)
+            if active_goal is not None or (
+                goal is not None and goal.status is GoalStatus.ACTIVE
+            ):
+                await self._reply(
+                    message,
+                    "当前 Goal 正在执行或状态未完成，不能修改会话配置；"
+                    "请先使用 /stop 停止当前任务，或等待执行结束。",
                 )
-            else:
-                notice = (
-                    "当前 Turn 正在执行，不能修改会话配置；"
-                    "请等待完成或先发送 /stop。"
+                return
+            active = self._runtime.active_turn(binding.id)
+            if self._runtime.is_compacting(binding.id):
+                await self._reply(
+                    message,
+                    "当前会话正在压缩上下文，完成前不能修改会话配置。",
                 )
-            await self._reply(
-                message,
-                notice,
-            )
-            return
-        catalog = None
-        catalog_error = None
-        try:
-            catalog = await self._runtime.model_catalog()
-        except Exception as error:
-            logger.warning(
-                "native model catalog unavailable for /config settings",
-                extra={"error_type": type(error).__name__},
-            )
-            catalog_error = "Model / Effort / Speed 暂不可用。"
+                return
+            if active is not None:
+                if active.state is ActiveState.STOPPING:
+                    notice = (
+                        "当前 Turn 正在停止，不能修改会话配置；"
+                        "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
+                    )
+                else:
+                    notice = (
+                        "当前 Turn 正在执行，不能修改会话配置；"
+                        "请等待完成或先发送 /stop。"
+                    )
+                await self._reply(
+                    message,
+                    notice,
+                )
+                return
+            catalog = None
+            catalog_error = None
+            try:
+                catalog = await self._runtime.model_catalog()
+            except Exception as error:
+                logger.warning(
+                    "native model catalog unavailable for /config settings",
+                    extra={"error_type": type(error).__name__},
+                )
+                catalog_error = "Model / Effort / Speed 暂不可用。"
         await self._reply(
             message,
             config_card(
+                local_only=self._policy.backend == "claude",
                 scope=intent.scope,
                 binding_id=binding.id,
                 short_id=binding.short_id,
@@ -417,7 +437,7 @@ class CommandChannel(CardControlChannel):
         )
         await self._reply(
             message,
-            f"{'已恢复并切换' if binding.native_thread_id else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
+            f"{'已恢复并切换' if binding.native_thread_id and self._policy.backend == 'codex' else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
         )
 
     async def _command_unarchive(self, message: Any, intent: ControlIntent) -> None:
@@ -573,6 +593,14 @@ class CommandChannel(CardControlChannel):
         binding = self._bindings.active_binding(intent.scope.key)
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
+            return
+        if self._policy.backend == "claude":
+            assert self._management.local is not None
+            snapshot = self._management.local.local_snapshot(binding.id)
+            task = "状态未知" if snapshot.unavailable else snapshot.turn.state.value if snapshot.turn else "空闲"
+            await self._reply(message, f"Project：{binding.project_alias}\n会话：{binding.short_id}\n"
+                              f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}\n本地任务：{task}\n"
+                              "模型用量及执行详情在 Claude 试点中不可用。")
             return
         state = await self._binding_state(binding)
         try:

@@ -13,9 +13,10 @@ from uuid import UUID, uuid4
 from claude_agent_sdk import AssistantMessage, ResultMessage, SystemInitData, SystemMessage
 
 from ..bindings import BindingNotFound, BindingStore, ProjectDeleting, ProjectNotFound, ScopeNotFound, ThreadBinding
-from ..domain import ActiveState
+from ..bindings import BindingTaskFeedback, BindingTurnSettings
+from ..domain import ActiveState, MessageContextAnchor, MentionContextMode
 from ..ordinary_sessions import (
-    OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
+    LocalExecutionSnapshot, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
     PreparedPrompt, SessionShutdownPort, StopPreview,
 )
 from .claude_client import ClaudeClient, ClaudeClients, single_message, user_message
@@ -379,6 +380,44 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                           status, answer, detail, task_feedback=execution.binding.task_feedback,
                                           feedback_revision=execution.binding.feedback_revision, cwd=cwd)
         raise TerminalStateUnknown(UNKNOWN)
+
+    def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot:
+        execution = self._active.get(binding_id)
+        turn = None
+        if execution is not None:
+            state = ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING
+            turn = ActiveTurnSnapshot(binding_id, execution.session, execution.input_id, self._owner, state)
+        return LocalExecutionSnapshot(execution.revision if execution else self._revisions.get(binding_id, 0),
+                                      turn, binding_id in self._unavailable)
+
+    async def activate_exact(self, binding_id: str, *, context_anchor: MessageContextAnchor | None = None) -> ThreadBinding:
+        self.require_admission()
+        async with self._lock(binding_id):
+            self.require_admission()
+            binding = self._bindings.get(binding_id)
+            self._bindings.require_project_not_deleting(binding.project_alias)
+            if binding.message_context_mode is MentionContextMode.CATCH_UP and context_anchor is None:
+                raise OrdinaryInputRejected("请从飞书 /resume 切换，以建立新的消息边界。")
+            return self._bindings.activate(scope_key=binding.scope_key, binding_id=binding_id, context_anchor=context_anchor)
+
+    async def configure_context_exact(
+        self, *, binding_id: str, expected_settings_revision: int, expected_context_revision: int,
+        expected_feedback_revision: int, settings: BindingTurnSettings | None, task_feedback: BindingTaskFeedback,
+        message_context_mode: MentionContextMode, context_anchor: MessageContextAnchor | None,
+    ) -> ThreadBinding:
+        self.require_admission()
+        async with self._lock(binding_id):
+            self._idle(binding_id)
+            if settings or task_feedback.progress_card_enabled or task_feedback.progress_card_settings:
+                raise OrdinaryInputRejected("Claude 试点暂不支持【模型设置或过程卡】。")
+            binding = self._bindings.set_configuration(
+                binding_id=binding_id, expected_settings_revision=expected_settings_revision,
+                expected_context_revision=expected_context_revision, expected_feedback_revision=expected_feedback_revision,
+                settings=settings, task_feedback=task_feedback, message_context_mode=message_context_mode,
+                context_anchor=context_anchor,
+            )
+            self._advance(binding_id)
+            return binding
 
     def turn_activity(self, binding_id: str, *, thread_id: str, turn_id: str) -> TurnActivitySnapshot | None:
         return None

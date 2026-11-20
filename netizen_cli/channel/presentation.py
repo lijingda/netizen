@@ -95,6 +95,20 @@ class CompletionPresentationChannel(ChannelReplies):
     """Completion handling: Result, Files, Goal receipts and reminders."""
 
     async def handle_ordinary_completion(self, outcome: OrdinaryEvent) -> None:
+        if self._policy.backend == "claude":
+            if isinstance(outcome, TurnObservationUnavailableOutcome):
+                await self._reactions.stop(outcome.turn_id)
+                await self._reply(outcome.origin, str(outcome.error))
+                return
+            if outcome.status == "completed":
+                reaction, content = constants.DONE_REACTION, outcome.final_response or "Claude 已完成本次执行。"
+            elif outcome.status == "interrupted":
+                reaction, content = constants.INTERRUPTED_REACTION, "Claude 本次执行已停止。"
+            else:
+                reaction, content = constants.ERROR_REACTION, outcome.error_detail or "Claude 本次执行失败。"
+            await self._finish_task_reactions(outcome.origin, outcome.turn_id, reaction)
+            await self._reply_task_result(outcome, content, allow_completion_mention=False)
+            return
         if isinstance(outcome, TurnObservationUnavailableOutcome):
             await self._park_observation(outcome)
             return

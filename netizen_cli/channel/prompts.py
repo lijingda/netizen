@@ -184,7 +184,8 @@ class PromptChannel(CompletionPresentationChannel):
         catalog = None
         try:
             async with asyncio.timeout(5):
-                catalog = await self._runtime.model_catalog()
+                if self._policy.backend == "codex":
+                    catalog = await self._runtime.model_catalog()
         except Exception:
             # Existing defaults must remain inspectable/deletable even when
             # the native model catalog is unavailable.
@@ -204,7 +205,7 @@ class PromptChannel(CompletionPresentationChannel):
                 workspace_error = str(error) + " 原 worktree 使用方式已保留，请重新加载或选择有效策略。"
         return defaults_card(
             scope, view, self._projects.list(), catalog,
-            notice=notice, notice_is_error=notice_is_error,
+            notice=notice, notice_is_error=notice_is_error, local_only=self._policy.backend == "claude",
             workspace_options=workspace_options, workspace_error=workspace_error,
             allow_workspace_selection=worktrees is not None, draft=draft,
         )
@@ -359,6 +360,9 @@ class PromptChannel(CompletionPresentationChannel):
                     ),
                 )
             ]
+            if self._policy.backend == "claude":
+                await asyncio.gather(*presenters)
+                return
             delivery_options = {}
             if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin)):
                 delivery_options = {

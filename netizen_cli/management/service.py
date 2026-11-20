@@ -49,7 +49,7 @@ from ..bindings import (
 )
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
-from ..ordinary_sessions import OrdinarySessionPort
+from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort
 from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
@@ -518,11 +518,19 @@ class ManagementRuntimePort:
     it.
     """
 
-    __slots__ = ("__runtime", "__ordinary")
+    __slots__ = ("__codex", "__ordinary", "local")
 
-    def __init__(self, runtime: CodexRuntime, *, ordinary: OrdinarySessionPort) -> None:
-        self.__runtime = runtime
+    def __init__(self, runtime: CodexRuntime | None, *, ordinary: OrdinarySessionPort,
+                 local: LocalSessionManagement | None = None) -> None:
+        self.__codex = runtime
+        self.local = local
         self.__ordinary: OrdinarySessionPort = ordinary
+
+    @property
+    def __runtime(self) -> CodexRuntime:
+        if self.__codex is None:
+            raise ManagementError("Claude 试点暂不支持【原生 Codex 操作】。")
+        return self.__codex
 
     async def read_scheduled_turn(
         self, binding_id: str, turn_id: str, *, deadline: float | None = None,
@@ -545,7 +553,7 @@ class ManagementRuntimePort:
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
-        return await self.__runtime.configure_context_exact(
+        return await (self.local or self.__runtime).configure_context_exact(
             binding_id=binding_id,
             expected_settings_revision=expected_settings_revision,
             expected_context_revision=expected_context_revision,
@@ -562,7 +570,7 @@ class ManagementRuntimePort:
         *,
         context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
-        return await self.__runtime.activate_exact(
+        return await (self.local or self.__runtime).activate_exact(
             binding_id,
             context_anchor=context_anchor,
         )
@@ -694,12 +702,15 @@ class ManagementRuntimePort:
         previous_binding_id: str | None,
         current_binding_id: str | None,
     ) -> None:
-        await self.__runtime.binding_pointer_changed(
+        await (self.local or self.__runtime).binding_pointer_changed(
             previous_binding_id,
             current_binding_id,
         )
 
     def runtime_snapshot_exact(self, binding_id: str) -> BindingRuntimeSnapshot:
+        if self.local is not None:
+            state = self.local.local_snapshot(binding_id)
+            return BindingRuntimeSnapshot(binding_id, state.revision, state.turn, None, False, None, None, None)
         return self.__runtime.binding_runtime_snapshot(binding_id)
 
     async def goal_snapshot_exact(
@@ -823,6 +834,7 @@ class InstanceManagementService:
         self._bindings = bindings
         self._projects = projects
         self._runtime = runtime
+        self.local = runtime.local if isinstance(runtime, ManagementRuntimePort) else None
         self._scope_coordinator = scope_coordinator
         self._updates = updates or UpdateService(root=root)
         self._progress_card_config = progress_card_config or ProgressCardConfigService()
@@ -959,6 +971,7 @@ class InstanceManagementService:
     def enable_defaults(self, *, app_id: str, chat_info: Any = None) -> SessionDefaultsService:
         if self.defaults is None:
             self.defaults = SessionDefaultsService(
+                local_only=self.local is not None,
                 bindings=self._bindings, projects=self._projects,
                 runtime=self._runtime, app_id=app_id, chat_info=chat_info,
                 chat_target_validator=self.validate_chat_target,

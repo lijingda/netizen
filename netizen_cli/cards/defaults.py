@@ -22,6 +22,7 @@ from .controls import (
     _form_section,
     _form_submit_button,
     decode_session_settings_form,
+    local_form_fields,
     session_settings_form_elements,
 )
 
@@ -83,6 +84,7 @@ def defaults_card(
     notice: str | None = None,
     notice_is_error: bool = False,
     *,
+    local_only: bool = False,
     workspace_options: Mapping[str, Any] | None = None,
     workspace_error: str | None = None,
     allow_workspace_selection: bool = False,
@@ -100,7 +102,7 @@ def defaults_card(
         state.update(id=draft.get("id"), expected_revision=draft["expected_revision"])
     _validate_state(scope, state)
     if effective is None:
-        settings = SessionSettings.new_defaults(catalog)
+        settings = SessionSettings() if local_only else SessionSettings.new_defaults(catalog)
         selected_project = None
     else:
         raw_settings = effective["session_settings"]
@@ -156,6 +158,7 @@ def defaults_card(
     if selected_value is not None:
         project_select["initial_option"] = selected_value
     settings_elements = session_settings_form_elements(
+        local_only=local_only,
         prefix=_SESSION_PREFIX, settings=settings, catalog=catalog,
         allow_context_mode=state["chat_kind"] == "group",
         grouped=True,
@@ -219,7 +222,7 @@ def _request(scope: FeishuScope, state: Mapping[str, Any], mode: str) -> dict[st
     return result
 
 
-def decode_defaults_action(scope: FeishuScope, value: Any, form: Any = None) -> dict[str, Any]:
+def decode_defaults_action(scope: FeishuScope, value: Any, form: Any = None, *, local_only: bool = False) -> dict[str, Any]:
     """Decode strict form values; the caller verifies the real card location."""
     if form is not None and form != {}:
         load_workspace = value is not None and value != {}
@@ -252,6 +255,8 @@ def decode_defaults_action(scope: FeishuScope, value: Any, form: Any = None) -> 
             raise CardActionError("单聊不支持补充历史上下文。")
         if state["chat_kind"] == "group" and f"{_SESSION_PREFIX}_context_mode" not in fields:
             raise CardActionError("默认会话配置表单缺少上下文设置。")
+        if local_only:
+            fields = local_form_fields(fields, _SESSION_PREFIX)
         settings = decode_session_settings_form(fields, prefix=_SESSION_PREFIX)
         workspace = {"mode": "project"}
         try:

@@ -39,7 +39,7 @@ _FIELDS = {
 class SessionDefaultsService:
     def __init__(
         self, *, bindings: BindingStore, projects: ProjectRegistry,
-        runtime: Any, app_id: str, chat_info: Any = None, blocking_io: Any = None,
+        runtime: Any, app_id: str, local_only: bool = False, chat_info: Any = None, blocking_io: Any = None,
         chat_target_validator: ChatTargetValidator | None = None,
         worktrees: Callable[[], WorktreeService | None] | None = None,
     ) -> None:
@@ -47,6 +47,7 @@ class SessionDefaultsService:
         self._store = bindings.defaults
         self._projects = projects
         self._runtime = runtime
+        self._local_only = local_only
         self._chat_info = chat_info
         self._chat_target_validator = chat_target_validator
         self._blocking_io = blocking_io
@@ -93,6 +94,14 @@ class SessionDefaultsService:
 
     async def validate(self, rule: DefaultRule, *, expected_project_revision: int | None = None) -> Project:
         """Validate at use time; no Project revision or effective config is saved."""
+        if self._local_only:
+            settings = rule.session_settings
+            if settings.turn_settings:
+                raise DefaultConfigurationError("Claude 试点暂不支持【模型、思考强度或速度设置】。", code="backend_unsupported")
+            if settings.task_feedback.progress_card_enabled or settings.task_feedback.progress_card_settings is not None:
+                raise DefaultConfigurationError("Claude 试点暂不支持【过程卡】。", code="backend_unsupported")
+            if not settings.task_feedback.completion_mention_enabled:
+                raise DefaultConfigurationError("Claude 试点暂不支持【结束时提醒设置】。", code="backend_unsupported")
         if rule.app_id != self.app_id:
             raise DefaultConfigurationError("当前应用下没有这个默认配置。", code="not_found")
         try:
@@ -268,7 +277,8 @@ class SessionDefaultsService:
         error = None
         try:
             async with asyncio.timeout(5):
-                catalog = await self._runtime.model_catalog()
+                if not self._local_only:
+                    catalog = await self._runtime.model_catalog()
         except Exception:
             error = "Codex 模型目录暂不可用；可以选择继承 Codex，稍后再选择模型。"
         workspace_options = None
@@ -282,7 +292,7 @@ class SessionDefaultsService:
                 workspace_error = str(failure)
             except Exception:
                 workspace_error = "worktree 选项暂不可用，请稍后刷新。"
-        return {"models": _models(catalog), "session_settings": SessionSettings.new_defaults(catalog).to_dict(),
+        return {"models": _models(catalog), "session_settings": (SessionSettings() if self._local_only else SessionSettings.new_defaults(catalog)).to_dict(),
                 "context_mode_available": kind != "p2p", "model_catalog_error": error,
                 "workspace_options": workspace_options, "workspace_options_error": workspace_error}
 

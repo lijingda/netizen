@@ -276,6 +276,21 @@ def _chat_id(message: Any) -> str:
     )
 
 
+def authenticated_sender(event: Any, app_id: str, *, card: bool = False) -> str | None:
+    if getattr(event, "app_id", app_id) != app_id:
+        return None
+    identity = getattr(event, "operator" if card else "sender", None)
+    if not card and (getattr(identity, "is_bot", False) or getattr(identity, "sender_type", None) in {"app", "bot"}):
+        return None
+    values = [getattr(identity, "open_id", None)]
+    if not card:
+        values.append(getattr(event, "sender_id", None))
+    supplied = [value for value in values if value is not None]
+    if not supplied or any(not isinstance(value, str) or not value.strip() or value != supplied[0] for value in supplied):
+        return None
+    return supplied[0]
+
+
 def _sender_id(message: Any) -> str:
     sender = getattr(message, "sender", None)
     return str(

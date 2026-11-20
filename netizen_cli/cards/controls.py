@@ -338,6 +338,7 @@ def _new_binding_form(
     projects: tuple[Project, ...],
     catalog: ModelCatalog | None,
     *,
+    local_only: bool = False,
     initial_project_alias: str | None,
     allow_context_mode: bool,
     message_context_mode: MentionContextMode,
@@ -405,6 +406,7 @@ def _new_binding_form(
     feedback = _task_feedback_form_elements(prefix="new", initial=task_feedback)
     _restore_settings_draft([*model_fields, *context, *feedback], settings_draft)
     elements.extend(_session_settings_sections(
+        local_only=local_only,
         model_fields=model_fields, context_fields=context, feedback_fields=feedback,
     ))
     if allow_workspace_selection:
@@ -490,12 +492,23 @@ def _form_section(title: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _session_settings_sections(
     *,
+    local_only: bool = False,
     model_fields: list[dict[str, Any]],
     context_fields: list[dict[str, Any]],
     feedback_fields: list[dict[str, Any]],
     model_notices: Sequence[dict[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Share presentation while each caller owns field values and validation."""
+    if local_only:
+        selector = model_fields[1]
+        selector["placeholder"] = _plain_text("原生 Claude 设置")
+        selector["options"] = [{"text": _plain_text("原生 Claude 设置"), "value": selector["options"][0]["value"]}]
+        selector["initial_option"] = selector["options"][0]["value"]
+        sections = [_form_section("模型来源", [selector])]
+        if context_fields:
+            sections.append(_form_section("消息上下文", context_fields))
+        sections.append(_form_section("执行中表情闪烁", feedback_fields[1:2]))
+        return sections
     model_elements = [*model_notices, model_fields[1]]
     if len(model_fields) > 2:
         # These are fixed form labels, not submitted text. Markdown avoids a
@@ -580,6 +593,7 @@ def _new_workspace_load_button() -> dict[str, Any]:
 
 def _binding_config_form(
     *,
+    local_only: bool = False,
     binding_id: str,
     settings_revision: int,
     context_revision: int,
@@ -618,6 +632,7 @@ def _binding_config_form(
             inherit_initial_when_unset=True,
         )
     elements = _session_settings_sections(
+        local_only=local_only,
         model_fields=model_fields,
         context_fields=(
             _context_mode_form_elements(prefix="config", initial_mode=message_context_mode)
@@ -837,6 +852,7 @@ def _decode_task_feedback_fields(payload: Mapping[str, Any], *, prefix: str) -> 
 
 def session_settings_form_elements(
     *,
+    local_only: bool = False,
     prefix: str,
     settings: SessionSettings,
     catalog: ModelCatalog | None,
@@ -896,6 +912,7 @@ def session_settings_form_elements(
     _restore_settings_draft(fields, settings_draft)
     if grouped:
         return _session_settings_sections(
+        local_only=local_only,
             model_fields=model_fields, context_fields=context, feedback_fields=feedback,
             model_notices=model_notices,
         )
@@ -995,6 +1012,7 @@ def _form_submit_button(*, name: str, label: str) -> dict[str, Any]:
 
 def new_binding_card(
     *,
+    local_only: bool = False,
     scope: FeishuScope,
     projects: tuple[Project, ...],
     initial_project_alias: str | None = None,
@@ -1019,12 +1037,15 @@ def new_binding_card(
             "再发送 `/new`。发送 `/help` 查看快速开始。"
         )
     else:
-        builder.markdown(
-            "不确定模型配置时，可选择“继承 Codex”；"
-            "也可选择 Model（模型）、Effort（思考强度）和 Speed（速度），"
-            "应用于这个会话后续的新任务。空闲时可通过 `/config` 调整。"
-        )
-        if catalog is None:
+        if local_only:
+            builder.markdown("使用原生 Claude 设置；可调整消息范围和执行中表情。")
+        else:
+            builder.markdown(
+                "不确定模型配置时，可选择“继承 Codex”；"
+                "也可选择 Model（模型）、Effort（思考强度）和 Speed（速度），"
+                "应用于这个会话后续的新任务。空闲时可通过 `/config` 调整。"
+            )
+        if catalog is None and not local_only:
             builder.raw(
                 _notice(
                     (catalog_error or "Model / Effort / Speed 暂不可用。")
@@ -1036,6 +1057,7 @@ def new_binding_card(
             _new_binding_form(
                 projects,
                 catalog,
+                local_only=local_only,
                 initial_project_alias=initial_project_alias,
                 allow_context_mode=allow_context_mode,
                 message_context_mode=message_context_mode,
@@ -1053,6 +1075,7 @@ def new_binding_card(
 
 def config_card(
     *,
+    local_only: bool = False,
     scope: FeishuScope,
     binding_id: str,
     short_id: str,
@@ -1068,11 +1091,14 @@ def config_card(
     catalog_error: str | None = None,
 ) -> OutboundCard:
     builder = _builder("当前会话配置", f"Netizen 会话编号：{short_id} · {project_alias}")
-    builder.markdown(
-        "Model 可继承 Codex，也可显式选择 Model / Effort / Speed；"
-        "保存不会启动任务。Model 是模型，Effort 是思考强度，Speed 是速度。"
-    )
-    if catalog is None:
+    if local_only:
+        builder.markdown("使用原生 Claude 设置；可调整消息范围和执行中表情。")
+    else:
+        builder.markdown(
+            "Model 可继承 Codex，也可显式选择 Model / Effort / Speed；"
+            "保存不会启动任务。Model 是模型，Effort 是思考强度，Speed 是速度。"
+        )
+    if catalog is None and not local_only:
         builder.raw(
             _notice(
                 (catalog_error or "Model / Effort / Speed 暂不可用。")
@@ -1080,7 +1106,7 @@ def config_card(
                 error=True,
             )
         )
-    elif turn_settings is not None:
+    elif catalog is not None and turn_settings is not None:
         try:
             catalog.resolve(
                 model_id=turn_settings.model_id,
@@ -1097,6 +1123,7 @@ def config_card(
             )
     builder.raw(
         _binding_config_form(
+            local_only=local_only,
             binding_id=binding_id,
             settings_revision=settings_revision,
             context_revision=context_revision,
@@ -1403,6 +1430,39 @@ def archived_sessions_delete_binding_card(
     return OutboundCard(card=builder.to_dict())
 
 
+def local_sessions_card(
+    scope: FeishuScope, items: tuple[SessionCardItem, ...], *, navigation: SessionCardPage,
+    next_cursor: str | None, notice: str | None, active_binding_id: str | None,
+) -> OutboundCard:
+    builder = _builder("普通会话", "按本地创建时间排序")
+    if notice:
+        builder.raw(_notice(notice))
+    if not items:
+        builder.markdown("当前聊天或话题还没有会话。")
+    for item in items:
+        builder.markdown(f"{_md_code(item.project_alias)} · {_md_code(item.short_id)}"
+                         + (" · 当前会话" if item.active else "") + " · " + item.state)
+        if not item.active:
+            builder.raw(_repeatable_callback_button(
+                label="设为当前", value=_envelope(scope, CardControlName.ACTIVATE_BINDING,
+                    binding_id=_binding_reference(item.binding_id), session_cursor=navigation.encode(scope)),
+            ))
+        if item.turn_id is not None and session_stop_available(item.state):
+            builder.raw(_callback_button(label="停止", value=_envelope(
+                scope, CardControlName.STOP_EXACT_BINDING, binding_id=_binding_reference(item.binding_id),
+                expected_active_binding_id=_binding_reference(active_binding_id) if active_binding_id else None,
+                expected_activity_revision=item.activity_revision, expected_turn_id=_turn_reference(item.turn_id),
+                page=navigation.page, session_cursor=navigation.encode(scope),
+            )))
+    previous = navigation.previous()
+    builder.raw(_sessions_pagination(
+        scope=scope, local_only=True, page=navigation.page,
+        previous_cursor=previous.encode(scope) if previous else None, next_cursor=next_cursor,
+        state=navigation.state, has_lazy=False,
+    ))
+    return _session_list_card(builder.to_dict())
+
+
 def sessions_card(
     *,
     scope: FeishuScope,
@@ -1643,7 +1703,7 @@ def _session_row(
 
 def _sessions_pagination(
     *,
-    scope: FeishuScope,
+    scope: FeishuScope, local_only: bool = False,
     page: int,
     previous_cursor: str | None,
     next_cursor: str | None,
@@ -1672,7 +1732,7 @@ def _sessions_pagination(
         ),
     ))
     for target, label in (("active", "普通会话"), ("archived", "已归档"), ("lazy", "未开始")):
-        if target == state or target == "lazy" and not has_lazy:
+        if local_only or target == state or target == "lazy" and not has_lazy:
             continue
         buttons.append(_repeatable_callback_button(
             label=label, value=_sessions_page_envelope(
@@ -2255,6 +2315,27 @@ def decode_button_action(
     )
 
 
+def local_form_fields(payload: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+    fields = dict(payload)
+    if any(f"{prefix}_{key}" in fields for key in ("effort", "speed")):
+        raise CardActionError("Claude 试点暂不支持【模型、思考强度或速度设置】。")
+    model = fields.get(f"{prefix}_model")
+    if model is not None:
+        model = _required_string(model, f"{prefix}_model")
+        model_id = (_decode_config_model_reference(model)[-1] if prefix == "config" else _decode_new_model_reference(model))
+        if model_id is not None:
+            raise CardActionError("Claude 试点暂不支持【模型、思考强度或速度设置】。")
+    progress = f"{prefix}_progress_card"
+    if progress in fields and _decode_progress_card_reference(fields[progress], progress) != (False, None):
+        raise CardActionError("Claude 试点暂不支持【过程卡】。")
+    fields.setdefault(progress, _progress_card_reference(False, None))
+    mention = f"{prefix}_completion_mention"
+    if mention in fields and not _decode_task_feedback_reference(fields[mention], mention):
+        raise CardActionError("Claude 试点暂不支持【结束时提醒设置】。")
+    fields.setdefault(mention, _task_feedback_reference(True))
+    return fields
+
+
 def decode_card_form(
     *,
     scope: FeishuScope,
@@ -2263,6 +2344,7 @@ def decode_card_form(
     tag: str,
     form_value: Any,
     value: Any = None,
+    local_only: bool = False,
 ) -> CardControlIntent:
     if not isinstance(form_value, Mapping):
         raise CardActionError("卡片表单值必须是对象。")
@@ -2274,6 +2356,8 @@ def decode_card_form(
         raise CardActionError("卡片表单混合了不同操作的字段。")
     if value is not None and value != {} and not has_new:
         raise CardActionError("卡片表单操作与字段不匹配。")
+    if local_only and (has_new or has_config):
+        form_value = local_form_fields(form_value, "new" if has_new else "config")
     if has_new:
         return _decode_new_binding_form(
             scope=scope,

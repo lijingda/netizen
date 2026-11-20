@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .bindings import BindingTaskFeedback, ThreadBinding
+from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
+from .domain import MessageContextAnchor, MentionContextMode
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
@@ -93,6 +94,27 @@ class OrdinarySessionPort(Protocol):
     async def recheck_turn_exact(
         self, binding_id: str, *, expected_activity_revision: int, expected_turn_id: str,
     ) -> ActiveTurnSnapshot: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LocalExecutionSnapshot:
+    revision: int
+    turn: ActiveTurnSnapshot | None
+    unavailable: bool
+
+
+class LocalSessionManagement(Protocol):
+    def require_admission(self) -> None: ...
+    def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot: ...
+    async def binding_pointer_changed(self, previous_binding_id: str | None, current_binding_id: str | None) -> None: ...
+    async def activate_exact(
+        self, binding_id: str, *, context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding: ...
+    async def configure_context_exact(
+        self, *, binding_id: str, expected_settings_revision: int, expected_context_revision: int,
+        expected_feedback_revision: int, settings: BindingTurnSettings | None, task_feedback: BindingTaskFeedback,
+        message_context_mode: MentionContextMode, context_anchor: MessageContextAnchor | None,
+    ) -> ThreadBinding: ...
 
 
 class SessionShutdownPort(Protocol):

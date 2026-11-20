@@ -103,6 +103,7 @@ class CardControlChannel(TurnFileChannel):
                 raise CardActionError("无法确认默认配置所属聊天的类型，请重新打开 /defaults。")
             request = decode_defaults_action(
                 scope, getattr(action, "value", None), getattr(action, "form_value", None),
+                local_only=self._policy.backend == "claude",
             )
             service = self._management.defaults
             assert service is not None
@@ -205,6 +206,24 @@ class CardControlChannel(TurnFileChannel):
                 self._rename_name_generations.pop(intent.source_id)
 
     async def _card_control(self, intent: CardControlIntent) -> None:
+        if self._policy.backend == "claude":
+            allowed = {
+                CardControlName.OPEN_SETTINGS_SECTION, CardControlName.REFRESH_SETTINGS,
+                CardControlName.REGISTER_PROJECT, CardControlName.SET_PROJECT_ENABLED,
+                CardControlName.PREPARE_NEW_WORKSPACE, CardControlName.CREATE_BINDING, CardControlName.CONFIGURE_BINDING,
+                CardControlName.ACTIVATE_BINDING, CardControlName.STOP_EXACT_BINDING,
+                CardControlName.RECHECK_EXACT_TURN, CardControlName.SESSIONS_PAGE,
+            }
+            if intent.name not in allowed:
+                name = intent.name.value
+                label = ("Goal" if name.startswith("goal.") else "Side" if name.startswith("side.")
+                         else "会话命名" if name in {"binding.rename", "binding.name.generate"}
+                         else "会话删除" if "delete" in name else "会话恢复" if "unarchive" in name else "会话归档")
+                raise CardActionError(f"Claude 试点暂不支持【{label}】。")
+            if intent.model_id or intent.effort_id or intent.service_tier_id:
+                raise CardActionError("Claude 试点暂不支持【模型、思考强度或速度设置】。")
+            if intent.progress_card_enabled or intent.progress_card_settings is not None:
+                raise CardActionError("Claude 试点暂不支持【过程卡】。")
         handler = self._card_control_handlers().get(intent.name)
         if handler is None:
             raise CardActionError(f"尚未处理的卡片动作：{intent.name.value}")
@@ -380,6 +399,9 @@ class CardControlChannel(TurnFileChannel):
             worktree_id=intent.worktree_id,
             worktree_create=intent.worktree_create,
         )
+        if self._policy.backend == "claude":
+            await self._safe_reply_to_card(intent, f"已创建并切换到会话 {binding.short_id}（{binding.project_alias}）。")
+            return
         workspace_cwd = binding.working_cwd
         workspace_summary = (
             f"实际工作目录：`{_markdown_code(workspace_cwd)}`。" if workspace_cwd else ""
@@ -469,6 +491,9 @@ class CardControlChannel(TurnFileChannel):
             raise CardActionError(
                 "会话配置已变化，本卡片未执行；请重新发送 /config。"
             ) from error
+        if self._policy.backend == "claude":
+            await self._safe_reply_to_card(intent, f"会话 {binding.short_id} 的设置已保存。")
+            return
         updated = await self._safe_update_card(
             intent.source_id,
             binding_configured_card(
@@ -668,7 +693,7 @@ class CardControlChannel(TurnFileChannel):
             context_anchor=context_anchor,
         )
         success_notice = (
-            f"✅ {'已恢复并切换' if activated.native_thread_id else '已切换'}到会话 {activated.short_id}"
+            f"✅ {'已恢复并切换' if activated.native_thread_id and self._policy.backend == 'codex' else '已切换'}到会话 {activated.short_id}"
             f"（{activated.project_alias}）。"
         )
         try:
@@ -860,6 +885,8 @@ class CardControlChannel(TurnFileChannel):
             ),
         }
         notice = notices[stopped.disposition]
+        if self._policy.backend == "claude":
+            notice = "已请求停止本次 Claude 执行。" if stopped.disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
         try:
             refreshed = await self._safe_update_card(
                 intent.source_id,
@@ -902,6 +929,8 @@ class CardControlChannel(TurnFileChannel):
             "若任务仍在执行，仅恢复状态检查，旧进度卡不再更新；"
             "停止尚未完成时仍需等待或重试 /stop。仍无法确认时会返回具体原因。"
         )
+        if self._policy.backend == "claude":
+            notice = "已检查本次 Claude 执行的本地状态。"
         try:
             refreshed = await self._safe_update_card(
                 intent.source_id,

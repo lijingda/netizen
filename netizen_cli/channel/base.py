@@ -74,7 +74,9 @@ from ..domain import (
     SettingsSection,
     ScopeKind,
 )
+from ..backends import BackendPolicy
 from ..experience import (
+    InvalidInteraction,
     command_help,
     parse_message,
 )
@@ -341,7 +343,15 @@ class ChannelState:
     _is_instance_admin: Callable[[str, str], bool] | None
     _channel: ReplyChannel
     _chat_avatars: ChatAvatarImages
-    _runtime: CodexRuntime
+    _policy: BackendPolicy
+    _codex: CodexRuntime | None
+
+    @property
+    def _runtime(self) -> CodexRuntime:
+        if self._codex is None:
+            raise InvalidInteraction("Claude 试点暂不支持【原生 Codex 操作】。")
+        return self._codex
+
     _ordinary: OrdinarySessionPort
     _bindings: BindingStore
     _projects: ProjectRegistry
@@ -566,7 +576,8 @@ class ChannelState:
             message_id=_message_id(message),
             sender_id=_sender_id(message),
             text=_body_text(message, bot_open_id=_channel_bot_open_id(self._channel)),
-            available_capabilities=self._runtime.available_capabilities,
+            available_capabilities=() if self._policy.backend == "claude" else self._runtime.available_capabilities,
+            policy=self._policy,
         )
 
     def _model_task_text(
@@ -815,6 +826,7 @@ class ChannelState:
                 sender_id=sender_id,
                 tag=tag,
                 form_value=form_value,
+                local_only=self._policy.backend == "claude",
                 value=getattr(action, "value", None),
             )
             if (
@@ -963,4 +975,6 @@ class ChannelState:
         return "\n\n".join(lines)
 
     def _help(self) -> str:
+        if self._policy.backend == "claude":
+            return "Claude 会话：/new 新建 · /sessions 列表 · /resume 切换 · /status 状态 · /stop 停止 · /config 会话设置 · /defaults 默认设置 · /projects 项目 · /admin 管理。"
         return command_help(self._runtime.available_capabilities)

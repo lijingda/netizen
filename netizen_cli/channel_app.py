@@ -81,6 +81,7 @@ from .channel.app_values import (
     _goal_reply_activity,
     _outcome_completion_mention_user_id,
 )
+from .backends import BackendPolicy
 from .channel.entry import ChannelEntry
 
 
@@ -113,7 +114,8 @@ class ChannelApplication(ChannelEntry):
         *,
         app_id: str,
         channel: ReplyChannel,
-        runtime: CodexRuntime,
+        runtime: CodexRuntime | None,
+        policy: BackendPolicy = BackendPolicy("codex"),
         ordinary: OrdinarySessionPort | None = None,
         bindings: BindingStore,
         projects: ProjectRegistry,
@@ -131,8 +133,13 @@ class ChannelApplication(ChannelEntry):
         self._app_id = app_id
         self._channel = channel
         self._chat_avatars = ChatAvatarImages(channel)
-        self._runtime = runtime
-        self._ordinary = ordinary if ordinary is not None else CodexOrdinarySessions(runtime)
+        self._policy = policy
+        self._codex = runtime
+        if ordinary is None:
+            if runtime is None:
+                raise ValueError("ordinary sessions are required")
+            ordinary = CodexOrdinarySessions(runtime)
+        self._ordinary = ordinary
         self._bindings = bindings
         self._projects = projects
         self._message_history = message_history
@@ -141,7 +148,8 @@ class ChannelApplication(ChannelEntry):
         self._instance_root = instance_root
         self._input_preparer = MessageInputPreparer(channel=channel, attachment_store=attachment_store)
         self._management = management
-        self._management.enable_schedules(app_id=app_id, chat_info=channel)
+        if policy.backend == "codex":
+            self._management.enable_schedules(app_id=app_id, chat_info=channel)
         self._management.enable_defaults(app_id=app_id, chat_info=channel)
         self._scope_coordinator = management.scope_coordinator
         # Only the final send writes the aggregate Scheduled Run receipt. Keep
@@ -154,6 +162,8 @@ class ChannelApplication(ChannelEntry):
         self.handle_completion = codex_completion_handler(
             self.handle_ordinary_completion, self.handle_codex_completion, self._projection_failed,
         )
+        if runtime is None:
+            return
         runtime.set_completion_handler(self.handle_completion)
         runtime.set_question_handler(self.handle_questions)
         runtime.set_input_received_handler(self._reply_suppression.discard_physical_turn)
