@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from .backends import DEFAULT_BACKEND, BackendError, instance_backend
 from .lark_app import LARK_APP_RELATIVE_PATH, LarkAppConfigError, load_lark_app
 from .admin.port_config import ConfigFileSnapshot
 from .group_access import GroupAccessRule, GroupAccessError
@@ -48,6 +49,7 @@ class Settings:
     question_notifications: QuestionNotificationSettings = QuestionNotificationSettings()
     config_path: Path | None = None
     config_snapshot: ConfigFileSnapshot | None = field(default=None, repr=False)
+    backend: str = DEFAULT_BACKEND
 
     @classmethod
     def from_file(
@@ -71,6 +73,10 @@ class Settings:
             )
 
         instance = _mapping(loaded, "instance")
+        try:
+            backend = instance_backend(instance)
+        except BackendError as error:
+            raise SettingsError(str(error)) from error
         channel = _optional_mapping(loaded, "channel")
         admin_web = _admin_web_settings(loaded)
         try:
@@ -131,6 +137,7 @@ class Settings:
 
         return cls(
             app_id=credentials.app_id,
+            backend=backend,
             app_secret=credentials.app_secret,
             data_dir=data_dir,
             project_root=project_root,

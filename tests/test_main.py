@@ -407,6 +407,31 @@ class MainConfigurationTest(unittest.TestCase):
             with instance_lifetime_lock(root):
                 pass
 
+    def test_managed_start_with_unknown_backend_fails_before_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            ensure_instance_root(root)
+            config = root / "config.yaml"
+            config.write_text("instance:\n  backend: unknown\n")
+            config.chmod(0o600)
+            ready = root / "state" / "service.ready"
+            with (
+                patch.dict(os.environ, {
+                    "NETIZEN_ROOT": str(root), "NETIZEN_CLI_SERVICE": "1",
+                    "NETIZEN_READY_FILE": str(ready),
+                    "NETIZEN_LIFETIME_LOCK_FD": str(acquire_lifetime_lock(root)),
+                    "NETIZEN_LIFETIME_LOCK_FILE": str(root / "state" / "service.lifetime.lock"),
+                }, clear=True),
+                patch("netizen_cli.main.prepare_instance") as prepare,
+                patch("netizen_cli.main.run") as run,
+                self.assertLogs("netizen_cli.main", level="ERROR") as logs,
+            ):
+                main()
+            self.assertIn("instance.backend", logs.output[0])
+            prepare.assert_not_called()
+            run.assert_not_called()
+            self.assertFalse(ready.exists())
+
     def test_actual_start_with_lost_database_fails_before_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw).resolve()

@@ -59,7 +59,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(json.loads(output)["instance"]["binding"]["python"], "/env-a/bin/python")
 
     def test_retained_unbound_start_registers_current_environment(self):
-        root = Path("/tmp/cli-instance-retained").resolve()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        config = root / "config.yaml"
+        config.write_bytes(b"instance: [")
+        config.chmod(0o600)
         manager = Mock()
         manager.inspect.return_value = None
         manager.start.return_value = ServiceStatus(cli._current_binding(root), True, True, True)
@@ -118,8 +123,51 @@ class CliTest(unittest.TestCase):
         manager.remove.assert_not_called()
         purge.assert_not_called()
 
+    def test_new_codex_root_checks_login_before_creating_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "instance"
+            with (
+                patch("netizen_cli.cli_services.ServiceManager") as manager,
+                patch("netizen_cli.cli_setup.require_codex_login", side_effect=RuntimeError("login required")) as login,
+            ):
+                manager.return_value.inspect.return_value = None
+                code, output, _ = self.invoke(["setup", "--root", str(root), "--json"])
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(output)["reason"], "login required")
+            login.assert_called_once_with()
+            self.assertFalse(root.exists())
+
+    def test_interrupted_setup_rejects_unknown_or_unreadable_backend_before_login_and_writes(self):
+        cases = (
+            (b"instance: {backend: other}", [], "supports only: codex"),
+            (b"instance: {backend: null}", ["--backend", "codex"], "invalid instance.backend (NoneType)"),
+            (b"instance: {backend: 123}", ["--backend", "codex"], "invalid instance.backend (int)"),
+            (b"instance: {backend: Codex}", ["--backend", "codex"], "invalid instance.backend (str)"),
+            (b"instance: {backend: ", [], "configuration is invalid"),
+            (b"when: 2020-13-45", [], "existing configuration is invalid; repair it before retrying setup"),
+        )
+        for content, arguments, reason in cases:
+            with self.subTest(content=content, arguments=arguments), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = root / "config.yaml"
+                config.write_bytes(content)
+                config.chmod(0o600)
+                with (
+                    patch("netizen_cli.cli_services.ServiceManager") as manager,
+                    patch("netizen_cli.cli_setup.require_codex_login") as login,
+                ):
+                    manager.return_value.inspect.return_value = None
+                    code, output, _ = self.invoke(["setup", "--root", str(root), "--json", *arguments])
+                self.assertEqual(code, 1)
+                self.assertIn(reason, json.loads(output)["reason"])
+                login.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [config])
+                self.assertEqual(config.read_bytes(), content)
+
     def test_existing_setup_does_not_rebind_or_initialize(self):
-        root = Path("/tmp/cli-existing-setup").resolve()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
         binding = ServiceBinding(root, Path("/env-a/bin/python"), Path("/env-a"))
         for enabled in (True, False):
             with self.subTest(enabled=enabled):
@@ -134,6 +182,7 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(code, 0)
                 result = json.loads(output)
                 self.assertEqual(result["status"], "already_registered")
+                self.assertNotIn("backend", result)
                 self.assertEqual(result["instance"]["enabled"], enabled)
                 self.assertEqual(result["instance"]["binding"]["python"], "/env-a/bin/python")
                 self.assertTrue(result["recommendation"])
@@ -144,7 +193,12 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(manager.method_calls, [call.inspect(root)])
 
     def test_existing_setup_missing_administrator_does_not_return_success_while_running(self):
-        root = Path("/tmp/cli-existing-running").resolve()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        config = root / "config.yaml"
+        config.write_bytes(b"instance: [")
+        config.chmod(0o600)
         manager = Mock()
         manager.inspect.return_value = ServiceStatus(cli._current_binding(root), True, True, True)
         with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \

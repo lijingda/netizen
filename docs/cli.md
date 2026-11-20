@@ -38,6 +38,9 @@ netizen status --root /absolute/path/to/.netizen
 可用范围和机器人入群仍需用户完成。应用需开通 user 类型 `component:selector`、
 `offline_access`，新 Admin 登录也统一请求这两项授权。首次可用 `--admin-port` 指定端口。
 
+`netizen setup --backend codex` 为实例选定原生后端，当前仅支持 `codex`。省略
+`--backend` 时沿用已有配置，新实例默认使用 Codex。后端在首次 setup 时固定，更换后端须使用新的 root。
+
 本机受信操作者也可手填当前应用下的 Open ID，支持人和 Agent 的非交互流程：
 
 ```sh

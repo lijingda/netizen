@@ -286,6 +286,19 @@ class ConfigurationSetupTests(unittest.TestCase):
                          (before_stat.st_ino, before_stat.st_mtime_ns))
         self.assertEqual(load_lark_app(self.root / "lark-app/config.json").app_id, "cli_retry")
 
+    def test_backend_conflict_in_preparation_precedes_any_setup_write(self) -> None:
+        config = self.root / "config.yaml"
+        original = b"instance: {backend: other}\n"
+        setup._write_atomic(config, original, mode=0o600)
+        with (
+            patch("netizen_cli.backends.KNOWN_BACKENDS", ("codex", "other")),
+            patch.object(setup, "_write_atomic") as write,
+            self.assertRaisesRegex(setup.SetupError, "fixed at setup.*new root"),
+        ):
+            setup.prepare_configuration(self.root, backend="codex")
+        write.assert_not_called()
+        self.assertEqual(config.read_bytes(), original)
+
     def test_different_admin_port_refuses_before_authorization_or_config_changes(self) -> None:
         with (
             patch.object(setup, "_register", side_effect=setup.SetupError("browser timed out")),
