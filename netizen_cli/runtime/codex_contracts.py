@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..bindings import BindingTaskFeedback
 from ..domain import GoalOperationState
-from ..file_evidence import FileEvidence
-from ..turn_files import completed_file_evidence
 from ..partial_answers import PartialAnswer
 from ..sdk_gap_adapter import GoalSnapshot
 from ..turn_patch_children import TaskPatchChildren
@@ -77,8 +75,6 @@ class GoalOutcome:
     partial_answers: tuple[PartialAnswer, ...] = ()
     cwd: Path | None = None
 
-    files: FileEvidence = field(init=False, compare=False, repr=False)
-
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
             raise ValueError("feedback revision must be positive")
@@ -88,11 +84,6 @@ class GoalOutcome:
             or self.activity.logical_turn_id != self.logical_turn_id
         ):
             raise ValueError("Goal outcome activity belongs to another Goal run")
-
-        object.__setattr__(self, "files", (
-            completed_file_evidence(final_items=self.final_items, children=self.patch_children, turn_diff=self.turn_diff)
-            if self.final_physical_turn_id is not None and self.final_turn_status == "completed" else FileEvidence()
-        ))
 
 
 RuntimeOutcome = (

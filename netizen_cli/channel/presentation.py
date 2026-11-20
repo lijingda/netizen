@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lark_channel import (
@@ -29,7 +29,8 @@ from .reply_presenter import (
     _PartialAnswerDelivery,
 )
 from ..ordinary_sessions import OrdinaryConclusion, OrdinaryEvent
-from ..runtime.codex_replies import CodexFeatureEvent
+from ..file_evidence import FileEvidence
+from ..runtime.codex_replies import CodexFeatureEvent, outcome_file_evidence
 from ..runtime.codex_contracts import GoalOutcome
 from ..runtime.contracts import (
     CompactionOutcome,
@@ -83,6 +84,16 @@ from .replies import ChannelReplies
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
 
 
+@dataclass(frozen=True, slots=True)
+class _TaskFiles:
+    evidence: FileEvidence = FileEvidence()
+    summary: TurnDiffSummary = TurnDiffSummary()
+
+    @property
+    def has_references(self) -> bool:
+        return bool(self.evidence.outputs or self.summary.files)
+
+
 class CompletionPresentationChannel(ChannelReplies):
     """Completion handling: Result, Files, Goal receipts and reminders."""
 
@@ -95,7 +106,7 @@ class CompletionPresentationChannel(ChannelReplies):
         if scheduled is not None:
             self._scheduled_completions[scheduled.run_id] = completion
         try:
-            await self._complete_task(outcome)
+            await self._complete_task(outcome, file_evidence=lambda: outcome.files)
             if (scheduled is not None and scheduled.auto_archive and outcome.error_detail is None
                     and outcome.status == "completed" and completion.delivery_state == "sent"):
                 # The initial submission carries the immutable claim policy.
@@ -180,7 +191,7 @@ class CompletionPresentationChannel(ChannelReplies):
                     f"会话上下文压缩以未知状态结束：{outcome.status!r}。",
                 )
             return
-        await self._complete_task(outcome)
+        await self._complete_task(outcome, file_evidence=lambda: outcome_file_evidence(outcome))
 
     async def _park_observation(self, outcome: TurnObservationUnavailableOutcome) -> None:
         await self._reactions.stop(outcome.turn_id)
@@ -213,6 +224,7 @@ class CompletionPresentationChannel(ChannelReplies):
         self,
         outcome: OrdinaryConclusion | SideTurnOutcome,
         *,
+        file_evidence: Callable[[], FileEvidence],
         file_turn_id: str | None = None,
         logical_turn: bool = False,
         allow_suppression: bool = True,
@@ -246,10 +258,10 @@ class CompletionPresentationChannel(ChannelReplies):
         await self._reactions.freeze(outcome.turn_id)
         await self._safe_add_reaction(outcome.origin, terminal_reaction)
         await self._reactions.stop(outcome.turn_id)
-        diff_summary = TurnDiffSummary()
+        task_files = _TaskFiles()
         prepared_response = None
         if not silent and not _task_has_error(outcome) and outcome.status == "completed":
-            diff_summary, prepared_response = await self._prepare_task_result(outcome)
+            task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence())
         if outcome.task_feedback.progress_card_enabled:
             # A missing card stays silent; failure of an existing card uses
             # the original result fallback below. Successful updates return.
@@ -261,7 +273,7 @@ class CompletionPresentationChannel(ChannelReplies):
             try:
                 attempt = await self._complete_task_progress_card(
                     outcome,
-                    diff_summary,
+                    task_files,
                     prepared_response=prepared_response, file_turn_id=file_turn_id,
                     suppress_result=silent,
                 )
@@ -291,14 +303,14 @@ class CompletionPresentationChannel(ChannelReplies):
                     return
             if silent and fallback_to_result:
                 silent = False
-                diff_summary, prepared_response = await self._prepare_task_result(outcome)
+                task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence())
         try:
             if silent:
                 async def finish_silent_reply(content: str) -> None:
                     # Only the existing partial-delivery failure notice is nonempty.
                     if content:
                         await self._complete_task_with_files(
-                            outcome, self._task_patch_summary(outcome),
+                            outcome, self._prepare_task_files(outcome.cwd, file_evidence()),
                             prepared_response=content, file_turn_id=file_turn_id,
                         )
                         return
@@ -326,7 +338,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 )
             elif not outcome.partial_answers:
                 await self._complete_task_with_files(
-                    outcome, diff_summary, prepared_response=prepared_response, file_turn_id=file_turn_id,
+                    outcome, task_files, prepared_response=prepared_response, file_turn_id=file_turn_id,
                 )
             else:
                 await self._reply_task_answers(
@@ -338,20 +350,20 @@ class CompletionPresentationChannel(ChannelReplies):
                         if outcome.partial_answers and not outcome.final_response else None
                     ),
                     final_reply=lambda content: self._complete_task_with_files(
-                        outcome, diff_summary, prepared_response=content, file_turn_id=file_turn_id,
+                        outcome, task_files, prepared_response=content, file_turn_id=file_turn_id,
                     ),
                 )
         finally:
             await self._abandon_task_progress_card(outcome)
 
     async def _prepare_task_result(
-        self, outcome: OrdinaryConclusion | SideTurnOutcome,
-    ) -> tuple[TurnDiffSummary, str | None]:
-        diff = self._task_patch_summary(outcome)
+        self, outcome: OrdinaryConclusion | SideTurnOutcome, evidence: FileEvidence,
+    ) -> tuple[_TaskFiles, str | None]:
+        task_files = self._prepare_task_files(outcome.cwd, evidence)
         response = await self._prepare_task_result_images(outcome)
         if not response and outcome.partial_answers:
             response = "任务已完成，答案见阶段性答案。"
-        return diff, response
+        return task_files, response
 
     async def _prepare_task_result_images(
         self,
@@ -379,7 +391,7 @@ class CompletionPresentationChannel(ChannelReplies):
     async def _complete_task_progress_card(
         self,
         outcome: OrdinaryConclusion | SideTurnOutcome,
-        diff_summary: TurnDiffSummary,
+        task_files: _TaskFiles,
         *,
         prepared_response: str | None = None,
         file_turn_id: str | None = None,
@@ -404,13 +416,13 @@ class CompletionPresentationChannel(ChannelReplies):
             final_response = None if suppress_result else (
                 prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
             )
-            if not suppress_result and (outcome.files.outputs or diff_summary.files):
+            if not suppress_result and task_files.has_references:
                 try:
                     scope, files, file_provenance_id = (
-                        self._task_completion_files(outcome, diff_summary)
+                        self._task_completion_files(outcome, task_files)
                     )
-                    file_additions = diff_summary.additions
-                    file_deletions = diff_summary.deletions
+                    file_additions = task_files.summary.additions
+                    file_deletions = task_files.summary.deletions
                 except Exception:
                     logger.exception(
                         "failed to prepare terminal progress-card files",
@@ -480,22 +492,20 @@ class CompletionPresentationChannel(ChannelReplies):
             turn_id=outcome.turn_id,
         )
 
-    def _task_patch_summary(
-        self, outcome: OrdinaryConclusion | SideTurnOutcome,
-    ) -> TurnDiffSummary:
+    def _prepare_task_files(self, cwd: Path | None, evidence: FileEvidence) -> _TaskFiles:
         try:
-            cwd = outcome.cwd
             if cwd is None:
                 raise TurnFileError("本轮工作目录未确认，不能使用项目默认目录解释文件。")
-            return summarize_file_evidence(outcome.files, cwd)
+            summary = summarize_file_evidence(evidence, cwd)
         except Exception:
             logger.exception("failed to prepare completed patch statistics")
-            return TurnDiffSummary()
+            summary = TurnDiffSummary()
+        return _TaskFiles(evidence, summary)
 
     def _completion_files(
         self,
         outcome: OrdinaryConclusion,
-        diff_summary: TurnDiffSummary,
+        task_files: _TaskFiles,
     ) -> tuple[FeishuScope, tuple[TurnFile, ...]]:
         binding = self._bindings.get(outcome.binding_id)
         scope = self._scope(outcome.origin)
@@ -506,12 +516,12 @@ class CompletionPresentationChannel(ChannelReplies):
             raise TurnFileError("本轮文件与完成消息的会话身份不一致。")
         if outcome.cwd is None:
             raise TurnFileError("本轮工作目录未确认，无法解析相对文件路径。")
-        return scope, resolve_evidenced_files(outcome.files, outcome.cwd, diff_summary)
+        return scope, resolve_evidenced_files(task_files.evidence, outcome.cwd, task_files.summary)
 
     def _side_completion_files(
         self,
         outcome: SideTurnOutcome,
-        diff_summary: TurnDiffSummary,
+        task_files: _TaskFiles,
     ) -> tuple[FeishuScope, tuple[TurnFile, ...]]:
         record = self._bindings.get_side_topic(outcome.side_id)
         scope = self._scope(outcome.origin)
@@ -522,17 +532,17 @@ class CompletionPresentationChannel(ChannelReplies):
             or record.topic_id != scope.topic_id
         ):
             raise TurnFileError("本轮文件与 Side 完成消息的身份不一致。")
-        return scope, resolve_evidenced_files(outcome.files, outcome.cwd, diff_summary)
+        return scope, resolve_evidenced_files(task_files.evidence, outcome.cwd, task_files.summary)
 
     def _task_completion_files(
         self,
         outcome: OrdinaryConclusion | SideTurnOutcome,
-        diff_summary: TurnDiffSummary,
+        task_files: _TaskFiles,
     ) -> tuple[FeishuScope, tuple[TurnFile, ...], str]:
         if isinstance(outcome, OrdinaryConclusion):
-            scope, files = self._completion_files(outcome, diff_summary)
+            scope, files = self._completion_files(outcome, task_files)
             return scope, files, outcome.binding_id
-        scope, files = self._side_completion_files(outcome, diff_summary)
+        scope, files = self._side_completion_files(outcome, task_files)
         # v4 callbacks are self-contained. The captured Parent Binding is
         # provenance and deterministic-action identity only; paging and send
         # never read its current state or reinterpret the Side as a Binding.
@@ -541,13 +551,13 @@ class CompletionPresentationChannel(ChannelReplies):
     async def _complete_task_with_files(
         self,
         outcome: OrdinaryConclusion | SideTurnOutcome,
-        diff_summary: TurnDiffSummary,
+        task_files: _TaskFiles,
         *,
         prepared_response: str | None = None,
         file_turn_id: str | None = None,
     ) -> None:
         final_response = prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
-        if not (outcome.files.outputs or diff_summary.files):
+        if not task_files.has_references:
             await self._reply_task_result(
                 outcome, final_response,
             )
@@ -555,7 +565,7 @@ class CompletionPresentationChannel(ChannelReplies):
         try:
             scope, files, file_provenance_id = self._task_completion_files(
                 outcome,
-                diff_summary,
+                task_files,
             )
             card = turn_files_card(
                 scope=scope,
@@ -565,8 +575,8 @@ class CompletionPresentationChannel(ChannelReplies):
                     prepared_response or outcome.final_response or constants.TURN_FILES_WITHOUT_FINAL_RESPONSE
                 ),
                 files=files,
-                additions=diff_summary.additions,
-                deletions=diff_summary.deletions,
+                additions=task_files.summary.additions,
+                deletions=task_files.summary.deletions,
                 completion_mention_user_id=_outcome_completion_mention_user_id(outcome),
             ) if files else None
         except asyncio.CancelledError:
@@ -675,7 +685,6 @@ class CompletionPresentationChannel(ChannelReplies):
             status=outcome.final_turn_status if terminal else None,
             final_response=response,
             error_detail=describe_error(error) if error is not None else None,
-            files=outcome.files,
             background_cleanup_requested=outcome.background_cleanup_requested,
             task_feedback=(
                 outcome.task_feedback if terminal and outcome.error is None
@@ -686,7 +695,8 @@ class CompletionPresentationChannel(ChannelReplies):
             partial_answers=outcome.partial_answers,
         )
         await self._complete_task(
-            task, file_turn_id=outcome.final_physical_turn_id, logical_turn=True,
+            task, file_evidence=lambda: outcome_file_evidence(outcome),
+            file_turn_id=outcome.final_physical_turn_id, logical_turn=True,
             allow_suppression=(outcome.error is None
                                and outcome.finalization is not GoalFinalizationStatus.UNKNOWN
                                and outcome.finalization_error is None),

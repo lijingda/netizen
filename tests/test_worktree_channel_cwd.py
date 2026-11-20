@@ -12,7 +12,8 @@ from netizen_cli.cards.fork import ForkCardAction, ForkSource
 from netizen_cli.domain import ActiveState, CardControlIntent, CardControlName, FeishuScope, GoalStatus, NativeCapability, ScopeKind
 from netizen_cli.runtime.contracts import ActiveTurnSnapshot, GoalSubmission, SteerRace, Submission, SubmissionAdmission, SubmitDisposition, TurnOutcome
 from netizen_cli.schedules.models import ScheduleRule
-from netizen_cli.turn_files import TurnDiffSummary, TurnFileError
+from netizen_cli.runtime.codex_replies import ordinary_conclusion
+from netizen_cli.turn_files import TurnFileError
 from netizen_cli.worktrees.models import WorktreeConflict
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -201,15 +202,20 @@ class WorktreeChannelCwdTest(unittest.IsolatedAsyncioTestCase):
         alias.symlink_to(self.selected, target_is_directory=True)
         for cwd in (self.selected, alias):
             with self.subTest(cwd=cwd):
-                _, files = self.app._completion_files(self.outcome(cwd=cwd), TurnDiffSummary())
+                outcome = ordinary_conclusion(self.outcome(cwd=cwd))
+                task_files = self.app._prepare_task_files(cwd, outcome.files)
+                _, files = self.app._completion_files(outcome, task_files)
                 self.assertEqual(files[0].resolved_path, (self.selected / "answer.txt").resolve())
                 self.assertEqual(files[0].size, len("correct source"))
 
     async def test_files_without_cwd_evidence_do_not_use_project_default(self):
         self.materialize()
         (self.fixture.project / "answer.txt").write_text("must not be attributed")
+        outcome = ordinary_conclusion(self.outcome())
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
+            task_files = self.app._prepare_task_files(outcome.cwd, outcome.files)
         with self.assertRaises(TurnFileError):
-            self.app._completion_files(self.outcome(), TurnDiffSummary())
+            self.app._completion_files(outcome, task_files)
 
     async def test_missing_turn_cwd_keeps_text_without_reading_current_native_cwd(self):
         self.materialize()

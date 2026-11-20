@@ -18,8 +18,6 @@ from ..partial_answers import PartialAnswer
 from ..prompt_projection import ConversationInput
 from ..progress_card_settings import ProgressCardSettings
 from ..turn_activity import TurnActivityEntrySnapshot, TurnPlanStepSnapshot
-from ..file_evidence import FileEvidence
-from ..turn_files import completed_file_evidence
 from ..turn_patch_children import TaskPatchChildren
 
 
@@ -685,8 +683,6 @@ class TurnOutcome:
     # Execution-directory evidence for this Turn, never the Project default.
     cwd: Path | None = None
 
-    files: FileEvidence = field(init=False, compare=False, repr=False)
-
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
             raise ValueError("feedback revision must be positive")
@@ -696,11 +692,6 @@ class TurnOutcome:
             or self.activity.turn_id != self.turn_id
         ):
             raise ValueError("Turn outcome activity belongs to another Turn")
-
-        object.__setattr__(self, "files", (
-            completed_file_evidence(self.result, children=self.patch_children, turn_diff=self.turn_diff)
-            if self.error is None and self.status == "completed" else FileEvidence()
-        ))
 
     @property
     def final_response(self) -> str | None:
@@ -768,8 +759,6 @@ class SideTurnOutcome:
     patch_children: TaskPatchChildren = TaskPatchChildren()
     partial_answers: tuple[PartialAnswer, ...] = ()
 
-    files: FileEvidence = field(init=False, compare=False, repr=False)
-
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
             raise ValueError("feedback revision must be positive")
@@ -779,11 +768,6 @@ class SideTurnOutcome:
             or self.activity.turn_id != self.turn_id
         ):
             raise ValueError("Side outcome activity belongs to another Side Turn")
-
-        object.__setattr__(self, "files", (
-            completed_file_evidence(self.result, children=self.patch_children)
-            if self.error is None and self.status == "completed" else FileEvidence()
-        ))
 
     @property
     def final_response(self) -> str | None:

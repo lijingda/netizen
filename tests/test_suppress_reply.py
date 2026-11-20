@@ -208,6 +208,20 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(response["suppressed"])
 
+    async def test_file_projection_waits_for_delivery_and_failure_keeps_final_text(self):
+        with patch("netizen_cli.turn_files.project_file_evidence", side_effect=ValueError("bad file evidence")) as project:
+            outcomes = (
+                self.outcome(result=completed_turn_result(final_response="ordinary answer")),
+                self.side_outcome(final_response="side answer"),
+                self.goal_outcome(final_response="goal answer"),
+            )
+            project.assert_not_called()
+            for count, outcome in enumerate(outcomes, start=1):
+                with self.subTest(kind=type(outcome).__name__), self.assertLogs("netizen_cli.turn_files", "ERROR"):
+                    await self.app.handle_completion(outcome)
+                self.assertEqual(project.call_count, count)
+                self.assertEqual(self.channel.replies[-1][1], outcome.final_response)
+
     async def test_normal_completion_omits_empty_and_missing_final_without_creating_card(self):
         for index, final in enumerate(("", None)):
             for progress in (False, True):
