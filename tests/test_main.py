@@ -11,13 +11,14 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from lark_channel import DedupStore, SendResult
+from lark_channel import DedupStore, FeishuChannelError, FeishuChannelErrorCode, SendResult
 from openai_codex import CodexConfig
 
 from netizen_cli.admin.port_config import ConfigFileSnapshot
@@ -615,6 +616,90 @@ class RunDatabaseAdmissionTest(unittest.IsolatedAsyncioTestCase):
                     build.assert_not_called()
                 self.assertEqual(database.read_bytes() if database.exists() else None,
                                  None if missing else b"")
+
+
+class FailingStartChannel:
+    def __init__(self) -> None:
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.thread: threading.Thread | None = None
+        self.destroy_loop_on_failure = True
+        self.error = FeishuChannelError(FeishuChannelErrorCode.NOT_CONNECTED, "connect failed")
+        self.on = Mock()
+        self.stop = Mock(side_effect=self.stop_loop)
+
+    def schedule(self, coro):
+        if self.loop is None or self.loop.is_closed():
+            self.loop = asyncio.new_event_loop()
+            self.thread = threading.Thread(target=self.loop.run_forever)
+            self.thread.start()
+        return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    def stop_loop(self) -> None:
+        if self.loop is None or self.loop.is_closed():
+            return
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        assert self.thread is not None
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise AssertionError("Channel loop thread failed to stop")
+        self.loop.close()
+
+    async def start_background(self) -> None:
+        if self.destroy_loop_on_failure:
+            self.stop_loop()
+        raise self.error
+
+
+class RunChannelStartFailureTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.ready_file = self.root / "service.ready"
+        self.ready_file.touch()
+        self.channel = FailingStartChannel()
+        self.addCleanup(self.channel.stop_loop)
+        self.enterContext(patch("netizen_cli.main.build_channel", return_value=self.channel))
+        self.enterContext(patch("netizen_cli.main.ProjectRegistry"))
+        self.store = self.enterContext(patch("netizen_cli.main.BindingStore")).return_value
+        self.core = self.enterContext(patch("netizen_cli.main.ServiceCore")).return_value
+        self.core._closed = False
+        self.close_loops = []
+
+        async def start():
+            self.core._start_loop = asyncio.get_running_loop()
+
+        async def close():
+            self.close_loops.append(asyncio.get_running_loop())
+            self.store.close()
+            self.core._closed = True
+
+        self.core.start = AsyncMock(side_effect=start)
+        self.core.close = AsyncMock(side_effect=close)
+        self.enterContext(patch.object(asyncio.get_running_loop(), "add_signal_handler"))
+
+    async def run_failed_start(self) -> None:
+        with self.assertRaises(FeishuChannelError) as caught:
+            await asyncio.wait_for(
+                run(settings(self.root), instance_root=self.root, ready_file=self.ready_file),
+                timeout=10,
+            )
+        self.assertIs(caught.exception, self.channel.error)
+        self.store.close.assert_called_once_with()
+        self.channel.stop.assert_called_once_with()
+        self.assertFalse(self.ready_file.exists())
+
+    async def test_destroyed_start_loop_skips_core_cleanup(self) -> None:
+        with self.assertLogs("netizen_cli.main", level="WARNING") as logs:
+            await self.run_failed_start()
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("Skipping service-core cleanup", logs.records[0].getMessage())
+        self.core.close.assert_not_called()
+        self.assertIs(self.channel.loop, self.core._start_loop)
+
+    async def test_live_start_loop_closes_core_on_original_loop(self) -> None:
+        self.channel.destroy_loop_on_failure = False
+        await self.run_failed_start()
+        self.core.close.assert_awaited_once_with()
+        self.assertEqual(self.close_loops, [self.core._start_loop])
 
 
 class FakeScheduleMcpRunner:
@@ -1625,6 +1710,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     captured_environment = dict(os.environ)
                     await core.start()
+                    self.assertIs(core._start_loop, asyncio.get_running_loop())
                     self.assertEqual(os.environ, captured_environment)
                     assert core._runtime is not None
                     self.history_factory.assert_called_once_with(core._codex)
