@@ -2327,7 +2327,10 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             from netizen_cli.thread_history import ThreadHistoryUnavailable
             from openai_codex import CodexError
 
-            native = AsyncMock()
+            from netizen_cli.codex_runtime import CodexRuntime
+
+            native = object.__new__(CodexRuntime)
+            native.thread_conversation = AsyncMock()
             port = ManagementRuntimePort(native)
 
             async def exact_read(binding_id, **kwargs):
