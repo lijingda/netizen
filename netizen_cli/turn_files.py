@@ -168,11 +168,14 @@ def _patch_counts(
             for change in item.changes:
                 kind = change.kind.root
                 raw_path = getattr(kind, "move_path", None) or change.path
-                value = (
-                    None if item.id in conflicting else _file_change_counts(
-                        change.diff, kind.type, getattr(kind, "move_path", None),
-                    )
-                )
+                value: tuple[int, int] | None | Exception = None
+                if item.id not in conflicting:
+                    try:
+                        value = _file_change_counts(
+                            change.diff, kind.type, getattr(kind, "move_path", None),
+                        )
+                    except Exception as error:
+                        value = error.with_traceback(None)
                 changes.append(PatchCount(
                     raw_path, cwd, value, kind.type == "delete" and item.id not in conflicting,
                 ))
@@ -198,6 +201,8 @@ def summarize_file_evidence(evidence: FileEvidence, project_cwd: Path) -> TurnDi
         if patch.deleted:
             deleted_paths.add(path)
         value = patch.counts
+        if isinstance(value, Exception):
+            raise value
         if value is None:
             complete = False
         else:

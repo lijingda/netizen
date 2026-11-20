@@ -9,7 +9,8 @@ class PatchCount:
     path: str
     # Child-specific base. Root patches use the execution's captured cwd.
     cwd: Path | None
-    counts: tuple[int, int] | None
+    # A parse error applies only if this entry's path resolves at delivery.
+    counts: tuple[int, int] | None | Exception
     deleted: bool
 
 

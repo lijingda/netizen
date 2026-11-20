@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,8 @@ from unittest.mock import patch
 from openai_codex.types import ThreadItem
 
 from netizen_cli.turn_files import (
-    extract_turn_files, project_file_evidence, resolve_evidenced_files, summarize_file_evidence, turn_patch_summary,
+    TurnDiffFileStats, TurnDiffSummary, completed_file_evidence, extract_turn_files, project_file_evidence,
+    resolve_evidenced_files, summarize_file_evidence, turn_patch_summary,
 )
 from netizen_cli.turn_patch_children import TaskPatchChildren, TurnPatchBatch
 
@@ -47,6 +49,35 @@ class TurnPatchStatisticsTest(unittest.TestCase):
         with patch("netizen_cli.turn_files._parse_diff_block", side_effect=ValueError("broken diff")):
             with self.assertRaisesRegex(ValueError, "broken diff"):
                 turn_patch_summary((item,), self.root)
+
+    def test_unresolvable_root_patch_with_oversized_hunk_preserves_child_file(self) -> None:
+        loop = self.root / "loop"
+        loop.symlink_to(loop)
+        invalid_paths = ["bad\0path"]
+        try:
+            loop.resolve()
+        except (OSError, RuntimeError):
+            # Some Python versions return the loop unchanged from non-strict resolve.
+            invalid_paths.append(loop.name)
+
+        self.addCleanup(sys.set_int_max_str_digits, sys.get_int_max_str_digits())
+        sys.set_int_max_str_digits(sys.int_info.str_digits_check_threshold)
+        digits = "9" * (sys.get_int_max_str_digits() + 1)
+        report = self.root / "report.txt"
+        report.write_text("result\n")
+        child = patch_item("create", report.name, "result\n", kind="add")
+        children = TaskPatchChildren((TurnPatchBatch("child", "child-turn", self.root, (child,)),))
+        expected = TurnDiffSummary(files=(TurnDiffFileStats(str(report), 1, 0),))
+        for path in invalid_paths:
+            items = (patch_item("bad", path, f"@@ -1,{digits} +1 @@\n-old\n+new\n"),)
+            with self.subTest(path=path, entry="Files"):
+                evidence = completed_file_evidence(final_items=items, children=children)
+                summary = summarize_file_evidence(evidence, self.root)
+                files = resolve_evidenced_files(evidence, self.root, summary)
+                self.assertEqual([(f.display_path, f.additions, f.deletions) for f in files],
+                                 [("report.txt", 1, 0)])
+            with self.subTest(path=path, entry="probe"):
+                self.assertEqual(turn_patch_summary(items, self.root, children=children), expected)
 
     def test_file_evidence_resolves_changes_at_delivery(self) -> None:
         evidence = project_file_evidence((patch_item("write", "out", "one line", kind="add"),))
