@@ -1,8 +1,8 @@
 ---
 status: proposed
 date: 2026-11-20
-amends: 0008, 0074
-related: 0014, 0017, 0028, 0049, 0060, 0061, 0071, 0072, 0078, 0081, 0093
+amends: 0008, 0074, 0092
+related: 0014, 0017, 0028, 0049, 0060, 0061, 0068, 0071, 0072, 0078, 0080, 0081, 0093
 ---
 
 # 按实例接入多个原生 Agent 后端
@@ -60,11 +60,19 @@ Binding 锁、准入版本、未知态、停服预算；后者包括 Goal 换轮
    - archive、delete、restore 和 fork 只对经验证提供对应原生操作的后端开放。
    - 没有原生删除的后端不提供删除入口，不以删除本地登记冒充原生删除。
    - 删除 Project 时，含已物化会话的 Project 在预览阶段就被拦截。
-8. **认证**：每个后端只使用厂商允许第三方产品采用的认证方式。Claude 后端使用 API key
-   或厂商支持的云平台凭据，不使用 claude.ai 订阅登录。依据是
-   [Agent SDK 文档](https://code.claude.com/docs/en/agent-sdk/overview)："Unless previously approved,
-   Anthropic does not allow third party developers to offer claude.ai login or rate limits for their
-   products, including agents built on the Claude Agent SDK."
+8. **认证**：每个后端只使用厂商允许第三方产品采用的认证方式。
+   - **Netizen 不接触 Agent 账号凭据。** 不实现任何 Claude 登录流程；不读取、保存或转发 Claude 凭据与会话令牌；不修改 Claude Code 程序，也不禁用它自带的认证方式。
+   - **Claude 后端的认证模式在 setup 时按实例选定**，之后只能在主机上更改：
+     - **API key 模式（默认）**：使用 Anthropic API key 或厂商支持的云平台凭据，费用计入凭据所有者，可供多人使用。
+       - 凭据缺失时拒绝执行，不得回退到主机上的订阅登录。
+       - 每次会话以 SDK 公开的初始化信息确认实际认证来源；来源不符时拒绝执行。
+     - **所有者专用订阅模式**：订阅所有者本人在主机上，通过官方 Claude Code 登录流程登录；Netizen 只运行未修改的官方程序，由程序自行读取凭据。
+       - setup 时，由在主机上执行 setup 的人完成飞书授权，以此确认其飞书身份，并声明自己是该订阅的所有者；Netizen 把这个身份登记为实例唯一的订阅所有者。
+       - 此后，只有所有者本人能触发执行，包括普通消息、问题回答、定时计划的创建与手动运行，以及 Admin 手动运行。其他人的消息（含群聊中 @ 机器人）在调用 SDK 前拒绝。其他实例管理员保留管理权限，但不能触发执行。
+       - 所有者登记与实例后端身份一起保存，并受启动校验保护；只能在主机上通过 setup 或修复命令更改，飞书和 Admin Web 都不能更改。
+   - **身份对应由部署者负责。** Netizen 无法、也不尝试核实飞书身份与 Claude 账号属于同一人；这一对应由部署者在 setup 时声明，合规责任由部署者承担。用户手册默认推荐 API key 模式。
+   - **依据**：[Anthropic 法律与合规](https://code.claude.com/docs/en/legal-and-compliance)规定，开发者不得在自己的应用中提供 Claude.ai 登录，不得代其用户经订阅凭据转发请求，也不得收集、保存或中转 Claude 凭据，登录须经 Anthropic 自己的流程完成。同一节又写明："Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription, including where a platform hosts Claude Code"。[消费者条款](https://www.anthropic.com/legal/consumer-terms)第 2 节规定，不得把账号提供给他人使用。
+   - **尚未解决的歧义**：[Agent SDK 文档](https://code.claude.com/docs/en/agent-sdk/overview)写的是"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products"，措辞与法律页的例外存在张力；消费者条款第 3 节对自动化访问也有限制。所以在订阅模式下开放定时任务之类的自动执行之前，须先确认这类使用是否被允许；必要时按法律页的指引向 Anthropic 询问。
 9. **试点与传输**
    - 首个试点是经官方 `claude-agent-sdk` 接入 Claude Code。
    - Antigravity 优先评估官方 `agy acp`；ACP 可以作为单个后端的传输，不作为所有后端的产品契约。
@@ -84,7 +92,9 @@ Binding 锁、准入版本、未知态、停服预算；后者包括 Goal 换轮
 - 运行中拒绝新输入、停止目标的竞态在 Netizen 自身范围内可控；
 - 各类结束状态可以区分；Netizen 异常退出后，残留的 Agent 子进程会在服务重启前被受管服务回收，Linux systemd 与 macOS LaunchAgent 均需实测；
 - 同一实际目录下并发会话的资源占用，以及 60 秒停服预算，均可满足；
-- 服务账号下的非交互认证符合第 8 条，且能加载原生配置。
+- 服务账号下的非交互认证符合第 8 条，且能加载原生配置；
+- API key 模式下，凭据缺失或无效时不会回退到主机上的订阅登录；
+- 订阅模式下，所有者限制覆盖每一个执行入口，非所有者的请求在调用 SDK 前被拒绝。
 
 ## 备选方案
 
@@ -114,4 +124,5 @@ Binding 锁、准入版本、未知态、停服预算；后者包括 Goal 换轮
   - SQLite 数据白名单
   - 无队列、无第二份历史
 - ADR 0008 中"唯一 Codex 后端边界"收窄为 Codex 后端内部的规则；ADR 0074 增加实例后端身份。已被取代的 ADR 0002、0003、0007 不重新启用。
+- 订阅模式在飞书可用范围、群成员资格以及 ADR 0092 的群聊开关之外，新增一条按认证模式生效的执行限制：只有所有者本人能触发执行。这条限制不引入多角色权限体系，也不影响 Admin 的管理权限。
 - 维护成本大致按"后端数量 × 各自开放的能力"增长。跨后端协作会引入有向组合，因此推迟。
