@@ -308,6 +308,11 @@ class StubRuntime:
         selected = rows[offset:offset + limit]
         return NativeThreadCatalogPage(tuple(selected), str(offset + limit) if offset + limit < len(rows) else None)
 
+    async def thread_conversation_exact(self, thread_id: str, **kwargs: object) -> object:
+        # Like CodexRuntime: the management read delegates to the native page
+        # read, so tests that replace thread_conversation keep driving it.
+        return await self.thread_conversation(thread_id, **kwargs)
+
     async def thread_summary(self, thread_id: str) -> NativeThreadMetadata:
         self.thread_summary_calls.append(thread_id)
         for values in (self.thread_summary_values, self.thread_metadata_values, self.archived_thread_metadata_values):
