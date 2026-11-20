@@ -13,6 +13,7 @@ from netizen_cli.cards.defaults import decode_defaults_action
 from netizen_cli.codex_runtime import SteerRace, Submission, SubmitDisposition
 from netizen_cli.domain import MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.message_history import MessageHistoryStats, MessageHistoryWindow
+from netizen_cli.runtime.native_inputs import to_codex_input
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from tests.support.channel_cards import callback, elements, form_values, new_form_values
 from tests.support.channel_fixtures import channel_fixture
@@ -35,7 +36,7 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.submit_patch.stop)
 
     async def accept(self, **kwargs):
-        self.submissions.append(kwargs)
+        self.submissions.append({**kwargs, "input": to_codex_input(kwargs["input"])})
         binding = kwargs["binding"]
         self.store.assign_native_thread_id(binding.id, "native-" + binding.id)
         commit = kwargs["context_commit"]

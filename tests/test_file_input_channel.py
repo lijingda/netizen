@@ -11,8 +11,8 @@ from unittest.mock import patch
 from lark_channel import FileContent, InboundConfig, InboundPipeline, PostContent, ResourceDescriptor
 from lark_channel.channel.normalize.pipeline import PipelineConfig, PipelineDeps
 from openai_codex import ImageInput, TextInput
-from netizen_cli.ordinary_sessions import PreparedPrompt
 
+from netizen_cli.runtime.native_inputs import to_codex_input
 from netizen_cli.attachments import AttachmentInput, AttachmentStore
 from netizen_cli.channel.input_preparation import MessageInputPreparer
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, NativeCapability, ScopeKind
@@ -53,8 +53,6 @@ def post_message(text, *, message_id="om_post", files=None, images=(), **kwargs)
 
 
 def split_attachments(native_input):
-    if isinstance(native_input, PreparedPrompt):
-        native_input = native_input.text
     text = native_input if isinstance(native_input, str) else native_input[-1].text
     prefix, attachment_text = text.split("\n\n<feishu_file_attachments>\n", 1)
     return prefix, json.loads(attachment_text.removesuffix("\n</feishu_file_attachments>"))
@@ -344,7 +342,7 @@ class FileInputChannelTest(unittest.IsolatedAsyncioTestCase):
             return b"original document"
 
         async def reject(**kwargs):
-            submissions.append(kwargs)
+            submissions.append({**kwargs, "input": to_codex_input(kwargs["input"])})
             raise SteerRace("original turn ended")
 
         self.channel.download_resource = download
@@ -381,7 +379,7 @@ class FileInputChannelTest(unittest.IsolatedAsyncioTestCase):
                 submissions = []
 
                 async def fail(**kwargs):
-                    submissions.append(kwargs)
+                    submissions.append({**kwargs, "input": to_codex_input(kwargs["input"])})
                     raise error
 
                 self.runtime.submit = fail
@@ -452,7 +450,7 @@ class SideFileInputChannelTest(unittest.IsolatedAsyncioTestCase):
                 submissions = []
 
                 async def fail(**kwargs):
-                    submissions.append(kwargs)
+                    submissions.append({**kwargs, "input": to_codex_input(kwargs["input"])})
                     raise error
 
                 self.runtime.submit_side = fail

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from netizen_cli.codex_runtime import Submission, SubmitDisposition
 from netizen_cli.domain import MentionContextMode, MessageContextAnchor
 from netizen_cli.message_history import MessageHistoryStats, MessageHistoryWindow
+from netizen_cli.runtime.native_inputs import to_codex_input
 from netizen_cli.session_settings import SessionSettings
 from netizen_cli.worktrees.errors import WorktreeError
 from netizen_cli.worktrees.git import GitError
@@ -44,7 +45,7 @@ class DefaultsWorktreeChannelTest(unittest.IsolatedAsyncioTestCase):
         ).stdout.strip()
 
     async def accept(self, **kwargs):
-        self.submissions.append(kwargs)
+        self.submissions.append({**kwargs, "input": to_codex_input(kwargs["input"])})
         binding = kwargs["binding"]
         self.store.assign_native_thread_id(binding.id, "native-" + binding.id)
         commit = kwargs["context_commit"]
