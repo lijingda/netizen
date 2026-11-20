@@ -51,6 +51,7 @@ from .reply_presenter import (
 )
 from .reply_suppression import ReplySuppression
 from ..codex_runtime import CodexRuntime
+from ..ordinary_sessions import OrdinarySessionPort
 from ..runtime.contracts import (
     ContextWindowUsage,
     NativeThreadMetadata,
@@ -341,6 +342,7 @@ class ChannelState:
     _channel: ReplyChannel
     _chat_avatars: ChatAvatarImages
     _runtime: CodexRuntime
+    _ordinary: OrdinarySessionPort
     _bindings: BindingStore
     _projects: ProjectRegistry
     _message_history: MessageHistoryReader | None

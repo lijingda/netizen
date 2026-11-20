@@ -14,7 +14,8 @@ from netizen_cli.domain import (
     FeishuScope, GoalOperationState, GoalStatus,
     NativeCapability, ScopeKind,
 )
-from netizen_cli.runtime.contracts import ActiveGoalSnapshot, GoalFinalizationStatus, GoalOutcome, GoalSubmission
+from netizen_cli.runtime.codex_contracts import ActiveGoalSnapshot, GoalOutcome
+from netizen_cli.runtime.contracts import GoalFinalizationStatus, GoalSubmission
 from tests.support.channel_cards import _elements, direct_button_event
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage

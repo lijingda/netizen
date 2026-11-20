@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from openai_codex import AsyncCodex, CodexConfig, InternalRpcError, InvalidRequestError
+from openai_codex import AsyncCodex, CodexConfig, ImageInput, InternalRpcError, InvalidRequestError, TextInput
 
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingNotFound, BindingStore, ProjectDisabled
@@ -22,6 +22,7 @@ from netizen_cli.codex_runtime import (
 )
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.model_settings import ModelCatalogError
+from netizen_cli.ordinary_sessions import PreparedPrompt, PromptImage
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.runtime.contracts import ContextCursorCommit
 from netizen_cli.schedules.models import ScheduleConflict, ScheduleRule
@@ -109,6 +110,20 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         config = {"mcp_servers.netizen_run_outcome_test": {"enabled_tools": ["report_run_outcome"]}}
         self.runtime._outcome_thread_config = lambda app_id: config if app_id == "app" else None
         return config
+
+    async def test_initial_prepared_prompt_reaches_turn_start_as_native_inputs(self):
+        run_id, binding = self.occurrence()
+        self.codex.complete_immediately = True
+        url = "data:image/png;base64,AA=="
+        submission = await self.runtime.submit_initial(
+            run_id=run_id, binding=binding, cwd=self.cwd, owner_id="owner", origin=object(),
+            input=PreparedPrompt("inspect", (PromptImage("attached image", url),)),
+        )
+        submission.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertEqual(self.codex.turn_inputs, [
+            (submission.thread_id, [TextInput("attached image"), ImageInput(url), TextInput("inspect")]),
+        ])
 
     async def test_outcome_mount_first_followup_skills_and_resource_lifecycle(self):
         config = self.enable_outcome_mount()

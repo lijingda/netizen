@@ -15,6 +15,7 @@ from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingStore
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, ScheduledOrigin, ScopeKind
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import InstanceManagementService, ScopeCoordinator
 from netizen_cli.management.service import ManagementRuntimePort
 from netizen_cli.projects import ProjectRegistry
@@ -85,10 +86,11 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(chat_type="private", chat_mode=chat_mode)
 
             channel.get_chat_info = get_chat_info
+            ordinary = CodexOrdinarySessions(runtime)
             management = InstanceManagementService(bindings=store, projects=projects,
-                runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator(),
+                runtime=ManagementRuntimePort(runtime, ordinary=ordinary), scope_coordinator=ScopeCoordinator(),
                 chat_directory=FakeChatTargetDirectory(channel))
-            app = ChannelApplication(app_id="app", channel=channel, runtime=runtime,
+            app = ChannelApplication(app_id="app", channel=channel, runtime=runtime, ordinary=ordinary,
                 bindings=store, projects=projects, management=management)
             scheduler = Scheduler(store, runtime, "app", app.dispatch_scheduled_run)
             management.schedules.set_refresh_handler(scheduler.refresh)

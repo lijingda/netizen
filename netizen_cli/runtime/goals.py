@@ -18,6 +18,7 @@ from ..domain import (
     GoalOperationState,
     GoalStatus,
 )
+from .codex_contracts import GoalOutcome
 from .contracts import (
     ModelProviderRejected,
     NativeThread,
@@ -38,7 +39,6 @@ from .contracts import (
     Submission,
     GoalSubmission,
     ContextCursorCommit,
-    GoalOutcome,
     StopAcknowledger,
 )
 from ..sdk_gap_adapter import (

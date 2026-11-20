@@ -2726,17 +2726,17 @@ class ManagementRuntimePortSurfaceTest(unittest.TestCase):
         available = ManagementRuntimePort(
             SimpleNamespace(
                 available_capabilities=frozenset({NativeCapability.DELETE})
-            )
+            ), ordinary=AsyncMock(),
         )
         unavailable = ManagementRuntimePort(
-            SimpleNamespace(available_capabilities=frozenset())
+            SimpleNamespace(available_capabilities=frozenset()), ordinary=AsyncMock(),
         )
 
         self.assertTrue(available.native_delete_available)
         self.assertFalse(unavailable.native_delete_available)
 
     def test_forbidden_runtime_capabilities_are_not_exposed(self) -> None:
-        port = ManagementRuntimePort(object())  # type: ignore[arg-type]
+        port = ManagementRuntimePort(object(), ordinary=AsyncMock())  # type: ignore[arg-type]
 
         for name in (
             "submit",

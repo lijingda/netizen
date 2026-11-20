@@ -73,7 +73,8 @@ Code mode 的 V8 运行时会预留大量虚拟地址空间，请勿用 `ulimit 
 | `netizen_cli/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的安装信息与本实例重启编排。 |
 | `netizen_cli/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
 | `netizen_cli/deployment/` | 有界 Admin 重启记录、维护锁与独立重启 job。 |
-| `netizen_cli/runtime/contracts.py`、`netizen_cli/codex_runtime.py`、`netizen_cli/runtime/` | `contracts.py` 唯一定义公共协议、异常、输入输出和快照；CodexRuntime 继续独占任务、Goal、Side、订阅和锁，并在 `codex_runtime.py` 保留原公共类型导入路径。它由 `runtime/` 中的单向生命周期分层组成（顺序见 `codex_runtime.py` 模块说明），下层不得调用上层，由类型检查保证；共享可变状态只在 `runtime/state.py` 声明一次，超时与预算集中在 `runtime/limits.py`。 |
+| `netizen_cli/codex_runtime.py`、`netizen_cli/runtime/` | `contracts.py` 定义共享运行态契约，`codex_contracts.py` 定义 Codex 专用结果和回调。CodexRuntime 独占任务、Goal、Side、订阅和锁，保留原公共类型导入路径。生命周期分层顺序见 `codex_runtime.py`，类型检查保证下层不得调用上层。共享可变状态集中在 `runtime/state.py`，超时与预算集中在 `runtime/limits.py`。 |
+| `netizen_cli/ordinary_sessions.py`、`netizen_cli/file_evidence.py`、`netizen_cli/prompt_inputs.py` | `ordinary_sessions.py` 定义普通会话端口及其中立类型，后两者分别定义文件证据和提示输入的中立类型。 |
 
 程序分发与实例数据由 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md)
 分开：`netizen_cli/cli.py` 提供命令，`cli_services.py` 控制精确系统服务，

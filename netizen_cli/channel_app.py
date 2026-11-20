@@ -45,6 +45,9 @@ from .channel.reply_presenter import (
 )
 from .channel.reply_suppression import ReplySuppression
 from .codex_runtime import CodexRuntime
+from .ordinary_sessions import OrdinarySessionPort
+from .runtime.codex_ordinary import CodexOrdinarySessions
+from .runtime.codex_replies import codex_completion_handler
 from .domain import (
     TurnFileActionIntent,
     TurnFileActionName,
@@ -111,6 +114,7 @@ class ChannelApplication(ChannelEntry):
         app_id: str,
         channel: ReplyChannel,
         runtime: CodexRuntime,
+        ordinary: OrdinarySessionPort | None = None,
         bindings: BindingStore,
         projects: ProjectRegistry,
         management: InstanceManagementService,
@@ -128,6 +132,7 @@ class ChannelApplication(ChannelEntry):
         self._channel = channel
         self._chat_avatars = ChatAvatarImages(channel)
         self._runtime = runtime
+        self._ordinary = ordinary if ordinary is not None else CodexOrdinarySessions(runtime)
         self._bindings = bindings
         self._projects = projects
         self._message_history = message_history
@@ -145,7 +150,10 @@ class ChannelApplication(ChannelEntry):
         self._rename_name_generations: dict[str, _RenameNameGeneration] = {}
         self._reactions = _ReactionController(channel)
         self._reply_suppression = ReplySuppression()
-        self._progress_cards = _ReplyCardPresenter(channel, runtime)
+        self._progress_cards = _ReplyCardPresenter(channel, runtime, ordinary=self._ordinary)
+        self.handle_completion = codex_completion_handler(
+            self.handle_ordinary_completion, self.handle_codex_completion, self._projection_failed,
+        )
         runtime.set_completion_handler(self.handle_completion)
         runtime.set_question_handler(self.handle_questions)
         runtime.set_input_received_handler(self._reply_suppression.discard_physical_turn)

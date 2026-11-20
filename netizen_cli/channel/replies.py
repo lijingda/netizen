@@ -29,6 +29,7 @@ from ..cards import (
 from .messages import _send_result_error_code
 from ..file_inputs import FileInputError
 from ..defaults import DefaultConfigurationError
+from ..ordinary_sessions import OrdinaryInputRejected
 from ..runtime.contracts import (
     ContextBoundaryCommitFailed,
     GoalNotFound,
@@ -167,6 +168,7 @@ class ChannelReplies(ChannelState):
             ThreadRunningConfiguration,
             ThreadStopping,
             ThreadOccupied,
+            OrdinaryInputRejected,
             SteerRace,
             TerminalCleanupFailed,
             TurnInterruptFailed,

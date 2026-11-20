@@ -35,6 +35,7 @@ from ..model_settings import TurnModelSettings
 from ..partial_answers import PartialAnswer
 from ..progress_card_settings import ProgressCardSettings
 from .thread_naming import ThreadNamer
+from .codex_contracts import RuntimeOutcome, CompletionHandler
 from .contracts import (
     NativeTurnHandle,
     NativeThread,
@@ -54,8 +55,6 @@ from .contracts import (
     ThreadSubscriptionState,
     ContextWindowUsage,
     ContextCursorCommit,
-    RuntimeOutcome,
-    CompletionHandler,
 )
 from ..sdk_gap_adapter import (
     GoalControl,

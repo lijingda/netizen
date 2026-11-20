@@ -25,7 +25,6 @@ from ..runtime.contracts import (
     GoalActivitySnapshot,
     SideTurnOutcome,
     TurnActivitySnapshot,
-    TurnOutcome,
 )
 from ..domain import (
     ActiveState,
@@ -37,21 +36,14 @@ from ..domain import (
     ScopeKind,
     TurnFileActionIntent,
 )
-from ..error_messages import describe_error, native_turn_failure
+from ..error_messages import describe_error
+from ..ordinary_sessions import OrdinaryConclusion
+from ..runtime.codex_replies import native_failure_detail
 from ..turn_files import (
     TurnFileError,
 )
 
 from . import constants
-
-
-@dataclass(frozen=True, slots=True)
-class _GoalReplyResult:
-    """Presentation-only view of the verified final physical Turn."""
-
-    status: str | None
-    final_response: str | None
-    items: tuple[object, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,7 +388,13 @@ def _first_post_node(message: Any) -> dict[str, Any] | None:
     return None
 
 
-def _task_interruption_text(outcome: TurnOutcome | SideTurnOutcome) -> str:
+def _task_has_error(outcome: OrdinaryConclusion | SideTurnOutcome) -> bool:
+    if isinstance(outcome, OrdinaryConclusion):
+        return outcome.error_detail is not None
+    return outcome.error is not None
+
+
+def _task_interruption_text(outcome: OrdinaryConclusion | SideTurnOutcome) -> str:
     if outcome.background_cleanup_requested:
         message = (
             "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。"
@@ -407,9 +405,10 @@ def _task_interruption_text(outcome: TurnOutcome | SideTurnOutcome) -> str:
             "Codex Turn 已中断；本服务未请求清理已登记的后台终端。"
             "前台工具进程可能仍在运行。"
         )
-    native_error = getattr(outcome.result, "error", None)
-    if native_error is not None:
-        message += f"\n中断原因：{describe_error(native_turn_failure(native_error))}"
+    detail = (outcome.native_failure_detail if isinstance(outcome, OrdinaryConclusion)
+              else native_failure_detail(outcome.result))
+    if detail is not None:
+        message += f"\n中断原因：{detail}"
     return message
 
 
@@ -430,19 +429,17 @@ def _goal_reply_activity(snapshot: GoalActivitySnapshot) -> TurnActivitySnapshot
     )
 
 
-def _task_failure_text(outcome: TurnOutcome | SideTurnOutcome) -> str:
-    error = outcome.error
-    if error is None:
-        native_error = getattr(outcome.result, "error", None)
-        error = (
-            native_turn_failure(native_error)
-            if native_error is not None
-            else RuntimeError(
-                outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
-            )
-        )
-    message = f"任务未完成：{describe_error(error)}"
-    if isinstance(outcome, TurnOutcome) and outcome.status == "failed":
+def _task_failure_text(outcome: OrdinaryConclusion | SideTurnOutcome) -> str:
+    if isinstance(outcome, OrdinaryConclusion):
+        detail = outcome.error_detail or outcome.native_failure_detail
+    elif outcome.error is not None:
+        detail = describe_error(outcome.error)
+    else:
+        detail = native_failure_detail(outcome.result)
+    if detail is None:
+        detail = describe_error(RuntimeError(outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"))
+    message = f"任务未完成：{detail}"
+    if isinstance(outcome, OrdinaryConclusion) and outcome.status == "failed":
         message += (
             "\n本轮已结束，原会话及上下文仍保留；"
             "可发送“继续”或调整 /config 后重试。"
@@ -451,7 +448,7 @@ def _task_failure_text(outcome: TurnOutcome | SideTurnOutcome) -> str:
 
 
 def _outcome_completion_mention_user_id(
-    outcome: TurnOutcome | SideTurnOutcome,
+    outcome: OrdinaryConclusion | SideTurnOutcome,
 ) -> str | None:
     """Mention the captured task initiator once, only on a known task ending.
 
@@ -472,7 +469,7 @@ def _outcome_completion_mention_user_id(
         # of a terminal; Runtime retains an unknown Side slot in this case.
         return None
     elif outcome.status == "interrupted" or (
-        outcome.error is None and outcome.status not in {"completed", "failed"}
+        not _task_has_error(outcome) and outcome.status not in {"completed", "failed"}
     ):
         return None
     return valid_completion_mention_user_id(outcome.owner_id)

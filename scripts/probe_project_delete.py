@@ -31,6 +31,7 @@ from netizen_cli.bindings import (  # noqa: E402
 )
 from netizen_cli.codex_runtime import CodexRuntime, SideSessionNotFound  # noqa: E402
 from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions  # noqa: E402
 from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
 from netizen_cli.management.service import (  # noqa: E402
     ExactBindingTarget,
@@ -102,7 +103,7 @@ async def _scenario(
     service = InstanceManagementService(
         bindings=store,
         projects=projects,
-        runtime=ManagementRuntimePort(runtime),
+        runtime=ManagementRuntimePort(runtime, ordinary=CodexOrdinarySessions(runtime)),
         scope_coordinator=ScopeCoordinator(),
     )
     bindings = []

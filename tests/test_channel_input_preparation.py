@@ -120,7 +120,7 @@ class MessageInputPreparerTest(unittest.IsolatedAsyncioTestCase):
             current_images=(),
         )
 
-        self.assertEqual(prepared.native_input, render_plain_prompt(self.current))
+        self.assertEqual(prepared.prompt.text, render_plain_prompt(self.current))
         self.assertIsNone(prepared.context_anchor)
         self.assertIsNone(prepared.context_stats)
         self.channel.fetch_inbound_message.assert_not_awaited()
@@ -142,7 +142,7 @@ class MessageInputPreparerTest(unittest.IsolatedAsyncioTestCase):
             source_message=self.source, quoted_target_id=None, current=self.current,
         )
 
-        self.assertEqual(prepared.native_input, render_plain_prompt(self.current))
+        self.assertEqual(prepared.prompt.text, render_plain_prompt(self.current))
         self.assertIsNone(prepared.context_anchor)
         self.assertIsNone(prepared.context_stats)
         self.channel.fetch_inbound_message.assert_not_awaited()
@@ -162,11 +162,11 @@ class MessageInputPreparerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(prepared.context_anchor, self.upper)
         self.assertEqual(prepared.context_stats.selected_count, 1)
-        envelope = json.loads(prepared.native_input)
+        envelope = json.loads(prepared.prompt.text)
         self.assertEqual(envelope["supplemental_messages"][0]["text"], "请总结 $reports")
-        self.assertIn(r"\u0024reports", prepared.native_input)
-        self.assertIn(r"\u0024metadata-skill", prepared.native_input)
-        self.assertIn("$live-skill", prepared.native_input)
+        self.assertIn(r"\u0024reports", prepared.prompt.text)
+        self.assertIn(r"\u0024metadata-skill", prepared.prompt.text)
+        self.assertIn("$live-skill", prepared.prompt.text)
         self.assertEqual(envelope["current_message"]["kind"], "scheduled_plan")
         self.assertEqual(envelope["current_message"]["request_text"], self.current.request_text)
         self.assertNotIn("sender", envelope["current_message"])
@@ -185,11 +185,11 @@ class MessageInputPreparerTest(unittest.IsolatedAsyncioTestCase):
         self.channel.download_resource.assert_awaited_once_with(
             "img_history", resource_type="image", message_id="om_image",
         )
-        self.assertEqual(len(prepared.native_input), 3)
-        label = json.loads(prepared.native_input[0].text)
+        self.assertEqual(len(prepared.prompt.images), 1)
+        label = json.loads(prepared.prompt.images[0].label)
         self.assertEqual(label["source"], "supplemental_message")
         self.assertEqual(label["ref"], "img1")
-        envelope = json.loads(prepared.native_input[-1].text)
+        envelope = json.loads(prepared.prompt.text)
         self.assertEqual(
             envelope["supplemental_messages"][0]["attachments"],
             [{"type": "image", "ref": "img1"}],
@@ -217,7 +217,7 @@ class MessageInputPreparerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(prepared.context_stats.selected_count, 50)
         self.assertTrue(prepared.context_stats.message_limit_reached)
-        self.assertTrue(json.loads(prepared.native_input)["context_status"]["truncated"])
+        self.assertTrue(json.loads(prepared.prompt.text)["context_status"]["truncated"])
         self.channel.download_resource.assert_not_awaited()
 
     async def test_scheduled_catch_up_keeps_selected_history_failures_fatal(self):
@@ -277,10 +277,10 @@ class MessageInputPreparerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.context_anchor, self.upper)
         self.assertEqual(prepared.context_stats.selected_count, 0)
         self.assertEqual(prepared.context_stats.quoted_deduplicated_count, 1)
-        envelope = json.loads(prepared.native_input)
+        envelope = json.loads(prepared.prompt.text)
         self.assertEqual(envelope["supplemental_messages"], [])
         self.assertEqual(envelope["quoted_message"]["text"], "请总结 $reports")
-        self.assertIn("\\u0024reports", prepared.native_input)
+        self.assertIn("\\u0024reports", prepared.prompt.text)
         self.assertEqual(envelope["current_message"]["request_text"], self.current.request_text)
         reader.read_window.assert_awaited_once_with(
             self.scope, self.lower, self.upper.message_id,
@@ -314,7 +314,7 @@ class MessageInputPreparerTest(unittest.IsolatedAsyncioTestCase):
 
         prepared = await self.catch_up(self.reader(reference))
 
-        self.assertEqual(json.loads(prepared.native_input)["supplemental_messages"], [])
+        self.assertEqual(json.loads(prepared.prompt.text)["supplemental_messages"], [])
         self.assertEqual(prepared.context_stats.omitted_count, 1)
         self.channel.fetch_quoted_context.assert_not_awaited()
         self.channel.download_resource.assert_not_awaited()

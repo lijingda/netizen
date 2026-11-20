@@ -25,8 +25,8 @@ from ..cards import (
     new_binding_card,
 )
 from .session_pages import SessionCardPage
+from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
-    BindingRuntimeSnapshot,
     NativeThreadMetadata,
     ThreadLifecycleError,
 )

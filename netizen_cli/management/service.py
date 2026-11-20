@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
+from ..management_errors import ConversationReadError as ConversationReadError, ManagementError
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .project_files import ProjectFileService
 from .path_files import PathFileService
@@ -48,9 +49,10 @@ from ..bindings import (
 )
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
+from ..ordinary_sessions import OrdinarySessionPort
+from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
-    BindingRuntimeSnapshot,
     NativeConversationPage,
     RuntimeClosed,
     NativeThreadCatalog,
@@ -111,10 +113,6 @@ _CONFIG_WRITE_SECONDS = 10.0
 _PROJECT_DELETE_SECONDS = 120.0
 _PROJECT_DELETE_STEP_SECONDS = 30.0
 logger = logging.getLogger(__name__)
-
-
-class ManagementError(RuntimeError):
-    """Base class for stable application-boundary precondition failures."""
 
 
 class NoCurrentBinding(ManagementError):
@@ -520,10 +518,11 @@ class ManagementRuntimePort:
     it.
     """
 
-    __slots__ = ("__runtime",)
+    __slots__ = ("__runtime", "__ordinary")
 
-    def __init__(self, runtime: CodexRuntime) -> None:
+    def __init__(self, runtime: CodexRuntime, *, ordinary: OrdinarySessionPort) -> None:
         self.__runtime = runtime
+        self.__ordinary: OrdinarySessionPort = ordinary
 
     async def read_scheduled_turn(
         self, binding_id: str, turn_id: str, *, deadline: float | None = None,
@@ -645,12 +644,7 @@ class ManagementRuntimePort:
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
     ) -> StopDisposition:
-        if expected_activity_revision is None:
-            return await self.__runtime.stop_exact(
-                binding_id,
-                acknowledge=acknowledge,
-            )
-        return await self.__runtime.stop_exact(
+        return await self.__ordinary.stop_exact(
             binding_id,
             acknowledge=acknowledge,
             expected_activity_revision=expected_activity_revision,
@@ -664,7 +658,7 @@ class ManagementRuntimePort:
         expected_activity_revision: int,
         expected_turn_id: str,
     ) -> ActiveTurnSnapshot:
-        return await self.__runtime.recheck_turn_exact(
+        return await self.__ordinary.recheck_turn_exact(
             binding_id,
             expected_activity_revision=expected_activity_revision,
             expected_turn_id=expected_turn_id,
@@ -759,7 +753,7 @@ class ManagementRuntimePort:
         self, thread_id: str, *, cursor: str | None = None, limit: int = 10,
         previous_page: NativeConversationPage | None = None, deadline: float | None = None,
     ) -> NativeConversationPage:
-        return await self.__runtime.thread_conversation(
+        return await self.__runtime.thread_conversation_exact(
             thread_id, cursor=cursor, limit=limit, previous_page=previous_page, deadline=deadline,
         )
 

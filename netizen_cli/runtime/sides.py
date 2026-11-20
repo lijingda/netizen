@@ -52,6 +52,8 @@ from ..turn_activity import (
 )
 from ..turn_patch_children import TaskPatchChildren
 
+from ..prompt_inputs import PreparedPrompt
+from .native_inputs import to_codex_input
 from . import limits
 from .native_values import (
     _model_provider_rejection,
@@ -456,6 +458,8 @@ class SideRuntime(SubmissionRuntime):
         admission: SideSubmissionAdmission | None = None,
         skill_names: tuple[str, ...] = (),
     ) -> SideSubmission:
+        if isinstance(input, PreparedPrompt):
+            input = to_codex_input(input)
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不接受 Side 消息。")
         if admission is not None and admission.side_id != side_id:

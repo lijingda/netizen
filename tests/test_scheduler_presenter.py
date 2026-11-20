@@ -11,6 +11,7 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 from netizen_cli.cards import turn_progress_card
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.partial_answers import PartialAnswer
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.contracts import ActiveState, TurnActivitySnapshot
 
 
@@ -41,9 +42,11 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             turn_activity=Mock(return_value=self.activity),
             lifecycle_state=Mock(return_value=None),
         )
+        self.ordinary = CodexOrdinarySessions(self.runtime)
         self.presenter = _ReplyCardPresenter(
             self.channel,  # type: ignore[arg-type]
             self.runtime,  # type: ignore[arg-type]
+            ordinary=self.ordinary,
             poll_seconds=60,
         )
         self.addAsyncCleanup(self.presenter.close)
@@ -154,6 +157,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
         presenter = _ReplyCardPresenter(
             self.channel,  # type: ignore[arg-type]
             self.runtime,  # type: ignore[arg-type]
+            ordinary=self.ordinary,
             operation_timeout_seconds=0.01,
         )
         self.addAsyncCleanup(presenter.close)

@@ -143,6 +143,7 @@ from ..runtime.contracts import (
 )
 from ..domain import MentionContextMode, ScopeKind
 from ..management import (
+    ConversationReadError,
     ActivePointerChanged,
     BindingStatusProjection,
     ChatLabel,
@@ -1611,10 +1612,6 @@ class AdminWebApplication:
         })
 
     async def _session_conversation(self, context: _RequestContext) -> Response:
-        from openai_codex import CodexError
-        from openai_codex.errors import InvalidRequestError, JsonRpcError
-        from ..thread_history import ThreadHistoryUnavailable
-
         _require_query_keys(context.query, {"bindingId", "threadId", "cursor"})
         binding_id = _optional_text_query(context.query, "bindingId")
         thread_id = _optional_text_query(context.query, "threadId")
@@ -1671,13 +1668,15 @@ class AdminWebApplication:
                 if response is not None:
                     return response
                 previous_page = page
-        except JsonRpcError as error:
-            if isinstance(error, InvalidRequestError) and "cursor" in error.message.lower():
+        except ConversationReadError as error:
+            if error.kind == "invalid_cursor":
                 raise AdminWebError(400, "invalid_cursor", "分页游标已失效，请从最新重新读取。") from error
-            raise AdminWebError(503, "conversation_unavailable", "会话历史暂时不可读取，可能已删除或不可用。") from error
+            if error.kind == "rpc_unavailable":
+                raise AdminWebError(503, "conversation_unavailable", "会话历史暂时不可读取，可能已删除或不可用。") from error
+            raise AdminWebError(503, "conversation_unavailable", "会话历史暂时不可读取，请稍后刷新。") from error
         except (TimeoutError, BlockingIOResultUnknown) as error:
             raise AdminWebError(504, "conversation_timeout", "对话记录读取超时，请手动重试。") from error
-        except (CodexError, ThreadHistoryUnavailable, OSError, BlockingIOExecutorClosed, BlockingIOExecutorSaturated) as error:
+        except (OSError, BlockingIOExecutorClosed, BlockingIOExecutorSaturated) as error:
             raise AdminWebError(503, "conversation_unavailable", "会话历史暂时不可读取，请稍后刷新。") from error
         raise AssertionError("conversation page did not produce a response")
 

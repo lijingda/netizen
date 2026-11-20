@@ -14,6 +14,7 @@ import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from lark_channel import (
     FeishuChannel, LogLevel, OutboundCard, OutboundConfig, OutboundPost,
@@ -27,6 +28,7 @@ from netizen_cli.domain import (
     ReplyCardGoalModule, ReplyCardPartialAnswerModule, ReplyCardProjection,
     ReplyCardResultModule, ScopeKind, TurnCommentaryManifestEntry, TurnProgressManifest,
 )
+from netizen_cli.ordinary_sessions import OrdinarySessionPort
 from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.settings import Settings
 
@@ -138,7 +140,7 @@ def _card_scenarios(scope: FeishuScope) -> list[tuple[str, list[tuple[str, Outbo
 async def _text_samples(send_post) -> int:
     # No native runtime or notification consumer: delivery uses only supplied
     # exact completed items and the real production rich-text delivery method.
-    presenter = _ReplyCardPresenter(None, None, operation_timeout_seconds=30)
+    presenter = _ReplyCardPresenter(None, None, ordinary=Mock(spec_set=OrdinarySessionPort), operation_timeout_seconds=30)
     try:
         for side in (False, True):
             label = "Side" if side else "普通会话"

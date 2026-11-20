@@ -12,6 +12,7 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 from ..cards import turn_progress_card
 from ..cards.reply import feishu_answer_text
 from ..codex_runtime import CodexRuntime
+from ..ordinary_sessions import OrdinarySessionPort
 from ..partial_answers import PartialAnswer
 from ..runtime.contracts import (
     SideTurnActivitySnapshot,
@@ -104,6 +105,7 @@ class _ReplyCardPresenter:
         channel: ReplyChannel,
         runtime: CodexRuntime,
         *,
+        ordinary: OrdinarySessionPort,
         poll_seconds: float = _PROGRESS_CARD_POLL_SECONDS,
         operation_timeout_seconds: float = _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS,
     ) -> None:
@@ -113,6 +115,7 @@ class _ReplyCardPresenter:
             raise ValueError("progress card operation timeout must be positive")
         self._channel = channel
         self._runtime = runtime
+        self._ordinary = ordinary
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
         self._sessions: dict[
@@ -146,8 +149,8 @@ class _ReplyCardPresenter:
             # Resuming a paused Goal can join the same running logical stream.
             return True
         if snapshot_reader is None:
-            snapshot_reader = lambda: self._runtime.turn_activity(
-                binding_id, thread_id=thread_id, turn_id=turn_id, refresh_plan=False,
+            snapshot_reader = lambda: self._ordinary.turn_activity(
+                binding_id, thread_id=thread_id, turn_id=turn_id,
             )
         try:
             snapshot = snapshot_reader()
@@ -194,7 +197,8 @@ class _ReplyCardPresenter:
         current = snapshot_reader()
         if (
             current is None
-            or self._runtime.lifecycle_state(binding_id) is not None
+            or (self._runtime.lifecycle_state(binding_id) is not None if logical_turn
+                else self._ordinary.reply_blocked_by_lifecycle(binding_id))
         ):
             return False
         key = (binding_id, thread_id, turn_id)
@@ -437,11 +441,8 @@ class _ReplyCardPresenter:
         if session.failed:
             return False
         try:
-            snapshot = self._runtime.turn_activity(
-                binding_id,
-                thread_id=thread_id,
-                turn_id=turn_id,
-                refresh_plan=False,
+            snapshot = self._ordinary.turn_activity(
+                binding_id, thread_id=thread_id, turn_id=turn_id,
             )
         except Exception:
             logger.exception(

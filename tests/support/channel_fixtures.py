@@ -15,11 +15,13 @@ from netizen_cli.bindings import BindingStore, BindingTaskFeedback
 from netizen_cli.cards import goal_card
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, NativeCapability, ScopeKind
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
     ScopeCoordinator,
 )
+from netizen_cli.ordinary_sessions import OrdinarySessionPort
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.runtime.contracts import Submission, SubmitDisposition
 from netizen_cli.schedules.models import ScheduleRule
@@ -161,21 +163,23 @@ class ScheduledChannelFixture(ChannelFixture):
 async def _assembled_channel(
     root: Path, project: Path, store: BindingStore, *, app_id: str,
     project_alias: str, fixture_type: type[ChannelFixture],
-    history: FakeMessageHistory | None,
+    history: FakeMessageHistory | None, ordinary: OrdinarySessionPort | None = None,
 ):
     channel = FakeChannel()
     runtime = StubRuntime()
     runtime.binding_store = store
+    if ordinary is None:
+        ordinary = CodexOrdinarySessions(runtime)
     projects = ProjectRegistry(store=store, project_root=root, projects={project_alias: project})
     management = InstanceManagementService(
-        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
+        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=ordinary),
         scope_coordinator=ScopeCoordinator(),
         chat_directory=FakeChatTargetDirectory(channel),
     )
     async with AsyncExitStack() as resources:
         resources.push_async_callback(management.close)
         app = ChannelApplication(
-            app_id=app_id, channel=channel, runtime=runtime, bindings=store,
+            app_id=app_id, channel=channel, runtime=runtime, ordinary=ordinary, bindings=store,
             projects=projects, management=management, message_history=history,
         )
         resources.push_async_callback(app.close)
@@ -184,7 +188,7 @@ async def _assembled_channel(
 
 
 @asynccontextmanager
-async def channel_fixture():
+async def channel_fixture(*, ordinary: OrdinarySessionPort | None = None):
     """The standard direct/group Channel fixture, including message history."""
     ids = iter((
         "11111111-0000-0000-0000-000000000001",
@@ -197,7 +201,7 @@ async def channel_fixture():
         project.mkdir()
         async with _assembled_channel(
             root, project, store, app_id="cli_test", project_alias="test",
-            fixture_type=ChannelFixture, history=FakeMessageHistory(),
+            fixture_type=ChannelFixture, history=FakeMessageHistory(), ordinary=ordinary,
         ) as fixture:
             yield fixture
 

@@ -48,6 +48,8 @@ from .contracts import (
     ContextCursorCommit,
 )
 
+from ..prompt_inputs import PreparedPrompt
+from .native_inputs import to_codex_input
 from .native_values import (
     _model_provider_rejection,
     _thread_creation_cwd,
@@ -367,6 +369,8 @@ class SubmissionRuntime(CompactionRuntime):
         external_model: str | None = None,
         preferred_title: str | None = None,
     ) -> Submission:
+        if isinstance(input, PreparedPrompt):
+            input = to_codex_input(input)
         if isinstance(input, ExternalMessage) != external:
             raise TypeError("ExternalMessage must use the verified external input entry")
         initial_run_id = initial.run_id if initial is not None else None

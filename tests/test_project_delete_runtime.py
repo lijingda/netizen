@@ -16,6 +16,7 @@ from netizen_cli.codex_runtime import (
     ThreadDeleteUnavailable,
 )
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from netizen_cli.projects import ProjectRegistry, UnknownProject
 from tests import test_codex_runtime as fixtures
@@ -275,7 +276,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         service = InstanceManagementService(
             bindings=self.store,
             projects=projects,
-            runtime=ManagementRuntimePort(self.runtime),
+            runtime=ManagementRuntimePort(self.runtime, ordinary=CodexOrdinarySessions(self.runtime)),
             scope_coordinator=ScopeCoordinator(),
         )
         try:
