@@ -2,7 +2,7 @@
 
 from openai_codex import ImageInput, TextInput
 
-from ..ordinary_sessions import PreparedPrompt
+from ..prompt_inputs import PreparedPrompt
 
 
 def to_codex_input(prompt: PreparedPrompt) -> str | list[TextInput | ImageInput]:

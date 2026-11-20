@@ -52,7 +52,7 @@ from ..turn_activity import (
 )
 from ..turn_patch_children import TaskPatchChildren
 
-from ..ordinary_sessions import PreparedPrompt
+from ..prompt_inputs import PreparedPrompt
 from .native_inputs import to_codex_input
 from . import limits
 from .native_values import (

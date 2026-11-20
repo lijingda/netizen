@@ -48,7 +48,7 @@ from .contracts import (
     ContextCursorCommit,
 )
 
-from ..ordinary_sessions import PreparedPrompt
+from ..prompt_inputs import PreparedPrompt
 from .native_inputs import to_codex_input
 from .native_values import (
     _model_provider_rejection,

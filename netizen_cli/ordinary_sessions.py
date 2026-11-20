@@ -1,29 +1,18 @@
 """Netizen-owned values for ordinary session inputs and completion."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from .bindings import BindingTaskFeedback, ThreadBinding
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
+from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
 from .runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class PromptImage:
-    label: str
-    data_url: str = field(repr=False)
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedPrompt:
-    text: str
-    images: tuple[PromptImage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

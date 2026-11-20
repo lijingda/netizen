@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
-from .ordinary_sessions import PreparedPrompt, PromptImage
+from .prompt_inputs import PreparedPrompt, PromptImage
 
 from .message_content import MATERIAL_MESSAGE_TYPES, normalized_content_type
 

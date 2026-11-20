@@ -17,7 +17,7 @@ from ..card_content import PreparedCardContent, request_locale
 from ..domain import FeishuScope, MessageContextAnchor, ScopeKind
 from ..attachments import AttachmentStore, PreparedAttachments
 from ..file_inputs import FileInputError, FileInputPreparer, file_references, render_file_attachments
-from ..ordinary_sessions import PreparedPrompt
+from ..prompt_inputs import PreparedPrompt
 from ..image_inputs import (
     ImageDownloadChannel,
     ImageInputError,
