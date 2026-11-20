@@ -219,3 +219,74 @@ class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(task, 2)
             self.assertEqual(backend.interrupts, [])
             self.assertNotIn((message.id, "正在停止任务。"), fixture.channel.replies)
+
+
+class OrdinaryPortContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_busy_policy_completion_and_stale_admission_on_both_runtimes(self):
+        from tempfile import TemporaryDirectory
+
+        from netizen_cli.bindings import BindingStore
+        from netizen_cli.codex_runtime import CodexRuntime
+        from netizen_cli.domain import FeishuScope, ScopeKind
+        from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
+        from netizen_cli.runtime.codex_replies import codex_completion_handler
+        from netizen_cli.runtime.contracts import SteerRace
+        from tests.support.claude_client import FakeClaudeClients
+        from tests.test_codex_runtime import FakeCodex, FakeTerminalCleanup
+
+        for backend in ("codex", "claude"):
+            with self.subTest(backend=backend), TemporaryDirectory() as tmp:
+                store = BindingStore()
+                cwd = Path(tmp)
+                store.bootstrap_project(alias="test", cwd=str(cwd))
+                binding = store.create_channel_binding(scope=FeishuScope("app", "chat", ScopeKind.DIRECT),
+                                                       project_alias="test", creator_id="owner")
+                sink = AsyncMock()
+                if backend == "codex":
+                    sdk = FakeCodex()
+                    runtime = CodexRuntime(codex=sdk, bindings=store, terminal_cleanup=FakeTerminalCleanup(sdk.events),
+                                           automatic_thread_naming=False, poll_interval_seconds=0,
+                                           on_completion=codex_completion_handler(sink, AsyncMock(), AsyncMock()))
+                    ordinary = CodexOrdinarySessions(runtime)
+                else:
+                    now = 0.
+                    clients = FakeClaudeClients()
+                    ordinary = runtime = ClaudeOrdinarySessions(bindings=store, clients=clients, owner_id="owner",
+                                                                notice=AsyncMock(), on_completion=sink, clock=lambda: now)
+                    runtime.open_admission()
+                    now = 2.
+                try:
+                    async def submit(admission):
+                        current = store.get(binding.id)
+                        return await ordinary.submit(binding=current, cwd=None if current.native_thread_id else cwd,
+                                                     input=PreparedPrompt("input"), owner_id="owner", origin="origin",
+                                                     admission=admission, context_commit=None, skill_names=())
+
+                    stale = await ordinary.capture_submission_admission(binding.id)
+                    first = await submit(stale)
+                    self.assertEqual(first.disposition, SubmitDisposition.STARTED)
+                    self.assertEqual(store.get(binding.id).native_thread_id, first.thread_id)
+                    if backend == "codex":
+                        follow = await submit(await ordinary.capture_submission_admission(binding.id))
+                        self.assertEqual((follow.disposition, follow.turn_id), (SubmitDisposition.STEERED, first.turn_id))
+                        self.assertEqual(len(sdk.handles), 1)
+                        sdk.handles[0].complete(response="answer")
+                    else:
+                        with self.assertRaises(OrdinaryInputRejected):
+                            await ordinary.capture_submission_admission(binding.id)
+                        self.assertEqual(len(clients.calls[0].inputs), 1)
+                        clients.calls[0].init()
+                        clients.calls[0].result()
+                    first.release_receipt_attempt()
+                    self.assertTrue(await runtime.wait_idle(2))
+                    event = sink.await_args.args[0]
+                    self.assertEqual((event.binding_id, event.thread_id, event.turn_id, event.owner_id, event.origin,
+                                      event.final_response, event.status),
+                                     (binding.id, first.thread_id, first.turn_id, "owner", "origin", "answer", "completed"))
+                    self.assertEqual(sink.await_count, 1)
+                    with self.assertRaises((SteerRace, OrdinaryInputRejected)):
+                        await submit(stale)
+                finally:
+                    runtime.close_admission()
+                    await runtime.cancel_tasks()
+                    store.close()
