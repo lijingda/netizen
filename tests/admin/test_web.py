@@ -2170,7 +2170,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
     async def test_conversation_is_an_authenticated_exact_read_not_a_mutation(self) -> None:
         from netizen_cli.prompt_projection import ConversationInput
         from netizen_cli.runtime.contracts import NativeLatestAnswer, NativeConversationTurn, NativeConversationPage
-        from netizen_cli.thread_history import ThreadHistoryUnavailable
+        from netizen_cli.management import ConversationReadError
         from netizen_cli.management.blocking_io import BoundedBlockingIOExecutor
 
         self.runner.open_admission()
@@ -2198,7 +2198,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("readAt", result)
             self.assertEqual(read.call_args.args, ("binding",))
             self.assertEqual(read.call_args.kwargs["thread_id"], "native")
-            read.side_effect = ThreadHistoryUnavailable("missing history")
+            read.side_effect = ConversationReadError("unavailable")
             status, _, result = await self.json_get("/api/v1/sessions/conversation?bindingId=binding&threadId=native", session)
             self.assertEqual(status, 503, result)
             self.assertEqual(result["code"], "conversation_unavailable")
@@ -2324,13 +2324,27 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 200, result)
             self.assertEqual(read.call_args.kwargs["cursor"], "opaque")
             self.assertEqual(read.call_args.kwargs["limit"], 10)
-            read.side_effect = InvalidRequestError(-32600, "invalid cursor")
-            status, _, result = await self.json_get(target + "&cursor=bad", session)
-            self.assertEqual((status, result["code"]), (400, "invalid_cursor"))
-            for error in (JsonRpcError(-32600, "invalid cursor"), InvalidRequestError(-32600, "thread not found")):
-                read.side_effect = error
-                status, _, result = await self.json_get(target + "&cursor=valid", session)
-                self.assertEqual(status, 503, result)
+            from netizen_cli.thread_history import ThreadHistoryUnavailable
+            from openai_codex import CodexError
+
+            native = AsyncMock()
+            port = ManagementRuntimePort(native)
+
+            async def exact_read(binding_id, **kwargs):
+                return await port.thread_conversation_exact(**kwargs)
+
+            read.side_effect = exact_read
+            for error, expected in (
+                (InvalidRequestError(-32600, "invalid cursor"), (400, "invalid_cursor", "分页游标已失效，请从最新重新读取。")),
+                (JsonRpcError(-32600, "invalid cursor"), (503, "conversation_unavailable", "会话历史暂时不可读取，可能已删除或不可用。")),
+                (InvalidRequestError(-32600, "thread not found"), (503, "conversation_unavailable", "会话历史暂时不可读取，可能已删除或不可用。")),
+                (CodexError("private"), (503, "conversation_unavailable", "会话历史暂时不可读取，请稍后刷新。")),
+                (ThreadHistoryUnavailable("private"), (503, "conversation_unavailable", "会话历史暂时不可读取，请稍后刷新。")),
+            ):
+                with self.subTest(error=type(error).__name__):
+                    native.thread_conversation.side_effect = error
+                    status, _, result = await self.json_get(target, session)
+                    self.assertEqual((status, result["code"], result["message"]), expected)
 
     async def test_conversation_page_budget_rereads_same_cursor_and_retains_single_oversized_turn(self):
         from netizen_cli.prompt_projection import ConversationInput

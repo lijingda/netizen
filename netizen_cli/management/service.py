@@ -11,6 +11,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
+from openai_codex import CodexError
+from openai_codex.errors import InvalidRequestError, JsonRpcError
+
+from ..thread_history import ThreadHistoryUnavailable
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .project_files import ProjectFileService
 from .path_files import PathFileService
@@ -509,6 +513,14 @@ class ClosedSide:
     missing_runtime_session: bool = False
 
 
+class ConversationReadError(ManagementError):
+    """The exact native conversation read failed before a page was available."""
+
+    def __init__(self, kind: Literal["invalid_cursor", "rpc_unavailable", "unavailable"]) -> None:
+        super().__init__(kind)
+        self.kind = kind
+
+
 class ManagementRuntimePort:
     """Concrete capability wrapper exposing only approved management seams.
 
@@ -759,9 +771,16 @@ class ManagementRuntimePort:
         self, thread_id: str, *, cursor: str | None = None, limit: int = 10,
         previous_page: NativeConversationPage | None = None, deadline: float | None = None,
     ) -> NativeConversationPage:
-        return await self.__runtime.thread_conversation(
-            thread_id, cursor=cursor, limit=limit, previous_page=previous_page, deadline=deadline,
-        )
+        try:
+            return await self.__runtime.thread_conversation(
+                thread_id, cursor=cursor, limit=limit, previous_page=previous_page, deadline=deadline,
+            )
+        except JsonRpcError as error:
+            if isinstance(error, InvalidRequestError) and "cursor" in error.message.lower():
+                raise ConversationReadError("invalid_cursor") from error
+            raise ConversationReadError("rpc_unavailable") from error
+        except (CodexError, ThreadHistoryUnavailable) as error:
+            raise ConversationReadError("unavailable") from error
 
     async def thread_summary_exact(
         self, thread_id: str,
