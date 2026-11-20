@@ -55,6 +55,7 @@ Binding 锁、准入版本、未知态、停服预算；后者包括 Goal 换轮
    - "未提交"的拒绝文案只用于本地确实没有调用 SDK 的情形；调用后失去回执时，报告提交结果未知。
 6. **审批仍是非目标**
    - 新后端使用其原生的非交互权限策略；需要真人批准、又没有可验证应答通道的操作，按原生策略拒绝。
+   - Claude 后端的权限完全由用户在 Claude Code 设置中自行配置（权限规则与默认模式），用户手册说明配置方法。Netizen 不替用户放宽权限，例如不传入额外允许的工具，也不切换到跳过权限的模式。Netizen 将来注册的专用工具需要的权限，另行决定。
    - Agent 的阻塞式提问回调与 Codex 问题卡"以普通输入作答"是不同的授权路径，单独设计后才开放。
 7. **生命周期操作按后端开放**
    - archive、delete、restore 和 fork 只对经验证提供对应原生操作的后端开放。
@@ -71,6 +72,7 @@ Binding 锁、准入版本、未知态、停服预算；后者包括 Goal 换轮
        - setup 时，由在主机上执行 setup 的人完成飞书授权，以此确认其飞书身份，并声明自己是该订阅的所有者；Netizen 把这个身份登记为实例唯一的订阅所有者。
        - 此后，只有所有者本人能触发执行，包括普通消息、问题回答、定时计划的创建与手动运行，以及 Admin 手动运行。其他人的消息（含群聊中 @ 机器人）在调用 SDK 前拒绝。其他实例管理员保留管理权限，但不能触发执行。
        - 所有者登记与实例后端身份一起保存，并受启动校验保护；只能在主机上通过 setup 或修复命令更改，飞书和 Admin Web 都不能更改。
+   - **未取样的认证来源保持关闭。** 某种认证来源（例如有效 API key、Bedrock、Vertex）的握手字段组合，在取得实际样本之前不被识别为合格，对应模式不可选。认证本身由 Agent 完成，Netizen 只需确认自己能正确识别它。
    - **身份对应由部署者负责。** Netizen 无法、也不尝试核实飞书身份与 Claude 账号属于同一人；这一对应由部署者在 setup 时声明，合规责任由部署者承担。用户手册默认推荐 API key 模式。
    - **依据**：[Anthropic 法律与合规](https://code.claude.com/docs/en/legal-and-compliance)规定，开发者不得在自己的应用中提供 Claude.ai 登录，不得代其用户经订阅凭据转发请求，也不得收集、保存或中转 Claude 凭据，登录须经 Anthropic 自己的流程完成。同一节又写明："Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription, including where a platform hosts Claude Code"。[消费者条款](https://www.anthropic.com/legal/consumer-terms)第 2 节规定，不得把账号提供给他人使用。
    - **尚未解决的歧义**：[Agent SDK 文档](https://code.claude.com/docs/en/agent-sdk/overview)写的是"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products"，措辞与法律页的例外存在张力；消费者条款第 3 节对自动化访问也有限制。所以在订阅模式下开放定时任务之类的自动执行之前，须先确认这类使用是否被允许；必要时按法律页的指引向 Anthropic 询问。
