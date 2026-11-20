@@ -285,6 +285,16 @@ def resolve_setup_backend(root: Path, requested: str | None, *, already_register
         raise
 
 
+def check_unbound_start_backend(root: Path) -> None:
+    try:
+        config = read_setup_config(root / "config.yaml")
+    except Exception:
+        # Service startup handles unreadable configuration after registration.
+        return
+    if config is not None:
+        instance_backend(config["instance"])
+
+
 def prepare_configuration(root: Path, *, backend: str | None = None, admin_port: int | None = None,
                           admin_open_id: str | None = None,
                           runner: Callable = subprocess.run,

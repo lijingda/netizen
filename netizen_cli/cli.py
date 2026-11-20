@@ -238,9 +238,10 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                 report["phase"] = "register"
                 with instance_lifetime_lock(root) as descriptor:
                     validate_prepared_instance(root)
-                    from .cli_setup import require_admin_binding
+                    from .cli_setup import check_unbound_start_backend, require_admin_binding
 
                     require_admin_binding(root)
+                    check_unbound_start_backend(root)
                     binding = _current_binding(root)
                     manager.register(binding, lifetime_descriptor=descriptor)
                     # Registration and process readiness are separate facts.

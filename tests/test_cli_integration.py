@@ -216,6 +216,21 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         self.assertEqual(self.manager.inspect(self.root).binding, self.environments[1])
         self.assertEqual(report["instance"], "unknown until ready is verified")
 
+    def test_unbound_start_refuses_invalid_backend_before_registration(self) -> None:
+        self.setup_instance()
+        self.assertEqual(self.invoke("remove", "-y")[0], 0)
+        config = self.root / "config.yaml"
+        saved = yaml.safe_load(config.read_bytes())
+        for backend in ("other", None, 123):
+            with self.subTest(backend=backend), patch.object(self.manager, "register") as register:
+                saved["instance"]["backend"] = backend
+                config.write_text(yaml.safe_dump(saved))
+                code, report, _ = self.invoke("start")
+                self.assertEqual(code, 1, report)
+                self.assertIn("invalid instance.backend", report["reason"])
+                register.assert_not_called()
+                self.assertIsNone(self.manager.inspect(self.root))
+
     def test_complete_setup_start_remove_preserve_then_start_in_new_environment(self) -> None:
         self.setup_instance()
         database = self.root / "state/channel.sqlite3"

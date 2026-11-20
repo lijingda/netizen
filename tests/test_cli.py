@@ -59,7 +59,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(json.loads(output)["instance"]["binding"]["python"], "/env-a/bin/python")
 
     def test_retained_unbound_start_registers_current_environment(self):
-        root = Path("/tmp/cli-instance-retained").resolve()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        config = root / "config.yaml"
+        config.write_bytes(b"instance: [")
+        config.chmod(0o600)
         manager = Mock()
         manager.inspect.return_value = None
         manager.start.return_value = ServiceStatus(cli._current_binding(root), True, True, True)
