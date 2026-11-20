@@ -17,6 +17,7 @@ from ..card_content import PreparedCardContent, request_locale
 from ..domain import FeishuScope, MessageContextAnchor, ScopeKind
 from ..attachments import AttachmentStore, PreparedAttachments
 from ..file_inputs import FileInputError, FileInputPreparer, file_references, render_file_attachments
+from ..ordinary_sessions import PreparedPrompt
 from ..image_inputs import (
     ImageDownloadChannel,
     ImageInputError,
@@ -86,7 +87,7 @@ class MessageInputChannel(ImageDownloadChannel, Protocol):
 class PreparedInput:
     """Transient input and optional catch-up facts, without submission authority."""
 
-    native_input: str | list[Any]
+    prompt: PreparedPrompt
     context_anchor: MessageContextAnchor | None = None
     context_stats: SupplementalContextStats | None = None
     attachments: PreparedAttachments | None = None
@@ -126,16 +127,8 @@ class MessageInputPreparer:
             return prepared
         try:
             annotation = render_file_attachments(batch, references)
-            native = prepared.native_input
-            if isinstance(native, str):
-                native = native + "\n\n" + annotation
-            else:
-                # Existing multimodal order ends in one complete text prompt.
-                from openai_codex import TextInput
-                if not native or not isinstance(native[-1], TextInput):
-                    raise PromptProjectionError("附件与消息输入不一致，本条消息未提交。")
-                native = [*native[:-1], TextInput(native[-1].text + "\n\n" + annotation)]
-            return replace(prepared, native_input=native, attachments=batch)
+            prompt = replace(prepared.prompt, text=prepared.prompt.text + "\n\n" + annotation)
+            return replace(prepared, prompt=prompt, attachments=batch)
         except BaseException:
             await self._attachment_store.discard_files(batch)
             raise
@@ -152,7 +145,7 @@ class MessageInputPreparer:
 
         self._validate_anchor_material(current, quoted_target_id, current_images)
         if isinstance(current, (ScheduledInputProjection, CardAnswerProjection)):
-            return PreparedInput(native_input=render_plain_prompt(current))
+            return PreparedInput(prompt=PreparedPrompt(render_plain_prompt(current)))
         locale = request_locale(source_message)
 
         try:
@@ -218,7 +211,7 @@ class MessageInputPreparer:
                 )
 
             return await self._attach_files(PreparedInput(
-                native_input=compose_multimodal_input(
+                prompt=compose_multimodal_input(
                     prompt_text,
                     images=prepared_images,
                     image_prompt_refs=prompt_image_refs,
@@ -466,7 +459,7 @@ class MessageInputPreparer:
             image_prompt_refs=prompt_image_refs,
         )
         return await self._attach_files(PreparedInput(
-            native_input=compose_multimodal_input(
+            prompt=compose_multimodal_input(
                 context.text,
                 images=prepared_images,
                 image_prompt_refs=prompt_image_refs,

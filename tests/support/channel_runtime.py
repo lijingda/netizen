@@ -10,6 +10,8 @@ from netizen_cli.bindings import (
     BindingTurnSettings,
     SideTopicState,
 )
+from netizen_cli.ordinary_sessions import PreparedPrompt
+from netizen_cli.runtime.native_inputs import to_codex_input
 from netizen_cli.codex_runtime import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
@@ -234,6 +236,8 @@ class StubRuntime:
                 raise SteerRace(
                     "准备本条消息期间 active 会话已切换，本条消息未执行，请重新发送。"
                 )
+        if isinstance(kwargs["input"], PreparedPrompt):
+            kwargs["input"] = to_codex_input(kwargs["input"])
         self.submit_calls.append(kwargs)
         assert self.submission is not None
         return self.submission
@@ -754,6 +758,8 @@ class StubRuntime:
         )
 
     async def submit_side(self, **kwargs) -> SideSubmission:
+        if isinstance(kwargs["input"], PreparedPrompt):
+            kwargs["input"] = to_codex_input(kwargs["input"])
         self.submit_side_calls.append(kwargs)
         if self.side_submission is not None:
             return self.side_submission

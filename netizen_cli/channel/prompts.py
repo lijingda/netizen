@@ -277,7 +277,7 @@ class PromptChannel(CompletionPresentationChannel):
         submit_kwargs: dict[str, Any] = dict(
             binding=binding,
             cwd=cwd,
-            input=prepared.native_input,
+            input=prepared.prompt,
             owner_id=owner_id,
             origin=message,
             skill_names=skill_names,

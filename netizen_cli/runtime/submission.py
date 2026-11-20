@@ -48,6 +48,8 @@ from .contracts import (
     ContextCursorCommit,
 )
 
+from ..ordinary_sessions import PreparedPrompt
+from .native_inputs import to_codex_input
 from .native_values import (
     _model_provider_rejection,
     _thread_creation_cwd,
@@ -252,6 +254,8 @@ class SubmissionRuntime(CompactionRuntime):
         skill_names: tuple[str, ...] = (),
     ) -> Submission:
         """Submit input; cwd is only a lazy Thread's creation-directory intent."""
+        if isinstance(input, PreparedPrompt):
+            input = to_codex_input(input)
         active = self._active.get(binding.id)
         if (
             admission is None

@@ -225,7 +225,7 @@ class SideChannel(PromptChannel):
         )
         submit_kwargs: dict[str, Any] = dict(
             side_id=side_id,
-            input=prepared.native_input,
+            input=prepared.prompt,
             owner_id=owner_id,
             origin=reply_origin,
             admission=admission,

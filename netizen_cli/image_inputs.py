@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
-from openai_codex import ImageInput, TextInput
+from .ordinary_sessions import PreparedPrompt, PromptImage
 
 from .message_content import MATERIAL_MESSAGE_TYPES, normalized_content_type
 
@@ -380,15 +380,15 @@ def compose_multimodal_input(
     *,
     images: tuple[PreparedImage, ...],
     image_prompt_refs: ImagePromptReferences | None = None,
-) -> str | list[Any]:
-    """Place labeled native images before one complete final text prompt."""
+) -> PreparedPrompt:
+    """Label images in submission order and retain the complete task text."""
 
     if not images:
         if image_prompt_refs:
             raise ImageInputContractError(
                 "无图片输入不能携带图片本地引用，本条消息未执行。"
             )
-        return prompt_text
+        return PreparedPrompt(prompt_text)
     ordered_images = _ordered_images(images)
     expected_refs = image_prompt_references(ordered_images)
     resolved_refs = expected_refs if image_prompt_refs is None else image_prompt_refs
@@ -401,7 +401,7 @@ def compose_multimodal_input(
         for source in _IMAGE_SOURCE_ORDER
     }
     indexes = {source: 0 for source in _IMAGE_SOURCE_ORDER}
-    items: list[Any] = []
+    labeled: list[PromptImage] = []
     for image in ordered_images:
         reference = image.reference
         indexes[reference.source] += 1
@@ -414,10 +414,8 @@ def compose_multimodal_input(
             "mime_type": image.mime_type,
             "size_bytes": image.size_bytes,
         }
-        items.append(TextInput(json.dumps(label, ensure_ascii=False)))
-        items.append(ImageInput(image.data_url))
-    items.append(TextInput(prompt_text))
-    return items
+        labeled.append(PromptImage(json.dumps(label, ensure_ascii=False), image.data_url))
+    return PreparedPrompt(prompt_text, tuple(labeled))
 
 
 def _ordered_images(

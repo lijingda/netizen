@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from openai_codex import ImageInput, TextInput
 
+from netizen_cli.runtime.native_inputs import to_codex_input
 from netizen_cli.image_inputs import (
     ImageInputContractError,
     ImageInputUnavailable,
@@ -523,8 +524,9 @@ class MultimodalCompositionTest(unittest.TestCase):
             )
         )
 
-        result = compose_multimodal_input("request", images=images)
+        prompt_input = compose_multimodal_input("request", images=images)
 
+        result = to_codex_input(prompt_input)
         assert isinstance(result, list)
         labels = [
             json.loads(item.text)
@@ -576,11 +578,12 @@ class MultimodalCompositionTest(unittest.TestCase):
             }
         )
 
-        result = compose_multimodal_input(
+        prompt_input = compose_multimodal_input(
             prompt,
             images=images,
         )
 
+        result = to_codex_input(prompt_input)
         assert isinstance(result, list)
         self.assertIsInstance(result[0], TextInput)
         self.assertIsInstance(result[1], ImageInput)
@@ -617,11 +620,12 @@ class MultimodalCompositionTest(unittest.TestCase):
             "data:image/png;base64,AA==",
         )
 
-        result = compose_multimodal_input(
+        prompt_input = compose_multimodal_input(
             "inspect this image",
             images=(image,),
         )
 
+        result = to_codex_input(prompt_input)
         assert isinstance(result, list)
         self.assertEqual(len(result), 3)
         self.assertEqual(json.loads(result[0].text)["kind"], "feishu_image_input")
@@ -638,7 +642,7 @@ class MultimodalCompositionTest(unittest.TestCase):
 
     def test_no_images_preserves_plain_string_input(self) -> None:
         self.assertEqual(
-            compose_multimodal_input("plain", images=()),
+            to_codex_input(compose_multimodal_input("plain", images=())),
             "plain",
         )
 
