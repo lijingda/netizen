@@ -27,8 +27,9 @@ sys.path.insert(0, str(SOURCE_ROOT))
 from netizen_cli.bindings import BindingStore  # noqa: E402
 from netizen_cli.codex_runtime import CodexRuntime, ThreadLifecycleError  # noqa: E402
 from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
+from netizen_cli.runtime.codex_contracts import GoalOutcome  # noqa: E402
 from netizen_cli.runtime.contracts import (  # noqa: E402
-    GoalOutcome, StopDisposition, ThreadActivityDiscardedOutcome,
+    StopDisposition, ThreadActivityDiscardedOutcome,
     ThreadSubscriptionState, TurnOutcome,
 )
 from netizen_cli.sdk_gap_adapter import (  # noqa: E402

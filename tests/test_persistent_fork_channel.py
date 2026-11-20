@@ -19,10 +19,11 @@ from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAn
 from netizen_cli.feishu_links import chat_open_url, topic_open_url
 from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError, FeishuChatDirectory
 from netizen_cli.progress_card_settings import ProgressCardSettings
+from netizen_cli.runtime.native_inputs import to_codex_input
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from tests.support.channel_cards import callback, elements, form_values
 from tests.support.channel_fixtures import channel_fixture, side_channel_fixture
-from tests.support.channel_messages import FakeMessage, quoted_inbound
+from tests.support.channel_messages import FakeMessage, plain_prompt_projection, quoted_inbound
 from tests.support.channel_results import sent_result
 
 
@@ -760,7 +761,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
             rule_id=None, expected_revision=None)
         self.queue_topic()
         async def submit(**kwargs):
-            self.runtime.submit_calls.append(kwargs)
+            self.runtime.submit_calls.append({**kwargs, "input": to_codex_input(kwargs["input"])})
             binding = kwargs["binding"]
             self.runtime.materialize(binding.id, "native-early", cwd=self.fixture.project)
             return Submission(SubmitDisposition.STARTED, binding.id, "native-early", "turn-early",
@@ -782,6 +783,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(early_binding.native_thread_id, self.native.id)
         self.assertEqual(len(self.runtime.submit_calls), 1)
         self.assertEqual(self.runtime.submit_calls[0]["binding"].id, early_binding.id)
+        self.assertEqual(plain_prompt_projection(self.runtime.submit_calls[0]["input"])[0], "提前的问题")
         self.runtime.adopt_fork.assert_not_awaited()
         self.runtime.release_unbound_fork.assert_awaited_once_with(self.native)
         self.assertIn("绑定未完成", self.updates_text())

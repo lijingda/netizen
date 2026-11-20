@@ -41,6 +41,7 @@ from ..cards.scheduled import (
     schedule_retry_card,
     schedule_trigger_instructions,
 )
+from ..ordinary_sessions import OrdinaryInputRejected
 from ..runtime.contracts import (
     GoalNotFound,
     GoalNotMaterialized,
@@ -287,7 +288,7 @@ class ScheduleChannel(SessionToolChannel):
             admission = None
             admission_error: Exception | None = None
             try:
-                admission = await self._runtime.capture_submission_admission(binding.id)
+                admission = await self._ordinary.capture_submission_admission(binding.id)
             except Exception as error:
                 # Still publish a real anchor for ordinary visible rejection.
                 admission_error = error
@@ -351,7 +352,7 @@ class ScheduleChannel(SessionToolChannel):
             current_run = store.get_run(run.id)
             if current_run.barrier != "released":
                 rejected = isinstance(error, (
-                    RuntimeClosed, SteerRace, ThreadStopping, ThreadCompacting,
+                    OrdinaryInputRejected, RuntimeClosed, SteerRace, ThreadStopping, ThreadCompacting,
                     ThreadOccupied, ThreadGoalActive, ThreadLifecycleError,
                     ModelCatalogError, SkillCatalogError, SkillReferenceError,
                     GoalNotFound, GoalNotMaterialized, WorktreeConflict,

@@ -23,6 +23,7 @@ from netizen_cli.codex_runtime import (
     ThreadLifecycleStateUnknown,
 )
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from netizen_cli.projects import ProjectError, ProjectRegistry, UnknownProject
 from tests.management.test_service import FakeManagementRuntime
@@ -467,7 +468,7 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
         second = self.binding("second")
         runtime = CodexRuntime(codex=object(), bindings=self.store, terminal_cleanup=object(),
                                automatic_thread_naming=False)
-        self.service._runtime = ManagementRuntimePort(runtime)
+        self.service._runtime = ManagementRuntimePort(runtime, ordinary=CodexOrdinarySessions(runtime))
         snapshot = await self.preview()
 
         first_deleted = self.watch_deletion(first.id)

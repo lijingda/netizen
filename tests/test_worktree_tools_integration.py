@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule, SessionPolicyService
+from netizen_cli.runtime.codex_session_reads import CodexSessionReads
 from netizen_cli.sessions.service import SessionService
 from netizen_cli.worktrees.errors import WorktreeError
 from netizen_cli.worktrees.settings import WorktreeSettingsService
@@ -44,7 +45,7 @@ class WorktreeToolIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     def session_service(self, policy: SessionAccessPolicy = SessionAccessPolicy()) -> SessionService:
         return SessionService(
-            bindings=self.store, runtime=self.fixture.runtime, codex=None, app_id="cli_test",
+            bindings=self.store, runtime=self.fixture.runtime, reads=AsyncMock(spec=CodexSessionReads), app_id="cli_test",
             policy=SessionPolicyService(policy), create_thread=self.create_thread, send_message=AsyncMock(),
             worktrees=self.worktrees,
         )

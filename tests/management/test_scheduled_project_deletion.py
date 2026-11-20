@@ -7,7 +7,8 @@ from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingNotFound, ProjectDeleting
 from netizen_cli.domain import ActiveState, FeishuScope, ScopeKind
 from netizen_cli.management import ExactBindingTarget
-from netizen_cli.runtime.contracts import ActiveTurnSnapshot, BindingRuntimeSnapshot, ThreadLifecycleStateUnknown
+from netizen_cli.runtime.codex_contracts import BindingRuntimeSnapshot
+from netizen_cli.runtime.contracts import ActiveTurnSnapshot, ThreadLifecycleStateUnknown
 from netizen_cli.schedules.models import ScheduleNotFound, ScheduleRule
 from tests.management import test_project_deletion as fixture
 

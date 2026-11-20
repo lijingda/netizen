@@ -180,7 +180,7 @@ class QuestionChannel(ScheduleChannel):
                         raise CardActionError(
                             f"请先通过 /sessions 切回问题所属会话 {recipient.short_id}，再提交回答；无需修改答案。"
                         )
-                    admission = await self._runtime.capture_submission_admission(recipient.id)
+                    admission = await self._ordinary.capture_submission_admission(recipient.id)
                 else:
                     admission = await self._runtime.capture_side_submission_admission(recipient.id)
                 sender = await card_answer_sender(self._channel, chat_id, operator)

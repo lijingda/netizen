@@ -397,6 +397,7 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
     async def test_feishu_image_labels_merge_with_their_following_image(self):
         import json
         from openai_codex import TextInput
+        from netizen_cli.runtime.native_inputs import to_codex_input
         from netizen_cli.image_inputs import ImageReference, PreparedImage, compose_multimodal_input
 
         async def project(content):
@@ -408,10 +409,11 @@ class ConversationPageTest(unittest.IsolatedAsyncioTestCase):
 
         for sources in (("current_message",), ("current_message", "current_message"),
                         ("supplemental_message", "quoted_message", "current_message")):
-            rendered = compose_multimodal_input("authored request", images=tuple(
+            prompt = compose_multimodal_input("authored request", images=tuple(
                 PreparedImage(ImageReference(source, f"message-{i}", f"key-{i}"), "image/png", 10, "data:image/png;base64,eA==")
                 for i, source in enumerate(sources)
             ))
+            rendered = to_codex_input(prompt)
             # The history text/image kinds correspond to the public input objects.
             content = [SimpleNamespace(type="text", text=part.text) if isinstance(part, TextInput)
                        else SimpleNamespace(type="image", url=part.url) for part in rendered]

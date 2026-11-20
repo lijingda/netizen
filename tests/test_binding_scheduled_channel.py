@@ -22,6 +22,7 @@ from netizen_cli.domain import (
     ScheduledBindingOrigin,
     ScopeKind,
 )
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
@@ -69,12 +70,13 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.projects = ProjectRegistry(
             store=self.store, project_root=self.cwd, projects={"work": self.cwd},
         )
+        ordinary = CodexOrdinarySessions(self.runtime)
         self.management = InstanceManagementService(
             bindings=self.store, projects=self.projects,
-            runtime=ManagementRuntimePort(self.runtime), scope_coordinator=ScopeCoordinator(),
+            runtime=ManagementRuntimePort(self.runtime, ordinary=ordinary), scope_coordinator=ScopeCoordinator(),
         )
         self.app = ChannelApplication(
-            app_id="app", channel=self.channel, runtime=self.runtime,
+            app_id="app", channel=self.channel, runtime=self.runtime, ordinary=ordinary,
             bindings=self.store, projects=self.projects, management=self.management,
             message_history=self.history,
         )

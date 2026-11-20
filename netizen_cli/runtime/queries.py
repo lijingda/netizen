@@ -12,7 +12,7 @@ from openai_codex import (
     CodexError,
     InvalidRequestError,
 )
-from openai_codex.errors import MethodNotFoundError
+from openai_codex.errors import JsonRpcError, MethodNotFoundError
 from pydantic import ValidationError
 
 if TYPE_CHECKING:
@@ -23,6 +23,7 @@ from ..account_rate_limits import (
     AccountRateLimitsUnavailable,
 )
 from ..delegation_envelope import SIDE_SOURCE_NOTICE, recognize_delegated_output
+from ..management_errors import ConversationReadError
 from ..model_settings import ModelCatalog, ModelCatalogError, TurnModelSettings
 from ..prompt_projection import ConversationInput, project_conversation_input, project_conversation_image_label
 from ..thread_history import AppServerThreadHistory, ThreadHistoryUnavailable
@@ -284,6 +285,22 @@ class NativeQueryRuntime(ForkRuntime):
                     ConversationInput("〔未能读取本轮首条输入〕", kind="unavailable"),
                 )
         return inputs
+
+    async def thread_conversation_exact(
+        self, thread_id: str, *, cursor: str | None = None, limit: int = 10,
+        previous_page: NativeConversationPage | None = None, deadline: float | None = None,
+    ) -> NativeConversationPage:
+        """Read one Admin conversation page with the management error contract."""
+        try:
+            return await self.thread_conversation(
+                thread_id, cursor=cursor, limit=limit, previous_page=previous_page, deadline=deadline,
+            )
+        except JsonRpcError as error:
+            if isinstance(error, InvalidRequestError) and "cursor" in error.message.lower():
+                raise ConversationReadError("invalid_cursor") from error
+            raise ConversationReadError("rpc_unavailable") from error
+        except (CodexError, ThreadHistoryUnavailable) as error:
+            raise ConversationReadError("unavailable") from error
 
     async def thread_conversation(
         self, thread_id: str, *, cursor: str | None = None, limit: int = 10,

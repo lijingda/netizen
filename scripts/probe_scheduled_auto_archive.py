@@ -32,6 +32,7 @@ from netizen_cli.bindings import BindingStore  # noqa: E402
 from netizen_cli.channel_app import ChannelApplication  # noqa: E402
 from netizen_cli.codex_runtime import CodexRuntime  # noqa: E402
 from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions  # noqa: E402
 from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
 from netizen_cli.management.service import (  # noqa: E402
     ExactBindingTarget, InstanceManagementService, ManagementRuntimePort,
@@ -129,12 +130,13 @@ async def _case(root: Path, name: str, *, manual: bool, auto_archive: bool,
                     thread_subscription_control=AppServerThreadSubscriptionControl(codex),
                     automatic_thread_naming=False,
                 )
+                ordinary = CodexOrdinarySessions(runtime)
                 management = InstanceManagementService(
-                    bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
+                    bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=ordinary),
                     scope_coordinator=ScopeCoordinator(), chat_directory=channel,
                 )
                 application = ChannelApplication(
-                    app_id="probe", channel=channel, runtime=runtime, bindings=store,
+                    app_id="probe", channel=channel, runtime=runtime, ordinary=ordinary, bindings=store,
                     projects=projects, management=management,
                 )
                 outcomes: asyncio.Queue[TurnOutcome | BaseException] = asyncio.Queue()

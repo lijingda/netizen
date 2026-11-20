@@ -18,6 +18,7 @@ from ..bindings import (
 from .question_inputs import CardAnswerOrigin
 from ..cards.defaults import defaults_card
 from ..defaults import DefaultConfigurationError
+from ..ordinary_sessions import OrdinaryInputRejected
 from ..runtime.contracts import (
     ModelProviderRejected,
     ContextCursorCommit,
@@ -220,7 +221,7 @@ class PromptChannel(CompletionPresentationChannel):
     ) -> None:
         """Share preparation, exact admission, acceptance and feedback for inputs."""
         if admission is None:
-            admission = await self._runtime.capture_submission_admission(binding.id)
+            admission = await self._ordinary.capture_submission_admission(binding.id)
         cwd = self._binding_creation_cwd(binding)
         if (binding.settings_revision != admission.settings_revision
                 or binding.context_revision != admission.context_revision
@@ -274,16 +275,6 @@ class PromptChannel(CompletionPresentationChannel):
                 current_images=current_images,
             )
 
-        submit_kwargs: dict[str, Any] = dict(
-            binding=binding,
-            cwd=cwd,
-            input=prepared.native_input,
-            owner_id=owner_id,
-            origin=message,
-            skill_names=skill_names,
-            context_commit=context_commit,
-        )
-        submit_kwargs["admission"] = admission
         if scheduled_run_id is not None:
             self._bindings.schedules.begin_binding_submission(scheduled_run_id, binding.id)
         attempted = False
@@ -292,7 +283,10 @@ class PromptChannel(CompletionPresentationChannel):
             if prepared.context_stats is not None:
                 await self._send_context_receipt(message, prepared.context_stats)
             attempted = True
-            submission = await self._runtime.submit(**submit_kwargs)
+            submission = await self._ordinary.submit(
+                binding=binding, cwd=cwd, input=prepared.prompt, owner_id=owner_id, origin=message,
+                admission=admission, context_commit=context_commit, skill_names=skill_names,
+            )
             accepted = True
             if on_accepted is not None:
                 on_accepted()
@@ -304,7 +298,6 @@ class PromptChannel(CompletionPresentationChannel):
             # The native RPC has consumed the input (or owns its in-flight
             # serialization). Do not retain a second large data-URL reference
             # while the reaction receipt below waits on Feishu I/O.
-            submit_kwargs.pop("input", None)
             prepared = None
         if scheduled_run_id is not None:
             try:
@@ -341,7 +334,7 @@ class PromptChannel(CompletionPresentationChannel):
         # Generic RPC failures, cancellation during submit and post-acceptance
         # cursor errors retain originals; manual deletion remains available.
         if attempted and not isinstance(error, (
-            SteerRace, RuntimeClosed, ThreadStopping, ThreadCompacting,
+            OrdinaryInputRejected, SteerRace, RuntimeClosed, ThreadStopping, ThreadCompacting,
             ThreadArchived, ThreadResumeNotFound, ThreadOccupied, ModelProviderRejected,
             SkillReferenceError, ModelCatalogError, SkillCatalogError,
             SideSessionNotFound, SideSessionClosing, SideSessionConflict,

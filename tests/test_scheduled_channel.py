@@ -815,7 +815,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         native_id = "native-" + claim.run.id
         partial = PartialAnswer(native_id, "turn-initial", "partial-one", "stable answer")
         self.app._progress_cards = reply_presenter._ReplyCardPresenter(
-            self.channel, self.runtime, poll_seconds=0.001,
+            self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.001,
         )
 
         async def submit_initial(**kwargs):
@@ -859,6 +859,20 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.channel.replies), 2)
         self.assertIn("投递未确认", self.channel.replies[-1][1])
         self.assertNotIn("stable answer", self.channel.replies[-1][1])
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
+
+    async def test_projection_failure_clears_suppression_and_marks_run_delivery_unknown(self):
+        claim, request = await self.completion_fixture()
+        outcome = TurnOutcome(
+            binding_id=request["binding"].id, thread_id="native-" + claim.run.id, turn_id="turn-initial",
+            owner_id=request["owner_id"], origin=request["origin"], error=RuntimeError("turn failed"),
+        )
+        suppression = self.app._reply_suppression
+        suppression.suppress(outcome.thread_id, outcome.turn_id, outcome.turn_id)
+        with patch("netizen_cli.runtime.codex_replies.describe_error", side_effect=ValueError("projection")):
+            with self.assertRaisesRegex(ValueError, "projection"):
+                await self.app.handle_completion(outcome)
+        self.assertFalse(suppression.is_suppressed(outcome.thread_id, outcome.turn_id, outcome.turn_id))
         self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
 
     async def test_failed_partial_then_confirmed_final_keeps_whole_batch_unknown(self):
@@ -1037,7 +1051,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.store.set_configuration(binding_id=binding.id, expected_settings_revision=binding.settings_revision,
             expected_context_revision=binding.context_revision, expected_feedback_revision=binding.feedback_revision,
             settings=binding.turn_settings, task_feedback=feedback, message_context_mode=binding.message_context_mode, context_anchor=None)
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, self.runtime, poll_seconds=0.01)
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.01)
         source_activity = turn_activity_snapshot(binding_id=source.id, thread_id="native-source", turn_id="turn-followup",
             steps=(TurnPlanStepSnapshot("source scope activity", TurnPlanStepState.IN_PROGRESS),))
         initial = turn_activity_snapshot(binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-followup")

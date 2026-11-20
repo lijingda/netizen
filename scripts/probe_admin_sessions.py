@@ -28,6 +28,7 @@ from openai_codex.generated.v2_all import ThreadStartResponse
 from netizen_cli.bindings import BindingStore
 from netizen_cli.codex_runtime import CodexRuntime
 from netizen_cli.delegation_envelope import delegated_prompt
+from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup
 from netizen_cli.thread_history import AppServerThreadHistory
 from probe_sdk_partial_answers import isolated_config, message_events, mock_provider, response_events
@@ -391,7 +392,7 @@ async def sparse_search_case(root: Path) -> dict:
             async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
                 runtime = runtime_for(codex, store)
                 management = InstanceManagementService(
-                    bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
+                    bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime, ordinary=CodexOrdinarySessions(runtime)),
                     scope_coordinator=ScopeCoordinator(), root=root,
                 )
                 try:

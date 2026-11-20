@@ -644,16 +644,8 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        active = self._runtime.active_turn(binding.id)
-        active_goal = self._runtime.active_goal(binding.id)
-        compacting = self._runtime.is_compacting(binding.id)
-        if active is None and active_goal is None and not compacting:
-            persisted_goal = await self._runtime.goal_snapshot(binding)
-            active_goal = self._runtime.active_goal(binding.id)
-            if persisted_goal is None or active_goal is None:
-                await self._reply(message, "当前没有正在执行的任务。")
-                return
-        if active is None and active_goal is None and not compacting:
+        preview = await self._ordinary.preview_stop(binding)
+        if preview is None:
             await self._reply(message, "当前没有正在执行的任务。")
             return
         acknowledged = False
@@ -662,14 +654,7 @@ class CommandChannel(CardControlChannel):
             nonlocal acknowledged
             # Runtime holds the Binding lock while awaiting this receipt,
             # so native terminal delivery cannot overtake it.
-            await self._reply(
-                message,
-                (
-                    "正在暂停 Codex Goal 并中断当前物理 Turn。"
-                    if active_goal is not None
-                    else "正在中断当前 Codex Turn。"
-                ),
-            )
+            await self._reply(message, preview.acknowledgement)
             acknowledged = True
 
         try:

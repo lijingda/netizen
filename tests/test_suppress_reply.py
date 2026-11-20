@@ -9,13 +9,14 @@ from unittest.mock import AsyncMock, patch
 
 from lark_channel import Identity, OutboundCard, OutboundText
 
+from netizen_cli import turn_files
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel import reply_presenter
 from netizen_cli.domain import ActiveState, FeishuScope, GoalOperationState, GoalStatus, ScopeKind
 from netizen_cli.partial_answers import PartialAnswer
+from netizen_cli.runtime.codex_contracts import GoalOutcome
 from netizen_cli.runtime.contracts import (
     GoalFinalizationStatus,
-    GoalOutcome,
     GoalSubmission,
     SideSessionSnapshot,
     SideSessionState,
@@ -163,6 +164,37 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app._progress_cards._sessions, {})
         self.assertEqual(self.app._reactions._pulses, {})
 
+    async def test_failed_projection_finishes_running_reactions_and_progress(self):
+        projection_error = ValueError("could not format error")
+
+        class UnformattableError(RuntimeError):
+            def __str__(self):
+                raise projection_error
+
+        feedback = replace(self.feedback, progress_card_enabled=True, reaction_pulse_enabled=True)
+        for outcome in (self.outcome(task_feedback=feedback), self.goal_outcome(task_feedback=feedback)):
+            with self.subTest(kind=type(outcome).__name__):
+                outcome = await self.start_progress(outcome)
+                await self.suppress(outcome)
+                if isinstance(outcome, GoalOutcome):
+                    turn_id = outcome.logical_turn_id
+                    failed = replace(outcome, final_physical_turn_id=None, error=UnformattableError())
+                else:
+                    turn_id = outcome.turn_id
+                    await self.app._reactions.start(turn_id, self.origin.id, pulse_enabled=True)
+                    failed = replace(outcome, error=UnformattableError())
+                self.assertIn((self.binding.id, outcome.thread_id, turn_id), self.app._progress_cards._sessions)
+                pulse = self.app._reactions._pulses[turn_id]
+                running_ids = (pulse.typing_reaction_id, pulse.thinking_reaction_id)
+                self.channel.reactions.clear()
+                with self.assertRaises(ValueError) as raised:
+                    await self.app.handle_completion(failed)
+                self.assertIs(raised.exception, projection_error)
+                self.assertIn((self.origin.id, "ERROR"), self.channel.reactions)
+                for reaction_id in running_ids:
+                    self.assertIn((self.origin.id, reaction_id), self.channel.reaction_removals)
+                self.assert_cleaned(outcome)
+
     async def test_tool_is_idempotent_without_ending_native_execution_or_sending_messages(self):
         outcome = self.outcome()
         first = await self.suppress(outcome)
@@ -207,6 +239,20 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
             source_thread_id=snapshot.thread_id, source_turn_id=snapshot.physical_turn_id,
         )
         self.assertTrue(response["suppressed"])
+
+    async def test_file_projection_waits_for_delivery_and_failure_keeps_final_text(self):
+        with patch("netizen_cli.turn_files.project_file_evidence", side_effect=ValueError("bad file evidence")) as project:
+            outcomes = (
+                self.outcome(result=completed_turn_result(final_response="ordinary answer")),
+                self.side_outcome(final_response="side answer"),
+                self.goal_outcome(final_response="goal answer"),
+            )
+            project.assert_not_called()
+            for count, outcome in enumerate(outcomes, start=1):
+                with self.subTest(kind=type(outcome).__name__), self.assertLogs("netizen_cli.turn_files", "ERROR"):
+                    await self.app.handle_completion(outcome)
+                self.assertEqual(project.call_count, count)
+                self.assertEqual(self.channel.replies[-1][1], outcome.final_response)
 
     async def test_normal_completion_omits_empty_and_missing_final_without_creating_card(self):
         for index, final in enumerate(("", None)):
@@ -263,11 +309,26 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
             result=completed_turn_result(file_change_item("secret.txt", "secret.png"), final_response=""),
         )
         await self.suppress(outcome)
-        await self.app.handle_completion(outcome)
+        with patch.object(turn_files, "_file_change_counts", wraps=turn_files._file_change_counts) as counts:
+            await self.app.handle_completion(outcome)
+        counts.assert_not_called()
         self.assertEqual(self.channel.upload_calls, [])
         self.assertEqual(self.channel.replies, [])
         self.assertEqual(self.channel.send_calls, [])
         self.assert_cleaned(outcome)
+
+    async def test_done_reaction_precedes_ordinary_file_parsing(self):
+        parser = turn_files._file_change_counts
+        reactions_at_parse = []
+
+        def record_parse(*args):
+            reactions_at_parse.append(tuple(self.channel.reactions))
+            return parser(*args)
+
+        outcome = self.outcome(result=completed_turn_result(file_change_item("result.txt"), final_response="answer"))
+        with patch.object(turn_files, "_file_change_counts", side_effect=record_parse):
+            await self.app.handle_completion(outcome)
+        self.assertEqual(reactions_at_parse, [((self.origin.id, "DONE"),)])
 
     async def test_nonempty_final_preserves_images_and_files_with_and_without_existing_progress(self):
         (self.fixture.project / "result.txt").write_text("task file")
