@@ -120,6 +120,7 @@ from netizen_cli.sdk_gap_adapter import (
 )
 from netizen_cli.turn_patch_children import TaskPatchChildren, TurnPatchBatch
 from netizen_cli.partial_answers import PartialAnswer
+from netizen_cli.prompt_inputs import PreparedPrompt, PromptImage
 from netizen_cli.turn_plan_observer import (
     TurnActivityObservation,
     TurnPlanStepSnapshot,
@@ -1292,6 +1293,18 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-parent")
         self.assertEqual(self.store.active_binding(self.scope.key).id, binding.id)
         self.assertTrue(self.runtime._accepting)
+
+    async def test_submit_side_renders_prepared_image_at_thread_turn(self) -> None:
+        _binding, record, snapshot = await self.open_side()
+        image = PromptImage("attached diagram", "data:image/png;base64,AA==")
+        prompt = PreparedPrompt("describe the diagram", (image,))
+        submission = await self.runtime.submit_side(
+            side_id=record.id, input=prompt, owner_id="ou_owner", origin=object(),
+        )
+        await self.finish_side_turn(submission)
+        self.assertEqual(self.codex.turn_inputs, [(snapshot.thread_id, [
+            TextInput(image.label), ImageInput(image.data_url), TextInput(prompt.text),
+        ])])
 
     async def test_three_turns_reuse_one_thread_and_running_input_steers(self) -> None:
         _binding, record, snapshot = await self.open_side()
