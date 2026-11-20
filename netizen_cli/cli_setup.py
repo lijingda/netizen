@@ -278,7 +278,7 @@ def resolve_setup_backend(root: Path, requested: str | None, *, already_register
                 raise SetupError("cannot verify --backend without the registered instance configuration")
             return None
         return setup_backend(config, requested)
-    except Exception:
+    except (OSError, ValueError, SetupError):
         # Optional metadata must never prevent an idempotent setup result.
         if already_registered and requested is None:
             return None
@@ -288,7 +288,7 @@ def resolve_setup_backend(root: Path, requested: str | None, *, already_register
 def check_unbound_start_backend(root: Path) -> None:
     try:
         config = read_setup_config(root / "config.yaml")
-    except Exception:
+    except (OSError, ValueError, SetupError):
         # Service startup handles unreadable configuration after registration.
         return
     if config is not None:
