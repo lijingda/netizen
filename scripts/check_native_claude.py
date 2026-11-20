@@ -108,8 +108,8 @@ async def main_cases(cwd, provider, evidence):
     from netizen_cli.domain import FeishuScope, ScopeKind
     from netizen_cli.ordinary_sessions import OrdinaryInputRejected, PreparedPrompt, PromptImage
     from netizen_cli.runtime.claude_client import single_message, user_message
-    from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions, DEFAULT_MODE, UNKNOWN
-    from netizen_cli.runtime.contracts import TerminalStateUnknown, ThreadActivityChanged
+    from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions, DEFAULT_MODE
+    from netizen_cli.runtime.contracts import ThreadActivityChanged
 
     cli = verified_claude_cli().resolve()
     store = BindingStore()
@@ -262,14 +262,10 @@ async def main_cases(cwd, provider, evidence):
 
         lost = new_binding()
         clients.drop_receipt = True
-        try:
-            await submit(lost, "text", "lost")
-        except TerminalStateUnknown as error:
-            evidence.check("lost receipt remains unknown", str(error) == UNKNOWN)
-        else:
-            raise AssertionError("lost receipt appeared confirmed")
-        finally:
-            clients.drop_receipt = False
+        await submit(lost, "text", "lost")
+        reconciled = await done("lost")
+        evidence.check("lost write receipt reconciled on the same stream", reconciled.final_response == "fixture-reply-lost")
+        clients.drop_receipt = False
         evidence.check("no application replay", len(clients.calls[-1].ids) == 1 and len(rows("lost")) == 1)
         pair = [new_binding(), new_binding()]
         await asyncio.gather(*(submit(binding, "hold-stream", f"parallel{i}") for i,binding in enumerate(pair)))

@@ -14,7 +14,7 @@ from netizen_cli.runtime.claude_client import BundledClaudeClients
 from netizen_cli.runtime.claude_ordinary import (
     CLOSE_FAILED, DEFAULT_MODE, GRACE, MODE_UNKNOWN, START_FAILED, UNKNOWN, ClaudeOrdinarySessions,
 )
-from netizen_cli.runtime.contracts import ContextCursorCommit, TerminalStateUnknown, ThreadActivityChanged
+from netizen_cli.runtime.contracts import ContextCursorCommit, StopDisposition, TerminalStateUnknown, ThreadActivityChanged
 from tests.support.claude_client import FakeClaudeClients
 
 
@@ -22,7 +22,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.cwd = Path(self.temp.name)
+        self.cwd = Path(self.temp.name).resolve()
         self.store = BindingStore()
         self.addCleanup(self.store.close)
         self.store.bootstrap_project(alias="work", cwd=str(self.cwd))
@@ -44,7 +44,13 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                                              on_completion=completion, notice=notice, clock=lambda: self.now)
         self.runtime.open_admission()
         self.now += 2.
-        self.addAsyncCleanup(self.runtime.cancel_tasks)
+        async def cleanup():
+            if self.runtime._unavailable:
+                with self.assertRaisesRegex(RuntimeError, "未能确认"):
+                    await self.runtime.cancel_tasks()
+            else:
+                await self.runtime.cancel_tasks()
+        self.addAsyncCleanup(cleanup)
 
     def new_binding(self, chat="chat"):
         return self.store.create_channel_binding(scope=FeishuScope("app", chat, ScopeKind.DIRECT),
@@ -124,6 +130,9 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             ("error_during_execution", "aborted_tools", True, "interrupted"), ("error_max_turns", "max_turns", True, "failed"),
             ("success", "api_error", True, "failed"), ("success", "api_error", False, None),
             ("unexpected", "completed", False, None),
+            ("error_max_budget_usd", None, True, "failed"),
+            ("error_during_execution", "private raw secret", True, "failed"),
+            ("error_during_execution", "api_error", False, None),
         ):
             with self.subTest(reason=reason, status=status):
                 receipt = await self.submit()
@@ -138,6 +147,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("raw secret", repr(event))
                 if status is None:
                     self.assertEqual(str(event.error), UNKNOWN)
+                if reason == "private raw secret":
+                    self.assertEqual(event.error_detail, "Claude 执行失败（error_during_execution/unknown）。")
                 if reason == "api_error" and status == "failed":
                     self.assertIn("429", event.error_detail)
 
@@ -271,7 +282,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             client.result(user_message_uuid="other")
             client.stream.put_nowait(None)
             await self.runtime.wait_idle(1)
-            save.assert_not_called()
+            save.assert_called_once()
+            save.reset_mock()
             await self.finish(await self.submit(context_commit=commit))
             save.assert_called_once_with(binding_id=self.binding.id, expected_context_revision=1, anchor=commit.anchor)
             self.assertEqual(self.events[-1].status, "completed")
@@ -354,6 +366,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         submit.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await submit
+        client.stream.put_nowait(None)
         client.write_gate.set()
         self.assertTrue(await self.runtime.wait_idle(1))
         self.assertEqual([str(event.error) for event in self.events], [UNKNOWN])
@@ -401,8 +414,16 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await self.runtime.wait_idle(1))
             with self.assertRaisesRegex(OrdinaryInputRejected, CLOSE_FAILED):
                 await self.submit()
-            await asyncio.wait_for(self.runtime.interrupt_all(), 1)
+            with self.assertRaisesRegex(OrdinaryInputRejected, "无法确认 Claude 客户端已关闭"):
+                await self.runtime.preview_stop(self.binding)
+            self.runtime.close_admission()
+            self.runtime._shutdown_deadline = asyncio.get_running_loop().time() + 0.05
+            with self.assertRaisesRegex(RuntimeError, "未能确认"):
+                await asyncio.wait_for(self.runtime.interrupt_all(), 1)
             self.assertFalse(await self.runtime.wait_idle(0))
+            client.close_gate.set()
+            await asyncio.gather(*self.runtime._closes)
+            self.assertTrue(await self.runtime.wait_idle(0))
             self.assertEqual((len(client.inputs), client.closes), (1, 1))
 
     async def test_stop_receipt_precedes_terminal_handoff_and_duplicate_stop_is_local(self):
@@ -430,6 +451,96 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await stop).value, "requested")
         self.assertTrue(await self.runtime.wait_idle(1))
         self.assertEqual(self.events[-1].status, "interrupted")
+
+    async def test_recognized_peer_result_does_not_start_reconciliation_deadline(self):
+        with patch("netizen_cli.runtime.claude_ordinary._RECONCILE_SECONDS", 0):
+            receipt = await self.submit()
+            receipt.release_receipt_attempt()
+            client = self.clients.calls[-1]
+            client.init()
+            client.result(user_message_uuid="foreign", origin={"kind": "peer"})
+            while not client.stream.empty():
+                await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            client.result()
+            self.assertTrue(await self.runtime.wait_idle(1))
+            self.assertEqual(self.events[-1].final_response, "answer")
+
+    async def test_interrupt_failure_after_confirmed_completion_returns_finished(self):
+        receipt = await self.submit()
+        receipt.release_receipt_attempt()
+        client = self.clients.calls[-1]
+        async def race():
+            client.init()
+            client.result()
+            while not self.runtime._active[self.binding.id].closed:
+                await asyncio.sleep(0)
+            raise OSError("closed")
+        async def unexpected_ack():
+            self.fail("stop success must not be acknowledged")
+        with patch.object(client, "interrupt", side_effect=race):
+            preview = await self.runtime.preview_stop(self.binding)
+            result = await asyncio.wait_for(self.runtime.stop_exact(self.binding.id, acknowledge=unexpected_ack,
+                expected_activity_revision=preview.activity_revision, expected_turn_id=preview.turn_id), 1)
+        self.assertEqual(result, StopDisposition.NOT_RUNNING)
+        self.assertTrue(await self.runtime.wait_idle(1))
+
+    async def test_lost_write_receipt_reconciles_without_replay(self):
+        self.clients.configure = lambda client: setattr(client, "failure", "query")
+        submitting = asyncio.create_task(self.submit())
+        await asyncio.wait_for(self.clients.created.wait(), 1)
+        client, = self.clients.calls
+        await asyncio.wait_for(client.writing.wait(), 1)
+        client.init()
+        client.result()
+        receipt = await asyncio.wait_for(submitting, 1)
+        receipt.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(1))
+        self.assertEqual((client.consumers, len(client.inputs), self.events[-1].final_response), (1, 1, "answer"))
+
+    async def test_live_actual_cwd_remains_owned_through_late_close(self):
+        first = await self.submit()
+        await self.finish(first)
+        target = self.cwd / "managed" / "subdir"
+        target.mkdir(parents=True)
+        self.clients.cwds[first.thread_id] = target
+        with patch("netizen_cli.runtime.claude_ordinary._CLOSE_SECONDS", 0.01):
+            second = await self.submit()
+            client = self.clients.calls[-1]
+            self.assertEqual(self.runtime.occupying_bindings(target.parent), {self.binding.id})
+            client.close_gate.clear()
+            client.init()
+            client.result()
+            second.release_receipt_attempt()
+            await asyncio.wait_for(self.delivered.wait(), 1)
+            await asyncio.wait_for(client.closing.wait(), 1)
+            await asyncio.gather(*self.runtime._tasks)
+            self.assertEqual(self.runtime.occupying_bindings(target), {self.binding.id})
+            self.assertTrue(self.runtime.local_snapshot(self.binding.id).unavailable)
+            client.close_gate.set()
+            self.assertTrue(await self.runtime.wait_idle(1))
+            self.assertFalse(self.runtime.occupying_bindings(target))
+            await self.finish(await self.submit())
+
+    async def test_native_scan_does_not_hold_binding_lock_or_return_stale_usage(self):
+        first = await self.submit()
+        await self.finish(first)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow_lookup(_):
+            entered.set()
+            await release.wait()
+            return self.cwd
+        with patch.object(self.clients, "session_cwd", side_effect=slow_lookup):
+            query = asyncio.create_task(self.runtime.resource_usage(self.binding.id))
+            await asyncio.wait_for(entered.wait(), 1)
+            opening = asyncio.create_task(self.submit())
+            while not self.runtime.local_snapshot(self.binding.id).turn:
+                await asyncio.sleep(0)
+            with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
+                await self.runtime.capture_submission_admission(self.binding.id)
+            release.set()
+            self.assertEqual(await query, {"cwd": None, "status": "unknown"})
+            await self.finish(await opening)
 
     async def test_shutdown_during_receipt_or_opening_drains_each_owned_client(self):
         receipt = await self.submit()
@@ -461,6 +572,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                 await self.runtime.stop_exact(self.binding.id, **fields)
         with self.assertRaises(OrdinaryInputRejected):
             await self.submit()
+        self.assertEqual(await self.runtime.stop_exact(self.binding.id, **fields), StopDisposition.REQUESTED)
         client.init()
         client.result("error_during_execution", "aborted_streaming", True)
         self.assertTrue(await self.runtime.wait_idle(1))

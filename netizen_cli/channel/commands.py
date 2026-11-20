@@ -597,7 +597,7 @@ class CommandChannel(CardControlChannel):
         if self._policy.backend == "claude":
             assert self._management.local is not None
             snapshot = self._management.local.local_snapshot(binding.id)
-            task = "状态未知" if snapshot.unavailable else snapshot.turn.state.value if snapshot.turn else "空闲"
+            task = "无法确认 Claude 客户端已关闭" if snapshot.unavailable else snapshot.turn.state.value if snapshot.turn else "空闲"
             await self._reply(message, f"Project：{binding.project_alias}\n会话：{binding.short_id}\n"
                               f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}\n本地任务：{task}\n"
                               "模型用量及执行详情在 Claude 试点中不可用。")
@@ -702,6 +702,8 @@ class CommandChannel(CardControlChannel):
         result = stopped.disposition
         if result is StopDisposition.NOT_RUNNING and not acknowledged:
             await self._reply(message, "当前任务恰好已经结束。")
+        elif result is StopDisposition.STOPPING and self._policy.backend == "claude":
+            await self._reply(message, "已在等待上一次停止请求的结果。")
         elif result is StopDisposition.COMPACTING:
             await self._reply(
                 message,

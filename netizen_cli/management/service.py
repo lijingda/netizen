@@ -1168,6 +1168,8 @@ class InstanceManagementService:
         if self.local is not None:
             if any(item.binding.native_thread_id is not None for item in snapshot.bindings):
                 raise BackendUnsupported("会话删除", detail="Project 含已建立的 Claude 会话，试点不支持删除该 Project。")
+            if self.local.occupying_bindings(Path(snapshot.project.cwd)):
+                raise ThreadOccupied("Claude 客户端仍占用此 Project 目录。")
             if snapshot.sides:
                 raise BackendUnsupported("Side")
             for item in snapshot.bindings:

@@ -420,6 +420,8 @@ class WorktreeService:
             reasons.append("仍有非级联会话的 Side 使用此目录，请先结束该 Side。")
         if delete_sessions and any(binding.native_thread_id for binding in snapshot.bindings) and not self._management.native_delete_available:
             reasons.append("Claude 试点暂不支持【会话删除】。" if local is not None else "Codex 会话删除能力不可用。")
+        if local is not None and local.occupying_bindings(Path(record.root)):
+            reasons.append("Claude 客户端仍占用此目录。")
         return reasons
 
     async def _delete_check(self, record: WorktreeRecord) -> tuple[WorktreeState, list[str]]:
@@ -458,7 +460,9 @@ class WorktreeService:
                 "bindings": [{"bindingId": binding.id, "shortId": binding.short_id,
                               "nativeThreadId": binding.native_thread_id,
                               "scopeKey": binding.scope_key} for binding in snapshot.bindings],
-                "sideCount": len(sides), "protectedSessionCount": len(usage_bindings),
+                "sideCount": len(sides), "protectedSessionCount": len(
+                    {b.id for b in usage_bindings} | (self._management.local.occupying_bindings(Path(snapshot.record.root))
+                                                      if self._management.local else frozenset())),
                 "safe": not reasons, "reasons": list(dict.fromkeys(reasons)),
                 "externalUseWarning": "仅检查本实例已知关联；请确认没有其他客户端正在使用目录。"}
 

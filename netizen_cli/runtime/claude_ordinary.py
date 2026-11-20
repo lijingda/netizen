@@ -28,14 +28,15 @@ from .contracts import (
 
 logger = logging.getLogger(__name__)
 UNKNOWN = "本次 Claude 提交结果未知，请检查原会话；系统不会自动重发。"
-CLOSE_FAILED = "无法确认 Claude 客户端已关闭，本会话在本次服务运行期间不可再提交。"
+CLOSE_FAILED = "无法确认 Claude 客户端已关闭，本会话暂不可再提交。"
 MODE_UNKNOWN = "无法确认 Claude 的有效权限模式，本次执行已停止。"
 DEFAULT_MODE = "Claude 的自动审核不可用，本次使用默认权限；未预先允许的操作会被拒绝。"
 START_FAILED = "Claude 会话启动失败，本条输入未发送。"
 START_CANCELLED = "已取消启动，本条输入未发送。"
 STALE = "准备本条消息期间会话已变化，本条输入未发送。"
 GRACE = "服务刚启动，请稍后重发"
-_CLOSE_SECONDS = 12.0
+# The pinned transport allows 5s each for its write lock, EOF, TERM and KILL waits.
+_CLOSE_SECONDS = 22.0
 _CONTROL_SECONDS = 5.0
 _RECONCILE_SECONDS = 3.0
 _START_SECONDS = 60.0
@@ -59,6 +60,8 @@ class _Execution:
     stopping: bool = False
     closing: bool = False
     close_finished: bool = False
+    closed: bool = False
+    concluded: bool = False
     detached: bool = False
     stop_receipt: asyncio.Event | None = None
 
@@ -79,6 +82,16 @@ def _terminal(message: ResultMessage) -> tuple[str, str | None, str | None]:
             status = message.api_error_status
             detail = f"（HTTP {status}）" if type(status) is int and 100 <= status <= 599 else ""
             return "failed", None, f"Claude 请求失败{detail}。"
+        case ("error_max_budget_usd", _, True):
+            return "failed", None, "Claude 已达到本次执行的预算上限。"
+        case (subtype, reason, True) if subtype in {
+            "error_during_execution", "error_max_turns", "error_max_structured_output_retries",
+        }:
+            safe_reason = reason if reason in {
+                "max_turns", "completed", "api_error", "max_budget_usd", "model_error",
+                "aborted_streaming", "aborted_tools", "max_structured_output_retries",
+            } else "unknown"
+            return "failed", None, f"Claude 执行失败（{subtype}/{safe_reason}）。"
         case _:
             raise TerminalStateUnknown(UNKNOWN)
 
@@ -103,6 +116,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._revisions: dict[str, int] = {}
         self._active: dict[str, _Execution] = {}
         self._tasks: dict[asyncio.Task[None], _Execution] = {}
+        self._closes: set[asyncio.Task[None]] = set()
+        self._owned_cwds: dict[str, Path] = {}
         self._controls: set[asyncio.Task[None]] = set()
         self._unavailable: set[str] = set()
 
@@ -117,7 +132,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             raise OrdinaryInputRejected(GRACE)
 
     def _lock(self, binding_id: str) -> asyncio.Lock:
-        return self._locks.setdefault(binding_id, asyncio.Lock())
+        if binding_id not in self._locks:
+            self._locks[binding_id] = asyncio.Lock()
+        return self._locks[binding_id]
 
     def _advance(self, binding_id: str) -> int:
         revision = self._revisions.get(binding_id, 0) + 1
@@ -223,7 +240,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 cwd = None
             if cwd is None or not cwd.is_absolute() or not cwd.is_dir():
                 raise OrdinaryInputRejected("无法恢复原 Claude 会话的实际目录，本条输入未发送。")
-            return cwd
+            return cwd.resolve()
         return self._creation_cwd(binding, requested)
 
     def _creation_cwd(self, binding: ThreadBinding, requested: Path | None) -> Path:
@@ -244,7 +261,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             async with asyncio.timeout(_START_SECONDS):
                 actual = await self._cwd(execution, cwd)
                 self._check_opening(execution)
+                self._bindings.require_actual_cwd_not_deleting(actual)
                 execution.client = self._clients.create(execution.session, actual, resume=binding.native_thread_id is not None)
+                self._owned_cwds[binding.id] = actual
                 await execution.client.connect()
             async with self._lock(binding.id):
                 self._check_opening(execution)
@@ -255,13 +274,19 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     self._bindings.assign_native_thread_id(binding.id, execution.session)
                 execution.writing = True
                 execution.revision = self._advance(binding.id)
-            async with asyncio.timeout(_WRITE_SECONDS):
-                await execution.client.query(single_message(message))
+            try:
+                async with asyncio.timeout(_WRITE_SECONDS):
+                    await execution.client.query(single_message(message))
+            except Exception:
+                # The write may have succeeded. This is still the only consumer.
+                async with asyncio.timeout(self._remaining(_RECONCILE_SECONDS)):
+                    event = await self._observe(execution, execution.client, actual, commit)
             del message
             if not execution.ready.done():
                 execution.ready.set_result(Submission(SubmitDisposition.STARTED, binding.id, execution.session, execution.input_id,
                                                execution.receipt.set, binding.task_feedback, binding.feedback_revision))
-            event = await self._observe(execution, execution.client, actual, commit)
+            if event is None:
+                event = await self._observe(execution, execution.client, actual, commit)
         except OrdinaryInputRejected as exc:
             # Never send a traceback holding the still-running owner's frame to another task.
             failure = OrdinaryInputRejected(str(exc))
@@ -273,19 +298,32 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         finally:
             await self._finish(execution, event, failure)
 
+    async def _disconnect(self, execution: _Execution, client: ClaudeClient) -> None:
+        binding_id = execution.binding.id
+        try:
+            await client.disconnect()
+        except (Exception, asyncio.CancelledError):
+            self._unavailable.add(binding_id)
+        else:
+            execution.closed = True
+            self._owned_cwds.pop(binding_id, None)
+            if binding_id in self._unavailable:
+                self._unavailable.remove(binding_id)
+                self._advance(binding_id)
+
     async def _finish(
         self, execution: _Execution, event: OrdinaryEvent | None,
         failure: OrdinaryInputRejected | TerminalStateUnknown | None,
     ) -> None:
         binding = execution.binding
         execution.closing = True
+        execution.concluded = event is not None
         if execution.client is not None:
-            try:
-                async with asyncio.timeout(self._remaining(_CLOSE_SECONDS)) as timer:
-                    await execution.client.disconnect()
-                if timer.expired():
-                    self._unavailable.add(binding.id)
-            except (Exception, asyncio.CancelledError):
+            close = asyncio.create_task(self._disconnect(execution, execution.client))
+            self._closes.add(close)
+            close.add_done_callback(self._closes.discard)
+            await asyncio.wait([close], timeout=self._remaining(_CLOSE_SECONDS))
+            if not close.done():
                 self._unavailable.add(binding.id)
         execution.close_finished = True
         close_failed = binding.id in self._unavailable
@@ -294,7 +332,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             # Delivery of the old outcome may still be waiting on Feishu.
             self._release(execution)
             if not execution.ready.done():
-                execution.ready.set_exception(failure)
+                if execution.stop_receipt is not None:
+                    try:
+                        async with asyncio.timeout(self._remaining(_CONTROL_SECONDS + 1)):
+                            await execution.stop_receipt.wait()
+                    except TimeoutError:
+                        pass
+                if not execution.ready.done():
+                    execution.ready.set_exception(failure)
                 # The waiting handler reports this write failure unless it was cancelled.
                 await execution.submit_finished.wait()
                 report_unknown = execution.detached
@@ -314,7 +359,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             logger.warning("Claude completion delivery failed for Binding %s", binding.id)
         finally:
             self._release(execution)
-        if close_failed:
+        if close_failed and binding.id in self._unavailable:
             await self._tell(execution, CLOSE_FAILED)
 
     def _release(self, execution: _Execution) -> None:
@@ -339,6 +384,17 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
 
     async def _observe(self, execution: _Execution, client: ClaudeClient, cwd: Path,
                        commit: ContextCursorCommit | None) -> OrdinaryConclusion:
+        async def commit_intake() -> None:
+            nonlocal commit
+            if commit is not None:
+                cursor, commit = commit, None
+                try:
+                    self._bindings.commit_context_anchor(binding_id=execution.binding.id,
+                                                         expected_context_revision=cursor.expected_context_revision,
+                                                         anchor=cursor.anchor)
+                except Exception:
+                    await self._tell(execution, "已接收，但上下文边界更新失败。")
+
         initialized = False
         warned = False
         async with asyncio.timeout(None) as reconciliation:
@@ -347,11 +403,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     await self._invalid_init(client)
                 if isinstance(msg, SystemMessage) and msg.subtype == "init":
                     data = cast(SystemInitData, msg.data)
+                    init_cwd = data.get("cwd")
+                    if (data.get("session_id") != execution.session or not isinstance(init_cwd, str)
+                            or not Path(init_cwd).is_absolute() or Path(init_cwd).resolve() != cwd):
+                        raise TerminalStateUnknown(UNKNOWN)
+                    await commit_intake()
                     mode = data.get("permissionMode")
                     if mode not in ("auto", "default"):
                         await self._invalid_init(client)
-                    if data.get("session_id") != execution.session or data.get("cwd") != str(cwd):
-                        raise TerminalStateUnknown(UNKNOWN)
                     initialized = True
                     if mode == "default" and not warned:
                         warned = True
@@ -360,43 +419,49 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     continue
                 if msg.session_id != execution.session:
                     raise TerminalStateUnknown(UNKNOWN)
-                ids = msg.user_message_uuids or []
-                if not isinstance(ids, list):
-                    raise TerminalStateUnknown(UNKNOWN)
-                if msg.user_message_uuid != execution.input_id and execution.input_id not in ids:
-                    injected = msg.origin is not None and msg.origin.get("kind") == "task-notification"
-                    if not (injected and (ids or msg.user_message_uuid)) and reconciliation.when() is None:
+                ids = [] if msg.user_message_uuids is None else msg.user_message_uuids
+                valid_ids = isinstance(ids, list) and all(isinstance(value, str) and value for value in ids)
+                single = msg.user_message_uuid
+                valid_single = single is None or (isinstance(single, str) and bool(single))
+                if valid_ids and valid_single and (single or ids):
+                    if single != execution.input_id and execution.input_id not in ids:
+                        continue
+                else:
+                    if reconciliation.when() is None:
                         reconciliation.reschedule(asyncio.get_running_loop().time() + _RECONCILE_SECONDS)
                     continue
+                await commit_intake()
                 if not initialized:
                     await self._invalid_init(client)
-                if commit is not None:
-                    try:
-                        self._bindings.commit_context_anchor(binding_id=execution.binding.id,
-                                                             expected_context_revision=commit.expected_context_revision,
-                                                             anchor=commit.anchor)
-                    except Exception:
-                        await self._tell(execution, "已接收，但上下文边界更新失败。")
                 status, answer, detail = _terminal(msg)
                 return OrdinaryConclusion(execution.binding.id, execution.session, execution.input_id, self._owner, execution.origin,
                                           status, answer, detail, task_feedback=execution.binding.task_feedback,
                                           feedback_revision=execution.binding.feedback_revision, cwd=cwd)
         raise TerminalStateUnknown(UNKNOWN)
 
+    def occupying_bindings(self, directory: Path) -> frozenset[str]:
+        target = directory.resolve()
+        return frozenset(key for key, cwd in self._owned_cwds.items() if cwd.is_relative_to(target))
+
     async def resource_usage(self, binding_id: str) -> dict[str, str | None]:
-        async with self._lock(binding_id):
+        lock = self._lock(binding_id)
+        async with lock:
             binding = self._bindings.get(binding_id)
-            busy = binding_id in self._active or binding_id in self._unavailable
+            snapshot = self.local_snapshot(binding_id)
+            owned = self._owned_cwds.get(binding_id)
+            if owned is not None:
+                return {"cwd": str(owned), "status": "active"}
             if binding.native_thread_id is None:
-                return {"cwd": binding.working_cwd, "status": "active" if busy else "idle"}
-            try:
-                async with asyncio.timeout(_CONTROL_SECONDS):
-                    cwd = await self._clients.session_cwd(binding.native_thread_id)
-            except Exception:
-                cwd = None
-            # Exact transcript metadata proves cwd. The SDK cannot prove that an
-            # external writer or detached tool has stopped using that directory.
-            return {"cwd": str(cwd) if cwd else None, "status": "active" if busy else "unknown"}
+                return {"cwd": binding.working_cwd, "status": "active" if snapshot.turn else "idle"}
+        try:
+            async with asyncio.timeout(_CONTROL_SECONDS):
+                cwd = await self._clients.session_cwd(binding.native_thread_id)
+        except Exception:
+            cwd = None
+        async with lock:
+            if self._bindings.get(binding_id) != binding or snapshot != self.local_snapshot(binding_id):
+                return {"cwd": None, "status": "unknown"}
+            return {"cwd": str(cwd.resolve()) if cwd else None, "status": "unknown"}
 
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding:
         async with self._lock(binding_id):
@@ -453,6 +518,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
 
     async def preview_stop(self, binding: ThreadBinding) -> StopPreview | None:
         async with self._lock(binding.id):
+            if binding.id in self._unavailable:
+                raise OrdinaryInputRejected(CLOSE_FAILED)
             execution = self._active.get(binding.id)
             if execution is None or execution.closing:
                 return None
@@ -478,22 +545,33 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             client = execution.client if execution.writing else None
             if not execution.writing:
                 self._cancel_opening(execution)
+        stop_receipt = execution.stop_receipt
+        acknowledge_success = False
         # Keep the captured client pinned. Completion waits for this stop's receipt attempt.
         try:
             if client is not None:
                 async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
                     await client.interrupt()
-        except Exception:
+            acknowledge_success = True
+        except (Exception, asyncio.CancelledError) as exc:
+            async with self._lock(binding_id):
+                if execution.concluded and execution.closed:
+                    return StopDisposition.NOT_RUNNING
+                if self._active.get(binding_id) is execution:
+                    execution.stopping = False
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise TerminalStateUnknown("无法确认 Claude 停止请求的结果。") from None
         finally:
-            if acknowledge is not None and execution.stop_receipt is not None:
+            if acknowledge is not None and stop_receipt is not None:
                 try:
                     async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
-                        await acknowledge()
+                        if acknowledge_success:
+                            await acknowledge()
                 except Exception:
                     logger.warning("Claude stop receipt failed for Binding %s", binding_id)
                 finally:
-                    execution.stop_receipt.set()
+                    stop_receipt.set()
         if not execution.writing and execution.task is not None:
             await asyncio.wait([execution.task], timeout=self._remaining(_CLOSE_SECONDS))
         return StopDisposition.REQUESTED
@@ -534,7 +612,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
 
     async def wait_idle(self, timeout: float) -> bool:
         deadline = time.monotonic() + self._remaining(timeout)
-        while tasks := {task for task in (*self._tasks, *self._controls) if not task.done()}:
+        while tasks := {task for task in (*self._tasks, *self._controls, *self._closes) if not task.done()}:
             _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - time.monotonic()))
             if pending:
                 return False
@@ -555,4 +633,5 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             for task, execution in self._tasks.items():
                 if execution.close_finished and execution.submit_finished.is_set():
                     task.cancel()
-            await self.wait_idle(1.0)
+            if not await self.wait_idle(self._remaining(60.0)):
+                raise RuntimeError("未能确认所有 Claude 客户端已关闭。")

@@ -39,7 +39,7 @@ class ClaudeResourcesTests(IsolatedAsyncioTestCase):
             fixture.store.require_project_not_deleting("test")
             self.assertEqual(fixture.store.get(created.binding.id).native_thread_id, client.session)
             usage = await runtime.resource_usage(created.binding.id)
-            self.assertEqual(usage, {"cwd": str(fixture.project), "status": "unknown"})
+            self.assertEqual(usage, {"cwd": str(fixture.project.resolve()), "status": "unknown"})
             self.assertEqual(len(clients.calls), 1)
 
     async def test_local_inventory_and_confirmed_lazy_cleanup(self):

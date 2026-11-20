@@ -502,7 +502,7 @@ class ServiceCore:
         if self._claude is not None:
             self._claude.close_admission()
             await _cleanup_with_budget(
-                "Claude client shutdown", self._claude.interrupt_all, deadline=deadline, cap=25,
+                "Claude client shutdown", self._claude.interrupt_all, deadline=deadline, cap=_SHUTDOWN_BUDGET_SECONDS,
             )
 
     async def _close_partial_start(self) -> None:

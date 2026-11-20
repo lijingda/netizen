@@ -558,6 +558,22 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(Path(second.root).is_dir())
         self.assertTrue(self.repo.is_dir())
 
+    async def test_live_claude_cwd_outside_the_binding_inventory_blocks_delete(self):
+        resource = await self.resource()
+        original = await self.service.preview_delete(resource["id"])
+        self.assertTrue(original["safe"], original["reasons"])
+        target = Path(resource["root"])
+        class Occupied:
+            def occupying_bindings(self, root):
+                return {"external-binding"} if root == target else set()
+        self.management.local = Occupied()
+        taken = await self.service.preview_delete(resource["id"])
+        self.assertFalse(taken["safe"])
+        self.assertEqual(taken["protectedSessionCount"], 1)
+        with self.assertRaises(WorktreeError):
+            await self.service.delete(resource["id"], expected_fingerprint=original["fingerprint"], delete_sessions=False)
+        self.assertTrue(target.is_dir())
+
     async def test_known_subdirectory_usage_is_protected_but_not_cascaded(self):
         resource = await self.resource()
         nested = Path(resource["root"]) / "nested"
