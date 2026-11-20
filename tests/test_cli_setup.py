@@ -291,6 +291,7 @@ class ConfigurationSetupTests(unittest.TestCase):
         original = b"instance: {backend: other}\n"
         setup._write_atomic(config, original, mode=0o600)
         with (
+            patch("netizen_cli.backends.KNOWN_BACKENDS", ("codex", "other")),
             patch.object(setup, "_write_atomic") as write,
             self.assertRaisesRegex(setup.SetupError, "fixed at setup.*new root"),
         ):

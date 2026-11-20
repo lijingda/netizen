@@ -135,8 +135,11 @@ class CliTest(unittest.TestCase):
     def test_interrupted_setup_rejects_unknown_or_unreadable_backend_before_login_and_writes(self):
         cases = (
             (b"instance: {backend: other}", [], "supports only: codex"),
-            (b"instance: {backend: other}", ["--backend", "codex"], "fixed at setup"),
+            (b"instance: {backend: null}", ["--backend", "codex"], "invalid instance.backend (NoneType)"),
+            (b"instance: {backend: 123}", ["--backend", "codex"], "invalid instance.backend (int)"),
+            (b"instance: {backend: Codex}", ["--backend", "codex"], "invalid instance.backend (str)"),
             (b"instance: {backend: ", [], "configuration is invalid"),
+            (b"when: 2020-13-45", [], "existing configuration is invalid; repair it before retrying setup"),
         )
         for content, arguments, reason in cases:
             with self.subTest(content=content, arguments=arguments), tempfile.TemporaryDirectory() as temporary:

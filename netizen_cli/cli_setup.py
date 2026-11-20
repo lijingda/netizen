@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, IO
 
-from .backends import DEFAULT_BACKEND
+from .backends import instance_backend
 from .lark_app import encode_lark_app, load_lark_app
 
 
@@ -253,7 +253,7 @@ def read_setup_config(path: Path) -> dict[str, Any] | None:
         return None
     try:
         config = yaml.safe_load(path.read_bytes())
-    except (UnicodeError, yaml.YAMLError):
+    except (ValueError, yaml.YAMLError):
         raise SetupError("existing configuration is invalid; repair it before retrying setup") from None
     if not isinstance(config, dict) or not isinstance(config.get("instance"), dict):
         raise SetupError("existing configuration must contain an instance mapping")
@@ -261,15 +261,13 @@ def read_setup_config(path: Path) -> dict[str, Any] | None:
 
 
 def setup_backend(config: dict[str, Any] | None, requested: str | None) -> str:
-    from .settings import validate_backend
-
     if config is None:
-        return validate_backend(DEFAULT_BACKEND if requested is None else requested)
-    saved = config["instance"].get("backend", DEFAULT_BACKEND)
+        return instance_backend({} if requested is None else {"backend": requested})
+    saved = instance_backend(config["instance"])
     if requested is not None and requested != saved:
         raise SetupError("--backend differs from existing configuration. The backend is fixed at setup. "
                          "A different backend needs a new root.")
-    return validate_backend(saved)
+    return saved
 
 
 def prepare_configuration(root: Path, *, backend: str | None = None, admin_port: int | None = None,

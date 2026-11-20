@@ -116,7 +116,7 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         config.write_bytes(original)
         code, report, _ = self.invoke("setup", "--backend", "codex")
         self.assertEqual(code, 1)
-        self.assertIn("fixed at setup", report["reason"])
+        self.assertIn("invalid instance.backend", report["reason"])
         self.assertEqual(config.read_bytes(), original)
 
     def test_registered_setup_repairs_missing_administrator_without_rebinding(self) -> None:
