@@ -74,9 +74,8 @@ from ..domain import (
     SettingsSection,
     ScopeKind,
 )
-from ..backends import BackendPolicy
+from ..backends import BackendPolicy, BackendUnsupported
 from ..experience import (
-    InvalidInteraction,
     command_help,
     parse_message,
 )
@@ -349,7 +348,7 @@ class ChannelState:
     @property
     def _runtime(self) -> CodexRuntime:
         if self._codex is None:
-            raise InvalidInteraction("Claude 试点暂不支持【原生 Codex 操作】。")
+            raise BackendUnsupported("原生 Codex 操作")
         return self._codex
 
     _ordinary: OrdinarySessionPort

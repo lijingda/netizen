@@ -48,7 +48,6 @@ from ..domain import (
     NativeCapability,
 )
 from ..experience import (
-    require_command,
     InvalidInteraction,
 )
 from ..management import (
@@ -120,7 +119,6 @@ class CommandChannel(CardControlChannel):
             if self._policy.backend == "claude":
                 if decoded.target_kind == "side" or side is not None:
                     raise InvalidInteraction("Claude 试点暂不支持【Side】。")
-                require_command(self._policy, decoded.command.name.value, archived=bool(decoded.command.arguments))
             if decoded.target_kind == "side":
                 if side is None or side.id != decoded.target_id:
                     raise CardActionError("状态卡对应的 Side 已变化或不可用，本次未执行。")
@@ -153,7 +151,6 @@ class CommandChannel(CardControlChannel):
         self, message: Any, intent: ControlIntent, *, expected_binding_id: str | None = None,
     ) -> None:
         if self._policy.backend == "claude":
-            require_command(self._policy, intent.name.value, archived=bool(intent.arguments))
             if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.DEFAULTS}:
                 assert self._management.local is not None
                 self._management.local.require_admission()

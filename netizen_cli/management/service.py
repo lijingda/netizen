@@ -12,6 +12,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
+from ..backends import BackendUnsupported as BackendUnsupported
+from ..session_settings import require_local_settings
 from ..management_errors import ConversationReadError as ConversationReadError, ManagementError
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .project_files import ProjectFileService
@@ -115,13 +117,6 @@ _CONFIG_WRITE_SECONDS = 10.0
 _PROJECT_DELETE_SECONDS = 120.0
 _PROJECT_DELETE_STEP_SECONDS = 30.0
 logger = logging.getLogger(__name__)
-
-
-class BackendUnsupported(ManagementError):
-    """An operation outside the selected instance backend's capabilities."""
-
-    def __init__(self, feature: str, *, detail: str | None = None) -> None:
-        super().__init__(detail or f"Claude 试点暂不支持【{feature}】。")
 
 
 class NoCurrentBinding(ManagementError):
@@ -539,7 +534,7 @@ class ManagementRuntimePort:
     @property
     def __runtime(self) -> CodexRuntime:
         if self.__codex is None:
-            raise ManagementError("Claude 试点暂不支持【原生 Codex 操作】。")
+            raise BackendUnsupported("原生 Codex 操作")
         return self.__codex
 
     async def read_scheduled_turn(
@@ -1799,10 +1794,7 @@ class InstanceManagementService:
     ) -> CreatedBinding:
         if self.local is not None:
             self.local.require_admission()
-            if turn_settings is not None:
-                raise BackendUnsupported("模型、思考强度或速度设置")
-            if task_feedback and (task_feedback.progress_card_enabled or task_feedback.progress_card_settings is not None):
-                raise BackendUnsupported("过程卡")
+            require_local_settings(turn_settings is not None, task_feedback)
         parameters = dict(
             scope=scope, creator_id=creator_id, project_alias=project_alias,
             expected_project_revision=expected_project_revision,
@@ -2012,10 +2004,7 @@ class InstanceManagementService:
     ) -> ThreadBinding:
         if self.local is not None:
             self.local.require_admission()
-            if settings is not None:
-                raise BackendUnsupported("模型、思考强度或速度设置")
-            if task_feedback and (task_feedback.progress_card_enabled or task_feedback.progress_card_settings is not None):
-                raise BackendUnsupported("过程卡")
+            require_local_settings(settings is not None, task_feedback)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             return await self._runtime.configure_context_exact(
@@ -2162,10 +2151,7 @@ class InstanceManagementService:
     ) -> ThreadBinding:
         if self.local is not None:
             self.local.require_admission()
-            if settings is not None:
-                raise BackendUnsupported("模型、思考强度或速度设置")
-            if task_feedback and (task_feedback.progress_card_enabled or task_feedback.progress_card_settings is not None):
-                raise BackendUnsupported("过程卡")
+            require_local_settings(settings is not None, task_feedback)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             if binding.settings_revision != expected_settings_revision:

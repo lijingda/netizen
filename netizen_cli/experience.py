@@ -305,25 +305,8 @@ def _command_error(
     return InvalidInteraction(" ".join(parts))
 
 
-_COMMAND_OPERATIONS = {
-    "menu": ("help", "帮助"), "sessions": ("list_bindings", "会话列表"),
-    "resume": ("activate_binding", "切换会话"), "enable": ("enable_group", "群聊启用"),
-    "config": ("context", "会话设置"), "defaults": ("context", "聊天默认设置"),
-    "side": ("side", "Side"), "goal": ("goal", "Goal"), "fork": ("fork", "会话分支"),
-    "compact": ("compact", "上下文压缩"), "usage": ("usage", "账号额度"),
-    "cron": ("schedule", "定时任务"), "release": ("release", "释放会话订阅"),
-    "archive": ("archive", "会话归档"), "unarchive": ("unarchive", "会话恢复"),
-    "delete": ("delete", "会话删除"), "rename": ("rename", "会话命名"),
-}
-
-
 def require_command(policy: BackendPolicy, name: str, *, archived: bool = False) -> None:
-    operation, label = _COMMAND_OPERATIONS.get(name, (name, "/" + name))
-    if name in {*_CONFIG_ALIASES, "speed"}:
-        operation, label = "model", "模型、思考强度或速度设置"
-    if name == "sessions" and archived:
-        operation, label = "archived", "已归档会话"
-    refusal = policy.operation_refusal(operation, label)
+    refusal = policy.command_refusal(name, archived=archived)
     if refusal:
         raise InvalidInteraction(refusal)
 
@@ -356,14 +339,18 @@ def parse_message(
             )
         return PromptInput(scope, message_id, sender_id, body, skill_names)
     if body == "/":
+        if policy.backend == "claude":
+            require_command(policy, "menu")
         return ControlIntent(scope, message_id, sender_id, ControlName.MENU)
 
     raw_parts = body[1:].lstrip().split(maxsplit=1)
     raw_spec = _COMMANDS.get(raw_parts[0].lower()) if raw_parts else None
+    checked_command = False
     if policy.backend == "claude" and raw_parts:
         name = raw_spec.name if raw_spec else raw_parts[0].lower()
         if raw_spec is not None or name in {*_CONFIG_ALIASES, "speed"}:
             require_command(policy, name, archived=len(raw_parts) > 1)
+            checked_command = True
     if (
         raw_spec is not None
         and raw_spec.intent is ControlName.NEW
@@ -392,9 +379,11 @@ def parse_message(
                 spec=raw_spec,
             ) from error
     if not tokens:
+        if policy.backend == "claude":
+            require_command(policy, "menu")
         return ControlIntent(scope, message_id, sender_id, ControlName.MENU)
     spec = _COMMANDS.get(tokens[0].lower())
-    if policy.backend == "claude":
+    if policy.backend == "claude" and not checked_command:
         head = tokens[0].lower()
         if spec is not None or head in {*_CONFIG_ALIASES, "speed"}:
             require_command(policy, spec.name if spec else head, archived=len(tokens) > 1)

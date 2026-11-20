@@ -90,7 +90,7 @@ from .queries import (
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
 from ..backends import BackendPolicy
-from ..management.service import BackendUnsupported
+from ..backends import BackendUnsupported
 from .users import OwnerOnly
 from ..instance import instance_digest
 from ..error_messages import describe_error
@@ -638,18 +638,7 @@ class AdminWebApplication:
         path = context.path.removeprefix("/api/v1")
         if path in {"/admin-users/add", "/admin-users/selector-config"}:
             raise OwnerOnly()
-        families = {
-            "/schedules": "定时任务", "/side-topics": "Side", "/sessions/temporary": "Side",
-            "/session-tools": "会话协作权限", "/session-tool-access": "会话协作权限",
-            "/progress-card": "过程卡", "/question-notifications": "原生提问通知",
-            "/sessions/conversation": "原生会话目录或历史", "/sessions/archive": "会话归档",
-            "/sessions/unarchive": "会话恢复", "/sessions/delete-lazy": "会话删除",
-            "/sessions/delete-materialized": "会话删除", "/sessions/rename": "会话命名",
-            "/sessions/generate-name": "会话命名", "/sessions/release": "释放会话订阅",
-        }
-        for prefix, label in families.items():
-            if path == prefix or path.startswith(prefix + "/"):
-                raise BackendUnsupported(label)
+        self._backend_policy.require_api(path)
         if path == "/sessions/ordinary" and (context.query.get("inventoryState") == ["archived"]
                 or context.query.get("sortBy") == ["updatedAt"] or any(key in context.query for key in ("updatedFrom", "updatedBefore", "searchTerm"))):
             raise BackendUnsupported("原生会话目录或历史")

@@ -26,6 +26,7 @@ from ..cards.scheduled import (
 from ..cards.questions import (
     is_question_card_action,
 )
+from ..backends import BackendUnsupported
 from ..cards.controls import local_form_fields
 from ..cards.defaults import is_defaults_card_action
 from ..cards.status import (
@@ -178,10 +179,10 @@ class ChannelEntry(CommandChannel):
                     name = CardControlName(value["intent"])
                 except (TypeError, ValueError):
                     raise CardActionError("未知卡片动作。") from None
-                self._require_local_card_operation(name)
+                self._policy.require_card(name.value)
         if isinstance(form, Mapping):
             if any(isinstance(key, str) and key.startswith("rename_name_v1__") for key in form):
-                self._require_local_card_operation(CardControlName.RENAME_BINDING)
+                self._policy.require_card(CardControlName.RENAME_BINDING.value)
             for prefix in ("new", "config", "defaults_session"):
                 if any(isinstance(key, str) and key.startswith(prefix + "_") for key in form):
                     local_form_fields(form, prefix)
@@ -209,7 +210,7 @@ class ChannelEntry(CommandChannel):
                     try:
                         self._check_local_card(value, form)
                         self._management.local.require_admission()
-                    except (CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
+                    except (BackendUnsupported, CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
                         refusal = str(error)
             if refusal:
                 message_id = getattr(event, "message_id", "")
@@ -292,6 +293,7 @@ class ChannelEntry(CommandChannel):
                 raise CardActionError("Claude 试点暂不支持【Side】。")
             await self._card_control(intent)
         except (
+            BackendUnsupported,
             CardActionError,
             BindingContextRevisionConflict,
             BindingNotFound,

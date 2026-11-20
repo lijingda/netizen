@@ -1,13 +1,13 @@
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 from lark_channel import SendResult
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 import unittest
 
-from netizen_cli.backends import BackendPolicy
+from netizen_cli.backends import BackendPolicy, BackendUnsupported
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
@@ -100,6 +100,33 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("Codex", content)
                 self.assertNotIn("binding.delete", content)
             self.assertEqual(clients.calls, [])
+
+    async def test_local_commands_never_read_codex_accessors(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            port = app._management._runtime
+            with self.assertRaises(BackendUnsupported):
+                _ = app._runtime
+            with self.assertRaises(BackendUnsupported):
+                await port.read_scheduled_turn("unused", "unused")
+            await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            with (patch.object(type(app), "_runtime", new_callable=PropertyMock) as channel_codex,
+                  patch.object(type(port), "_ManagementRuntimePort__runtime", new_callable=PropertyMock) as management_codex):
+                for command in ("/help", "/status", "/new", "/sessions", "/defaults", "/config", "/stop", "/projects", "/admin",
+                                "/goal", "/usage", "/archive", "/side", "/fork", "/cron"):
+                    await app.handle_message(FakeMessage(command, message_id="om"))
+                channel_codex.assert_not_called()
+                management_codex.assert_not_called()
+
+    async def test_each_recognized_slash_command_is_checked_once(self):
+        from netizen_cli.experience import require_command
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            with patch("netizen_cli.experience.require_command", wraps=require_command) as check:
+                for text in ("/", "/help", "/new", "/'config'", "/goal x", "/threads archived"):
+                    check.reset_mock()
+                    await app.handle_message(FakeMessage(text, message_id="om"))
+                    self.assertEqual(check.call_count, 1, text)
 
     async def test_owner_enable_with_only_sender_id(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):

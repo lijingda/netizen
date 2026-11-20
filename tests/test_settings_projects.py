@@ -22,7 +22,7 @@ class SettingsTest(unittest.TestCase):
     def test_claude_pilot_policy_defaults_to_an_explicit_gap(self):
         self.assertIn("claude", KNOWN_BACKENDS)
         policy = BackendPolicy("claude", owner_id="owner")
-        for op in ("stop", "list_bindings", "context", "reactions", "worktrees"):
+        for op in ("stop", "list_bindings", "context", "worktrees"):
             self.assertIsNone(policy.operation_refusal(op, op))
         for op in ("goal", "schedules", "progress", "unknown"):
             self.assertIn(op, policy.operation_refusal(op, op))

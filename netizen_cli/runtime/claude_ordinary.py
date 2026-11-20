@@ -15,6 +15,7 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, SystemInitData, Sy
 from ..bindings import BindingNotFound, BindingStore, ProjectDeleting, ProjectNotFound, ScopeNotFound, ThreadBinding
 from ..bindings import BindingTaskFeedback, BindingTurnSettings
 from ..domain import ActiveState, MessageContextAnchor, MentionContextMode
+from ..session_settings import require_local_settings
 from ..ordinary_sessions import (
     LocalExecutionSnapshot, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
     PreparedPrompt, SessionShutdownPort, StopPreview,
@@ -505,8 +506,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self.require_admission()
         async with self._lock(binding_id):
             self._idle(binding_id)
-            if settings or task_feedback.progress_card_enabled or task_feedback.progress_card_settings:
-                raise OrdinaryInputRejected("Claude 试点暂不支持【模型设置或过程卡】。")
+            require_local_settings(settings is not None, task_feedback)
             binding = self._bindings.set_configuration(
                 binding_id=binding_id, expected_settings_revision=expected_settings_revision,
                 expected_context_revision=expected_context_revision, expected_feedback_revision=expected_feedback_revision,

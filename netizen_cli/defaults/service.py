@@ -14,6 +14,7 @@ from ..domain import MentionContextMode
 from ..model_settings import ModelCatalogError, STANDARD_SERVICE_TIER_ID
 from ..projects import Project, ProjectError, ProjectRegistry
 from ..worktrees.policy import WorkspacePolicy, WorkspacePolicyError
+from ..session_settings import require_local_settings
 from ..session_settings import SessionSettings, SessionSettingsError
 from ..worktrees.errors import WorktreeError
 from .models import DefaultConfigurationError, DefaultRule
@@ -96,10 +97,7 @@ class SessionDefaultsService:
         """Validate at use time; no Project revision or effective config is saved."""
         if self._local_only:
             settings = rule.session_settings
-            if settings.turn_settings:
-                raise DefaultConfigurationError("Claude 试点暂不支持【模型、思考强度或速度设置】。", code="backend_unsupported")
-            if settings.task_feedback.progress_card_enabled or settings.task_feedback.progress_card_settings is not None:
-                raise DefaultConfigurationError("Claude 试点暂不支持【过程卡】。", code="backend_unsupported")
+            require_local_settings(settings.turn_settings is not None, settings.task_feedback)
         if rule.app_id != self.app_id:
             raise DefaultConfigurationError("当前应用下没有这个默认配置。", code="not_found")
         try:

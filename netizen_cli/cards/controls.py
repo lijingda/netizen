@@ -35,7 +35,7 @@ from ..domain import (
 from ..model_settings import ModelCatalog, TurnModelSettings
 from ..projects import Project
 from ..progress_card_settings import ProgressCardSettings
-from ..session_settings import SessionSettings
+from ..session_settings import SessionSettings, require_local_settings
 from ..sdk_gap_adapter import GoalSnapshot
 from .callbacks import (
     ACTION_VERSION,
@@ -2319,17 +2319,15 @@ def decode_button_action(
 
 def local_form_fields(payload: Mapping[str, Any], prefix: str) -> dict[str, Any]:
     fields = dict(payload)
-    if any(f"{prefix}_{key}" in fields for key in ("effort", "speed")):
-        raise CardActionError("Claude 试点暂不支持【模型、思考强度或速度设置】。")
+    has_model = any(f"{prefix}_{key}" in fields for key in ("effort", "speed"))
     model = fields.get(f"{prefix}_model")
     if model is not None:
         model = _required_string(model, f"{prefix}_model")
         model_id = (_decode_config_model_reference(model)[-1] if prefix == "config" else _decode_new_model_reference(model))
-        if model_id is not None:
-            raise CardActionError("Claude 试点暂不支持【模型、思考强度或速度设置】。")
+        has_model = has_model or model_id is not None
     progress = f"{prefix}_progress_card"
-    if progress in fields and _decode_progress_card_reference(fields[progress], progress) != (False, None):
-        raise CardActionError("Claude 试点暂不支持【过程卡】。")
+    enabled, settings = _decode_progress_card_reference(fields[progress], progress) if progress in fields else (False, None)
+    require_local_settings(has_model, BindingTaskFeedback(progress_card_enabled=enabled, progress_card_settings=settings))
     fields.setdefault(progress, _progress_card_reference(False, None))
     mention = f"{prefix}_completion_mention"
     fields.setdefault(mention, _task_feedback_reference(True))

@@ -44,6 +44,7 @@ from ..model_settings import ModelCatalogError, TurnModelSettings
 from ..management import (
     RuntimePrecondition,
     SessionInventoryState,
+    SessionQuery,
 )
 
 from . import constants
@@ -156,19 +157,23 @@ class SessionCardChannel(QuestionChannel):
                 navigation = SessionCardPage("lazy")
             if navigation.state != "lazy" or (navigation.cursor is not None and not isinstance(navigation.cursor, BindingCursor)):
                 raise CardActionError("会话分页已过期，请重新发送 /sessions。")
-            records = await self._bindings.query_bindings(
-                query=BindingQuery(app_id=scope.app_id, chat_id=scope.chat_id, topic_id=scope.topic_id, scope_kind=scope.kind),
-                cursor=navigation.cursor, limit=SESSIONS_PAGE_SIZE,
+            deadline = asyncio.get_running_loop().time() + constants.SESSION_QUERY_TIMEOUT_SECONDS
+            records = await self._management.query_sessions(
+                query=SessionQuery(sort_by="created_at", local=BindingQuery(
+                    app_id=scope.app_id, chat_id=scope.chat_id, topic_id=scope.topic_id, scope_kind=scope.kind)),
+                cursor=navigation.cursor, limit=SESSIONS_PAGE_SIZE, deadline=deadline,
             )
-            assert self._management.local is not None
+            statuses = await self._management.binding_statuses_exact(
+                binding_ids=[item.record.binding.id for item in records.items], deadline=deadline)
             items_local = []
-            for record in records.items:
-                local_binding = record.binding
-                live = self._management.local.local_snapshot(local_binding.id)
+            for item, status in zip(records.items, statuses, strict=True):
+                local_binding = item.record.binding
+                snapshot = status.snapshot
+                assert status.local_label is not None
                 items_local.append(SessionCardItem(
                     binding_id=local_binding.id, short_id=local_binding.short_id, project_alias=local_binding.project_alias,
-                    native_thread_id=local_binding.native_thread_id, title="", state=live.label, active=local_binding.active,
-                    activity_revision=live.revision, turn_id=live.turn.turn_id if live.turn else None,
+                    native_thread_id=local_binding.native_thread_id, title="", state=status.local_label, active=local_binding.active,
+                    activity_revision=snapshot.activity_revision, turn_id=snapshot.turn.turn_id if snapshot.turn else None,
                 ))
             after = navigation.next(records.next_cursor).encode(scope) if records.next_cursor else None
             selected = self._bindings.active_binding(scope.key)

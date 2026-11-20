@@ -18,6 +18,8 @@ from ..bindings import (
     SideTopicState,
     ThreadBinding,
 )
+from ..backends import BackendUnsupported
+from ..session_settings import require_local_settings
 from ..cards import (
     CardActionError,
     archived_sessions_delete_binding_card,
@@ -115,7 +117,7 @@ class CardControlChannel(TurnFileChannel):
                     "已删除当前聊天的精确默认配置；群名规则仍可生效。"
                     if request["mode"] == "delete" else "已保存当前聊天的默认会话配置。"
                 )
-        except (CardActionError, DefaultConfigurationError, ProjectError, ModelCatalogError) as error:
+        except (BackendUnsupported, CardActionError, DefaultConfigurationError, ProjectError, ModelCatalogError) as error:
             notice, failed = str(error), True
         except Exception as error:
             logger.warning("default configuration callback failed", extra={"error_type": type(error).__name__})
@@ -205,28 +207,12 @@ class CardControlChannel(TurnFileChannel):
             if self._rename_name_generations.get(intent.source_id) is generation:
                 self._rename_name_generations.pop(intent.source_id)
 
-    def _require_local_card_operation(self, name: CardControlName) -> None:
-        allowed = {
-            CardControlName.OPEN_SETTINGS_SECTION, CardControlName.REFRESH_SETTINGS,
-            CardControlName.REGISTER_PROJECT, CardControlName.SET_PROJECT_ENABLED,
-            CardControlName.PREPARE_NEW_WORKSPACE, CardControlName.CREATE_BINDING, CardControlName.CONFIGURE_BINDING,
-            CardControlName.ACTIVATE_BINDING, CardControlName.STOP_EXACT_BINDING,
-            CardControlName.RECHECK_EXACT_TURN, CardControlName.SESSIONS_PAGE,
-        }
-        if name not in allowed:
-            value = name.value
-            label = ("Goal" if value.startswith("goal.") else "Side" if value.startswith("side.")
-                     else "会话命名" if value in {"binding.rename", "binding.name.generate"}
-                     else "会话删除" if "delete" in value else "会话恢复" if "unarchive" in value else "会话归档")
-            raise CardActionError(f"Claude 试点暂不支持【{label}】。")
-
     async def _card_control(self, intent: CardControlIntent) -> None:
         if self._policy.backend == "claude":
-            self._require_local_card_operation(intent.name)
-            if intent.model_id or intent.effort_id or intent.service_tier_id:
-                raise CardActionError("Claude 试点暂不支持【模型、思考强度或速度设置】。")
-            if intent.progress_card_enabled or intent.progress_card_settings is not None:
-                raise CardActionError("Claude 试点暂不支持【过程卡】。")
+            self._policy.require_card(intent.name.value)
+            require_local_settings(bool(intent.model_id or intent.effort_id or intent.service_tier_id),
+                                   BindingTaskFeedback(progress_card_enabled=bool(intent.progress_card_enabled),
+                                                       progress_card_settings=intent.progress_card_settings))
         handler = self._card_control_handlers().get(intent.name)
         if handler is None:
             raise CardActionError(f"尚未处理的卡片动作：{intent.name.value}")

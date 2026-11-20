@@ -30,6 +30,7 @@ from ..cards import (
 from .messages import _send_result_error_code
 from ..file_inputs import FileInputError
 from ..defaults import DefaultConfigurationError
+from ..backends import BackendUnsupported
 from ..ordinary_sessions import OrdinaryInputRejected
 from ..runtime.contracts import (
     ContextBoundaryCommitFailed,
@@ -115,7 +116,7 @@ class ChannelReplies(ChannelState):
 
     async def _report_input_error(self, message: Any, error: Exception) -> None:
         """One user-visible failure policy for message, card and scheduled inputs."""
-        if self._policy.backend == "claude" and isinstance(error, (OrdinaryInputRejected, TerminalStateUnknown, ThreadActivityChanged)):
+        if self._policy.backend == "claude" and isinstance(error, (BackendUnsupported, OrdinaryInputRejected, TerminalStateUnknown, ThreadActivityChanged)):
             await self._reply(message, str(error) or "本次操作对应的执行已变化。")
             return
         if isinstance(error, (InvalidInteraction, ScheduleError, DefaultConfigurationError)):
