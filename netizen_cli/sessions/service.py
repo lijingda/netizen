@@ -54,6 +54,10 @@ class SessionService:
                  send_message: Callable[..., Awaitable[dict[str, Any]]],
                  reads: CodexSessionReads | None = None, history: ThreadHistory | None = None, worktrees: Any = None,
                  suppress_reply: Callable[..., Awaitable[dict[str, Any]]] | None = None) -> None:
+        if (reads is None) == (codex is None):
+            raise TypeError("SessionService requires exactly one of reads or codex")
+        if reads is not None and history is not None:
+            raise TypeError("history cannot be supplied with reads")
         self._bindings, self._runtime = bindings, runtime
         self._app_id, self._policy = app_id, policy
         self._create, self._send = create_thread, send_message

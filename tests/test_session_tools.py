@@ -120,6 +120,14 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.patch = patch("netizen_cli.runtime.codex_session_reads.AsyncThread", self.catalog.handle)
         self.patch.start()
 
+    def test_construction_requires_one_read_source(self):
+        common = dict(bindings=self.store, runtime=self.catalog, app_id="app", policy=self.policy,
+                      create_thread=AsyncMock(), send_message=AsyncMock())
+        for invalid in ({}, {"history": self.catalog}, {"reads": object(), "codex": object()},
+                        {"reads": object(), "history": self.catalog}):
+            with self.subTest(arguments=tuple(invalid)), self.assertRaises(TypeError):
+                SessionService(**common, **invalid)
+
     async def asyncTearDown(self):
         self.patch.stop()
         self.store.close()

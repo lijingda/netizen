@@ -12,6 +12,7 @@ from mcp.types import CallToolRequestParams
 
 from netizen_cli.admin.port_config import ConfigFileSnapshot
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule, SessionPolicyService
+from netizen_cli.runtime.codex_session_reads import CodexSessionReads
 from netizen_cli.sessions.service import SessionService
 from netizen_cli.sessions.mcp import SessionMcpRunner
 from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings, ProjectDisabled
@@ -97,7 +98,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         policy_path.write_text("{}\n")
         self.policy = SessionPolicyService(config_snapshot=ConfigFileSnapshot.read(policy_path))
         self.service = SessionService(
-            bindings=self.store, runtime=self.runtime, codex=None, app_id="cli_test",
+            bindings=self.store, runtime=self.runtime, reads=AsyncMock(spec=CodexSessionReads), app_id="cli_test",
             policy=self.policy, create_thread=self.app.create_session_thread,
             send_message=self.app.send_session_message,
         )
