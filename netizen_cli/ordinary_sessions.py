@@ -3,11 +3,14 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
-from .bindings import BindingTaskFeedback
+from .bindings import BindingTaskFeedback, ThreadBinding
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
-from .runtime.contracts import TurnActivitySnapshot, TurnObservationUnavailableOutcome
+from .runtime.contracts import (
+    ContextCursorCommit, Submission, SubmissionAdmission, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,3 +57,25 @@ class OrdinaryConclusion:
 
 OrdinaryEvent = OrdinaryConclusion | TurnObservationUnavailableOutcome
 OrdinaryCompletionHandler = Callable[[OrdinaryEvent], Awaitable[None]]
+
+
+class OrdinaryInputRejected(RuntimeError):
+    """The backend verified that this input was never submitted."""
+
+
+class OrdinarySessionPort(Protocol):
+    """Admission, submission and exact activity for an ordinary Binding."""
+
+    async def capture_submission_admission(self, binding_id: str) -> SubmissionAdmission: ...
+
+    async def submit(
+        self, *, binding: ThreadBinding, cwd: Path | None, input: PreparedPrompt, owner_id: str,
+        origin: object, admission: SubmissionAdmission, context_commit: ContextCursorCommit | None,
+        skill_names: tuple[str, ...],
+    ) -> Submission: ...
+
+    def turn_activity(
+        self, binding_id: str, *, thread_id: str, turn_id: str,
+    ) -> TurnActivitySnapshot | None: ...
+
+    def reply_blocked_by_lifecycle(self, binding_id: str) -> bool: ...

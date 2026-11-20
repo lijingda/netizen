@@ -96,6 +96,7 @@ from .schedules.scheduler import Scheduler
 from .sessions.mcp import SessionMcpRunner
 from .sessions.policy import SessionPolicyService
 from .sessions.service import SessionService
+from .runtime.codex_ordinary import CodexOrdinarySessions
 from .runtime.codex_session_reads import CodexSessionReads
 from .thread_history import AppServerThreadHistory
 from .terminal_cleanup import PinnedExperimentalTerminalCleanup
@@ -350,6 +351,7 @@ class ServiceCore:
                 .build()
             )
             attachment_store = AttachmentStore(self._instance_root / "attachments")
+            ordinary = CodexOrdinarySessions(self._runtime)
             self._management = InstanceManagementService(
                 bindings=self._store,
                 projects=self._projects,
@@ -384,7 +386,7 @@ class ServiceCore:
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
                 channel=self._channel,
-                runtime=self._runtime,
+                runtime=self._runtime, ordinary=ordinary,
                 bindings=self._store,
                 projects=self._projects,
                 message_history=FeishuMessageHistoryReader(
