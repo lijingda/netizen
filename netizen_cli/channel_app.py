@@ -45,6 +45,7 @@ from .channel.reply_presenter import (
 )
 from .channel.reply_suppression import ReplySuppression
 from .codex_runtime import CodexRuntime
+from .runtime.codex_replies import codex_completion_handler
 from .domain import (
     TurnFileActionIntent,
     TurnFileActionName,
@@ -146,6 +147,7 @@ class ChannelApplication(ChannelEntry):
         self._reactions = _ReactionController(channel)
         self._reply_suppression = ReplySuppression()
         self._progress_cards = _ReplyCardPresenter(channel, runtime)
+        self.handle_completion = codex_completion_handler(self.handle_ordinary_completion, self.handle_codex_completion)
         runtime.set_completion_handler(self.handle_completion)
         runtime.set_question_handler(self.handle_questions)
         runtime.set_input_received_handler(self._reply_suppression.discard_physical_turn)

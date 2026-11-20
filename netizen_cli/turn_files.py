@@ -114,11 +114,13 @@ def project_file_evidence(
 
 
 def completed_file_evidence(
-    result: object | None, *, children: TaskPatchChildren, turn_diff: str | None = None,
+    result: object | None = None, *, children: TaskPatchChildren, turn_diff: str | None = None,
+    final_items: tuple[object, ...] | None = None,
 ) -> FileEvidence:
     """Files are best effort and can never prevent delivery of the conclusion."""
     try:
-        return project_file_evidence(tuple(getattr(result, "items", ())), children=children, turn_diff=turn_diff)
+        items = final_items if final_items is not None else tuple(getattr(result, "items", ()))
+        return project_file_evidence(items, children=children, turn_diff=turn_diff)
     except Exception:
         logging.getLogger(__name__).exception("failed to project completed Turn file evidence")
         return FileEvidence()
