@@ -861,6 +861,20 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stable answer", self.channel.replies[-1][1])
         self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
 
+    async def test_projection_failure_clears_suppression_and_marks_run_delivery_unknown(self):
+        claim, request = await self.completion_fixture()
+        outcome = TurnOutcome(
+            binding_id=request["binding"].id, thread_id="native-" + claim.run.id, turn_id="turn-initial",
+            owner_id=request["owner_id"], origin=request["origin"], error=RuntimeError("turn failed"),
+        )
+        suppression = self.app._reply_suppression
+        suppression.suppress(outcome.thread_id, outcome.turn_id, outcome.turn_id)
+        with patch("netizen_cli.runtime.codex_replies.describe_error", side_effect=ValueError("projection")):
+            with self.assertRaisesRegex(ValueError, "projection"):
+                await self.app.handle_completion(outcome)
+        self.assertFalse(suppression.is_suppressed(outcome.thread_id, outcome.turn_id, outcome.turn_id))
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
+
     async def test_failed_partial_then_confirmed_final_keeps_whole_batch_unknown(self):
         claim, request = await self.completion_fixture()
         native_id = "native-" + claim.run.id

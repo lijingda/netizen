@@ -36,10 +36,16 @@ def ordinary_conclusion(turn: TurnOutcome) -> OrdinaryConclusion:
 def codex_completion_handler(
     ordinary: OrdinaryCompletionHandler,
     feature: Callable[[CodexFeatureEvent], Awaitable[None]],
+    projection_failed: Callable[[TurnOutcome], None],
 ) -> CompletionHandler:
     async def dispatch(outcome: RuntimeOutcome) -> None:
         if isinstance(outcome, TurnOutcome):
-            await ordinary(ordinary_conclusion(outcome))
+            try:
+                conclusion = ordinary_conclusion(outcome)
+            except BaseException:
+                projection_failed(outcome)
+                raise
+            await ordinary(conclusion)
         elif isinstance(outcome, TurnObservationUnavailableOutcome):
             await ordinary(outcome)
         else:

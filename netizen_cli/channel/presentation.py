@@ -42,6 +42,7 @@ from ..runtime.contracts import (
     ThreadActivityDiscardedOutcome,
     TurnActivitySnapshot,
     TurnObservationUnavailableOutcome,
+    TurnOutcome,
 )
 from ..domain import (
     FeishuScope,
@@ -102,17 +103,21 @@ class CompletionPresentationChannel(ChannelReplies):
                 # Recovery never replays this completion or its side effects.
                 await self._archive_scheduled_completion(outcome)
         finally:
-            self._reply_suppression.discard(outcome.thread_id, outcome.turn_id)
-            if scheduled is not None:
-                self._scheduled_completions.pop(scheduled.run_id, None)
-                # Keep an undelivered terminal Run until the final I/O attempt
-                # finishes; setting a receipt earlier would allow retention
-                # pruning to delete it while the result card is still updating.
-                try:
-                    if self._bindings.schedules.get_run(scheduled.run_id).delivery_state is None:
-                        self._bindings.schedules.set_run(scheduled.run_id, delivery_state="unknown")
-                except ScheduleNotFound:
-                    pass  # A completed receipt may have allowed normal pruning.
+            self._finish_ordinary_completion(outcome)
+
+    def _finish_ordinary_completion(self, outcome: OrdinaryConclusion | TurnOutcome) -> None:
+        scheduled = outcome.origin if isinstance(outcome.origin, ScheduledOrigin) else None
+        self._reply_suppression.discard(outcome.thread_id, outcome.turn_id)
+        if scheduled is not None:
+            self._scheduled_completions.pop(scheduled.run_id, None)
+            # Keep an undelivered terminal Run until the final I/O attempt
+            # finishes; setting a receipt earlier would allow retention
+            # pruning to delete it while the result card is still updating.
+            try:
+                if self._bindings.schedules.get_run(scheduled.run_id).delivery_state is None:
+                    self._bindings.schedules.set_run(scheduled.run_id, delivery_state="unknown")
+            except ScheduleNotFound:
+                pass  # A completed receipt may have allowed normal pruning.
 
     async def _archive_scheduled_completion(self, outcome: OrdinaryConclusion) -> None:
         origin = outcome.origin
