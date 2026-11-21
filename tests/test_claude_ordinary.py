@@ -373,6 +373,34 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             await self.runtime.stop_exact(self.binding.id, **fields)
         self.assertTrue(await self.runtime.wait_idle(1))
 
+    async def test_cancelled_shutdown_starts_pending_closes_and_joins_an_existing_close_once(self):
+        await self.submit()
+        await self.submit(self.new_binding("second"))
+        closing, active = self.clients.calls
+        for client in self.clients.calls:
+            client.close_gate.clear()
+        closing.init()
+        closing.result()
+        await asyncio.wait_for(closing.closing.wait(), 1)
+        interrupt_started = asyncio.Event()
+        async def hang():
+            interrupt_started.set()
+            await asyncio.Future()
+
+        try:
+            with patch.object(active, "interrupt", side_effect=hang):
+                shutdown = asyncio.create_task(self.runtime.interrupt_all())
+                await asyncio.wait_for(interrupt_started.wait(), 1)
+                shutdown.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await shutdown
+            await asyncio.wait_for(active.closing.wait(), 1)
+            self.assertEqual([client.closes for client in self.clients.calls], [1, 1])
+        finally:
+            for client in self.clients.calls:
+                client.close_gate.set()
+        self.assertTrue(await self.runtime.wait_idle(1))
+
     async def test_busy_bindings_share_cwd_and_shutdown_closes_in_parallel(self):
         first = await self.submit()
         second = await self.submit(self.new_binding("other"))

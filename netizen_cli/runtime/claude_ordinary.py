@@ -668,8 +668,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 task = asyncio.create_task(self._shutdown_stop(execution))
                 self._controls.add(task)
                 task.add_done_callback(self._controls.discard)
-        if not await self.wait_idle(_CONTROL_SECONDS):
-            await self.cancel_tasks()
+        try:
+            if not await self.wait_idle(_CONTROL_SECONDS):
+                await self.cancel_tasks()
+        except asyncio.CancelledError:
+            # The service's remaining drain budget can expire during interrupt.
+            # Trigger each execution's owned finally even when there is no time to join.
+            self._begin_client_cleanup()
+            raise
 
     async def wait_idle(self, timeout: float) -> bool:
         deadline = time.monotonic() + self._remaining(timeout)
@@ -679,10 +685,10 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 return False
         return not self._unavailable
 
-    async def cancel_tasks(self) -> None:
-        self.close_admission()
+    def _begin_client_cleanup(self) -> None:
         for task in self._controls:
-            task.cancel()
+            if not task.cancelling():
+                task.cancel()
         for execution in self._tasks.values():
             if execution.closing:
                 continue
@@ -690,6 +696,10 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 self._cancel_opening(execution)
             elif execution.task is not None and not execution.task.cancelling():
                 execution.task.cancel()
+
+    async def cancel_tasks(self) -> None:
+        self.close_admission()
+        self._begin_client_cleanup()
         if not await self.wait_idle(_CLOSE_SECONDS):
             for task, execution in self._tasks.items():
                 if execution.close_finished and execution.submit_finished.is_set():

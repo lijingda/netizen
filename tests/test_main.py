@@ -1579,6 +1579,32 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(core._schedule_mcp.deadline, core._scheduler.deadline)
         self.assertEqual(core._scheduler.deadline, core._management.deadline)
 
+    async def test_hung_claude_shutdown_runs_after_drains_and_leaves_time_for_cleanup(self):
+        order = []
+        def step(name):
+            async def record(*args, **kwargs):
+                order.append(name)
+            return record
+
+        async def hung():
+            order.append("claude:close")
+            await asyncio.Future()
+
+        core = ServiceCore(settings=SimpleNamespace(), projects=SimpleNamespace(), instance_root=Path("/unused"),
+            channel=SimpleNamespace(update_policy=lambda **kwargs: None,
+                                    safety=SimpleNamespace(dispose=step("feishu:drain"))),
+            store=SimpleNamespace(aclose=step("store:close")))
+        core._claude = SimpleNamespace(close_admission=lambda: order.append("claude:admission"), interrupt_all=hung)
+        core._admin = SimpleNamespace(close_admission=lambda: None, close_listener=step("admin:listener"),
+                                      drain=step("admin:drain"), close_auth=lambda: order.append("admin:auth"))
+        core._management = SimpleNamespace(set_service_ready=lambda ready: None, close=step("management:drain"))
+        core.application = SimpleNamespace(close=step("application:close"))
+        with patch("netizen_cli.main._CLAUDE_SHUTDOWN_CAP_SECONDS", .02), self.assertLogs("netizen_cli.main", "WARNING") as logs:
+            await asyncio.wait_for(core.close(), 1)
+        self.assertIn("Claude client shutdown timed out", " ".join(logs.output))
+        self.assertEqual(order, ["claude:admission", "admin:listener", "feishu:drain", "admin:drain",
+                                 "management:drain", "claude:close", "application:close", "admin:auth", "store:close"])
+
     async def test_shutdown_native_failure_still_closes_sdk_and_local_resources(self) -> None:
         for failure in ("cleanup_error", "turns_not_idle"):
             with self.subTest(failure=failure):

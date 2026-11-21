@@ -119,6 +119,7 @@ logger = logging.getLogger(__name__)
 
 _CODEX_SERVICE_CONFIG_OVERRIDES = ("allow_login_shell=false",)
 _SHUTDOWN_BUDGET_SECONDS = 60.0
+_CLAUDE_SHUTDOWN_CAP_SECONDS = 30.0
 _READY_MARKER_CONTENT = b"netizen service ready\n"
 _LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOG_BACKUP_COUNT = 2
@@ -500,14 +501,18 @@ class ServiceCore:
 
     async def _close_claude(self, deadline: float) -> None:
         if self._claude is not None:
-            self._claude.close_admission()
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            # Leave time to close presentation, Auth and the Binding Store after an unconfirmed native close.
+            reserve = min(9.0, remaining / 2)
             await _cleanup_with_budget(
-                "Claude client shutdown", self._claude.interrupt_all, deadline=deadline, cap=_SHUTDOWN_BUDGET_SECONDS,
+                "Claude client shutdown", self._claude.interrupt_all, deadline=deadline - reserve,
+                cap=_CLAUDE_SHUTDOWN_CAP_SECONDS,
             )
 
     async def _close_partial_start(self) -> None:
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
-        await self._close_claude(deadline)
+        if self._claude is not None:
+            self._claude.close_admission()
         if self._scheduler is not None:
             self._scheduler.close_admission()
             await _cleanup_with_budget(
@@ -557,6 +562,7 @@ class ServiceCore:
                 deadline=deadline,
                 cap=10,
             )
+        await self._close_claude(deadline)
         if (shutdown := self._session_shutdown) is not None:
             shutdown.close_admission()
             await _cleanup_with_budget(
@@ -599,7 +605,8 @@ class ServiceCore:
                 )
             except Exception:
                 logger.exception("failed to disable Feishu admission")
-            await self._close_claude(deadline)
+            if self._claude is not None:
+                self._claude.close_admission()
             if (shutdown := self._session_shutdown) is not None:
                 shutdown.close_admission()
             if self._scheduler is not None:
@@ -656,6 +663,7 @@ class ServiceCore:
                     deadline=deadline,
                     cap=15,
                 )
+            await self._close_claude(deadline)
             if (shutdown := self._session_shutdown) is not None:
                 interrupted = await _cleanup_with_budget(
                     "native Turn interrupt",
