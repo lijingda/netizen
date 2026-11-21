@@ -26,7 +26,7 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
-from ..cards.controls import local_running_status_card
+from ..cards.controls import local_status_card, local_status_text
 from ..cards.status import (
     decode_status_command, session_status_card,
 )
@@ -602,16 +602,11 @@ class CommandChannel(CardControlChannel):
         if self._policy.backend == "claude":
             assert self._management.local is not None
             snapshot = self._management.local.local_snapshot(binding.id)
-            text = (f"Project：{binding.project_alias}\n会话：{binding.short_id}\n"
-                    f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}\n本地任务：{snapshot.label}\n"
-                    "模型用量及执行详情在 Claude 试点中不可用。")
             turn = snapshot.turn
             if turn is not None and session_stop_available(turn.state.value):
-                await self._reply(message, local_running_status_card(
-                    intent.scope, text, binding.id, snapshot.revision, turn.turn_id,
-                ))
+                await self._reply(message, local_status_card(intent.scope, binding, snapshot))
             else:
-                await self._reply(message, text)
+                await self._reply(message, local_status_text(binding, snapshot))
             return
         state = await self._binding_state(binding)
         try:

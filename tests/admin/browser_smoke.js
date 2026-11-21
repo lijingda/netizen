@@ -245,6 +245,10 @@ async function run() {
                 row.textContent.includes("原生 Claude 设置") && row.textContent.includes("空闲")
                 && /[0-9]/.test(row.querySelector(".session-time")?.textContent))`);
             await until("local registration time, settings and status", verify);
+            await click('#sessions-body [aria-haspopup="menu"]');
+            await until("Claude row menu contains only available actions", () => evaluate(
+              '[...document.querySelectorAll(\'[role="menuitem"]\')].some(el => el.textContent === "设为当前") && ![...document.querySelectorAll(\'[role="menuitem"]\')].some(el => el.textContent.includes("创建定时任务"))'));
+            await evaluate('document.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape", bubbles:true}))');
             await click(created);
             await until("local sort after refresh", () => evaluate(`document.querySelector('${created}').parentElement.getAttribute("aria-sort") === "ascending"`));
             await until("local columns after refresh", verify);

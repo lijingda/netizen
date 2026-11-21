@@ -22,7 +22,7 @@ from netizen_cli.runtime.claude_client import BundledClaudeClients
 from netizen_cli.runtime.claude_ordinary import DEFAULT_MODE, GRACE, UNKNOWN
 from netizen_cli.settings import AdminWebSettings, Settings
 from tests.support.channel_cards import _card_button_value, direct_button_event, direct_card_event, new_form_values
-from tests.support.channel_messages import FakeChannel, FakeMessage
+from tests.support.channel_messages import PNG, FakeChannel, FakeMessage
 
 OWNER = "ou_user"
 SCOPE = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -258,8 +258,14 @@ class Driver:
             assert post == STOPPED, "incorrect interrupted terminal"
         else:
             assert isinstance(post, OutboundPost) and [m.open_id for m in post.mentions] == [OWNER]
-            assert call.answer and post.markdown == call.answer, "terminal did not deliver the attributed answer"
-            self.check_answer(label, post.markdown)
+            if self.provider and label == "ordinary":
+                assert call.answer == "fixture-reply-ordinary ![pixel](result.png)"
+                assert post.markdown.strip() == "fixture-reply-ordinary ![pixel](img_uploaded_1)"
+                (source, kind), = self.channel.upload_calls
+                assert kind == "image" and source.buffer == PNG
+            else:
+                assert call.answer and post.markdown == call.answer, "terminal did not deliver the attributed answer"
+                self.check_answer(label, post.markdown)
         events = self.channel.events
         terminal = "CrossMark" if interrupted else "DONE"
         assert events.index(("add", label, "Typing")) < events.index(("add", label, terminal)) < events.index(("reply", label, post))
@@ -292,7 +298,9 @@ class Driver:
         assert self.replies("grace-early") == [GRACE] and len(self.clients.calls) == 1
 
     async def ordinary(self):
-        await self.submit("ordinary")
+        if self.provider:
+            (self.cwd / "result.png").write_bytes(PNG)
+        await self.submit("ordinary", "inline-image" if self.provider else "text")
         await self.terminal("ordinary")
         if self.provider:
             row, = self.rows("ordinary")
@@ -303,7 +311,8 @@ class Driver:
             # The model must recall the unpredictable token in its observed answer.
             return
         row, = self.rows(label)
-        assert any(m["role"] == "user" and ("text", previous) in m["markers"] for m in row["history"])
+        previous_scenario = "inline-image" if previous == "ordinary" else "text"
+        assert any(m["role"] == "user" and (previous_scenario, previous) in m["markers"] for m in row["history"])
         assert any(m["role"] == "assistant" and "fixture-reply-" + previous in m["answers"] for m in row["history"])
 
     async def resume(self):
@@ -352,11 +361,15 @@ class Driver:
         await self.send("sessions", "/sessions")
         card, = self.replies("sessions")
         stop = _card_button_value(card, "停止")
-        await self.send("stop-command", "/stop")
+        await self.send("status", "/status")
+        status_card, = self.replies("status")
+        await self.click(direct_button_event(_card_button_value(status_card, "停止"), message_id="card-status"))
+        assert "当前会话" in json.dumps(self.channel.updates[-1], ensure_ascii=False)
+        assert self.channel.updates[-1][0] == "card-status"
         await self.terminal("stop-a", interrupted=True)
-        ack, = self.replies("stop-command")
+        ack, = self.replies("card-status")
         assert ack == "正在请求停止当前 Claude 执行。"
-        assert self.channel.events.index(("reply", "stop-command", ack)) < self.channel.events.index(
+        assert self.channel.events.index(("reply", "card-status", ack)) < self.channel.events.index(
             ("reply", "stop-a", self.replies("stop-a")[-1]))
         assert not running(tool)
         await self.submit("stop-b", "foreground")

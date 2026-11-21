@@ -54,6 +54,14 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(fx.channel.replies[-1][1], "这个 Claude 实例仅限所有者使用。")
                 await app.handle_message(FakeMessage("/help", message_id="om", sender_id="other", thread_id=topic, chat_type=kind))
                 self.assertIn("/new", fx.channel.replies[-1][1])
+            await app.handle_message(FakeMessage("  /help  ", message_id="om", sender_id="other"))
+            self.assertIn("/new", fx.channel.replies[-1][1])
+            fx.channel.bot_identity = SimpleNamespace(open_id="ou_bot")
+            await app.handle_message(FakeMessage("@Bot /help ", message_id="om", sender_id="other",
+                raw_content_type="post", chat_type="group", mentions=[SimpleNamespace(open_id="ou_bot", key="@_user_1")],
+                content=SimpleNamespace(post={"content": [[{"tag": "at", "user_id": "@_user_1", "user_name": "Bot"},
+                                                           {"tag": "text", "text": " /help "}]]})))
+            self.assertIn("/new", fx.channel.replies[-1][1])
             for sender, second in (("", "ou_user"), ("other", "ou_user"), ("", None)):
                 msg = FakeMessage("/help", message_id="om", sender_id=sender)
                 msg.sender_id = second
@@ -206,6 +214,10 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fx.channel.replies[-1][1], "plain answer")
             await app.handle_message(FakeMessage("/config", message_id="config"))
             form = form_values(fx.channel.replies[-1][1])
+            missing_mention = {key: value for key, value in form.items() if key != "config_completion_mention"}
+            await app.handle_card_action(direct_card_event(fx.channel, missing_mention))
+            self.assertIn("卡片已过期", fx.channel.replies[-1][1])
+            self.assertFalse(fx.store.get(binding.id).task_feedback.completion_mention_enabled)
             await app.handle_card_action(direct_card_event(fx.channel, form))
             self.assertIn("设置已保存", fx.channel.replies[-1][1])
             self.assertEqual(len(clients.calls), 1)
@@ -232,6 +244,6 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 if index:
                     self.assertEqual(reply, UNKNOWN)
                 else:
-                    self.assertEqual(reply.markdown, "answer with ![file](unavailable.png)")
+                    self.assertIn("图片文件不存在", reply.markdown)
                     self.assertEqual([mention.open_id for mention in reply.mentions], ["ou_user"])
             self.assertFalse(fx.channel.upload_calls)

@@ -34,6 +34,7 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
+from ..cards.controls import local_status_card
 from ..cards.defaults import decode_defaults_action
 from ..defaults import DefaultConfigurationError
 from ..runtime.contracts import (
@@ -852,17 +853,19 @@ class CardControlChannel(TurnFileChannel):
         binding = self._bindings.get(intent.binding_id)
         if binding.scope_key != intent.scope.key:
             raise BindingNotFound(intent.binding_id)
+        target = ExactBindingTarget(scope_key=intent.scope.key, binding_id=binding.id,
+                                    expected_active_binding_id=intent.expected_active_binding_id)
+        precondition = self._runtime_precondition(intent)
         try:
-            stopped = await self._management.stop_exact_binding(
-                target=ExactBindingTarget(
-                    scope_key=intent.scope.key,
-                    binding_id=binding.id,
-                    expected_active_binding_id=(
-                        intent.expected_active_binding_id
-                    ),
-                ),
-                runtime_precondition=self._runtime_precondition(intent),
-            )
+            if self._policy.backend == "claude":
+                async def acknowledge() -> None:
+                    await self._safe_reply_to_card(intent, "正在请求停止当前 Claude 执行。")
+
+                stopped = await self._management.stop_exact_binding(
+                    target=target, runtime_precondition=precondition, acknowledge=acknowledge,
+                )
+            else:
+                stopped = await self._management.stop_exact_binding(target=target, runtime_precondition=precondition)
         except ActivePointerChanged as error:
             raise CardActionError(
                 "会话列表已变化，本次停止未执行；请刷新 /sessions。"
@@ -890,15 +893,13 @@ class CardControlChannel(TurnFileChannel):
         if self._policy.backend == "claude":
             notice = "已请求停止本次 Claude 执行。" if stopped.disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
         try:
-            refreshed = await self._safe_update_card(
-                intent.source_id,
-                await self._sessions_card(
-                    scope=intent.scope,
-                    page=intent.page,
-                    session_cursor=intent.session_cursor,
-                    notice=notice,
-                ),
-            )
+            if self._policy.backend == "claude" and intent.from_status:
+                assert self._management.local is not None
+                card = local_status_card(intent.scope, binding, self._management.local.local_snapshot(binding.id))
+            else:
+                card = await self._sessions_card(scope=intent.scope, page=intent.page,
+                                                 session_cursor=intent.session_cursor, notice=notice)
+            refreshed = await self._safe_update_card(intent.source_id, card)
         except Exception:
             logger.exception("failed to rebuild sessions card after exact stop")
             refreshed = False

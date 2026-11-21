@@ -1789,15 +1789,20 @@ function renderSessions(data, batchActions) {
 function wireSessionActions(actions, session) {
   const a = session.actions;
   const secondary = document.createElement("div");
-  const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
-  secondary.append(schedule);
+  if (!claudeBackend) {
+    const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
+    secondary.append(schedule);
+  }
   if (session.canReadLatestAnswer) secondary.append(actionButton("查看对话记录", () => window.NetizenConversation.open(session)));
   if (a.configure) {
     const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
     actions.append(button);
   }
   if (a.stop) actions.append(actionButton("停止", async () => await window.NetizenConfirm.ask({ body: "停止这个会话的当前运行？", danger: false }) && mutate("/api/v1/sessions/stop", a.stop)));
-  if (a.activate) actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
+  if (a.activate) {
+    const container = claudeBackend && a.configure ? secondary : actions;
+    container.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
+  }
   if (a.rename) {
     const button = actionButton("重命名", () => openSessionRenameEditor(session, button));
     secondary.append(button);
@@ -1810,7 +1815,7 @@ function wireSessionActions(actions, session) {
   if (a.release) secondary.append(actionButton("释放订阅", async () => await window.NetizenConfirm.ask({ body: "释放本进程订阅？历史不会删除。", danger: false }) && mutate("/api/v1/sessions/release", a.release)));
   const primary = [...actions.children];
   for (const button of primary.slice(3)) secondary.append(button);
-  actions.append(window.NetizenMenu.create([...secondary.children], `更多操作 · ${session.shortId}`));
+  if (secondary.children.length) actions.append(window.NetizenMenu.create([...secondary.children], `更多操作 · ${session.shortId}`));
 }
 
 async function loadSides(page) {
@@ -3495,6 +3500,10 @@ function scheduleSelectOptions(node, choices, selected) {
 }
 
 function renderSessionSettingsFields(input, settings, models, contextAvailable) {
+  input("context").value = settings.message_context_mode;
+  for (const option of input("context").querySelectorAll("option")) {
+    option.disabled = option.value === "catch-up" && contextAvailable === false;
+  }
   if (claudeBackend) {
     for (const field of ["model", "effort", "tier", "progress"]) {
       input(field).closest("label").hidden = true;
@@ -3502,8 +3511,6 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
     input("progress-settings").hidden = true;
     input("progress-reset").hidden = true;
     input("completion-mention").checked = settings.completion_mention_enabled;
-    input("context").value = settings.message_context_mode;
-    input("context").disabled = !contextAvailable;
     input("reactions").checked = settings.reaction_pulse_enabled;
     return null;
   }
@@ -3515,10 +3522,6 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   scheduleSelectOptions(input("tier"), (model?.service_tiers || []).map((item) => [item.id, catalogChoiceLabel(item)]), turn?.service_tier_id);
   input("effort").disabled = !model;
   input("tier").disabled = !model;
-  input("context").value = settings.message_context_mode;
-  for (const option of input("context").querySelectorAll("option")) {
-    option.disabled = option.value === "catch-up" && contextAvailable === false;
-  }
   input("reactions").checked = settings.reaction_pulse_enabled;
   input("progress").checked = settings.progress_card_enabled;
   input("completion-mention").checked = settings.completion_mention_enabled;

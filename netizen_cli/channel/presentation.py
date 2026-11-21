@@ -101,7 +101,8 @@ class CompletionPresentationChannel(ChannelReplies):
                 await self._reply(outcome.origin, str(outcome.error))
                 return
             if outcome.status == "completed":
-                reaction, content = constants.DONE_REACTION, outcome.final_response or "Claude 已完成本次执行。"
+                reaction = constants.DONE_REACTION
+                content = await self._prepare_task_result_images(outcome) or "Claude 已完成本次执行。"
             elif outcome.status == "interrupted":
                 reaction, content = constants.INTERRUPTED_REACTION, "Claude 本次执行已停止。"
             else:

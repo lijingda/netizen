@@ -90,6 +90,7 @@ from .queries import (
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
 from ..backends import BackendPolicy
+from ..ordinary_sessions import OrdinaryInputRejected
 from ..backends import BackendUnsupported
 from .users import OwnerOnly
 from ..instance import instance_digest
@@ -123,6 +124,7 @@ from ..management.blocking_io import (
 from ..management.updates import UpdateError
 from ..management.chat_directory import AvailableChat, ChatDirectoryError
 from ..runtime.contracts import (
+    TerminalStateUnknown,
     NativeThreadCatalogState,
     RuntimeClosed,
     SideCloseFailed,
@@ -3659,6 +3661,10 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(409, "stale_action", "操作授权已过期或名单已变化，请刷新后重试。")
     if isinstance(error, FeishuError):
         return AdminWebError(502, "feishu_error", "飞书请求未完成，请稍后重试。")
+    if isinstance(error, OrdinaryInputRejected):
+        return AdminWebError(409, "ordinary_input_rejected", str(error))
+    if isinstance(error, TerminalStateUnknown):
+        return AdminWebError(409, "terminal_state_unknown", str(error))
     if isinstance(error, BackendUnsupported):
         return AdminWebError(409, "backend_unsupported", str(error))
     if isinstance(error, OwnerOnly):

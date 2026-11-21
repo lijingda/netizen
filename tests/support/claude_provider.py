@@ -108,6 +108,8 @@ class Provider:
                 tool = ("mcp__fixture__identify", {})
         content = ({"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex, "name": tool[0], "input": tool[1]}
                    if tool else {"type": "text", "text": "fixture-reply-" + label})
+        if scenario == "inline-image":
+            content["text"] += " ![pixel](result.png)"
         stop = "tool_use" if tool else "end_turn"
         msg = {"id": "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant",
                "model": data["model"], "content": [], "stop_reason": None, "stop_sequence": None,

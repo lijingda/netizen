@@ -308,6 +308,7 @@ class CardControlIntent:
     worktree_id: str | None = None
     worktree_create: dict[str, str | None] | None = None
     new_settings_draft: dict[str, str] | None = None
+    from_status: bool = False
 
 
 class TurnFileActionName(str, Enum):

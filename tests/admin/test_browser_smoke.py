@@ -164,6 +164,8 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
         management = fixture.management
         policy = BackendPolicy("codex")
         if owner_only:
+            from netizen_cli.domain import FeishuScope, ScopeKind
+            await fixture.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
             owner = users.restrict_to_owner()
             policy = BackendPolicy("claude", owner.open_id)
             local = ClaudeOrdinarySessions(bindings=fixture.store, owner_id=owner.open_id, clients=FakeClaudeClients(),

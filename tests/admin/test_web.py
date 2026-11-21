@@ -799,6 +799,29 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         return status, headers, json.loads(content) if content else None
 
+    async def test_local_management_refusals_reach_http_clients(self):
+        from netizen_cli.ordinary_sessions import OrdinaryInputRejected
+        from netizen_cli.runtime.contracts import TerminalStateUnknown
+
+        self.runner.open_admission()
+        session = await self.login()
+        settings = SessionSettings(task_feedback=BindingTaskFeedback(progress_card_enabled=False))
+        for operation, binding, inventory, error, code in (
+            ("configure", "binding-native", "active", OrdinaryInputRejected("当前会话正在执行。"), "ordinary_input_rejected"),
+            ("activate", "binding-lazy", "lazy", OrdinaryInputRejected("服务启动中。"), "ordinary_input_rejected"),
+            ("stop", "binding-native", "active", TerminalStateUnknown("无法确认 Claude 停止请求的结果。"), "terminal_state_unknown"),
+        ):
+            _, _, page = await self.json_get("/api/v1/sessions?inventoryState=" + inventory, session)
+            item = next(row for row in page["items"] if row["bindingId"] == binding)
+            extra = {"sessionSettings": settings.to_dict()} if operation == "configure" else {}
+            self.runner.application._backend_policy = BackendPolicy("claude", "ou_admin")
+            with patch.object(self.management, operation + "_exact_binding", AsyncMock(side_effect=error)) as call:
+                status, _, result = await self.json_post("/api/v1/sessions/" + operation, session,
+                                                         _action_payload(item["actions"][operation], **extra))
+                self.assertEqual((status, result["code"], result["message"]), (409, code, str(error)))
+                call.assert_awaited_once()
+            self.runner.application._backend_policy = BackendPolicy("codex")
+
     async def test_owner_backend_rejects_route_families_before_grants(self) -> None:
         self.assertEqual(self.users.restrict_to_owner(), self.member.identity)
         self.runner.application._backend_policy = BackendPolicy("claude", "ou_admin")

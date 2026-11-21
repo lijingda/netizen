@@ -36,6 +36,7 @@ from ..cards.fork import (
     is_fork_card_action,
 )
 from ..runtime.contracts import (
+    TerminalStateUnknown,
     ContextAnchorRequired,
     GoalNotFound,
     GoalNotMaterialized,
@@ -104,8 +105,9 @@ class ChannelEntry(CommandChannel):
                 if sender != self._policy.owner_id:
                     bare_help = (
                         sender is not None and group_rule.allows(scope.chat_id, _message_chat_type(message))
-                        and normalized_message_type(message) == "text"
-                        and _body_text(message) == "/help" and not quoted_message_id(message)
+                        and normalized_message_type(message) in {"text", "post"}
+                        and _body_text(message, bot_open_id=_channel_bot_open_id(self._channel)).strip() == "/help"
+                        and not quoted_message_id(message)
                         and not getattr(getattr(message, "reply", None), "message_id", None)
                         and not getattr(message, "resources", None)
                         and not self._has_current_files(message) and not self._current_image_references(message)
@@ -306,6 +308,7 @@ class ChannelEntry(CommandChannel):
             MessageHistoryError,
             NativeThreadMissing,
             OrdinaryInputRejected,
+            TerminalStateUnknown,
             ProjectError,
             RuntimeClosed,
             SideCloseFailed,

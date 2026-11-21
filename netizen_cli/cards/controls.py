@@ -11,7 +11,9 @@ from typing import Any
 
 from lark_channel import OutboundCard
 
+from ..ordinary_sessions import LocalExecutionSnapshot
 from ..bindings import (
+    ThreadBinding,
     BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicState,
@@ -501,15 +503,24 @@ def _session_settings_sections(
 ) -> list[dict[str, Any]]:
     """Share presentation while each caller owns field values and validation."""
     if local_only:
-        selector = model_fields[1]
+        def field(elements: list[dict[str, Any]], suffix: str) -> dict[str, Any]:
+            return next(item for item in elements if item.get("name", "").endswith("_" + suffix))
+
+        selector = field(model_fields, "model")
         selector["placeholder"] = _plain_text("原生 Claude 设置")
-        selector["options"] = [{"text": _plain_text("原生 Claude 设置"), "value": selector["options"][0]["value"]}]
-        selector["initial_option"] = selector["options"][0]["value"]
+        def inherited(value: str) -> bool:
+            if selector["name"] == "config_model":
+                return _decode_config_model_reference(value)[-1] is None
+            return _decode_new_model_reference(value) is None
+
+        inherit = next(option["value"] for option in selector["options"] if inherited(option["value"]))
+        selector["options"] = [{"text": _plain_text("原生 Claude 设置"), "value": inherit}]
+        selector["initial_option"] = inherit
         sections = [_form_section("模型来源", [selector])]
         if context_fields:
             sections.append(_form_section("消息上下文", context_fields))
-        sections.append(_form_section("执行中表情闪烁", feedback_fields[1:2]))
-        sections.append(_form_section("结束时 @ 提醒", feedback_fields[7:8]))
+        sections.append(_form_section("执行中表情闪烁", [field(feedback_fields, "task_reactions")]))
+        sections.append(_form_section("结束时 @ 提醒", [field(feedback_fields, "completion_mention")]))
         return sections
     model_elements = [*model_notices, model_fields[1]]
     if len(model_fields) > 2:
@@ -1434,22 +1445,30 @@ def archived_sessions_delete_binding_card(
 
 def _local_stop_button(
     scope: FeishuScope, binding_id: str, active_binding_id: str | None,
-    revision: int, turn_id: str, navigation: SessionCardPage,
+    revision: int, turn_id: str, navigation: SessionCardPage, *, from_status: bool = False,
 ) -> dict[str, Any]:
     return _callback_button(label="停止", value=_envelope(
         scope, CardControlName.STOP_EXACT_BINDING, binding_id=_binding_reference(binding_id),
         expected_active_binding_id=_binding_reference(active_binding_id) if active_binding_id else None,
         expected_activity_revision=revision, expected_turn_id=_turn_reference(turn_id),
-        page=navigation.page, session_cursor=navigation.encode(scope),
+        page=navigation.page, session_cursor=navigation.encode(scope), **({"from_status": True} if from_status else {}),
     ))
 
 
-def local_running_status_card(
-    scope: FeishuScope, text: str, binding_id: str, revision: int, turn_id: str,
+def local_status_text(binding: ThreadBinding, snapshot: LocalExecutionSnapshot) -> str:
+    return (f"Project：{binding.project_alias}\n会话：{binding.short_id}\n"
+            f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}\n本地任务：{snapshot.label}\n"
+            "模型用量及执行详情在 Claude 试点中不可用。")
+
+
+def local_status_card(
+    scope: FeishuScope, binding: ThreadBinding, snapshot: LocalExecutionSnapshot,
 ) -> OutboundCard:
     builder = _builder("当前会话", "Claude 本地任务")
-    builder.raw(_plain(text))
-    builder.raw(_local_stop_button(scope, binding_id, binding_id, revision, turn_id, SessionCardPage("lazy")))
+    builder.raw(_plain(local_status_text(binding, snapshot)))
+    if snapshot.turn is not None and session_stop_available(snapshot.turn.state.value):
+        builder.raw(_local_stop_button(scope, binding.id, binding.id, snapshot.revision,
+                                      snapshot.turn.turn_id, SessionCardPage("lazy"), from_status=True))
     return OutboundCard(card=builder.to_dict())
 
 
@@ -2178,6 +2197,8 @@ def decode_button_action(
         CardControlName.STOP_EXACT_BINDING, CardControlName.RECHECK_EXACT_TURN,
         CardControlName.SESSIONS_PAGE, CardControlName.REFRESH_ARCHIVED_SESSIONS,
     }
+    if name is CardControlName.STOP_EXACT_BINDING and payload.get("from_status") is True:
+        expected.add("from_status")
     if name in session_navigation_names and "session_cursor" in payload:
         expected.add("session_cursor")
     if (
@@ -2319,6 +2340,7 @@ def decode_button_action(
         sender_id=sender_id,
         name=name,
         settings_section=section,
+        from_status=payload.get("from_status") is True,
         project_alias=alias,
         expected_revision=revision,
         enabled=enabled,
@@ -2347,8 +2369,7 @@ def local_form_fields(payload: Mapping[str, Any], prefix: str) -> dict[str, Any]
     enabled, settings = _decode_progress_card_reference(fields[progress], progress) if progress in fields else (False, None)
     require_local_settings(has_model, BindingTaskFeedback(progress_card_enabled=enabled, progress_card_settings=settings))
     fields.setdefault(progress, _progress_card_reference(False, None))
-    mention = f"{prefix}_completion_mention"
-    fields.setdefault(mention, _task_feedback_reference(True))
+    _require_completion_mention_field(fields, prefix=prefix)
     return fields
 
 
