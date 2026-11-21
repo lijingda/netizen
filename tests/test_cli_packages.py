@@ -53,7 +53,8 @@ class PackagePreflightTest(unittest.TestCase):
         package.mkdir(parents=True)
         info = site / "netizen_cli-1.0.dist-info"
         info.mkdir()
-        (info / "METADATA").write_text("Name: netizen-cli\nVersion: 1.0\n")
+        (info / "METADATA").write_text('Name: netizen-cli\nVersion: 1.0\nProvides-Extra: claude\n'
+                                       'Requires-Dist: claude-agent-sdk==1; extra == "claude"\n')
         (info / "INSTALLER").write_text("pip\n")
         (info / "entry_points.txt").write_text("[console_scripts]\nnetizen=netizen_cli.cli:main\n")
         (self.prefix / "pyvenv.cfg").write_text("include-system-site-packages = false\n")
@@ -133,6 +134,27 @@ class PackagePreflightTest(unittest.TestCase):
                 self.assertIn(metadata_path, plan["revalidation_files"])
                 self.assertTrue(json.loads(plan["validation_command"][-2])["has_claude"])
                 self.assertTrue(any(call[:len(plan["command"])] == plan["command"] for call in self.calls))
+
+    def test_pin_change_while_taking_the_initial_fingerprints_prevents_resolution(self):
+        path = Path(self.install_claude_metadata())
+        digest = packages._digest
+        def replace_before_hash(file):
+            if file == path:
+                path.write_text("Name: claude-agent-sdk\nVersion: 0.3.1\n")
+            return digest(file)
+
+        with patch.object(packages, "_digest", side_effect=replace_before_hash), self.assertRaisesRegex(
+                packages.PackageUpdateError, "Repair the environment"):
+            self.prepare()
+        self.assertFalse(any("install" in call for call in self.calls))
+
+    def test_unrelated_sdk_version_refuses_pip_and_uv_pip_before_resolution(self):
+        path = Path(self.install_claude_metadata())
+        path.write_text("Name: claude-agent-sdk\nVersion: 0.3.1\n")
+        for backend in ("pip", "uv-pip"):
+            with self.subTest(backend=backend), self.assertRaisesRegex(packages.PackageUpdateError, "Repair the environment"):
+                self.prepare(backend=backend)
+            self.assertFalse(any("install" in call for call in self.calls))
 
     def test_tool_extra_requires_matching_receipt_and_local_install(self):
         receipt = self.tool_layout()

@@ -8,6 +8,7 @@ the documented public commands and non-mutating capability checks.
 """
 from __future__ import annotations
 
+from email.parser import BytesParser
 import hashlib
 import json
 import os
@@ -144,6 +145,20 @@ def _object(text: str, operation: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise PackageUpdateError(f"{operation} returned an invalid machine response.")
     return data
+
+
+def _require_installed_claude_pin(netizen_metadata: Path, sdk_metadata: Path) -> None:
+    """Only the installed release's declared extra can identify a pip-managed Claude installation."""
+    netizen = BytesParser().parsebytes(netizen_metadata.read_bytes(), headersonly=True)
+    sdk = BytesParser().parsebytes(sdk_metadata.read_bytes(), headersonly=True)
+    requirements = [req for req in netizen.get_all("Requires-Dist", [])
+                    if re.match(r"(?i)claude[-_.]agent[-_.]sdk\b", req)]
+    exact = re.fullmatch(r"""(?i)claude[-_.]agent[-_.]sdk\s*==\s*([\w.+!-]+)\s*;\s*extra\s*==\s*["']claude["']""",
+                         requirements[0]) if len(requirements) == 1 else None
+    if ("claude" not in netizen.get_all("Provides-Extra", []) or exact is None
+            or sdk.get_all("Version", []) != [exact.group(1)]):
+        raise PackageUpdateError("The installed Claude SDK does not match this Netizen release's exact extra. "
+                                 "Repair the environment with its package manager or update manually.")
 
 
 def _digest(path: Path) -> str:
@@ -471,6 +486,8 @@ def prepare_update(
     if uv is not None:
         paths[uv] = _identity(Path(uv))
     fingerprints = {str(p): _digest(p) for p in evidence}
+    if selected in {"pip", "uv-pip"} and has_claude:
+        _require_installed_claude_pin(info_dir / "METADATA", Path(info["claude_metadata"]))
     changes = (_pip_changes(command, env, cwd) if selected == "pip" else
                _uv_pip_changes(command, env, cwd) if selected == "uv-pip" else True)
     if any(_digest(Path(p)) != digest for p, digest in fingerprints.items()):
