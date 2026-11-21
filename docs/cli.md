@@ -149,8 +149,9 @@ NETIZEN_ROOT 也不缩小范围。普通 pip、uv pip 与 uv tool 采用经过�
 未知／冲突／不支持的安装在停服前报错，允许用户用自己的包工具手工维护。
 不根据 PATH 随便调用另一 pip，不试升级来识别环境，不失败后自动换后端。
 
-受支持的 `netizen update` 会保留 Claude 依赖。pip 和 uv pip 根据目标环境中是否装有
-`claude-agent-sdk` 决定是否继续请求 `netizen-cli[claude]`。uv tool 还会核对工具安装记录中
+受支持的 `netizen update` 会保留 Claude 依赖。pip 和 uv pip 在目标环境没有 `claude-agent-sdk` 时只更新主包。
+已装 SDK 的版本与当前已装 Netizen 发行包为 `[claude]` 声明的固定版本一致时，才请求 `netizen-cli[claude]`。
+版本不符或无法核对时会在停服前报错，请用原包管理器修复环境或手动升级。uv tool 核对工具安装记录中
 `netizen-cli` 主包的 `claude` extra，记录与已安装依赖冲突时会在停服前报错。
 若手动升级 Claude 环境，仍应向包管理器指定 `netizen-cli[claude]`。
 

@@ -174,8 +174,10 @@ The usage guides are not implementation guides.
   settings for execution; never persist the resolved fallback into a Binding,
   default rule or plan. Preserve all historical progress settings as explicit choices.
 - Preserve native capabilities. Users can disable them in native settings.
-  A per-session override requires a concrete Feishu benefit. Gate unsupported
-  operations at every entry and never simulate them with prompts or local state.
+  A per-session override requires a concrete Feishu benefit.
+  Weigh each capability against the Feishu interaction context: terminal-only interactions
+  (for example `@` autocomplete) need not be reproduced, and conflicts with Netizen's own
+  commands are decided explicitly. Gate unsupported operations at every entry and never simulate them with prompts or local state.
   See [product boundaries](docs/design.md#目标与边界).
 - Keep runtime Agent guidance separate from user guidance. Follow its documented
   description/body boundary and size budgets before adding execution hints.
