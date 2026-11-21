@@ -13,7 +13,6 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from ..backends import BackendPolicy
 from ..bindings import BindingStore, ProjectDeleting
 from .models import Claim, MutationResult, Run, ScheduleError, ScheduleNotFound
 from ..worktrees.models import WorktreeNotFound
@@ -49,9 +48,7 @@ class Scheduler:
         app_id: str,
         dispatch: Callable[[Claim], Awaitable[None]],
         wall_clock: Callable[[], float] = time.time,
-        *, backend_policy: BackendPolicy = BackendPolicy("codex"),
     ) -> None:
-        self._backend_policy = backend_policy
         self._bindings = bindings
         self._store = bindings.schedules
         self._runtime = runtime
@@ -78,13 +75,8 @@ class Scheduler:
             raise RuntimeError("Scheduler must run on its owning event loop")
         return loop
 
-    def _require_schedules(self) -> None:
-        if refusal := self._backend_policy.operation_refusal("schedule", "定时任务"):
-            raise SchedulerUnavailable(refusal)
-
     async def recover(self) -> None:
         """Reconcile pending metadata once, then skip all offline due points."""
-        self._require_schedules()
         loop = self._own_loop()
         if self._admission or self._closed or self._recovered:
             raise RuntimeError("Scheduler recovery must precede admission exactly once")
@@ -120,7 +112,6 @@ class Scheduler:
         self._recovered = True
 
     def start(self) -> None:
-        self._require_schedules()
         self._own_loop()
         if self._closed or self._timer is not None or not self._recovered:
             raise RuntimeError("Recover Scheduler before starting it exactly once")
@@ -139,7 +130,6 @@ class Scheduler:
         request_payload: object,
     ) -> MutationResult:
         """Claim and attach manual work without yielding or moving the timer cursor."""
-        self._require_schedules()
         self._own_loop()
         if not self._admission:
             raise SchedulerUnavailable("调度服务尚未就绪或正在停止，暂不能立即运行。")
@@ -190,7 +180,6 @@ class Scheduler:
 
     async def tick(self) -> int:
         """Claim one bounded batch; return without waiting for dispatch or Turn."""
-        self._require_schedules()
         loop = self._own_loop()
         if not self._admission or self._ticking:
             return 0
@@ -232,7 +221,6 @@ class Scheduler:
 
     async def refresh(self, plan_id: str) -> str | None:
         """Explicit user recheck; ordinary Runtime observation guards still apply."""
-        self._require_schedules()
         loop = self._own_loop()
         run = self._store.pending_for_plan(plan_id)
         if run is None or run.app_id != self._app_id:
@@ -312,7 +300,6 @@ class Scheduler:
         return None
 
     async def _dispatch_once(self, claim: Claim) -> None:
-        self._require_schedules()
         try:
             timeout = (
                 BINDING_DISPATCH_TIMEOUT_SECONDS if claim.run.target_kind == "binding"

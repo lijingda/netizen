@@ -641,9 +641,6 @@ class AdminWebApplication:
         if path in {"/admin-users/add", "/admin-users/selector-config"}:
             raise OwnerOnly()
         self._backend_policy.require_api(path)
-        if path == "/sessions/ordinary" and (context.query.get("inventoryState") == ["archived"]
-                or context.query.get("sortBy") == ["updatedAt"] or any(key in context.query for key in ("updatedFrom", "updatedBefore", "searchTerm"))):
-            raise BackendUnsupported("原生会话目录或历史")
         if path == "/runtime-snapshots" and context.query.get("sideIds"):
             raise BackendUnsupported("Side")
 

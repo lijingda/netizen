@@ -56,7 +56,7 @@ _OPERATIONS = {
     "admin": _Operation("管理页面", True, ("admin",)),
     "enable_group": _Operation("群聊启用", True, ("enable",)),
     "model": _Operation("模型、思考强度或速度设置", commands=("model", "effort", "fast", "speed")),
-    "side": _Operation("Side", commands=("side",), cards=("side.close",), api=("/side-topics", "/sessions/temporary")),
+    "side": _Operation("Side", commands=("side",), cards=("side.close",), api=("/side-topics",)),
     "goal": _Operation("Goal", commands=("goal",), cards=("goal.refresh", "goal.pause", "goal.resume", "goal.clear")),
     "fork": _Operation("会话分支", commands=("fork",)),
     "compact": _Operation("上下文压缩", commands=("compact",)),
