@@ -1328,15 +1328,22 @@ uninstall.sh 入口已停用，只返回 CLI 指引；不会生成 release/curre
 如果服务在首次写入前崩溃，已登记的会话 ID 可能没有原生记录。此会话无法续接，含该会话的 Project 在试点期间也无法删除。
 所有者可用 `/new` 新建会话。显式解除原会话登记须另行决定，见 [ADR 0104 决定 7](adr/0104-host-native-agent-backends-per-instance.md#决定)。
 
-新建和续接普通会话都申请原生 `auto` 权限，只对本次执行生效。Claude Code 负责加载原生设置和执行权限规则。
-退回默认模式时，所有者会收到一次提示，未预先允许的操作会被拒绝。若在提交前启动失败，机器人明确回复输入未发送。
-若有效模式无法确认，服务会请求中断并提示所有者检查原会话。Netizen 不写入用户的允许规则。
+新建和续接普通会话都申请原生 `auto` 权限，只对本次执行生效。Claude Code 加载原生设置并执行权限规则。
+即使项目设置了 `"disableAutoMode": "disable"`，启动消息中的 `permissionMode` 仍可能是 `auto`。
+Netizen 根据本轮结果的 `permission_denials` 提示所有者有多少个操作被拒绝，只列出可识别的工具名，省略工具参数和路径。
+若启动消息报告 `default`，机器人也会提示本轮使用默认权限。两种情况同时出现时，机器人在结果前合并发送一条提示。
+需要放行某个操作时，由所有者调整 Claude Code 权限规则。若在提交前启动失败，机器人回复输入未发送。
+若启动消息缺少模式或报告了试点不支持的模式，服务会请求中断并提示所有者检查原会话。
+
+Claude Code 可能在原生后台任务仍运行时结束本轮回复。试点在每轮结束时关闭客户端，后台任务随之停止，
+无法在稍后向飞书发送完成通知。下一阶段计划支持后台任务完成后的跟进回复。若只希望在前台执行，
+所有者可在自己的 Claude Code 设置的 `env` 中将 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` 设为字符串 `"1"`。Netizen 不设置这一变量。
 
 **平台与验收进度。** 服务每次启动后约两秒才接收 Claude 任务，过早提交会看到“服务刚启动，请稍后重发”。
 此等待降低崩溃重启时两个 CLI 重叠写入的概率。Linux systemd 会清理服务 cgroup 内的进程。
 macOS LaunchAgent 可能在上一代 Claude CLI 退出前重启，工具启动的已脱离进程也可能继续运行。
 验收须分别记录旧 CLI 退出、新服务开放准入的时刻、崩溃后的模型请求，以及脱离工具的状态。
-无账号的 `make check-native-claude` 用随附 CLI 和本地模拟服务验证会话续接、权限回退、停止和关闭。
+无账号的 `make check-native-claude` 用随附 CLI 和本地模拟服务验证会话续接、权限回退与拒绝提示、停止和关闭。
 试点仍待真实飞书与服务账号的认证、身份与权限验证，以及 Linux systemd 和 macOS LaunchAgent 的崩溃和停服验收。
 macOS 还须在所有者开启 SIP 的真实 Mac 上覆盖登录项启动、注销和重启。详见
 [试点接受条件](adr/0104-host-native-agent-backends-per-instance.md#接受条件)。
