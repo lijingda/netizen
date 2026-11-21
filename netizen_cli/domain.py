@@ -152,6 +152,7 @@ class NativeCapability(str, Enum):
 
 
 class ActiveState(str, Enum):
+    CLOSING = "closing"
     RUNNING = "running"
     STOPPING = "stopping"
     OBSERVATION_UNAVAILABLE = "turn-observation-unavailable"

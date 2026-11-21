@@ -309,7 +309,7 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
                 await worktrees.delete(resource["id"], delete_sessions=True, expected_fingerprint=preview["fingerprint"])
             self.assertTrue(Path(resource["root"]).is_dir())
             self.assertEqual(self.store.get(binding.id).native_thread_id, "native-owner")
-        self.assertTrue(clients.lookups)
+        self.assertFalse(clients.lookups)
         self.assertFalse(clients.calls)
 
     async def test_delete_cascade_choice_and_inventory_are_sealed(self):

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 from netizen_cli.bindings import BindingStore
-from netizen_cli.domain import FeishuScope, MessageContextAnchor, ScopeKind
+from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.file_evidence import FileEvidence
 from netizen_cli.ordinary_sessions import OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, PromptImage
 from netizen_cli.runtime.claude_client import BundledClaudeClients
@@ -244,7 +244,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                     client.stream.put_nowait(OSError("secret"))
                 client.stream.put_nowait(None)
                 await asyncio.wait_for(client.closing.wait(), 1)
-                with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
+                with self.assertRaisesRegex(OrdinaryInputRejected, "正在收尾"):
                     await self.submit()
                 client.close_gate.set()
                 self.assertTrue(await self.runtime.wait_idle(1))
@@ -333,6 +333,46 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.events[-1].status, "completed")
             self.assertIn(("origin", "已接收，但上下文边界更新失败。"), self.notices)
 
+    async def test_failed_write_init_and_injected_result_do_not_advance_group_cursor(self):
+        from claude_agent_sdk import ResultMessage
+        old = MessageContextAnchor("old", 100)
+        binding = self.store.create_channel_binding(scope=FeishuScope("app", "group", ScopeKind.GROUP),
+            project_alias="work", creator_id="owner", message_context_mode=MentionContextMode.CATCH_UP, context_anchor=old)
+        async def reject(_prompt):
+            raise OSError("before intake")
+        self.clients.configure = lambda client: setattr(client, "query", reject)
+        submit = asyncio.create_task(self.submit(binding, context_commit=ContextCursorCommit(
+            binding.context_revision, MessageContextAnchor("new", 200))))
+        await asyncio.wait_for(self.clients.created.wait(), 1)
+        client = self.clients.calls[-1]
+        client.init()
+        client.stream.put_nowait(ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id=client.session, origin={"kind": "task-notification"}))
+        client.stream.put_nowait(None)
+        with self.assertRaises(TerminalStateUnknown):
+            await submit
+        self.assertFalse(client.inputs)
+        self.assertEqual(self.store.get(binding.id).context_anchor, old)
+
+    async def test_startup_stop_preview_survives_write_and_cancelled_interrupt_propagates(self):
+        self.clients.configure = lambda c: c.connect_gate.clear()
+        submit = asyncio.create_task(self.submit())
+        await asyncio.wait_for(self.clients.created.wait(), 1)
+        client = self.clients.calls[-1]
+        preview = await self.runtime.preview_stop(self.binding)
+        fields = dict(expected_activity_revision=preview.activity_revision, expected_turn_id=preview.turn_id)
+        client.connect_gate.set()
+        receipt = await submit
+        receipt.release_receipt_attempt()
+        async def cancel_on_terminal():
+            client.init()
+            client.result()
+            await client.closing.wait()
+            raise asyncio.CancelledError()
+        with patch.object(client, "interrupt", side_effect=cancel_on_terminal), self.assertRaises(asyncio.CancelledError):
+            await self.runtime.stop_exact(self.binding.id, **fields)
+        self.assertTrue(await self.runtime.wait_idle(1))
+
     async def test_busy_bindings_share_cwd_and_shutdown_closes_in_parallel(self):
         first = await self.submit()
         second = await self.submit(self.new_binding("other"))
@@ -362,55 +402,39 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.clients.calls[-1].interrupts, 0)
         await self.finish(second)
 
-    async def test_public_scoped_read_recovers_large_image_without_a_summary(self):
+    async def test_summaryless_worktree_transcript_cannot_prove_cwd(self):
         import json
         import os
+        import subprocess
         from uuid import uuid4
+        from claude_agent_sdk import get_session_info, get_session_messages, project_key_for_directory
 
-        from claude_agent_sdk import get_session_info, project_key_for_directory
-
+        project, sibling = self.cwd / "project", self.cwd / "sibling"
+        subprocess.run(["git", "init", "-q", str(project)], check=True)
+        subprocess.run(["git", "-C", str(project), "-c", "user.name=test", "-c", "user.email=test@example.test",
+                        "commit", "--allow-empty", "-qm", "fixture"], check=True)
+        subprocess.run(["git", "-C", str(project), "worktree", "add", "-q", "--detach", str(sibling)], check=True)
         config = self.cwd / "claude"
-        project = config / "projects" / project_key_for_directory(self.cwd)
-        project.mkdir(parents=True)
+        native = config / "projects" / project_key_for_directory(sibling)
+        native.mkdir(parents=True)
         session = str(uuid4())
         image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 100_000}}
         entry = {"type": "user", "sessionId": session, "uuid": str(uuid4()), "parentUuid": None,
-                 "cwd": str(self.cwd), "message": {"role": "user", "content": [image]}}
-        (project / f"{session}.jsonl").write_text(json.dumps(entry, separators=(",", ":")) + "\n")
+                 "cwd": str(sibling), "message": {"role": "user", "content": [image]}}
+        (native / f"{session}.jsonl").write_text(json.dumps(entry, separators=(",", ":")) + "\n")
         with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(config)}):
             self.assertIsNone(get_session_info(session))
-            self.assertEqual(await BundledClaudeClients().session_cwd(session, (self.cwd,)), self.cwd)
+            for path in (project, sibling):
+                self.assertEqual(get_session_messages(session, directory=str(path))[0].session_id, session)
+            for candidates in ((project,), (sibling, project)):
+                self.assertIsNone(await BundledClaudeClients().session_cwd(session, candidates))
 
-    async def test_summaryless_lookup_requires_exactly_one_positive_candidate(self):
-        from types import SimpleNamespace
-        candidates = (self.cwd / "worktree", self.cwd)
-        candidates[0].mkdir()
-        clients = BundledClaudeClients()
-        for results, expected in (
-            ([[], [SimpleNamespace(session_id="id")]], self.cwd),
-            ([[], []], None),
-            ([[SimpleNamespace(session_id="id")], [SimpleNamespace(session_id="id")]], None),
-            ([[SimpleNamespace(session_id="foreign")]], None),
-        ):
-            with (patch("netizen_cli.runtime.claude_client.get_session_info", return_value=None),
-                  patch("netizen_cli.runtime.claude_client.get_session_messages", side_effect=results) as read):
-                self.assertEqual(await clients.session_cwd("id", candidates), expected)
-                self.assertTrue(all(call.kwargs["limit"] == 1 for call in read.call_args_list))
-
-    async def test_missing_summary_cwd_requires_positive_messages_and_conflicts_refuse(self):
+    async def test_missing_or_conflicting_summary_cwd_is_refused(self):
         from types import SimpleNamespace
         clients = BundledClaudeClients()
-        for summary, expected, scoped in (
-            (SimpleNamespace(session_id="id", cwd=None), self.cwd, True),
-            (SimpleNamespace(session_id="id", cwd=""), self.cwd, True),
-            (SimpleNamespace(session_id="id", cwd=str(self.cwd.parent)), None, False),
-            (SimpleNamespace(session_id="foreign", cwd=None), None, False),
-        ):
-            with (patch("netizen_cli.runtime.claude_client.get_session_info", return_value=summary),
-                  patch("netizen_cli.runtime.claude_client.get_session_messages",
-                        return_value=[SimpleNamespace(session_id="id")]) as read):
-                self.assertEqual(await clients.session_cwd("id", (self.cwd,)), expected)
-                self.assertEqual(read.called, scoped)
+        for identity, cwd in (("id", None), ("id", ""), ("id", str(self.cwd.parent)), ("foreign", str(self.cwd))):
+            with patch("netizen_cli.runtime.claude_client.get_session_info", return_value=SimpleNamespace(session_id=identity, cwd=cwd)):
+                self.assertIsNone(await clients.session_cwd("id", (self.cwd,)))
 
     async def test_public_factory_selects_exact_verified_cli_and_native_defaults(self):
         with (patch("netizen_cli.runtime.claude_client.verified_claude_cli", return_value=self.cwd/"bundled"),
@@ -595,7 +619,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         client.init()
         client.result()
         await asyncio.wait_for(client.closing.wait(), 1)
-        with self.assertRaisesRegex(OrdinaryInputRejected, "结果正在送出"):
+        await asyncio.wait_for(self.delivered.wait(), 1)
+        with self.assertRaisesRegex(OrdinaryInputRejected, "收尾"):
             await self.runtime.preview_stop(self.binding)
         client.close_gate.set()
         self.assertTrue(await self.runtime.wait_idle(1))
@@ -616,11 +641,11 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         receipt = await self.submit()
         receipt.release_receipt_attempt()
         client = self.clients.calls[-1]
+        client.close_gate.clear()
         async def race():
             client.init()
             client.result()
-            while not self.runtime._active[self.binding.id].closed:
-                await asyncio.sleep(0)
+            await client.closing.wait()
             raise OSError("closed")
         async def unexpected_ack():
             self.fail("stop success must not be acknowledged")
@@ -629,6 +654,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             result = await asyncio.wait_for(self.runtime.stop_exact(self.binding.id, acknowledge=unexpected_ack,
                 expected_activity_revision=preview.activity_revision, expected_turn_id=preview.turn_id), 1)
         self.assertEqual(result, StopDisposition.NOT_RUNNING)
+        client.close_gate.set()
         self.assertTrue(await self.runtime.wait_idle(1))
 
     async def test_lost_write_receipt_reconciles_without_replay(self):
@@ -668,25 +694,15 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.runtime.occupying_bindings(target))
             await self.finish(await self.submit())
 
-    async def test_native_scan_does_not_hold_binding_lock_or_return_stale_usage(self):
+    async def test_materialized_worktree_usage_blocks_without_transcript_scan(self):
         first = await self.submit()
+        self.assertEqual((await self.runtime.resource_usage(self.binding.id))["cwd"], str(self.cwd))
         await self.finish(first)
-        entered, release = asyncio.Event(), asyncio.Event()
-        async def slow_lookup(_, candidates):
-            entered.set()
-            await release.wait()
-            return self.cwd
-        with patch.object(self.clients, "session_cwd", side_effect=slow_lookup):
-            query = asyncio.create_task(self.runtime.resource_usage(self.binding.id))
-            await asyncio.wait_for(entered.wait(), 1)
-            opening = asyncio.create_task(self.submit())
-            while not self.runtime.local_snapshot(self.binding.id).turn:
-                await asyncio.sleep(0)
-            with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
-                await self.runtime.capture_submission_admission(self.binding.id)
-            release.set()
-            self.assertEqual(await query, {"cwd": None, "status": "unknown"})
-            await self.finish(await opening)
+        with patch.object(self.clients, "session_cwd") as lookup:
+            usage = await self.runtime.resource_usage(self.binding.id)
+            self.assertEqual(usage["status"], "unknown")
+            self.assertTrue(usage["reason"])
+            lookup.assert_not_called()
 
     async def test_shutdown_during_receipt_or_opening_drains_each_owned_client(self):
         receipt = await self.submit()

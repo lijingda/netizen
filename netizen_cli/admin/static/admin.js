@@ -1421,7 +1421,7 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
 window.NetizenTimeRange.init({ closeOtherFilters: () => openFilter?.close() });
 
 const runtimeLabels = Object.freeze({
-  running: "运行中", stopping: "停止中", "turn-observation-unavailable": "任务观测不可用",
+  running: "运行中", stopping: "停止中", closing: "正在收尾", "turn-observation-unavailable": "任务观测不可用",
   "goal-starting": "Goal 启动中", "goal-running": "Goal 运行中", "goal-pausing": "Goal 暂停中",
   "externally-active-goal": "外部活跃 Goal", "goal-unknown": "Goal 状态未知",
   renaming: "重命名中", archiving: "归档中", unarchiving: "恢复归档中", deleting: "删除中",

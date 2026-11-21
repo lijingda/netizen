@@ -397,9 +397,11 @@ class Driver:
         try:
             call = await self.submit("close")
             await asyncio.wait_for(call.closing.wait(), 30)
+            await wait_for(lambda: any(isinstance(reply, OutboundPost) for reply in self.replies("close")))
             await self.send("closing-stop", "/stop")
-            assert self.replies("closing-stop") == ["这次 Claude 执行已经结束，结果正在送出。"]
-            assert all(reply == DEFAULT_MODE for reply in self.replies("close"))
+            assert self.replies("closing-stop") == ["这次 Claude 执行已经结束，客户端正在收尾。"]
+            await self.send("close-busy", "more")
+            assert "上一轮正在收尾" in self.replies("close-busy")[0]
         finally:
             gate.set()
             self.clients.close_gate = None

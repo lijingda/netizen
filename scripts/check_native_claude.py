@@ -239,11 +239,14 @@ async def main_cases(cwd, provider, evidence):
         image_session = new_binding()
         with_image = await submit(image_session, "text", "image-first", (image_first_input(),))
         await done("image-first")
-        resumed_image = await submit(image_session, "text", "image-resume")
-        await done("image-resume")
-        evidence.check("large image first message resumes exact native transcript",
-                       resumed_image.thread_id == with_image.thread_id and
-                       any("fixture-reply-image-first" in item["answers"] for row in rows("image-resume") for item in row["history"]))
+        try:
+            await submit(image_session, "text", "image-resume")
+        except OrdinaryInputRejected as exc:
+            refused_image = "/new" in str(exc)
+        else:
+            refused_image = False
+        evidence.check("large image without native cwd refuses resume", with_image.thread_id and refused_image
+                       and not rows("image-resume"))
 
         missing = new_binding()
         store.assign_native_thread_id(missing.id, str(uuid4()))

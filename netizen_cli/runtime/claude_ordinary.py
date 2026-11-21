@@ -10,7 +10,7 @@ import time
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, SystemInitData, SystemMessage
+from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, SystemInitData, SystemMessage
 
 from ..bindings import BindingNotFound, BindingStore, ProjectDeleting, ProjectNotFound, ScopeNotFound, ThreadBinding
 from ..bindings import BindingTaskFeedback, BindingTurnSettings
@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 UNKNOWN = "本次 Claude 提交结果未知，请检查原会话；系统不会自动重发。"
 CLOSE_FAILED = "无法确认 Claude 客户端已关闭，本会话暂不可再提交。"
 CLOSING_CONCLUDED = "这次 Claude 执行已经结束，结果正在送出。"
-CLOSING = "这次 Claude 执行已经结束，正在关闭客户端。"
-MODE_UNKNOWN = "无法确认 Claude 的有效权限模式，本次执行已停止。"
+CLOSING = "正在关闭 Claude 客户端，执行结果尚未确认。"
+MODE_UNKNOWN = "无法确认 Claude 的有效权限模式，已尝试停止，结果未知。"
 DEFAULT_MODE = "Claude 的自动审核不可用，本次使用默认权限；未预先允许的操作会被拒绝。"
 START_FAILED = "Claude 会话启动失败，本条输入未发送。"
 START_CANCELLED = "已取消启动，本条输入未发送。"
@@ -65,6 +65,7 @@ class _Execution:
     close_finished: bool = False
     closed: bool = False
     concluded: bool = False
+    delivery_finished: bool = False
     detached: bool = False
     stop_receipt: asyncio.Event | None = None
     permission_notice: str | None = None
@@ -177,6 +178,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self.require_admission()
         if binding_id in self._unavailable:
             raise OrdinaryInputRejected(CLOSE_FAILED)
+        if binding_id in self._active and self._active[binding_id].closing:
+            raise OrdinaryInputRejected("上一轮正在收尾，本条消息未发送。")
         if binding_id in self._active:
             raise OrdinaryInputRejected("当前会话正在执行，本条消息未发送。")
 
@@ -301,14 +304,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                         raise OrdinaryInputRejected(STALE)
                     self._bindings.assign_native_thread_id(binding.id, execution.session)
                 execution.writing = True
-                execution.revision = self._advance(binding.id)
             try:
                 async with asyncio.timeout(_WRITE_SECONDS):
                     await execution.client.query(single_message(message))
             except Exception:
                 # The write may have succeeded. This is still the only consumer.
                 async with asyncio.timeout(self._remaining(_RECONCILE_SECONDS)):
-                    event = await self._observe(execution, execution.client, actual, commit)
+                    event = await self._observe(execution, execution.client, actual, commit, confirmed_write=False)
             del message
             if not execution.ready.done():
                 execution.ready.set_result(Submission(SubmitDisposition.STARTED, binding.id, execution.session, execution.input_id,
@@ -346,22 +348,19 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         binding = execution.binding
         execution.closing = True
         execution.concluded = event is not None
-        if execution.client is not None:
-            close = asyncio.create_task(self._disconnect(execution, execution.client))
-            self._closes.add(close)
-            close.add_done_callback(self._closes.discard)
-            await asyncio.wait([close], timeout=self._remaining(_CLOSE_SECONDS))
-            if not close.done():
-                self._unavailable.add(binding.id)
-        execution.close_finished = True
-        close_failed = binding.id in self._unavailable
+        if event is not None:
+            try:
+                await asyncio.gather(self._close_client(execution), self._deliver(execution, event))
+            finally:
+                self._release(execution)
+        else:
+            await self._close_client(execution)
         if failure is not None:
             # A confirmed close releases the UUID for the next explicit input.
             # Delivery of the old outcome may still be waiting on Feishu.
             self._release(execution)
-        if execution.permission_notice:
-            await self._tell(execution, execution.permission_notice)
-        if failure is not None:
+            if execution.permission_notice:
+                await self._tell(execution, execution.permission_notice)
             if not execution.ready.done():
                 if execution.stop_receipt is not None:
                     try:
@@ -377,21 +376,34 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             else:
                 report_unknown = True
             if report_unknown and isinstance(failure, TerminalStateUnknown):
-                event = TurnObservationUnavailableOutcome(binding.id, execution.session, execution.input_id,
-                                                          self._owner, execution.origin, failure)
-        try:
-            if event is not None:
-                await execution.receipt.wait()
-                if execution.stop_receipt is not None:
-                    await execution.stop_receipt.wait()
-                async with asyncio.timeout(self._remaining(30.0)):
-                    await self._completion(event)
-        except Exception:
-            logger.warning("Claude completion delivery failed for Binding %s", binding.id)
-        finally:
-            self._release(execution)
-        if close_failed and binding.id in self._unavailable:
+                await self._deliver(execution, TurnObservationUnavailableOutcome(
+                    binding.id, execution.session, execution.input_id, self._owner, execution.origin, failure))
+        if binding.id in self._unavailable:
             await self._tell(execution, CLOSE_FAILED)
+
+    async def _close_client(self, execution: _Execution) -> None:
+        if execution.client is not None:
+            close = asyncio.create_task(self._disconnect(execution, execution.client))
+            self._closes.add(close)
+            close.add_done_callback(self._closes.discard)
+            await asyncio.wait([close], timeout=self._remaining(_CLOSE_SECONDS))
+            if not close.done():
+                self._unavailable.add(execution.binding.id)
+        execution.close_finished = True
+
+    async def _deliver(self, execution: _Execution, event: OrdinaryEvent) -> None:
+        try:
+            await execution.receipt.wait()
+            if execution.stop_receipt is not None:
+                await execution.stop_receipt.wait()
+            if isinstance(event, OrdinaryConclusion) and execution.permission_notice:
+                await self._tell(execution, execution.permission_notice)
+            async with asyncio.timeout(self._remaining(30.0)):
+                await self._completion(event)
+        except Exception:
+            logger.warning("Claude completion delivery failed for Binding %s", execution.binding.id)
+        finally:
+            execution.delivery_finished = execution.concluded
 
     def _release(self, execution: _Execution) -> None:
         if self._active.get(execution.binding.id) is execution:
@@ -414,7 +426,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         raise TerminalStateUnknown(f"{MODE_UNKNOWN}\n{UNKNOWN}")
 
     async def _observe(self, execution: _Execution, client: ClaudeClient, cwd: Path,
-                       commit: ContextCursorCommit | None) -> OrdinaryConclusion:
+                       commit: ContextCursorCommit | None, *, confirmed_write: bool = True) -> OrdinaryConclusion:
         async def commit_intake() -> None:
             nonlocal commit
             if commit is not None:
@@ -437,13 +449,19 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     if (data.get("session_id") != execution.session or not isinstance(init_cwd, str)
                             or not Path(init_cwd).is_absolute() or Path(init_cwd).resolve() != cwd):
                         raise TerminalStateUnknown(UNKNOWN)
-                    await commit_intake()
+                    if confirmed_write:
+                        await commit_intake()
                     mode = data.get("permissionMode")
                     if mode not in ("auto", "default"):
                         await self._invalid_init(client)
                     initialized = True
                     if mode == "default":
                         execution.permission_notice = DEFAULT_MODE
+                if (initialized and isinstance(msg, (AssistantMessage, StreamEvent)) and msg.parent_tool_use_id is None
+                        and msg.session_id == execution.session
+                        and (msg.user_message_uuid == execution.input_id or
+                             (isinstance(msg.user_message_uuids, list) and execution.input_id in msg.user_message_uuids))):
+                    await commit_intake()
                 if not isinstance(msg, ResultMessage):
                     continue
                 if msg.session_id != execution.session:
@@ -492,17 +510,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 return {"cwd": str(owned), "status": "active"}
             if binding.native_thread_id is None:
                 return {"cwd": binding.working_cwd, "status": "active" if snapshot.turn else "idle"}
-            candidates = self._candidate_dirs(binding)
-        try:
-            async with asyncio.timeout(_CONTROL_SECONDS):
-                cwd = await self._clients.session_cwd(binding.native_thread_id, candidates)
-        except Exception:
-            cwd = None
-        async with lock:
-            if (self._bindings.get(binding_id) != binding or snapshot != self.local_snapshot(binding_id)
-                    or self._candidate_dirs(binding) != candidates):
-                return {"cwd": None, "status": "unknown"}
-            return {"cwd": str(cwd.resolve()) if cwd else None, "status": "unknown"}
+            return {"cwd": None, "status": "unknown", "reason": "Claude 试点不支持已建立会话的原生删除。"}
 
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding:
         async with self._lock(binding_id):
@@ -517,7 +525,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         execution = self._active.get(binding_id)
         turn = None
         if execution is not None:
-            state = ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING
+            state = (ActiveState.CLOSING if execution.closing else
+                     ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING)
             turn = ActiveTurnSnapshot(binding_id, execution.session, execution.input_id, self._owner, state)
         return LocalExecutionSnapshot(execution.revision if execution else self._revisions.get(binding_id, 0),
                                       turn, binding_id in self._unavailable)
@@ -566,14 +575,22 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if execution.closing:
                 # The client close can take several seconds (longer with background
                 # tasks); saying "nothing is running" here reads as a lost answer.
-                raise OrdinaryInputRejected(CLOSING_CONCLUDED if execution.concluded else CLOSING)
+                raise OrdinaryInputRejected(self._closing_notice(execution))
             return StopPreview("正在请求停止当前 Claude 执行。" if execution.writing else "正在取消 Claude 会话启动。",
                                execution.revision, execution.input_id)
 
+    @staticmethod
+    def _closing_notice(execution: _Execution) -> str:
+        if execution.delivery_finished:
+            return "这次 Claude 执行已经结束，客户端正在收尾。"
+        return CLOSING_CONCLUDED if execution.concluded else CLOSING
+
     def _exact(self, binding_id: str, revision: int | None, turn_id: str | None) -> _Execution:
         execution = self._active.get(binding_id)
-        if execution is None or execution.closing or (revision, turn_id) != (execution.revision, execution.input_id):
+        if execution is None or (revision, turn_id) != (execution.revision, execution.input_id):
             raise ThreadActivityChanged("目标执行已变化，请刷新后重试。")
+        if execution.closing:
+            raise OrdinaryInputRejected(self._closing_notice(execution))
         return execution
 
     async def stop_exact(self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
@@ -599,12 +616,12 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             acknowledge_success = True
         except (Exception, asyncio.CancelledError) as exc:
             async with self._lock(binding_id):
-                if execution.concluded and execution.closed:
-                    return StopDisposition.NOT_RUNNING
                 if self._active.get(binding_id) is execution:
                     execution.stopping = False
             if isinstance(exc, asyncio.CancelledError):
                 raise
+            if execution.concluded:
+                return StopDisposition.NOT_RUNNING
             raise TerminalStateUnknown("无法确认 Claude 停止请求的结果。") from None
         finally:
             if acknowledge is not None and stop_receipt is not None:
@@ -641,7 +658,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
     async def _shutdown_stop(self, execution: _Execution) -> None:
         try:
             await self.stop_exact(execution.binding.id, expected_activity_revision=execution.revision, expected_turn_id=execution.input_id)
-        except (ThreadActivityChanged, TerminalStateUnknown):
+        except (OrdinaryInputRejected, ThreadActivityChanged, TerminalStateUnknown):
             pass
 
     async def interrupt_all(self) -> None:

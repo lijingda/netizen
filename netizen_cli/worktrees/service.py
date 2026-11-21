@@ -388,7 +388,7 @@ class WorktreeService:
         for binding in snapshot.bindings:
             usage = await self._runtime.worktree_usage(binding.id)
             if local is not None and usage.get("status") != "idle":
-                reasons.append("关联 Claude 会话的工作目录仍在使用或无法确认已空闲。")
+                reasons.append(usage.get("reason") or "关联 Claude 会话的工作目录仍在使用或无法确认已空闲。")
             current = self._bindings.get(binding.id)
             if current.native_thread_id != binding.native_thread_id:
                 reasons.append("关联会话已物化或身份发生改变，请重新预览。")

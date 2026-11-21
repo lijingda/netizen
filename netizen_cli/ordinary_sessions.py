@@ -108,7 +108,7 @@ class LocalExecutionSnapshot:
             return "无法确认 Claude 客户端已关闭"
         if self.turn is None:
             return "空闲"
-        return {ActiveState.RUNNING: "执行中", ActiveState.STOPPING: "正在停止",
+        return {ActiveState.CLOSING: "正在收尾", ActiveState.RUNNING: "执行中", ActiveState.STOPPING: "正在停止",
                 ActiveState.OBSERVATION_UNAVAILABLE: "状态待确认"}[self.turn.state]
 
 

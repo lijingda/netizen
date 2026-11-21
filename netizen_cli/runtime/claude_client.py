@@ -6,7 +6,7 @@ from collections.abc import AsyncIterable, AsyncIterator
 from pathlib import Path
 from typing import Any, Protocol
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, get_session_info, get_session_messages
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, get_session_info
 
 from ..claude_installation import verified_claude_cli
 from ..ordinary_sessions import OrdinaryInputRejected, PreparedPrompt
@@ -40,30 +40,18 @@ class BundledClaudeClients:
 
     @staticmethod
     def _lookup_cwd(session_id: str, candidates: tuple[Path, ...]) -> Path | None:
+        # The public message reader searches sibling worktrees and its messages
+        # carry no source cwd. Only a native summary with an exact cwd can resume.
         info = get_session_info(session_id)
-        if info is not None and info.session_id != session_id:
+        if info is None or info.session_id != session_id or not info.cwd:
             return None
-        if info is not None and info.cwd:
-            cwd = Path(info.cwd)
-            if not cwd.is_absolute() or not cwd.is_dir():
-                return None
-            resolved = cwd.resolve(strict=True)
-            if candidates and not any(path.is_absolute() and path.resolve() == resolved for path in candidates):
-                return None
-            return resolved
-
-        # Large first messages can exceed the SDK's summary window. Only
-        # positive evidence for the exact ID can authorize a scoped resume.
-        matches = []
-        if any(not path.is_absolute() or not path.is_dir() for path in candidates):
+        cwd = Path(info.cwd)
+        if not cwd.is_absolute() or not cwd.is_dir():
             return None
-        for candidate in dict.fromkeys(path.resolve(strict=True) for path in candidates):
-            messages = get_session_messages(session_id, directory=str(candidate), limit=1)
-            if messages:
-                if messages[0].session_id != session_id:
-                    return None
-                matches.append(candidate)
-        return matches[0] if len(matches) == 1 else None
+        resolved = cwd.resolve(strict=True)
+        if candidates and not any(path.is_absolute() and path.resolve() == resolved for path in candidates):
+            return None
+        return resolved
 
 
 def user_message(prompt: PreparedPrompt, input_id: str) -> dict[str, Any]:
