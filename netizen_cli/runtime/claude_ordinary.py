@@ -67,6 +67,27 @@ class _Execution:
     concluded: bool = False
     detached: bool = False
     stop_receipt: asyncio.Event | None = None
+    permission_notice: str | None = None
+
+
+# Only fixed public labels may reach Feishu. Custom tools and MCP names can contain private identifiers.
+_DENIAL_TOOL_LABELS = frozenset({
+    "Agent", "Bash", "Edit", "Glob", "Grep", "NotebookEdit", "Read", "Skill", "WebFetch", "WebSearch", "Write",
+})
+
+
+def _denial_notice(denials: object) -> str | None:
+    if not isinstance(denials, list) or not denials:
+        return None
+    names: list[str] = []
+    for entry in denials[:32]:
+        name = entry.get("tool_name") if isinstance(entry, dict) else entry
+        if isinstance(name, str) and name in _DENIAL_TOOL_LABELS and name not in names:
+            names.append(name)
+            if len(names) == 6:
+                break
+    tools = "（" + "、".join(names) + "）" if names else ""
+    return f"本次有 {len(denials)} 个操作被 Claude Code 的权限设置拒绝{tools}。如需允许，请在 Claude Code 设置中调整权限规则。"
 
 
 def _terminal(message: ResultMessage) -> tuple[str, str | None, str | None]:
@@ -338,6 +359,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             # A confirmed close releases the UUID for the next explicit input.
             # Delivery of the old outcome may still be waiting on Feishu.
             self._release(execution)
+        if execution.permission_notice:
+            await self._tell(execution, execution.permission_notice)
+        if failure is not None:
             if not execution.ready.done():
                 if execution.stop_receipt is not None:
                     try:
@@ -403,7 +427,6 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     await self._tell(execution, "已接收，但上下文边界更新失败。")
 
         initialized = False
-        warned = False
         async with asyncio.timeout(None) as reconciliation:
             async for msg in client.receive_messages():
                 if not initialized and isinstance(msg, AssistantMessage):
@@ -419,9 +442,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     if mode not in ("auto", "default"):
                         await self._invalid_init(client)
                     initialized = True
-                    if mode == "default" and not warned:
-                        warned = True
-                        await self._tell(execution, DEFAULT_MODE)
+                    if mode == "default":
+                        execution.permission_notice = DEFAULT_MODE
                 if not isinstance(msg, ResultMessage):
                     continue
                 if msg.session_id != execution.session:
@@ -448,6 +470,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 await commit_intake()
                 if not initialized:
                     await self._invalid_init(client)
+                if denial := _denial_notice(msg.permission_denials):
+                    execution.permission_notice = (f"{DEFAULT_MODE}\n{denial}" if execution.permission_notice else denial)
                 status, answer, detail = _terminal(msg)
                 return OrdinaryConclusion(execution.binding.id, execution.session, execution.input_id, self._owner, execution.origin,
                                           status, answer, detail, task_feedback=execution.binding.task_feedback,

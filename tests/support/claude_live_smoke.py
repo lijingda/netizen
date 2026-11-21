@@ -31,6 +31,9 @@ class LiveSmoke:
         if scenario == "background":
             return ("Use Bash now to run exactly ./fixture-background with run_in_background set to true. "
                     "Reply immediately after launch. Do not poll the task or read its output.")
+        if scenario == "denied-touch":
+            return ("Use Bash once to run exactly touch permission-probe in the project directory. "
+                    "If permission is denied, report the refusal briefly without retrying or using another tool.")
         prompts = {
             "ordinary": (f"Remember this conversation token {self.first_token}. Without tools, reply with the "
                          "project sentinel supplied in your project instructions."),

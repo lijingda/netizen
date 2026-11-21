@@ -169,6 +169,50 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(client.interrupts, 1)
                     self.assertIn(MODE_UNKNOWN, str(self.events[-1].error))
 
+    async def test_permission_notice_precedes_only_its_attributed_result(self):
+        denied = [{"tool_name": "Bash", "tool_input": {"command": "private-command"}},
+                  {"tool_name": "Write", "tool_input": {"file_path": "/private/path"}}]
+        summary = "本次有 2 个操作被 Claude Code 的权限设置拒绝（Bash、Write）。如需允许，请在 Claude Code 设置中调整权限规则。"
+        seen_at_completion = []
+        async def complete(event):
+            seen_at_completion.append((event.final_response, list(self.notices)))
+        self.runtime._completion = complete
+
+        for mode, denials, expected in (
+            ("auto", denied, [summary]),
+            ("default", denied, [DEFAULT_MODE + "\n" + summary]),
+            ("auto", [{"tool_name": name} for name in ("Bash", "Bash", "Write", "Edit", "Read", "Glob", "Grep", "Agent")],
+             ["本次有 8 个操作被 Claude Code 的权限设置拒绝（Bash、Write、Edit、Read、Glob、Grep）。如需允许，请在 Claude Code 设置中调整权限规则。"]),
+            ("auto", None, []), ("auto", [], []), ("auto", "private-command", []),
+            ("auto", [{"tool_name": []}, {"tool_name": "/private/path"}, None],
+             ["本次有 3 个操作被 Claude Code 的权限设置拒绝。如需允许，请在 Claude Code 设置中调整权限规则。"]),
+        ):
+            with self.subTest(mode=mode, denials=denials):
+                self.notices.clear()
+                seen_at_completion.clear()
+                receipt = await self.submit()
+                client = self.clients.calls[-1]
+                client.init(mode)
+                client.init(mode)
+                client.result(user_message_uuid="foreign", permission_denials=denied)
+                client.result(user_message_uuid=None, origin={"kind": "task-notification"}, permission_denials=denied)
+                client.result(permission_denials=denials)
+                client.result(permission_denials=denied)
+                receipt.release_receipt_attempt()
+                self.assertTrue(await self.runtime.wait_idle(1))
+                self.assertEqual(seen_at_completion, [("answer", [("origin", text) for text in expected])])
+                self.assertEqual(self.notices, seen_at_completion[0][1])
+
+    async def test_default_notice_survives_stream_end_without_a_result(self):
+        receipt = await self.submit()
+        receipt.release_receipt_attempt()
+        client = self.clients.calls[-1]
+        client.init("default")
+        client.stream.put_nowait(None)
+        self.assertTrue(await self.runtime.wait_idle(1))
+        self.assertEqual(self.notices, [("origin", DEFAULT_MODE)])
+        self.assertEqual(str(self.events[-1].error), UNKNOWN)
+
     async def test_foreign_result_can_precede_our_attributed_result_and_duplicate_is_not_delivered(self):
         receipt = await self.submit()
         client = self.clients.calls[-1]

@@ -99,6 +99,7 @@ class NativeExecution:
         self.attributed = False
         self.answer = None
         self.reported_turns = 0
+        self.bash_denials = 0
         self.notification = asyncio.Event()
         self.closing = asyncio.Event()
         self.finished = asyncio.Event()
@@ -128,6 +129,8 @@ class NativeExecution:
                     self.notification.set()
                 if set(self.inputs).intersection([msg.user_message_uuid, *(msg.user_message_uuids or ())]):
                     self.attributed = True
+                    self.bash_denials = sum(isinstance(item, dict) and item.get("tool_name") == "Bash"
+                                            for item in msg.permission_denials or [])
                     self.answer = msg.result
                     self.reported_turns = msg.num_turns
             yield msg
@@ -222,7 +225,7 @@ class Driver:
 
     async def submit(self, label, scenario="text"):
         before = len(self.clients.calls)
-        self.clients.turn_limit = 3 if scenario in ("foreground", "background") else 1
+        self.clients.turn_limit = 3 if scenario in ("foreground", "background", "denied-touch") else 1
         try:
             await self.send(label, self.prompt(label, scenario))
         finally:
@@ -236,10 +239,17 @@ class Driver:
         self.session = call.session
         return call
 
-    async def terminal(self, label, *, interrupted=False):
+    async def terminal(self, label, *, interrupted=False, denied_bash=False):
         assert await self.core._claude.wait_idle(45), "execution did not finish"
         call = self.clients.calls[-1]
-        replies = [r for r in self.replies(label) if r != DEFAULT_MODE]
+        replies = self.replies(label)
+        if denied_bash:
+            assert call.bash_denials > 0, "attributed Result did not report a Bash denial"
+            notice = f"本次有 {call.bash_denials} 个操作被 Claude Code 的权限设置拒绝（Bash）。如需允许，请在 Claude Code 设置中调整权限规则。"
+            assert replies[0] in (notice, DEFAULT_MODE + "\n" + notice)
+            replies = replies[1:]
+        else:
+            replies = [r for r in replies if r != DEFAULT_MODE]
         assert UNKNOWN not in replies, "channel delivered unknown"
         assert set(call.init_sessions) == {self.session} and len(call.inputs) == 1
         assert call.finished.is_set() and call.attributed, "missing attributed native Result or disconnect"
@@ -413,6 +423,18 @@ class Driver:
         assert len(self.clients.calls) == calls
         assert tuple(self.store._connection.iterdump()) == before
 
+    async def permission_denials(self):
+        settings = self.cwd / ".claude" / "settings.json"
+        settings.parent.mkdir(exist_ok=True)
+        project = json.loads(settings.read_text()) if settings.exists() else {}
+        project.setdefault("permissions", {})["deny"] = ["Bash(touch:*)"]
+        settings.write_text(json.dumps(project))
+        probe = self.cwd / "permission-probe"
+        assert not probe.exists()
+        await self.submit("denied-touch", "denied-touch")
+        await self.terminal("denied-touch", denied_bash=True)
+        assert not probe.exists()
+
     async def fallback(self):
         settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
         original = settings.read_text()
@@ -467,7 +489,7 @@ async def channel_driver(cwd, provider, live):
 
 EXPECTED_REQUESTS = {
     "startup_grace": 1, "ordinary": 1, "resume": 1, "handoff": 2, "busy": 3, "exact_stop": 3,
-    "background": 3, "stop_during_close": 1, "owner_gate": 0, "fallback": 2, "shutdown": 1,
+    "background": 3, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2, "shutdown": 1,
 }
 CASES = tuple(EXPECTED_REQUESTS)
 

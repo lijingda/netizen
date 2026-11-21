@@ -98,6 +98,8 @@ class Provider:
                 command = "./fixture-" + scenario
                 tool = ("Bash", {"command": command, "run_in_background": scenario == "background",
                                  "description": "Run disposable fixture task"})
+            elif scenario == "denied-touch":
+                tool = ("Bash", {"command": "touch permission-probe", "description": "Check the project deny rule"})
             elif scenario == "tool-error":
                 tool = ("Bash", {"command": "exit 17", "description": "Fixture tool error"})
             elif scenario == "edit-file":
