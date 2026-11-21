@@ -12,7 +12,7 @@ from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions, GRACE, UNKNOWN
-from tests.support.channel_cards import direct_card_event, form_values, elements
+from tests.support.channel_cards import _card_button_value, direct_card_event, form_values, elements
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from tests.support.claude_client import FakeClaudeClients
@@ -100,6 +100,27 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("Codex", content)
                 self.assertNotIn("binding.delete", content)
             self.assertEqual(clients.calls, [])
+
+    async def test_running_session_and_status_cards_stop_the_exact_turn(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            await app.handle_message(FakeMessage("work", message_id="om-input"))
+            client = clients.calls[-1]
+            client.init()
+            try:
+                for command in ("/sessions", "/status"):
+                    with self.subTest(command=command):
+                        await app.handle_message(FakeMessage(command, message_id="om-view"))
+                        card = fx.channel.replies[-1][1]
+                        self.assertIn("执行中", json.dumps(card.card, ensure_ascii=False))
+                        action = _card_button_value(card, "停止")
+                        self.assertEqual(action["intent"], "binding.stop.exact")
+                        self.assertEqual(action["expected_turn_id"], "turn:v1:" + client.inputs[0]["uuid"])
+                        self.assertEqual(action["expected_activity_revision"], ordinary.local_snapshot(binding.binding.id).revision)
+            finally:
+                client.result()
+                self.assertTrue(await ordinary.wait_idle(2))
 
     async def test_local_commands_never_read_codex_accessors(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):

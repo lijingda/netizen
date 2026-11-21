@@ -172,7 +172,8 @@ class SessionCardChannel(QuestionChannel):
                 assert status.local_label is not None
                 items_local.append(SessionCardItem(
                     binding_id=local_binding.id, short_id=local_binding.short_id, project_alias=local_binding.project_alias,
-                    native_thread_id=local_binding.native_thread_id, title="", state=status.local_label, active=local_binding.active,
+                    native_thread_id=local_binding.native_thread_id, title="", state=status.primary_status or "",
+                    state_label=status.local_label, active=local_binding.active,
                     activity_revision=snapshot.activity_revision, turn_id=snapshot.turn.turn_id if snapshot.turn else None,
                 ))
             after = navigation.next(records.next_cursor).encode(scope) if records.next_cursor else None

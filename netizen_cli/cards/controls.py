@@ -116,6 +116,7 @@ class SessionCardItem:
     activity_revision: int = 0
     turn_id: str | None = None
     catalog_unconfirmed: bool = False
+    state_label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1431,6 +1432,27 @@ def archived_sessions_delete_binding_card(
     return OutboundCard(card=builder.to_dict())
 
 
+def _local_stop_button(
+    scope: FeishuScope, binding_id: str, active_binding_id: str | None,
+    revision: int, turn_id: str, navigation: SessionCardPage,
+) -> dict[str, Any]:
+    return _callback_button(label="停止", value=_envelope(
+        scope, CardControlName.STOP_EXACT_BINDING, binding_id=_binding_reference(binding_id),
+        expected_active_binding_id=_binding_reference(active_binding_id) if active_binding_id else None,
+        expected_activity_revision=revision, expected_turn_id=_turn_reference(turn_id),
+        page=navigation.page, session_cursor=navigation.encode(scope),
+    ))
+
+
+def local_running_status_card(
+    scope: FeishuScope, text: str, binding_id: str, revision: int, turn_id: str,
+) -> OutboundCard:
+    builder = _builder("当前会话", "Claude 本地任务")
+    builder.raw(_plain(text))
+    builder.raw(_local_stop_button(scope, binding_id, binding_id, revision, turn_id, SessionCardPage("lazy")))
+    return OutboundCard(card=builder.to_dict())
+
+
 def local_sessions_card(
     scope: FeishuScope, items: tuple[SessionCardItem, ...], *, navigation: SessionCardPage,
     next_cursor: str | None, notice: str | None, active_binding_id: str | None,
@@ -1442,19 +1464,15 @@ def local_sessions_card(
         builder.markdown("当前聊天或话题还没有会话。")
     for item in items:
         builder.markdown(f"{_md_code(item.project_alias)} · {_md_code(item.short_id)}"
-                         + (" · 当前会话" if item.active else "") + " · " + item.state)
+                         + (" · 当前会话" if item.active else "") + " · " + (item.state_label or item.state))
         if not item.active:
             builder.raw(_repeatable_callback_button(
                 label="设为当前", value=_envelope(scope, CardControlName.ACTIVATE_BINDING,
                     binding_id=_binding_reference(item.binding_id), session_cursor=navigation.encode(scope)),
             ))
         if item.turn_id is not None and session_stop_available(item.state):
-            builder.raw(_callback_button(label="停止", value=_envelope(
-                scope, CardControlName.STOP_EXACT_BINDING, binding_id=_binding_reference(item.binding_id),
-                expected_active_binding_id=_binding_reference(active_binding_id) if active_binding_id else None,
-                expected_activity_revision=item.activity_revision, expected_turn_id=_turn_reference(item.turn_id),
-                page=navigation.page, session_cursor=navigation.encode(scope),
-            )))
+            builder.raw(_local_stop_button(scope, item.binding_id, active_binding_id,
+                                           item.activity_revision, item.turn_id, navigation))
     previous = navigation.previous()
     builder.raw(_sessions_pagination(
         scope=scope, local_only=True, page=navigation.page,
