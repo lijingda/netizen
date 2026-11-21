@@ -1348,6 +1348,29 @@ macOS LaunchAgent 可能在上一代 Claude CLI 退出前重启，工具启动�
 macOS 还须在所有者开启 SIP 的真实 Mac 上覆盖登录项启动、注销和重启。详见
 [试点接受条件](adr/0104-host-native-agent-backends-per-instance.md#接受条件)。
 
+#### 在所有者的 Mac 上验收崩溃重启
+
+1. 在启用 SIP 的真实 Mac 上运行 `csrutil status`，保存输出。在候选 checkout 中用 `python3 -m venv .venv-crash` 创建专用环境，
+   用 `source .venv-crash/bin/activate` 激活，用 `python -m pip install '.[claude]'` 安装，再用当前系统账号登录 Claude Code。
+   执行 `netizen setup --backend claude --root ~/.netizen-claude-crash`，使用新 root，在浏览器流程中新建飞书应用并绑定所有者。
+   执行 `netizen start --root ~/.netizen-claude-crash`，确认登录项中的用户 LaunchAgent 已就绪。
+2. 在飞书用 `/projects` 登记专用 Project，再用 `/new` 选择它，发送下面的消息。随后立即在候选 checkout 和同一 venv 中运行助手。
+   若服务自定义了 `CLAUDE_CONFIG_DIR`，在运行助手的终端指定同一目录。观测期间请让该 Project 只运行这条任务。
+
+   ```text
+   在前台运行这条命令并等它结束，不要放到后台：python3 -c "import time; time.sleep(40)"，结束后回复"好了"
+   ```
+
+   ```bash
+   python scripts/accept_claude_service_crash.py --root ~/.netizen-claude-crash --yes-crash > ~/claude-crash-initial.jsonl
+   ```
+
+3. 注销并重新登录后，确认 LaunchAgent 随登录自动启动。重新激活 venv，重复步骤 2，将输出保存为
+   `claude-crash-login.jsonl`。再重启 Mac 并登录，确认登录项自动启动，重复一次并保存为 `claude-crash-reboot.jsonl`。
+4. 保存 SIP 状态及三次 JSONL 各自最后的 `verdict`。助手默认在检测到随附 CLI 后等 8 秒，只终止已核对身份的服务主进程，
+   随后观测 45 秒。通过要求旧 CLI 在新服务就绪后的两秒准入等待结束前退出，且原生记录中未出现崩溃后的模型请求或回复。
+   仍存活的工具子进程单独列出。
+
 ### 维护飞书权限契约
 
 权限和回调的单一契约仍是[前置门禁](#前置门禁)。修改
