@@ -71,15 +71,28 @@ class CrashKitTest(unittest.TestCase):
         manager = Mock(platform="darwin")
         name = manager.service_name.return_value = "selected"
         manager._launchd_jobs.return_value = {name: main.pid, "unrelated": 1002}
-        for case in ("wrong_root", "identity", "recycled_pid", "finished_cli"):
+        cli, tool = Mock(), Mock()
+        for case, reason in (("wrong_root", "unconfirmed_service_identity"), ("identity", "unconfirmed_service_identity"),
+                             ("recycled_pid", "service_changed_before_kill"), ("finished_cli", "execution_changed_before_kill"),
+                             ("finished_task", "foreground_task_not_covered")):
             with self.subTest(case=case):
                 manager.inspect.return_value = SimpleNamespace(ready=True, binding=SimpleNamespace(
                     root=root.parent if case == "wrong_root" else root))
                 manager._identity_matches.return_value = case != "identity"
                 current = Mock(pid=main.pid) if case == "recycled_pid" else main
                 with (patch.object(kit.psutil, "Process", return_value=current),
-                      patch.object(kit, "snapshot", return_value={}), self.assertRaises(kit.EvidenceError)):
-                    kit.crash_main(manager, root, main, Path("/fixture/claude"), {Mock()})
+                      patch.object(kit, "snapshot", return_value={} if case == "finished_cli" else {cli: "cli"}),
+                      patch.object(kit, "foreground_target", return_value=None if case == "finished_task" else (cli, tool)),
+                      self.assertRaisesRegex(kit.EvidenceError, "^" + reason + "$")):
+                    kit.crash_main(manager, root, main, Path("/fixture/claude"), {cli}, (cli, tool))
+        main.kill.assert_not_called()
+        manager._launchctl.assert_not_called()
+
+    def test_linux_without_pidfd_refuses_before_signalling(self):
+        main, cli, tool = Mock(), Mock(), Mock()
+        with patch.object(kit.os, "pidfd_open", None, create=True), self.assertRaisesRegex(
+                kit.EvidenceError, "^stable_signal_target_unavailable$"):
+            kit.crash_main(Mock(platform="linux"), self.root, main, Path("/fixture/claude"), {cli}, (cli, tool))
         main.kill.assert_not_called()
 
     def test_transcript_growth_accounts_for_timestamps_new_files_and_nested_records(self):
@@ -111,7 +124,7 @@ class CrashKitTest(unittest.TestCase):
         growth, activity = kit.transcript_delta({active}, before, 10)
         self.assertEqual(growth, [1])
         self.assertIsNone(activity["api-request"])
-        self.assertEqual(kit.verdict([.1], 1, 1.1, 5, activity), "unconfirmed_transcript_time")
+        self.assertEqual(kit.verdict([.1], 3, 5, activity), "unconfirmed_transcript_time")
 
     def test_fresh_complete_ready_record_required_even_across_log_rotation(self):
         log = self.root / "state/netizen.log"
@@ -121,7 +134,7 @@ class CrashKitTest(unittest.TestCase):
         self.assertFalse(kit.ready_since(log, cursor)[0])
         log.rename(log.with_suffix(".old"))
         log.write_bytes(b"unrelated netizen service ready\n" + READY[:-1])
-        seen, cursor = kit.ready_since(log, cursor)
+        seen, _, cursor = kit.ready_since(log, cursor)
         self.assertFalse(seen)
         with log.open("ab") as source:
             source.write(b"\n")
@@ -129,20 +142,26 @@ class CrashKitTest(unittest.TestCase):
 
     def test_verdict_requires_all_cli_exits_and_both_kinds_of_transcript_evidence(self):
         clean = {"api-request": False, "assistant": False}
-        self.assertEqual(kit.verdict([.5, 2.9], 1, 1.1, 4, clean), "pass")
+        self.assertEqual(kit.verdict([.5, 2.9], 3, 4, clean), "pass")
         for exits in ([], [None], [3.05], [.4, 3]):
-            self.assertNotEqual(kit.verdict(exits, 1, 1.1, 4, clean), "pass")
-        self.assertNotEqual(kit.verdict([.1], None, None, 45, clean), "pass")
-        self.assertNotEqual(kit.verdict([.1], 1, 1.1, 1.5, clean), "pass")
+            self.assertNotEqual(kit.verdict(exits, 3, 4, clean), "pass")
+        self.assertNotEqual(kit.verdict([.1], None, 45, clean), "pass")
+        self.assertNotEqual(kit.verdict([.1], 3, 1.5, clean), "pass")
         for kind in clean:
-            self.assertEqual(kit.verdict([.5], 1, 1.1, 4, clean | {kind: True}), "post_kill_model_activity")
+            self.assertEqual(kit.verdict([.5], 3, 4, clean | {kind: True}), "post_kill_model_activity")
 
     def test_complete_run_on_both_managers_only_signals_original_main(self):
         for platform in ("linux", "darwin"):
             with self.subTest(platform=platform):
                 self.simulate(platform)
 
-    def simulate(self, platform):
+    def test_cli_and_existing_transcript_without_foreground_task_is_not_covered(self):
+        self.simulate("darwin", foreground=False)
+
+    def test_late_log_poll_cannot_move_admission_past_an_observed_exit(self):
+        self.simulate("darwin", late_exit=True)
+
+    def simulate(self, platform, *, foreground=True, late_exit=False):
         config = self.root / "config.yaml"
         config.write_text("instance:\n  backend: claude\n")
         marker = self.root / ".netizen-root"
@@ -168,9 +187,11 @@ class CrashKitTest(unittest.TestCase):
         def tick(seconds):
             previous = clock.elapsed
             clock.elapsed += seconds
-            if previous < 1 <= clock.elapsed:
+            # The line becomes visible after the grace has already started.
+            if previous < 1.5 <= clock.elapsed:
                 with log.open("ab") as out:
-                    out.write(READY)
+                    out.write(b"2026-01-01 01:02:03,456 INFO netizen_cli.runtime.claude_ordinary "
+                              b"Claude admission grace started pid=7002 monotonic=1.0 deadline=3.0\n" + READY)
                 with transcript.open("ab") as out:
                     out.write(b'{"type":"system","content":"private marker"}\n')
         def kill(*_args):
@@ -180,8 +201,11 @@ class CrashKitTest(unittest.TestCase):
             return old.pid if not clock.killed else (None if clock.elapsed < .3 else new.pid)
         def alive(process):
             if process is cli:
-                return clock.elapsed < .6
+                return clock.elapsed < (3.1 if late_exit else .6)
             return True
+        tool.cmdline.return_value = kit.SLEEP_ARGS
+        msg = SimpleNamespace(session_id=session, message={"content": [{"type": "tool_use", "name": "Bash", "id": "tool",
+                                "input": {"command": 'python3 -c "import time; time.sleep(40)"'}}]})
         stdout = io.StringIO()
         with (patch.object(kit, "ServiceManager", return_value=manager),
               patch.object(manager, "inspect", return_value=SimpleNamespace(ready=True, binding=SimpleNamespace(root=self.root))),
@@ -190,16 +214,26 @@ class CrashKitTest(unittest.TestCase):
               patch.object(manager, "_launchd_jobs", side_effect=lambda: {service_name: pid(), "other": 8888}) as launchd,
               patch.object(kit.psutil, "Process", side_effect={old.pid: old, new.pid: new}.__getitem__),
               patch.object(kit, "verified_claude_cli", return_value=self.home / "bundled/claude"),
-              patch.object(kit, "snapshot", return_value={cli: "cli", tool: "tool"}),
+              patch.object(kit, "snapshot", return_value={cli: "cli", **({tool: "tool"} if foreground else {})}),
+              patch.object(kit, "descendants", return_value=[tool] if foreground else []),
+              patch("claude_agent_sdk.get_session_messages", return_value=[msg]),
               patch.object(kit, "live", side_effect=alive),
               patch.object(kit, "time", SimpleNamespace(monotonic=lambda: clock.elapsed, time=lambda: 10., sleep=tick)),
               patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(config_dir)}),
               patch.object(kit.os, "pidfd_open", side_effect=lambda p: os.open(os.devnull, os.O_RDONLY), create=True) as fdopen,
               patch.object(kit.signal, "pidfd_send_signal", side_effect=kill, create=True) as send_signal,
-              patch.object(old, "kill", side_effect=kill) as kill_old,
+              patch.object(manager, "_launchctl", side_effect=kill) as manager_kill,
+              patch.object(old, "kill") as kill_old,
               contextlib.redirect_stdout(stdout)):
             self.assertEqual(kit.main(["--root", str(self.root), "--yes-crash", "--delay", "0",
-                                       "--observe-seconds", "4"]), 0, stdout.getvalue())
+                                       "--wait-timeout", "1", "--observe-seconds", "4"]),
+                             0 if foreground and not late_exit else 1, stdout.getvalue())
+        kill_old.assert_not_called()
+        if not foreground:
+            manager_kill.assert_not_called()
+            send_signal.assert_not_called()
+            self.assertEqual(json.loads(stdout.getvalue().splitlines()[-1])["verdict"], "NOT_COVERED")
+            return
         if platform == "linux":
             fdopen.assert_called_once_with(old.pid)
             send_signal.assert_called_once()
@@ -208,7 +242,7 @@ class CrashKitTest(unittest.TestCase):
             launchd.assert_not_called()
             self.assertTrue(systemd.called)
         else:
-            kill_old.assert_called_once()
+            manager_kill.assert_called_once_with("kill", "SIGKILL", f"gui/{manager.uid}/{service_name}")
             systemd.assert_not_called()
             fdopen.assert_not_called()
             self.assertTrue(launchd.called)
@@ -221,7 +255,7 @@ class CrashKitTest(unittest.TestCase):
         self.assertEqual(by_event["exited"]["pid"], cli.pid)
         self.assertEqual(by_event["survivors"]["tool_processes"], [{"pid": tool.pid, "role": "tool"}])
         self.assertEqual(by_event["transcripts"]["line_growth"], [1])
-        self.assertEqual(by_event["ready"]["admission_after_kill"], by_event["ready"]["after_kill"] + 2)
-        self.assertEqual(events[-1]["verdict"], "PASS")
+        self.assertEqual(by_event["ready"]["admission_after_kill"], by_event["ready"]["grace_started_after_kill"] + 2)
+        self.assertEqual(events[-1]["reason"], "cli_exit_before_admission_unproven" if late_exit else "pass")
         for private in (str(self.root), session, "private body", "private marker", "private-project"):
             self.assertNotIn(private, stdout.getvalue())

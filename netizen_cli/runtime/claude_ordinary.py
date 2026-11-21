@@ -5,6 +5,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import logging
+import os
 from pathlib import Path
 import time
 from typing import Any, cast
@@ -148,7 +149,10 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
 
     def open_admission(self) -> None:
         if self._opens_at is None and self._shutdown_deadline is None:
-            self._opens_at = self._clock() + 2.0
+            started = self._clock()
+            self._opens_at = started + 2.0
+            logger.info("Claude admission grace started pid=%d monotonic=%r deadline=%r",
+                        os.getpid(), started, self._opens_at)
 
     def require_admission(self) -> None:
         if self._shutdown_deadline is not None:

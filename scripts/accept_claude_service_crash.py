@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 from stat import S_ISREG
 import sys
@@ -29,6 +30,10 @@ from netizen_cli.instance import require_instance_root_marker, resolve_instance_
 GRACE = 2.0
 POLL = 0.1
 READY_LINE = re.compile(rb"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} INFO (?:__main__|netizen_cli\.main) netizen service ready(?: projects=\d+)?\r?\n$")
+
+GRACE_LINE = re.compile(rb"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} INFO netizen_cli\.runtime\.claude_ordinary "
+                        rb"Claude admission grace started pid=(\d+) monotonic=([\d.e+-]+) deadline=([\d.e+-]+)\r?\n$")
+SLEEP_ARGS = ["python3", "-c", "import time; time.sleep(40)"]
 
 
 class EvidenceError(Exception):
@@ -101,26 +106,31 @@ def snapshot(main, platform, cli):
     return tree
 
 
+def cli_session_id(cli):
+    ids = [arg.partition("=")[2] for arg in cli.cmdline() if arg.startswith(("--resume=", "--session-id="))]
+    if len(ids) != 1 or str(UUID(ids[0])) != ids[0]:
+        raise EvidenceError("missing_session_identity")
+    return ids[0]
+
+
 def session_transcripts(clis, config_dir):
     from claude_agent_sdk import get_session_info, project_key_for_directory
 
     active = set()
     for cli in clis:
-        ids = [arg.partition("=")[2] for arg in cli.cmdline() if arg.startswith(("--resume=", "--session-id="))]
-        if len(ids) != 1 or str(UUID(ids[0])) != ids[0]:
-            raise EvidenceError("missing_session_identity")
+        session_id = cli_session_id(cli)
         projects = config_dir / "projects"
         cwd = cli.cwd()
-        expected = projects / project_key_for_directory(cwd) / f"{ids[0]}.jsonl"
+        expected = projects / project_key_for_directory(cwd) / f"{session_id}.jsonl"
         # A very long native project name can have a platform-specific hash.
         # An existing exact session file identifies its directory in that case.
         if not expected.exists():
-            matches = list(projects.glob(f"*/{ids[0]}.jsonl"))
+            matches = list(projects.glob(f"*/{session_id}.jsonl"))
             if len(matches) > 1:
                 raise EvidenceError("ambiguous_session_transcript")
             if matches:
-                info = get_session_info(ids[0], directory=cwd)
-                if info is None or info.session_id != ids[0] or not info.cwd or Path(info.cwd).resolve() != Path(cwd).resolve():
+                info = get_session_info(session_id, directory=cwd)
+                if info is None or info.session_id != session_id or not info.cwd or Path(info.cwd).resolve() != Path(cwd).resolve():
                     raise EvidenceError("unconfirmed_transcript_project")
                 expected = matches[0]
         active.add(expected)
@@ -220,30 +230,88 @@ def ready_since(path, cursor):
                 raise EvidenceError("truncated_service_log")
             source.seek(cursor.offset)
         ready = False
+        grace = []
         offset = source.tell()
         for line in source:
             if not line.endswith(b"\n"):
                 break
             ready |= READY_LINE.fullmatch(line) is not None
+            if match := GRACE_LINE.fullmatch(line):
+                grace.append((int(match[1]), float(match[2]), float(match[3])))
             offset += len(line)
-        return ready, Cursor(stat.st_dev, stat.st_ino, offset)
+        return ready, grace, Cursor(stat.st_dev, stat.st_ino, offset)
 
 
-def crash_main(manager, root, expected, executable, clis):
-    # Hold a kernel process reference where available. psutil checks PID reuse
-    # before kill() on macOS. No PID taken from a descendant is signaled.
-    fd = os.pidfd_open(expected.pid) if manager.platform == "linux" and hasattr(os, "pidfd_open") else None
+def pending_foreground_call(cli):
+    from claude_agent_sdk import get_session_messages
+    session_id = cli_session_id(cli)
+    pending = set()
+    for msg in get_session_messages(session_id, directory=cli.cwd()):
+        if msg.session_id != session_id or not isinstance(msg.message, dict):
+            continue
+        blocks = msg.message.get("content")
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                pending.discard(block.get("tool_use_id"))
+            if block.get("type") == "tool_use" and block.get("name") == "Bash":
+                args = block.get("input", {})
+                if isinstance(args, dict) and args.get("run_in_background", False) is False and block.get("id"):
+                    if not isinstance(args.get("command"), str):
+                        continue
+                    try:
+                        command = shlex.split(args["command"])
+                    except ValueError:
+                        continue
+                    if command == SLEEP_ARGS:
+                        pending.add(block["id"])
+    return len(pending) == 1
+
+
+def foreground_target(clis, platform):
+    for cli in clis:
+        with suppress(psutil.NoSuchProcess):
+            matches = []
+            for child in descendants(cli, platform):
+                with suppress(psutil.NoSuchProcess):
+                    argv = child.cmdline()
+                    if (len(argv) == 3 and Path(argv[0]).name == SLEEP_ARGS[0] and argv[1:] == SLEEP_ARGS[1:]
+                            and live(child)):
+                        matches.append(child)
+            if len(matches) == 1 and pending_foreground_call(cli):
+                return cli, matches[0]
+    return None
+
+
+def crash_main(manager, root, expected, executable, clis, foreground):
+    if manager.platform == "linux":
+        if not callable(getattr(os, "pidfd_open", None)) or not callable(getattr(signal, "pidfd_send_signal", None)):
+            raise EvidenceError("stable_signal_target_unavailable")
+        try:
+            fd = os.pidfd_open(expected.pid)
+        except OSError:
+            raise EvidenceError("stable_signal_target_unavailable") from None
+    elif manager.platform == "darwin":
+        fd = None
+    else:
+        raise EvidenceError("stable_signal_target_unavailable")
     try:
         if verified_main(manager, root) != expected:
             raise EvidenceError("service_changed_before_kill")
         tree = snapshot(expected, manager.platform, executable)
         if not clis or {p for p, role in tree.items() if role == "cli"} != clis:
             raise EvidenceError("execution_changed_before_kill")
+        if (not foreground or foreground[0] not in clis or foreground[1] not in tree
+                or foreground_target({foreground[0]}, manager.platform) != foreground):
+            raise EvidenceError("foreground_task_not_covered")
         if main_pid(manager, root) != expected.pid or not live(expected):
             raise EvidenceError("service_changed_before_kill")
         mono, wall = time.monotonic(), time.time()
         if fd is None:
-            expected.kill()
+            manager._launchctl("kill", "SIGKILL", f"gui/{manager.uid}/{manager.service_name(root)}")
         else:
             signal.pidfd_send_signal(fd, signal.SIGKILL)
         return mono, wall, tree
@@ -252,16 +320,15 @@ def crash_main(manager, root, expected, executable, clis):
             os.close(fd)
 
 
-def verdict(cli_exits, ready_lower, ready_upper, observed, activity):
+def verdict(cli_exits, admission, observed, activity):
     if any(activity.values()):
         return "post_kill_model_activity"
     if any(activity.get(kind) is not False for kind in ("api-request", "assistant")):
         return "unconfirmed_transcript_time"
-    if ready_upper is None or observed < ready_upper + GRACE:
+    if admission is None or observed < admission:
         return "admission_not_observed"
-    # Use the earliest possible ready time between the two log reads. A poll
-    # straddling the boundary cannot prove the old CLI exited before admission.
-    if not cli_exits or any(t is None or t >= ready_lower + GRACE for t in cli_exits):
+    # An exit first observed at or after admission cannot prove the old CLI had already exited.
+    if not cli_exits or any(t is None or t >= admission for t in cli_exits):
         return "cli_exit_before_admission_unproven"
     return "pass"
 
@@ -270,8 +337,8 @@ def observe(manager, root, old, tree, log, cursor, killed, window):
     exits = {}
     replacement = None
     stable = True
-    ready_lower = ready_upper = None
-    last_negative = 0.0
+    ready = False
+    windows = []
     while True:
         for child, role in tree.items():
             if child not in exits and not live(child):
@@ -283,15 +350,9 @@ def observe(manager, root, old, tree, log, cursor, killed, window):
         if pid and pid != old.pid and replacement is None:
             replacement = pid
             emit("new_main", pid=pid, after_kill=round(time.monotonic() - killed, 3))
-        if ready_upper is None:
-            reading = time.monotonic() - killed
-            ready, cursor = ready_since(log, cursor)
-            if ready:
-                ready_lower, ready_upper = last_negative, time.monotonic() - killed
-                emit("ready", after_kill=round(ready_upper, 3), admission_after_kill=round(ready_upper + GRACE, 3),
-                     earliest_admission_after_kill=round(ready_lower + GRACE, 3))
-            else:
-                last_negative = reading
+        line_ready, grace, cursor = ready_since(log, cursor)
+        ready |= line_ready
+        windows.extend(record for record in grace if record[1] >= killed)
         elapsed = time.monotonic() - killed
         if elapsed >= window:
             break
@@ -300,7 +361,13 @@ def observe(manager, root, old, tree, log, cursor, killed, window):
     emit("survivors", cli_pids=[p["pid"] for p in survivors if p["role"] == "cli"],
          tool_processes=[p for p in survivors if p["role"] != "cli"])
     cli_exits = [exits.get(child) for child, role in tree.items() if role == "cli"]
-    return cli_exits, ready_lower, ready_upper, elapsed, replacement if stable else None
+    admission = None
+    if stable and ready and len(windows) == 1:
+        pid, started, deadline = windows[0]
+        if pid == replacement and math.isfinite(deadline) and deadline == started + GRACE:
+            admission = deadline - killed
+            emit("ready", grace_started_after_kill=round(started - killed, 3), admission_after_kill=round(admission, 3))
+    return cli_exits, admission, elapsed, replacement if stable else None
 
 
 def run(args):
@@ -329,6 +396,11 @@ def run(args):
     clis = {p for p, role in tree.items() if role == "cli"}
     if not initial.intersection(clis):
         raise EvidenceError("execution_ended_before_kill")
+    while not (foreground := foreground_target(clis, manager.platform)):
+        if time.monotonic() >= deadline or not live(old) or not any(live(cli) for cli in clis):
+            raise EvidenceError("foreground_task_not_covered")
+        time.sleep(POLL)
+    emit("foreground_task_verified", cli=foreground[0].pid, task=foreground[1].pid)
     config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or manager.home / ".claude")
     active_transcripts = session_transcripts(clis, config_dir)
     before = baseline({path.parent for path in active_transcripts})
@@ -336,15 +408,15 @@ def run(args):
     with open_evidence(log) as source:
         stat = os.fstat(source.fileno())
         cursor = Cursor(stat.st_dev, stat.st_ino, stat.st_size)
-    killed, wall, tree = crash_main(manager, root, old, executable, clis)
+    killed, wall, tree = crash_main(manager, root, old, executable, clis, foreground)
     emit("kill", main=old.pid, after_kill=0, descendants=[{"pid": p.pid, "role": r} for p, r in tree.items()])
-    exits, lower, upper, observed, replacement = observe(manager, root, old, tree, log, cursor, killed, args.observe_seconds)
+    exits, admission, observed, replacement = observe(manager, root, old, tree, log, cursor, killed, args.observe_seconds)
     growth, activity = transcript_delta(active_transcripts, before, wall)
     emit("transcripts", line_growth=growth, api_request_after_kill=activity["api-request"],
          assistant_after_kill=activity["assistant"])
     if replacement is None or verified_main(manager, root).pid != replacement:
         raise EvidenceError("replacement_service_unconfirmed")
-    return verdict(exits, lower, upper, observed, activity)
+    return verdict(exits, admission, observed, activity)
 
 
 def seconds(value):
@@ -369,7 +441,10 @@ def main(argv=None):
     except Exception as exc:
         # Manager errors, filesystem exceptions and parse errors can include private data.
         reason = type(exc).__name__
-    emit("verdict", verdict="PASS" if reason == "pass" else "FAIL", reason=reason)
+    label = "PASS" if reason == "pass" else "FAIL"
+    if reason in {"no_execution_seen", "execution_ended_before_kill", "foreground_task_not_covered"}:
+        label = "NOT_COVERED"
+    emit("verdict", verdict=label, reason=reason)
     return 0 if reason == "pass" else 1
 
 
