@@ -4,10 +4,33 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.check_native_claude import fixture_environment, validate_worker_fixture
+from scripts.check_native_claude import fixture_environment, live_environment, live_refusal, validate_worker_fixture
+from tests.support.claude_live_smoke import TurnBudget
 
 
 class ClaudeIsolationTests(unittest.TestCase):
+    def test_live_requires_explicit_local_opt_in_and_only_passes_login_environment(self):
+        env = {"NETIZEN_CLAUDE_LIVE": "1", "HOME": "/owner", "PATH": "/usr/bin", "EXTRA": "x",
+               "ANTHROPIC_API_KEY": "fixture", "CLAUDE_CONFIG_DIR": "/elsewhere"}
+        self.assertIsNone(live_refusal(env))
+        self.assertEqual(live_refusal({**env, "CI": ""}), "refused_ci")
+        self.assertEqual(live_refusal({}), "refused_missing_opt_in")
+        self.assertEqual(live_environment(env), {"NETIZEN_CLAUDE_LIVE": "1", "HOME": "/owner", "PATH": "/usr/bin"})
+
+    def test_live_reserves_native_turn_limit_before_start(self):
+        budget = TurnBudget()
+        self.assertEqual(budget.reserve(29), 29)
+        with self.assertRaises(RuntimeError):
+            budget.reserve(2)
+        with self.assertRaises(RuntimeError):
+            budget.reserve(1)
+        self.assertEqual(budget.reserved, 29)
+        budget = TurnBudget()
+        self.assertEqual(budget.reserve(30), 30)
+        with self.assertRaises(RuntimeError):
+            budget.reserve(1)
+        self.assertEqual(budget.reserved, 30)
+
     def test_home_credentials_and_traffic_are_fixture_scoped(self):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "other", "CLAUDE_CODE_OAUTH_TOKEN": "other", "EXTRA_ENV": "other"}):
             config = fixture_environment(Path("/test-home"))

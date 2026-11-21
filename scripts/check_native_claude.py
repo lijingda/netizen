@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
+from functools import partial
 import json
 import os
 import signal
@@ -11,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -368,7 +370,86 @@ async def worker():
         await provider.close()
 
 
+def live_refusal(environment):
+    if "CI" in environment:
+        return "refused_ci"
+    if environment.get("NETIZEN_CLAUDE_LIVE") != "1":
+        return "refused_missing_opt_in"
+    return None
+
+
+def live_environment(environment):
+    # Only the native CLI accesses the real login in HOME or the OS keychain.
+    keys = ("HOME", "PATH", "LANG", "LC_CTYPE", "USER", "LOGNAME", "NETIZEN_CLAUDE_LIVE")
+    return {key: environment[key] for key in keys if key in environment}
+
+
+def live_worker():
+    if live_refusal(os.environ):
+        return 2
+    with os.fdopen(os.dup(1), "w", encoding="utf-8") as report, open(os.devnull, "w") as quiet:
+        # Libraries and child processes may emit account diagnostics directly to
+        # a file descriptor. Only the dedicated, non-inherited report fd is public.
+        os.dup2(quiet.fileno(), 1)
+        os.dup2(quiet.fileno(), 2)
+        emit = partial(print, file=report)
+        started = time.monotonic()
+        try:
+            from tests.support.claude_channel_e2e import install_tools, run_cases
+            from tests.support.claude_live_smoke import LiveSmoke
+
+            live = LiveSmoke()
+            cwd = Path.cwd()
+            (cwd / ".claude").mkdir()
+            (cwd / ".claude" / "settings.json").write_text(json.dumps({"model": "haiku"}))
+            (cwd / "CLAUDE.md").write_text(f"The project sentinel is {live.project_token}.\n")
+            install_tools(cwd)
+            asyncio.run(run_cases(cwd, live=live, report=emit))
+            return 0
+        except Exception:
+            emit(json.dumps({"scenario": "live_run", "status": "fail", "seconds": round(time.monotonic()-started, 3)}),
+                 flush=True)
+            return 1
+
+
+def live_smoke():
+    if reason := live_refusal(os.environ):
+        print(json.dumps({"scenario": "live_gate", "status": reason, "seconds": 0, "submissions": 0}))
+        return 2
+    base = Path(tempfile.gettempdir()).resolve()
+    if base.is_relative_to(ROOT):
+        base = Path("/tmp").resolve()
+    if base.is_relative_to(ROOT):
+        raise RuntimeError("no disposable project location outside repository")
+    with tempfile.TemporaryDirectory(prefix="netizen-claude-live-", dir=base) as temp:
+        cwd = Path(temp) / "project"
+        cwd.mkdir()
+        # The private worker has no CLI entry point. Its stdout is structure-only.
+        command = [sys.executable, "-I", "-B", "-c",
+                   "import runpy,sys; raise SystemExit(runpy.run_path(sys.argv[1])['live_worker']())",
+                   str(Path(__file__).resolve())]
+        with subprocess.Popen(command, cwd=cwd, env=live_environment(os.environ), stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True) as child:
+            try:
+                return child.wait(timeout=900)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                print(json.dumps({"scenario": "live_run", "status": "interrupted"}))
+                return 1
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--live"]:
+        try:
+            raise SystemExit(live_smoke())
+        except Exception:
+            print(json.dumps({"scenario": "live_setup", "status": "fail"}))
+            raise SystemExit(1) from None
     if sys.argv[1:] == ["--worker"]:
         asyncio.run(worker())
     elif not sys.argv[1:]:

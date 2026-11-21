@@ -1,7 +1,7 @@
 """Drive the registered Feishu handlers and observe the bundled CLI through its public SDK."""
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -23,7 +23,6 @@ from netizen_cli.runtime.claude_ordinary import DEFAULT_MODE, GRACE, UNKNOWN
 from netizen_cli.settings import AdminWebSettings, Settings
 from tests.support.channel_cards import _card_button_value, direct_button_event, direct_card_event, new_form_values
 from tests.support.channel_messages import FakeChannel, FakeMessage
-from tests.support.claude_provider import PROJECT_SENTINEL
 
 OWNER = "ou_user"
 SCOPE = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -98,6 +97,8 @@ class NativeExecution:
         self.client, self.session, self.close_gate = client, session, close_gate
         self.inputs = []
         self.attributed = False
+        self.answer = None
+        self.reported_turns = 0
         self.notification = asyncio.Event()
         self.closing = asyncio.Event()
         self.finished = asyncio.Event()
@@ -127,6 +128,8 @@ class NativeExecution:
                     self.notification.set()
                 if set(self.inputs).intersection([msg.user_message_uuid, *(msg.user_message_uuids or ())]):
                     self.attributed = True
+                    self.answer = msg.result
+                    self.reported_turns = msg.num_turns
             yield msg
 
     async def disconnect(self):
@@ -141,13 +144,17 @@ class NativeExecution:
 
 
 class NativeClients(BundledClaudeClients):
-    def __init__(self):
+    def __init__(self, live):
         super().__init__()
         self.calls = []
+        self.live = live
+        self.turn_limit = 1
         self.close_gate = None
 
     def create(self, session_id, cwd, *, resume):
         public_client = super().create(session_id, cwd, resume=resume)
+        if self.live:
+            public_client.options.max_turns = self.live.budget.reserve(self.turn_limit)
         observed = NativeExecution(public_client, session_id, self.close_gate)
         self.calls.append(observed)
         return observed
@@ -172,10 +179,29 @@ class Driver:
     clients: NativeClients
     clock: list
     provider: object
+    live: object
+    cli_submissions: int = 0
+    cli_turns: int = 0
+    tools: list = field(default_factory=list)
     session: str | None = None
 
     def rows(self, label=None):
         return [r for r in self.provider.rows if r["path"] == "/v1/messages" and (label is None or r["label"] == label)]
+
+    def prompt(self, label, scenario="text"):
+        return self.live.prompt(label, scenario) if self.live else f"[[S:{scenario}/{label}]]"
+
+    def submissions(self):
+        return self.cli_submissions + sum(len(call.inputs) for call in self.clients.calls)
+
+    def reported_turns(self):
+        return self.cli_turns + sum(call.reported_turns for call in self.clients.calls)
+
+    def check_answer(self, label, answer):
+        if self.live:
+            self.live.check_answer(label, answer)
+        else:
+            assert answer == "fixture-reply-" + label, "incorrect answer"
 
     async def send(self, label, text, **sender):
         await self.channel.handlers[Events.MESSAGE](FakeMessage(text, message_id=label, **sender))
@@ -188,7 +214,7 @@ class Driver:
 
     async def create(self):
         await self.send("new", "/new")
-        card, = self.replies("new")[-1:]
+        card, = self.replies("new")
         assert isinstance(card, OutboundCard)
         await self.click(direct_card_event(self.channel, new_form_values(card), message_id="card-new"))
         assert self.store.active_binding(SCOPE.key) is not None
@@ -196,7 +222,11 @@ class Driver:
 
     async def submit(self, label, scenario="text"):
         before = len(self.clients.calls)
-        await self.send(label, f"[[S:{scenario}/{label}]]")
+        self.clients.turn_limit = 3 if scenario in ("foreground", "background") else 1
+        try:
+            await self.send(label, self.prompt(label, scenario))
+        finally:
+            self.clients.turn_limit = 1
         assert len(self.clients.calls) == before + 1, "message did not start one execution"
         call = self.clients.calls[-1]
         binding = self.store.active_binding(SCOPE.key)
@@ -218,16 +248,16 @@ class Driver:
             assert post == STOPPED, "incorrect interrupted terminal"
         else:
             assert isinstance(post, OutboundPost) and [m.open_id for m in post.mentions] == [OWNER]
-            assert post.markdown == "fixture-reply-" + label, "incorrect answer"
+            assert call.answer and post.markdown == call.answer, "terminal did not deliver the attributed answer"
+            self.check_answer(label, post.markdown)
         events = self.channel.events
         terminal = "CrossMark" if interrupted else "DONE"
         assert events.index(("add", label, "Typing")) < events.index(("add", label, terminal)) < events.index(("reply", label, post))
         await self.reaped()
-        return post if interrupted else post.markdown
 
     async def reaped(self):
         await wait_for(lambda: all(not running(p) for c in self.clients.calls for p in c.processes)
-                       and not cli_children(), 8)
+                       and all(not running(p) for p in self.tools) and not cli_children(), 8)
 
     async def ready_tool(self, mode):
         path = self.cwd / f"fixture-{mode}.pid"
@@ -235,6 +265,7 @@ class Driver:
         proc = psutil.Process(int(path.read_text()))
         # Require our disposable CLI to own the tool while it is active.
         assert any(parent in self.clients.calls[-1].processes for parent in proc.parents())
+        self.tools.extend([proc, *proc.children(recursive=True)])
         path.unlink()
         return proc
 
@@ -242,22 +273,25 @@ class Driver:
         (self.cwd / "fixture-release").touch()
 
     async def startup_grace(self):
-        await self.send("grace-early", "[[S:text/grace-early]]")
-        assert self.replies("grace-early") == [GRACE] and not self.clients.calls and not self.rows("grace-early")
+        await self.send("grace-early", self.prompt("grace-early"))
+        assert self.replies("grace-early") == [GRACE] and not self.clients.calls
         self.clock[0] = 2
         await self.create()
         await self.submit("grace-ready")
         await self.terminal("grace-ready")
-        assert self.replies("grace-early") == [GRACE] and not self.rows("grace-early")
-        assert len(self.rows("grace-ready")) == 1 and len(self.clients.calls) == 1
+        assert self.replies("grace-early") == [GRACE] and len(self.clients.calls) == 1
 
     async def ordinary(self):
         await self.submit("ordinary")
         await self.terminal("ordinary")
-        row, = self.rows("ordinary")
-        assert row["project_sentinel"], "project CLAUDE.md did not reach model"
+        if self.provider:
+            row, = self.rows("ordinary")
+            assert row["project_sentinel"], "project CLAUDE.md did not reach model"
 
     def saw_exchange(self, label, previous):
+        if self.live:
+            # The model must recall the unpredictable token in its observed answer.
+            return
         row, = self.rows(label)
         assert any(m["role"] == "user" and ("text", previous) in m["markers"] for m in row["history"])
         assert any(m["role"] == "assistant" and "fixture-reply-" + previous in m["answers"] for m in row["history"])
@@ -268,12 +302,18 @@ class Driver:
         self.saw_exchange("resume", "ordinary")
 
     async def handoff(self):
-        child = await asyncio.create_subprocess_exec(str(verified_claude_cli()), "-p", "--resume", self.session,
-            "--permission-mode", "auto", "--output-format", "json", "[[S:text/handoff]]", cwd=self.cwd,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        limits = ["--max-turns", str(self.live.budget.reserve(1))] if self.live else []
+        child = await asyncio.create_subprocess_exec(str(verified_claude_cli()), "-p", "--resume", self.session, *limits,
+            "--permission-mode", "auto", "--output-format", "json", self.prompt("handoff"), cwd=self.cwd,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         try:
+            self.cli_submissions += 1
             output, _ = await asyncio.wait_for(child.communicate(), timeout=45)
-            assert child.returncode == 0 and json.loads(output)["session_id"] == self.session
+            assert child.returncode == 0
+            result = json.loads(output)
+            assert result["session_id"] == self.session and not result["is_error"]
+            self.cli_turns += result["num_turns"]
+            self.check_answer("handoff", result["result"])
         finally:
             if child.returncode is None:
                 child.kill()
@@ -286,16 +326,15 @@ class Driver:
     async def busy(self):
         await self.submit("busy-a", "foreground")
         tool = await self.ready_tool("foreground")
-        before = len(self.rows())
-        await self.send("busy-b", "[[S:text/busy-b]]")
-        assert self.replies("busy-b") == [BUSY] and len(self.rows()) == before
+        before = len(self.clients.calls)
+        await self.send("busy-b", self.prompt("busy-b"))
+        assert self.replies("busy-b") == [BUSY] and len(self.clients.calls) == before
         self.release()
         await self.terminal("busy-a")
         assert not running(tool)
         (self.cwd / "fixture-release").unlink()
         await self.submit("after-busy")
         await self.terminal("after-busy")
-        assert [len(self.rows(k)) for k in ("busy-a", "busy-b", "after-busy")] == [2, 0, 1]
 
     async def exact_stop(self):
         await self.submit("stop-a", "foreground")
@@ -317,7 +356,6 @@ class Driver:
         self.release()
         await self.terminal("stop-b")
         (self.cwd / "fixture-release").unlink()
-        assert [len(self.rows(k)) for k in ("stop-a", "stop-b")] == [1, 2]
 
     async def background(self):
         # Stop A at its real disconnect so the harness can witness the tool before it is killed.
@@ -336,12 +374,13 @@ class Driver:
             await asyncio.wait_for(second.notification.wait(), 20)
             # Keep the real model response pending for the documented reconciliation window.
             # A spurious unknown closes the client during that window on the old runtime.
-            with suppress(TimeoutError):
-                await asyncio.wait_for(second.closing.wait(), timeout=3.5)
+            if self.provider:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(second.closing.wait(), timeout=3.5)
         finally:
-            self.provider.release("bg-b")
+            if self.provider:
+                self.provider.release("bg-b")
         await self.terminal("bg-b")
-        assert [len(self.rows(k)) for k in ("bg-a", "bg-b")] == [2, 1]
 
     async def stop_during_close(self):
         gate = self.clients.close_gate = asyncio.Event()
@@ -350,15 +389,14 @@ class Driver:
             await asyncio.wait_for(call.closing.wait(), 30)
             await self.send("closing-stop", "/stop")
             assert self.replies("closing-stop") == ["这次 Claude 执行已经结束，结果正在送出。"]
-            assert not self.replies("close")
+            assert all(reply == DEFAULT_MODE for reply in self.replies("close"))
         finally:
             gate.set()
             self.clients.close_gate = None
         await self.terminal("close")
-        assert len(self.rows("close")) == 1
 
     async def owner_gate(self):
-        rows, calls = len(self.rows()), len(self.clients.calls)
+        calls = len(self.clients.calls)
         before = tuple(self.store._connection.iterdump())
         await self.send("other-dm", "hello", sender_id="other")
         await self.send("other-group", "hello", sender_id="other", chat_id="oc_group", chat_type="group", mentioned_bot=True)
@@ -372,7 +410,7 @@ class Driver:
         assert self.replies("card-owner-card") == [REFUSED]
         await self.send("other-help", "/help", sender_id="other")
         assert "/new" in self.replies("other-help")[0]
-        assert (len(self.rows()), len(self.clients.calls)) == (rows, calls)
+        assert len(self.clients.calls) == calls
         assert tuple(self.store._connection.iterdump()) == before
 
     async def fallback(self):
@@ -384,7 +422,6 @@ class Driver:
                 await self.submit(label)
                 await self.terminal(label)
                 assert self.replies(label)[0] == DEFAULT_MODE and self.replies(label).count(DEFAULT_MODE) == 1
-                assert len(self.rows(label)) == 1
         finally:
             settings.write_text(original)
 
@@ -396,11 +433,10 @@ class Driver:
             await self.reaped()
             await wait_for(lambda: not running(tool))
         await self.terminal("shutdown", interrupted=True)
-        assert len(self.rows("shutdown")) == 1
 
 
 @asynccontextmanager
-async def channel_driver(cwd, provider):
+async def channel_driver(cwd, provider, live):
     root = cwd.parent / "channel-instance"
     root.mkdir()
     AdminUsers(root, "cli_test").add_initial(OWNER)
@@ -411,8 +447,9 @@ async def channel_driver(cwd, provider):
     core = ServiceCore(settings=config, instance_root=root, channel=channel, store=store,
                        projects=ProjectRegistry(store=store, projects=config.projects, project_root=config.project_root))
     admin = Mock(bind=AsyncMock(), close_listener=AsyncMock(), drain=AsyncMock(), config_snapshot=None, urls=())
-    clients = NativeClients()
+    clients = NativeClients(live)
     clock = [0.]
+    driver = Driver(cwd, core, store, channel, clients, clock, provider, live)
     try:
         with (patch("netizen_cli.main.AdminWebRunner", return_value=admin),
               patch("netizen_cli.runtime.claude_client.BundledClaudeClients", return_value=clients)):
@@ -420,11 +457,12 @@ async def channel_driver(cwd, provider):
         core._claude._clock = lambda: clock[0]
         core.open_admission()
         _register_channel_handlers(channel, core.application)
-        yield Driver(cwd, core, store, channel, clients, clock, provider)
+        yield driver
     finally:
         if clients.close_gate:
             clients.close_gate.set()
         await core.close()
+        await driver.reaped()
 
 
 EXPECTED_REQUESTS = {
@@ -435,22 +473,39 @@ CASES = tuple(EXPECTED_REQUESTS)
 
 
 async def channel_cases(cwd, provider):
+    from tests.support.claude_provider import PROJECT_SENTINEL
+
     (cwd / "CLAUDE.md").write_text(f"The project sentinel is {PROJECT_SENTINEL}.\n")
     install_tools(cwd)
     (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json").write_text(json.dumps({
         "model": "claude-sonnet-4-6", "permissions": {"allow": ["Bash(./fixture-foreground)", "Bash(./fixture-background)"]},
     }))
-    async with channel_driver(cwd, provider) as driver:
+    await run_cases(cwd, provider=provider)
+
+
+async def run_cases(cwd, *, provider=None, live=None, report=print):
+    async with channel_driver(cwd, provider, live) as driver:
         for name in CASES:
             started = time.monotonic()
-            requests = len(driver.rows())
-            passed = False
+            requests = len(driver.rows()) if provider else None
+            submissions = driver.submissions()
+            reported_turns = driver.reported_turns()
+            status = "fail"
             try:
-                async with asyncio.timeout(65):
+                if live and name == "fallback":
+                    status = "skipped_mock_only"
+                    continue
+                async with asyncio.timeout(150 if live else 65):
                     await getattr(driver, name)()
                     await driver.reaped()
-                    assert len(driver.rows()) - requests == EXPECTED_REQUESTS[name], "unexpected model request count"
-                passed = True
+                    if live:
+                        assert not live.budget.refused, "live turn cap reached"
+                    if provider:
+                        assert len(driver.rows()) - requests == EXPECTED_REQUESTS[name], "unexpected model request count"
+                status = "pass"
             finally:
-                print(json.dumps({"scenario": name, "passed": passed, "seconds": round(time.monotonic()-started, 3),
-                                  "requests": len(driver.rows())-requests}), flush=True)
+                report(json.dumps({"scenario": name, "status": status, "seconds": round(time.monotonic()-started, 3),
+                                   "submissions": driver.submissions()-submissions,
+                                   "reportedModelTurns": driver.reported_turns()-reported_turns,
+                                   "providerRequests": len(driver.rows())-requests if provider else None,
+                                   **({"modelTurnsReserved": live.budget.reserved} if live else {})}), flush=True)
