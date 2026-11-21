@@ -525,6 +525,49 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await self.runtime.wait_idle(1))
             self.assertEqual(self.events[-1].final_response, "answer")
 
+    async def test_unattributed_injected_result_on_resume_does_not_start_reconciliation(self):
+        # Live Claude Code 2.1.329: resuming after a killed background task first emits
+        # a task-notification Result with no input UUIDs and no terminal reason.
+        with patch("netizen_cli.runtime.claude_ordinary._RECONCILE_SECONDS", 0):
+            receipt = await self.submit()
+            receipt.release_receipt_attempt()
+            client = self.clients.calls[-1]
+            client.init()
+            client.result(reason=None, user_message_uuid=None, user_message_uuids=[],
+                          origin={"kind": "task-notification", "producer": "session-task"})
+            client.init()
+            while not client.stream.empty():
+                await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            client.result()
+            self.assertTrue(await self.runtime.wait_idle(1))
+            self.assertEqual(self.events[-1].final_response, "answer")
+
+    async def test_stop_preview_during_close_reports_the_finished_execution(self):
+        receipt = await self.submit()
+        receipt.release_receipt_attempt()
+        client = self.clients.calls[-1]
+        client.close_gate.clear()
+        client.init()
+        client.result()
+        await asyncio.wait_for(client.closing.wait(), 1)
+        with self.assertRaisesRegex(OrdinaryInputRejected, "结果正在送出"):
+            await self.runtime.preview_stop(self.binding)
+        client.close_gate.set()
+        self.assertTrue(await self.runtime.wait_idle(1))
+        self.assertIsNone(await self.runtime.preview_stop(self.binding))
+        self.assertEqual(client.interrupts, 0)
+
+    async def test_unattributed_result_without_origin_still_reconciles(self):
+        with patch("netizen_cli.runtime.claude_ordinary._RECONCILE_SECONDS", 0.01):
+            receipt = await self.submit()
+            receipt.release_receipt_attempt()
+            client = self.clients.calls[-1]
+            client.init()
+            client.result(user_message_uuid=None, user_message_uuids=[])
+            self.assertTrue(await self.runtime.wait_idle(1))
+        self.assertEqual(str(self.events[-1].error), UNKNOWN)
+
     async def test_interrupt_failure_after_confirmed_completion_returns_finished(self):
         receipt = await self.submit()
         receipt.release_receipt_attempt()

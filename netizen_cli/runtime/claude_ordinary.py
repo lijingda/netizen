@@ -30,6 +30,8 @@ from .contracts import (
 logger = logging.getLogger(__name__)
 UNKNOWN = "本次 Claude 提交结果未知，请检查原会话；系统不会自动重发。"
 CLOSE_FAILED = "无法确认 Claude 客户端已关闭，本会话暂不可再提交。"
+CLOSING_CONCLUDED = "这次 Claude 执行已经结束，结果正在送出。"
+CLOSING = "这次 Claude 执行已经结束，正在关闭客户端。"
 MODE_UNKNOWN = "无法确认 Claude 的有效权限模式，本次执行已停止。"
 DEFAULT_MODE = "Claude 的自动审核不可用，本次使用默认权限；未预先允许的操作会被拒绝。"
 START_FAILED = "Claude 会话启动失败，本条输入未发送。"
@@ -428,9 +430,17 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 valid_ids = isinstance(ids, list) and all(isinstance(value, str) and value for value in ids)
                 single = msg.user_message_uuid
                 valid_single = single is None or (isinstance(single, str) and bool(single))
+                origin = msg.origin
+                # The SDK says any origin kind other than "human" is not a person's
+                # input, including kinds newer CLIs add (types.MessageOriginKind).
+                injected = isinstance(origin, dict) and origin.get("kind") not in (None, "human")
                 if valid_ids and valid_single and (single or ids):
                     if single != execution.input_id and execution.input_id not in ids:
                         continue
+                elif injected and valid_ids and valid_single:
+                    # For example, resuming after a killed background task replays its
+                    # notification as a Result with no input attribution at all.
+                    continue
                 else:
                     if reconciliation.when() is None:
                         reconciliation.reschedule(asyncio.get_running_loop().time() + _RECONCILE_SECONDS)
@@ -527,8 +537,12 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if binding.id in self._unavailable:
                 raise OrdinaryInputRejected(CLOSE_FAILED)
             execution = self._active.get(binding.id)
-            if execution is None or execution.closing:
+            if execution is None:
                 return None
+            if execution.closing:
+                # The client close can take several seconds (longer with background
+                # tasks); saying "nothing is running" here reads as a lost answer.
+                raise OrdinaryInputRejected(CLOSING_CONCLUDED if execution.concluded else CLOSING)
             return StopPreview("正在请求停止当前 Claude 执行。" if execution.writing else "正在取消 Claude 会话启动。",
                                execution.revision, execution.input_id)
 
