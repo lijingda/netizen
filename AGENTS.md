@@ -1,14 +1,15 @@
 # Netizen engineering guardrails
 
-Netizen is a Feishu/Lark Channel for Codex. Per instance, keep one long-lived Python
-service, one `FeishuChannel`, one Channel database, and one shared
-`AsyncCodex`. The Channel SDK owns messaging; the official `openai-codex`
-SDK owns native Threads, Turns, history, tools, configuration, and permissions.
+Netizen is a Feishu/Lark Channel for native agents. Each instance has one long-lived
+Python service, one `FeishuChannel`, one Channel database, and one backend fixed at setup.
+Codex is the reference backend and shares one `AsyncCodex` from the official `openai-codex` SDK.
+Claude Code is an owner-only ordinary-session pilot (ADR 0104).
 
-Follow the [Netizen/Codex responsibility boundary](docs/design.md#netizen-与-codex-的职责边界):
-Netizen owns SDK requests/results and its resources; Codex owns native execution.
-Do not add another runtime, long-lived service, scheduler, history model, or
-configuration layer.
+The Channel SDK owns messaging. Netizen owns SDK requests, result delivery and its
+resources. The selected agent owns native execution, history, tools, configuration
+and permissions. Keep a single runtime per instance, with no second service,
+scheduler, history model or configuration layer. See the
+[responsibility boundary](docs/design.md#netizen-与原生-agent-的职责边界).
 
 Keep durable contributor rules here. Behavior, procedures and compatibility
 evidence belong in linked sources; read relevant sections and cited ADRs before
@@ -26,6 +27,7 @@ The usage guides are not implementation guides.
 
 ### Runtime and sessions
 
+- [Claude Code pilot](docs/design.md#claude-code-后端试点) covers ordinary execution, permissions and capability gates.
 - [Identity](docs/design.md#scopebinding-与会话配置): Scope, Binding and Thread relationships, plus session configuration.
 - [Admission](docs/design.md#锁与输入准入): locks and which Turn may accept an input.
 - [Observation](docs/design.md#普通-turn-终态与观测恢复): ordinary Turn terminals and bounded observation recovery.
@@ -88,8 +90,9 @@ The usage guides are not implementation guides.
   secret-path denylists. Its HEAD diff (ADR 0095) persists no Git state and runs only the
   isolated read-only Git commands with lazy fetch and transports disabled; viewing
   must never execute repository-configured programs.
-- Preserve exact Scope/Binding-to-native-Thread identity. Existing running input
-  steers the exact Turn; it is never queued or converted into another Turn.
+- Preserve exact Scope/Binding-to-native-session identity. Never queue an input
+  or convert it into a later Turn. On Codex, running input steers the exact Turn.
+  On Claude, refuse busy input before submission and stop only the exact execution.
   Only the verified session-tool entry uses native ExternalMessage start/join
   (ADR 0081); it does not change ordinary input admission. Human messages,
   question-card answers and scheduled inputs retain their exact-Turn admission.
@@ -104,9 +107,9 @@ The usage guides are not implementation guides.
   session creation.
 - Different Bindings may run concurrently in the same actual working directory.
   Keep Project identity, its default cwd and the selected managed Worktree separate.
-  A materialized Thread gets its cwd from Codex, never an implicit Project fallback.
-  Do not add a global semaphore, Project lock, workspace copy, per-Binding
-  `CODEX_HOME`, or cross-Thread execution limit.
+  Resolve a materialized session's cwd from its native backend. Do not add a global
+  semaphore, Project lock, workspace copy or cross-session execution limit. Codex
+  Bindings share the standard `CODEX_HOME`.
 - A worktree is not owned by any one session. Keep deletion cascades optional.
   Manage only worktrees created by this instance's shared service, never external
   App/CLI worktrees.
@@ -115,7 +118,7 @@ The usage guides are not implementation guides.
   scheduled topic Run self-assessment enum (ADR 0102).
   Do not persist Git state or duplicate native cwd authority. Never store prompts
   beyond those exceptions, message bodies, responses, Turn history/activity, card
-  sessions, effective Codex configuration, or Admin sessions/tokens/indexes/audit records.
+  sessions, effective agent configuration, or Admin sessions/tokens/indexes/audit records.
   Side routes never store native Thread IDs.
 - Use exact-pinned official SDKs and public high-level APIs. Only the approved
   [narrow adapters](docs/design.md#sdk-适配边界) may cross that boundary.
@@ -129,24 +132,30 @@ The usage guides are not implementation guides.
   synthetic, and live harnesses. Delete also requires disposable live coverage
   and exact native-response handling (ADR 0078), without catalog reconciliation.
   Model upgrades do not replace these gates.
-- Every materialized persisted non-ephemeral Thread retains archive/delete
+- Every materialized persisted non-ephemeral Codex Thread retains archive/delete
   controls. Delegate shutdown to App Server after reserving exact lifecycle
   intent and releasing Binding/Scope locks; do not pre-interrupt, cleanup, or
   wait for idle. Preserve bounded observation/reconciliation and Binding-local
   unknown states (ADR 0037/0049); never fabricate a terminal.
 - Feishu app availability and chat membership govern Channel admission, with optional
   instance group access under [ADR 0092](docs/adr/0092-restrict-execution-to-enabled-group-chats-on-demand.md).
-  Direct chats and their topics remain unaffected. Instance Administrators have
-  separate, equal Admin Web authority. In Feishu they only add the ADR 0092 `/enable`
-  group command; this does not introduce multi-role RBAC or Project ACLs.
-- Native Codex controls model, tools, Skills, MCP, sandboxing, and environment
-  policy except the documented Binding
-  Model/Effort/Speed intent, non-login tool boundary, and dedicated temporary
+  The group switch leaves direct chats and their topics unaffected. Instance
+  Administrators have equal Admin Web authority. Their only additional Feishu command
+  is `/enable` in groups. Keep multi-role RBAC and Project ACLs out of this boundary.
+  A Claude instance has exactly one owner. Admin cannot add an administrator.
+  Only the owner can trigger Feishu execution or change what will execute.
+  Claude admission opens two seconds after Feishu readiness.
+- On Codex instances, Codex controls model, tools, Skills, MCP, sandboxing, and
+  environment policy except the documented Binding Model/Effort/Speed intent,
+  non-login tool boundary, and dedicated temporary
   Scheduler/session collaboration MCP server entries (ADR 0061/0081) and the
   Thread-level entry for a scheduled new-topic Run (ADR 0102).
   These public overrides must not write user configuration, replace user
-  MCP entries, or override developer/base instructions. Fresh Threads use the public SDK's `auto_review` default;
+  MCP entries, or override developer/base instructions. Fresh Codex Threads use the public SDK's `auto_review` default;
   persistent forks retain native inherited permissions without client overrides.
+- On Claude, the only native policy override is per-session `auto` permission mode.
+  Leave authentication to the owner's Claude Code installation. Never handle
+  Claude credentials or inspect their source.
 - Message-history access remains the narrow, public, typed, read-only
   `lark-oapi` port using the same app credentials (ADR 0039). Preserve chat-main
   versus thread-topic semantics, inert historical context, and its rollout gate.
@@ -164,9 +173,10 @@ The usage guides are not implementation guides.
 - Resolve a missing progress setting from the instance fallback only when capturing
   settings for execution; never persist the resolved fallback into a Binding,
   default rule or plan. Preserve all historical progress settings as explicit choices.
-- Unsupported native capabilities remain explicit gaps. Keep product non-goals
-  in [design.md](docs/design.md#目标与边界); do not simulate them with prompts or
-  local state.
+- Preserve native capabilities. Users can disable them in native settings.
+  A per-session override requires a concrete Feishu benefit. Gate unsupported
+  operations at every entry and never simulate them with prompts or local state.
+  See [product boundaries](docs/design.md#目标与边界).
 - Keep runtime Agent guidance separate from user guidance. Follow its documented
   description/body boundary and size budgets before adding execution hints.
 
@@ -174,7 +184,7 @@ The usage guides are not implementation guides.
 
 - Select one canonical root by `--root` > `NETIZEN_ROOT` > the effective user's
   `~/.netizen`; derive exact systemd user unit/LaunchAgent and maintenance job
-  names from that root (ADR 0074). Keep standard shared Codex state. Do not add a registry,
+  names from that root (ADR 0074). Do not add a registry,
   cross-instance manager, XDG profiles, LaunchDaemon, root helper, persistent
   Netizen environment file, or PATH snapshot.
   Reload the exported interactive-login-shell environment at each start; Codex
@@ -187,12 +197,15 @@ The usage guides are not implementation guides.
 - Programs belong to the selected Python environment; instance roots contain data,
   not release/venv/current trees. Explicit setup initializes new data. Every actual
   service start validates and migrates under the lifetime lock before Runtime admission
-  (ADR 0076). Preserve v14 baseline and frozen migration steps/fixtures. Missing data
+  (ADR 0076). Validate the configured backend at startup. On Claude instances,
+  verify the exact SDK and bundled CLI versions supplied by the optional
+  `netizen-cli[claude]` extra before admission.
+  Preserve v14 baseline and frozen migration steps/fixtures. Missing data
   never means a new instance. SQL failures before commit roll back; failures after
   commit retain the new database, never automatically restore an old snapshot.
   Restore CLOEXEC before Codex children start. Loaded/active is never a substitute
   for the private ready marker.
-- Built-in Skills belong to the physical installed package. Register their root on
+- Built-in Skills belong to the physical installed package. On Codex, register their root on
   the same initialized App Server before catalog/Thread access; fail startup if
   registration fails. Never install, snapshot, roll back, or uninstall global user
   Skills/Codex state. Preserve root ownership markers and unrelated content; never

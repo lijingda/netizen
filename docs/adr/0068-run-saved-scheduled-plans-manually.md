@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-09-21
 amends: 0031, 0061, 0063
-amended_by: 0070, 0075
+amended_by: 0070, 0075, 0104
 ---
 
 # 通过现有调度链路手动执行已保存的计划

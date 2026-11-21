@@ -2,37 +2,43 @@
 
 ## 工程概览
 
-Netizen 把飞书单聊、群聊和话题接成 Codex 的消息 Channel。仓库唯一的生产实现是
+Netizen 把飞书单聊、群聊和话题接成原生 Agent 的消息 Channel。每个实例在 setup 时选定一个后端，
+缺少后端标识的历史实例使用 Codex。Codex 是参考后端，Claude Code 提供所有者专用的普通会话试点。仓库唯一的生产实现是
 `netizen_cli/` 下的 Python 包，由 `pyproject.toml` 构建和安装；没有 Node.js/TypeScript
 运行时、构建面或 fallback。Node.js 仅用于 Admin JavaScript 行为测试，开发步骤见
 [贡献指南](CONTRIBUTING.md)。完整用户行为见[用户手册](../skills/netizen-user-guide/references/user-guide.md)。
 
 ### 职责与对象关系
 
-每个独立实例是一个常驻 Python 服务，内含一个 `FeishuChannel`、Store、Runtime、Scheduler 和共享
-`AsyncCodex`。Channel SDK 负责飞书消息与卡片；Netizen 负责 Scope/Binding 路由、项目
-登记、展示和定时交接；官方 `openai-codex` SDK 管理原生 App Server/CLI 上的 Thread、
-Turn、历史、工具与权限。Admin Web 是同一应用边界上的管理入口，不能提交即时 Prompt
-或浏览完整工具历史；提供 ADR 0096 的按轮分页只读对话记录。环境更新协调器与实例重启的一次性进程是限定例外，见[架构](#架构)与
+每个独立实例是一个常驻 Python 服务，内含一个 `FeishuChannel`、Channel 数据库和所选后端的 Runtime。
+Channel SDK 负责飞书消息与卡片，Netizen 负责 Scope/Binding 路由、项目登记、展示和管理。
+Codex 实例共享一个官方 `AsyncCodex`，由 App Server 管理 Thread、Turn、历史、工具与权限，并接入 Scheduler。
+Admin Web 是同一应用边界上的管理入口，不能提交即时 Prompt 或浏览完整工具历史；Codex 实例提供
+ADR 0096 的按轮分页只读对话记录。环境更新协调器与实例重启的一次性进程是限定例外，见[架构](#架构)与
 [系统维护 API](#系统维护-api)。
-同账号可部署多个 root，各自管理自己的机器人和 Channel 状态，同时共享原生 Codex
-用户状态；不因此增加业务 instance ID、权限隔离或跨实例服务依赖。
+同账号可部署多个 root，各自管理自己的机器人和 Channel 状态，原生用户状态仍属所选 Agent；
+不因此增加业务 instance ID、权限隔离或跨实例服务依赖。
 
 普通单聊、群聊主线或话题各是一个 Scope，可关联多个 Binding 和一个当前指针。
-Binding 关联一个 Project，可显式选择其受管 worktree，并在物化后精确绑定一个 native Thread；
-Thread 内可以有多个 Turn。`/new` 先创建 lazy Binding，第一条真实请求才物化 Thread。
-切换当前 Binding 不停止其他 Binding 的执行。Side 是从已物化 Parent Thread 创建的
+Binding 关联一个 Project，可显式选择其受管 worktree，并在物化后精确绑定一个原生会话。
+`/new` 先创建 lazy Binding，第一条真实请求才建立原生会话。切换当前 Binding 不停止其他 Binding 的执行。
+在 Codex 后端，Thread 内可以有多个 Turn。Side 是从已物化 Parent Thread 创建的
 ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Binding；Goal 则在同一个
 普通 Thread 内驱动多个物理 Turn。详细身份与生命周期见[核心模型](#核心模型)及
 [运行与锁](#运行与锁)；请求材料与投递展示分别见[消息输入准备](#消息输入准备)和
 [回复与活动展示](#回复与活动展示)。
 
-### Netizen 与 Codex 的职责边界
+### Netizen 与原生 Agent 的职责边界
 
-Netizen 是 Codex 的 Channel 和管理适配层。它负责把用户意图映射为正确的 SDK 请求，
-保持 exact Scope/Binding/Thread/Turn 身份、调用顺序、输入准入和本地状态，并如实交付
-返回结果；Codex 通过官方 SDK/App Server 拥有原生执行、历史、工具进程和原生生命周期。
-Netizen 调用公开高层 API；现有能力缺口只走已批准的窄 Adapter，继续遵守
+Netizen 把用户意图映射为所选后端的 SDK 请求，核对 Scope、Binding、原生会话和本次执行，
+负责输入准入、本地资源与结果投递。原生 Agent 拥有执行、历史、工具进程、配置、权限和会话生命周期。
+Netizen 保留原生能力，用户可在自己的原生设置中关闭功能。只有飞书场景有明确收益才按会话覆盖原生策略。
+各入口只开放已经验证的操作，缺少的能力不通过 Prompt 或本地状态模拟。后端选择和能力边界见
+[ADR 0104](adr/0104-host-native-agent-backends-per-instance.md)。
+
+#### Netizen 与 Codex 的职责边界
+
+Codex 后端通过共享的官方 SDK/App Server 操作精确的 Thread 和 Turn。Netizen 调用公开高层 API，现有能力缺口只走已批准的窄 Adapter，继续遵守
 [SDK 适配边界](#sdk-适配边界)的门禁和移除条件。
 
 | 场景 | Netizen 负责 | 交给 Codex 决定 |
@@ -60,13 +66,37 @@ Netizen 调用公开高层 API；现有能力缺口只走已批准的窄 Adapter
 不预先 interrupt 或 cleanup。兼容性异常先检查 Netizen 的调用、返回处理和资源归属；
 原生能力是否满足场景单独记录，不能以“适配层正确处理失败”宣称原生能力已经通过。
 
+### Claude Code 后端（试点）
+
+- **会话与目录。** 每次普通执行创建一个 `ClaudeSDKClient`。首轮显式指定会话 UUID，连接成功后、提交前写入 Binding 的既有 native ID 字段。
+  续接时用原 UUID 核对 SDK 返回的 ID 与实际 cwd。没有原生摘要或摘要缺少 cwd 时，依次在 Binding 工作目录和 Project 目录按该 ID 读消息，
+  只有恰好一个候选目录返回对应消息才可续接。证据缺失、矛盾或读取失败均拒绝，不另存原生 cwd。首次写入前崩溃可能使会话无法续接，
+  此时提示 `/new`，含该会话的 Project 仍无法删除。
+- **提交与归属。** 在 Binding 锁内核对准入版本并占用执行槽。每份输入带独立 UUID，只提交一次。唯一消费者核对 init 的会话 ID 与 cwd，
+  按 Result 的会话 ID 和输入 UUID 归属结果。属于其他输入的 Result，以及标明非人类来源、没有输入 ID 的通知（如续接时重现的后台任务通知）
+  均跳过，继续等本轮结果。其余归属不明的回执只作有界核实，不重投。
+- **终态与关闭。** 合看 `subtype`、`terminal_reason` 和 `is_error`。正常完成交付 Result，原生确认流或工具中断时报中断，
+  API 错误、轮数或预算超限报失败；API 错误也可能带 `subtype=success`。写入或终态无法核实时报告未知。
+  确认客户端关闭后，同一 Binding 才能接受下一条显式输入。关闭失败或超时只隔离该 Binding，迟到的成功关闭解除隔离。
+- **忙时输入与停止。** 忙时在调用 SDK 前拒绝新输入，不 steer、不排队。`/stop` 和卡片按 Binding、活动版本和输入 UUID 锁定目标，
+  启动中取消，写入后只 interrupt 当次客户端。停止回执只确认请求。关闭中说明正在关闭或结果正在送出，
+  结果仍回到原投递锚点，旧按钮不能中断后继执行。
+- **所有者与权限。** setup 的唯一管理员是所有者。飞书就绪后再等 2 秒才接收任务。群聊准入照常生效，
+  非所有者只能单独发送纯文本 `/help`，Admin 不能增设管理员。Claude Code 使用所有者自行配置的原生认证和权限。
+  Netizen 不处理凭据、不核查认证来源，仅按会话申请 `auto`。即使 init 报告 `auto`，操作仍可能被拒；
+  根据本轮 `ResultMessage.permission_denials` 在结果前向所有者提示拒绝次数及白名单工具名，与 init 报告 `default` 的提示合并发送。
+- **能力与缺口。** 飞书命令、卡片（含旧卡）、Admin API 和定时派发均按同一后端能力判定。试点支持文本和图片输入、本地状态、
+  精确停止、Result 及完成提及。Goal、Side、fork、归档／删除、定时、协作、原生历史、Files、Activity、阶段性答案和模型设置均未开放。
+  原生后台任务完成可唤起新一轮，试点每轮关闭客户端会结束这些任务。下一阶段必须支持向飞书投递完成轮，保留用户的原生后台任务设置。
+  取舍与验收见 [ADR 0104](adr/0104-host-native-agent-backends-per-instance.md#接受记录)。
+
 ### 三条主要执行路径
 
 | 入口 | 执行过程与结果归属 |
 | --- | --- |
-| 空闲会话收到普通消息 | 验证消息归属、引用、图片和所选上下文，校验显式 Skill 与会话配置，创建或恢复 exact Thread，启动一个新 Turn；结果回到原请求的投递锚点。 |
-| 运行中的会话收到普通消息 | 经输入准备与身份校验后，steer 当前 exact Turn；不排队、不拼接成下一轮，不改变原任务的结果投递锚点。 |
-| 定时计划到期或手动触发 | 唯一 Scheduler 认领到期点或手动请求；新话题目标创建普通持久 Binding 并提交初始 Turn，原会话目标固定 exact Binding 并按普通消息 start/steer。两者都不切换来源当前会话。 |
+| 空闲会话收到普通消息 | 验证消息归属、引用、图片和所选上下文，按后端校验可用能力与会话配置，创建或精确恢复原生会话；本次执行的结果回到原请求的投递锚点。 |
+| 运行中的会话收到普通消息 | Codex steer 当前 exact Turn，Claude 拒绝新输入。均不排队，不改变原任务的结果投递锚点。 |
+| Codex 定时计划到期或手动触发 | 唯一 Scheduler 认领到期点或手动请求；新话题目标创建普通持久 Binding 并提交初始 Turn，原会话目标固定 exact Binding 并按普通消息 start/steer。两者都不切换来源当前会话。 |
 
 输入准备不能把历史消息变成新的控制指令或 Skill 调用；普通群聊参与者每次触发仍需重新 @机器人。
 定时初始输入保留 Scheduled Plan 来源，后续交流沿用普通会话语义。具体准入、消息归属与
@@ -78,6 +108,7 @@ Netizen 调用公开高层 API；现有能力缺口只走已批准的窄 Adapter
 | 所有者 | 负责的状态 |
 | --- | --- |
 | Codex 原生状态 | 登录、Thread/Turn 历史、Goal、工具、Skills、MCP 与原生配置；复用 effective user 的标准 `$CODEX_HOME`。 |
+| Claude 原生状态 | 所有者的登录、会话记录、实际 cwd、工具与权限规则由 Claude Code 管理。 |
 | Channel SQLite | 仅[数据契约](#channel-数据库与结构校验)列出的元数据、显式意图及定时任务窄例外，不复制原生历史。 |
 | 当前进程内存 | 活动执行、锁与准入、订阅、Activity/usage 展示、Admin session 与一次性凭据；重启不重建执行/展示状态。 |
 | 实例文件 | [部署状态](#部署事务与操作状态)、维护锁、初始化/ready 证据与迁移备份；不进入 Channel SQLite。 |
@@ -94,8 +125,8 @@ SDK 门禁见[适配边界](#sdk-适配边界)，内置与用户 Skill 的归属
 [ADR 0061](adr/0061-schedule-ordinary-threads-in-feishu-topics.md)，兼容性范围及发布前验收
 要求见[部署文档](deployment.md#定时任务兼容性与验收)。
 
-目标是让少量受信用户在一台受支持的 Linux 或 macOS 主机上，通过飞书单聊、群聊和话题使用原生 Codex。
-飞书只是新的 Channel；历史、工具、Skills、MCP、配置、sandbox 和认证仍由 Codex
+目标是让用户在一台受支持的 Linux 或 macOS 主机上，通过飞书单聊、群聊和话题使用所选原生 Agent。
+Codex 实例可供受信用户共用，Claude 试点仅供所有者本人使用。历史、工具、Skills、MCP、配置、sandbox 和认证由原生 Agent
 管理。Project Registry 可通过飞书项目管理卡片或 Admin Web 管理；当前仍不实现审批卡、Codex 原生配置
 值的 idle read/update、文件正文自动解析或音视频输入、流式 token、HA 或 durable queue。
 普通文件按[输入文件附件](#输入文件附件)保存原件并提供本地路径，由 Agent 按需读取；
@@ -158,6 +189,8 @@ Admin `/worktrees` 进入、分页及手动刷新时查询当前页，列表仅�
 
 ## 架构
 
+下图是 Codex 参考后端的完整装配。Claude 试点复用 Channel、Store 和管理入口，普通执行按上文的[试点契约](#claude-code-后端试点)装配，不启动 Codex App Server 或定时器。
+
 ```mermaid
 flowchart LR
     Lark["飞书单聊 / 群聊 / 话题"]
@@ -195,7 +228,7 @@ flowchart LR
     Backend <--> Cwd
 ```
 
-业务只有一个 Python 服务。Admin/MCP listener、唯一 Scheduler 和 `FeishuChannel` handlers
+Codex 实例只有一个 Python 服务。Admin/MCP listener、唯一 Scheduler 和 `FeishuChannel` handlers
 都运行在 Channel background loop，且只构造一个 Store、Project Registry、Runtime 与 `AsyncCodex`。App
 Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 
@@ -1003,7 +1036,8 @@ CLI 自行换取令牌，查询、分页和结果处理按上游 lark Skills 执
 
 ### 锁与输入准入
 
-内存状态以 Binding ID 为键：普通 Turn 保存 handle、owner、origin message、
+两个后端均按 Binding ID 管理内存中的执行，不按 Project 或 cwd 串行化。Claude 的忙时拒绝和停止规则见[普通会话试点](#claude-code-后端试点)。
+Codex 的普通 Turn 保存 handle、owner、origin message、
 running/stopping/turn-observation-unavailable 的单轴公开状态、completion task、receipt
 Event、只读 Activity cursor/checklist/commentary/operations、成功 steer count 与 freshness；
 原生压缩保存 exact Thread、
@@ -1015,7 +1049,7 @@ steer、stop、compact、短暂的 rename/archive/delete/unarchive lifecycle 槽
 cleanup。不同 Binding 不互锁，也没有全局/Project semaphore。
 
 Channel SDK 自带的 `ChatQueue` 只按 `chat_id` 串行，会把同一个话题群里的独立 topic
-错误地互相阻塞，因此 Pilot 明确关闭它。消息到达后由 Binding 锁决定 start、steer 或
+错误地互相阻塞，因此 Pilot 明确关闭它。在 Codex 后端，消息到达后由 Binding 锁决定 start、steer 或
 stopping reject；不同 topic/Binding 不互锁，也不增加 prompt queue。
 
 每条普通消息在调用 Codex 前都捕获 admission；逐条引用与图片消息随后再做有界 Channel
@@ -1320,7 +1354,7 @@ read/wait 摘要和后台命名。只改一个出口，其他出口仍会交付�
 
 ### 原生归档与删除
 
-原生 archive 与 materialized delete 的准入事实是 Binding 指向 materialized、persisted、
+在 Codex 后端，原生 archive 与 materialized delete 的准入事实是 Binding 指向 materialized、persisted、
 non-ephemeral Thread，而不是当前 Runtime activity 或 native idle。提交时在 exact Binding lock
 内确认 Binding/native identity 并占用 lifecycle intent，然后释放 Binding/Scope lock，直接
 调用 `thread/archive` 或固定 `thread/delete`。intent 建立时禁止该 Binding 继续读取或采纳

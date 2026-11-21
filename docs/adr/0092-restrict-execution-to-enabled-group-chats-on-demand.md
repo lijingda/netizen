@@ -3,6 +3,7 @@ status: accepted
 date: 2026-11-05
 amends: 0061, 0070, 0080, 0081
 related: 0031, 0035, 0073
+amended_by: 0104
 ---
 
 # 按需限制机器人只在已启用的群聊中执行

@@ -33,6 +33,9 @@
 
 ## 你可以用它做什么
 
+每个实例在部署时选定一个后端。下列功能与快速开始以默认的 Codex 为例。也可以为自己部署所有者专用的
+Claude Code 普通会话实例，使用自己的 Claude Code 登录。见[试点功能](skills/netizen-user-guide/references/user-guide.md#claude-code-试点)与[安装方法](docs/cli.md#claude-code-试点实例)。
+
 - **把任务交给 Codex。** 在飞书中阅读代码、修改项目、整理资料；任务由官方 Codex SDK
   管理的原生会话执行，沿用运行主机上的工具和工作目录。
 - **边做边沟通。** 普通任务执行时继续发消息，可以补充条件或调整方向；也可以开启

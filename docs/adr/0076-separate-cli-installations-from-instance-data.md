@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-09-29
 amends: 0034, 0041, 0050, 0057, 0059, 0062, 0074, 0075
+amended_by: 0104
 ---
 
 # 用普通 Python CLI 分发程序，以实例启动负责数据准入
