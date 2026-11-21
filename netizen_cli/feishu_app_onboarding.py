@@ -15,6 +15,8 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, IO
 
+from .backends import DEFAULT_BACKEND
+
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +47,18 @@ RegisterApp = Callable[..., Mapping[str, Any]]
 QrRenderer = Callable[[str, IO[str]], None]
 
 
-def _registration_options(app_id: str | None) -> dict[str, Any]:
+_APP_DESCRIPTIONS = {
+    "codex": "Use native Codex threads from Feishu or Lark.",
+    "claude": "Use Claude Code sessions from Feishu or Lark.",
+}
+
+
+def _registration_options(app_id: str | None, backend: str) -> dict[str, Any]:
     options: dict[str, Any] = {
         "source": "netizen-installer",
         "app_preset": {
             "name": "{user}'s Netizen",
-            "desc": "Use native Codex threads from Feishu or Lark.",
+            "desc": _APP_DESCRIPTIONS[backend],
         },
         "addons": {
             "preset": False,
@@ -103,6 +111,7 @@ def run_registration(
     app_id: str | None,
     *,
     register_app: RegisterApp,
+    backend: str = DEFAULT_BACKEND,
     render_qr: QrRenderer = _default_qr_renderer,
     stdout: IO[str] | None = None,
     stderr: IO[str] | None = None,
@@ -153,7 +162,7 @@ def run_registration(
     result = register_app(
         on_qr_code=on_qr_code,
         on_status_change=on_status_change,
-        **_registration_options(app_id),
+        **_registration_options(app_id, backend),
     )
     payload = _credential_payload(result)
     if app_id is not None and payload["appId"] != app_id:
@@ -165,6 +174,7 @@ def run_registration(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Netizen Feishu/Lark app onboarding")
+    parser.add_argument("--backend", choices=_APP_DESCRIPTIONS, default=DEFAULT_BACKEND)
     parser.add_argument("--app-id", help="update this existing cli_ application")
     return parser.parse_args(argv)
 
@@ -176,7 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         import lark_oapi as lark
 
         stage = "registration"
-        run_registration(args.app_id, register_app=lark.register_app)
+        run_registration(args.app_id, backend=args.backend, register_app=lark.register_app)
         return 0
     except KeyboardInterrupt:
         print("netizen: Feishu/Lark app setup interrupted", file=sys.stderr)

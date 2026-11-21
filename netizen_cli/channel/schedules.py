@@ -93,6 +93,8 @@ class ScheduleChannel(SessionToolChannel):
 
     async def dispatch_scheduled_run(self, claim: Claim) -> None:
         """Publish one claimed occurrence and hand it to the ordinary Runtime."""
+        if self._policy.backend == "claude":
+            raise RuntimeError("Claude 试点暂不支持【定时任务】。")
         group_rule, _ = self._group_access.snapshot()
         if claim.run.target_kind == "binding":
             await self._dispatch_binding_input(claim, group_rule)

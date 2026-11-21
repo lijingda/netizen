@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
+from .backends import BackendUnsupported
 from .domain import MentionContextMode
 from .progress_card_settings import ProgressCardSettings
 
@@ -46,6 +47,13 @@ class BindingTaskFeedback:
             raise ValueError("Binding task feedback values must be booleans")
         if self.progress_card_settings is not None and not isinstance(self.progress_card_settings, ProgressCardSettings):
             raise ValueError("Binding progress card settings must be ProgressCardSettings or None")
+
+
+def require_local_settings(has_model: bool, feedback: BindingTaskFeedback) -> None:
+    if has_model:
+        raise BackendUnsupported("模型、思考强度或速度设置")
+    if feedback.progress_card_enabled or feedback.progress_card_settings is not None:
+        raise BackendUnsupported("过程卡")
 
 
 _FIELDS = frozenset({"turn_settings", "reaction_pulse_enabled", "progress_card_enabled", "completion_mention_enabled", "message_context_mode", "progress_card_settings"})

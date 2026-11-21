@@ -22,7 +22,8 @@ from openai_codex.errors import InvalidRequestError
 from netizen_cli.admin.auth import AdminAuth
 from netizen_cli.admin.feishu import DeviceChallenge, UserProfile, UserTokens
 from netizen_cli.admin.login import AdminLogin
-from netizen_cli.admin.users import AdminIdentity, AdminUsers
+from netizen_cli.backends import BackendPolicy
+from netizen_cli.admin.users import AdminIdentity, AdminUsers, AdminUsersError, OwnerOnly
 from netizen_cli.admin.errors import AdminWebError
 from netizen_cli.admin.transport import Request
 from netizen_cli.admin.presentation import (
@@ -797,6 +798,70 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             body=body,
         )
         return status, headers, json.loads(content) if content else None
+
+    async def test_local_management_refusals_reach_http_clients(self):
+        from netizen_cli.ordinary_sessions import OrdinaryInputRejected
+        from netizen_cli.runtime.contracts import TerminalStateUnknown
+
+        self.runner.open_admission()
+        session = await self.login()
+        settings = SessionSettings(task_feedback=BindingTaskFeedback(progress_card_enabled=False))
+        for operation, binding, inventory, error, code in (
+            ("configure", "binding-native", "active", OrdinaryInputRejected("当前会话正在执行。"), "ordinary_input_rejected"),
+            ("activate", "binding-lazy", "lazy", OrdinaryInputRejected("服务启动中。"), "ordinary_input_rejected"),
+            ("stop", "binding-native", "active", TerminalStateUnknown("无法确认 Claude 停止请求的结果。"), "terminal_state_unknown"),
+        ):
+            _, _, page = await self.json_get("/api/v1/sessions?inventoryState=" + inventory, session)
+            item = next(row for row in page["items"] if row["bindingId"] == binding)
+            extra = {"sessionSettings": settings.to_dict()} if operation == "configure" else {}
+            self.runner.application._backend_policy = BackendPolicy("claude", "ou_admin")
+            with patch.object(self.management, operation + "_exact_binding", AsyncMock(side_effect=error)) as call:
+                status, _, result = await self.json_post("/api/v1/sessions/" + operation, session,
+                                                         _action_payload(item["actions"][operation], **extra))
+                self.assertEqual((status, result["code"], result["message"]), (409, code, str(error)))
+                call.assert_awaited_once()
+            self.runner.application._backend_policy = BackendPolicy("codex")
+
+    async def test_owner_backend_rejects_route_families_before_grants(self) -> None:
+        self.assertEqual(self.users.restrict_to_owner(), self.member.identity)
+        self.runner.application._backend_policy = BackendPolicy("claude", "ou_admin")
+        self.runner.open_admission()
+        session = await self.login()
+        for path in ("session-tool-access", "side-topics", "schedules?mode=options", "schedules?mode=runs",
+                     "progress-card/settings", "question-notifications/settings", "sessions/conversation",
+                     "runtime-snapshots?sideIds=side", "sessions?sortBy=updatedAt", "sessions?inventoryState=archived"):
+            with self.subTest(path=path):
+                status, _, result = await self.json_get("/api/v1/" + path, session)
+                self.assertEqual((status, result["code"]), (409, "backend_unsupported"))
+        for path in ("schedules/run-now", "schedules/create", "side-topics/stop", "sessions/archive", "sessions/unarchive",
+                     "sessions/delete-lazy", "sessions/delete-materialized", "sessions/generate-name", "sessions/release"):
+            with self.subTest(path=path):
+                status, _, result = await self.json_post("/api/v1/" + path, session, {"actionToken": "prior"})
+                self.assertEqual((status, result["code"]), (409, "backend_unsupported"))
+        status, _, result = await self.json_get("/api/v1/admin-users", session)
+        self.assertEqual(status, 200)
+        self.assertIsNone(result["addAction"])
+        self.assertIsNone(result["selectorAction"])
+        for path in ("add", "selector-config"):
+            status, _, result = await self.json_post("/api/v1/admin-users/" + path, session, {})
+            self.assertEqual((status, result["code"]), (403, "owner_only"))
+        with self.assertRaises(OwnerOnly):
+            self.users.add(AdminIdentity("cli_test", "ou_other"), actor=self.member.identity, expected_revision=self.users.revision)
+        status, _, data = await self.json_get("/api/v1/schedules", "invalid")
+        self.assertEqual(status, 401)
+        for path in ("/admins", "/schedules", "/progress-card", "/sessions/temporary"):
+            status, _, page = await self.request("GET", path, headers=[("Cookie", f"netizen_admin_session={session}")])
+            self.assertEqual(status, 200, path)
+            self.assertIn(b'data-backend="claude"', page)
+        self.runner.application._backend_policy = BackendPolicy("claude", "ou_other")
+        status, _, result = await self.json_get("/api/v1/projects", session)
+        self.assertEqual((status, result["code"]), (403, "owner_only"))
+
+    def test_owner_backend_rejects_multiple_members_before_start(self) -> None:
+        self.users.add(AdminIdentity("cli_test", "ou_other"), actor=self.member.identity, expected_revision=self.users.revision)
+        with self.assertRaises(AdminUsersError):
+            self.users.restrict_to_owner()
+        self.assertEqual(len(self.users.list()), 2)
 
     async def test_chat_picker_queries_and_assets_require_authentication(self) -> None:
         self.runner.open_admission()

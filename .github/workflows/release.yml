@@ -129,29 +129,7 @@ jobs:
           MANIFEST_SHA256: ${{ needs.build-artifact.outputs.manifest-sha256 }}
         run: >-
           python scripts/build_cli_distribution.py --verify-only --output-dir dist
-          --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --manifest-sha256 "$MANIFEST_SHA256"
-      - name: Install the wheel into a fresh disposable environment
-        env:
-          WHEEL_NAME: ${{ needs.build-artifact.outputs.wheel-name }}
-        run: |
-          python -m venv "$RUNNER_TEMP/netizen-wheel-smoke"
-          "$RUNNER_TEMP/netizen-wheel-smoke/bin/python" -m pip install \
-            --disable-pip-version-check --no-input --constraint requirements.lock "dist/$WHEEL_NAME"
-      - name: Verify imports and resources outside the checkout without starting services
-        run: |
-          cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/netizen-wheel-smoke/bin/python" -I -m netizen_cli --help
-          "$RUNNER_TEMP/netizen-wheel-smoke/bin/python" -I -m netizen_cli --version
-          "$RUNNER_TEMP/netizen-wheel-smoke/bin/python" -I - <<'PY'
-          from netizen_cli.builtin_skills import builtin_skill_root
-          from netizen_cli.package_resources import resource_path
-          import netizen_cli.cli_services
-          import netizen_cli.cli_update_restore
-          import netizen_cli.service_launcher
-
-          assert (builtin_skill_root() / "netizen-user-guide/SKILL.md").is_file()
-          assert resource_path("config.example.yaml").is_file()
-          PY
+          --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --manifest-sha256 "$MANIFEST_SHA256" --smoke-installs
 
   prepare-release:
     if: inputs.publish

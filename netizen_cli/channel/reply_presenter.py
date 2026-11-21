@@ -103,7 +103,7 @@ class _ReplyCardPresenter:
     def __init__(
         self,
         channel: ReplyChannel,
-        runtime: CodexRuntime,
+        runtime: CodexRuntime | None,
         *,
         ordinary: OrdinarySessionPort,
         poll_seconds: float = _PROGRESS_CARD_POLL_SECONDS,
@@ -114,7 +114,7 @@ class _ReplyCardPresenter:
         if operation_timeout_seconds <= 0:
             raise ValueError("progress card operation timeout must be positive")
         self._channel = channel
-        self._runtime = runtime
+        self._codex = runtime
         self._ordinary = ordinary
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
@@ -127,6 +127,12 @@ class _ReplyCardPresenter:
             _SideTurnProgressCardSession,
         ] = {}
         self._closed = False
+
+    @property
+    def _runtime(self) -> CodexRuntime:
+        if self._codex is None:
+            raise RuntimeError("原生过程卡不可用")
+        return self._codex
 
     async def start(
         self,

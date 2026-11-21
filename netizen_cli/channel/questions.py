@@ -99,6 +99,8 @@ class QuestionChannel(ScheduleChannel):
         owner_id: str = "",
     ) -> None:
         """Project questions for either target without changing the producing Turn."""
+        if self._policy.backend == "claude":
+            raise RuntimeError("Claude 试点暂不支持【原生提问】。")
         scope, _ = self._question_recipient(target)
         if scope.app_id != self._app_id:
             return

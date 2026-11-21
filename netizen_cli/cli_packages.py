@@ -8,6 +8,7 @@ the documented public commands and non-mutating capability checks.
 """
 from __future__ import annotations
 
+from email.parser import BytesParser
 import hashlib
 import json
 import os
@@ -17,8 +18,9 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tomllib
 from typing import Any, Mapping
+
+from .cli_update_worker import read_uv_tool_receipt
 
 
 DISTRIBUTION = "netizen-cli"
@@ -62,6 +64,17 @@ if not all(p.is_relative_to(prefix) for p in (*sites, scripts)):
     raise RuntimeError("installation uses external site-packages")
 if not any(package.parent == s and info.parent == s for s in sites):
     raise RuntimeError("package or metadata is outside this environment's site-packages")
+claude = list(m.distributions(name="claude-agent-sdk"))
+claude_metadata = None
+if claude:
+    if len(claude) != 1:
+        raise RuntimeError("installation lacks a unique claude-agent-sdk distribution")
+    sdk = claude[0]
+    records = [P(sdk.locate_file(f)).resolve() for f in sdk.files or ()
+               if f.name == "METADATA" and f.parent.name.endswith(".dist-info")]
+    if len(records) != 1 or records[0].parent.parent not in sites or not records[0].is_file():
+        raise RuntimeError("Claude SDK metadata is missing or outside this environment")
+    claude_metadata = str(records[0])
 raw_url = d.read_text("direct_url.json")
 if raw_url:
     raise RuntimeError("direct URL, local source and editable installs require manual maintenance")
@@ -75,6 +88,7 @@ result = {"environment_python": os.path.abspath(sys.executable), "prefix": str(p
           "dist_info": str(info), "version": d.version,
           "installer": (d.read_text("INSTALLER") or "").strip(),
           "pip_available": local_pip,
+          "has_claude": bool(claude), "claude_metadata": claude_metadata,
           "scripts_dir": str(scripts),
           "externally_managed": (P(sysconfig.get_path("stdlib")) / "EXTERNALLY-MANAGED").exists()}
 if len(sys.argv) > 1:
@@ -85,6 +99,8 @@ if len(sys.argv) > 1:
 if len(sys.argv) > 2:
     for module in ("netizen_cli.cli", "netizen_cli.cli_services", "netizen_cli.package_resources"):
         importlib.import_module(module)
+    if sys.argv[2] == "validate" and claude:
+        importlib.import_module("netizen_cli.claude_installation").verified_claude_cli()
 print(json.dumps(result))
 '''
 _PROBE = ("try:\n" + "".join("    " + line + "\n" for line in _PROBE_BODY.splitlines())
@@ -129,6 +145,20 @@ def _object(text: str, operation: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise PackageUpdateError(f"{operation} returned an invalid machine response.")
     return data
+
+
+def _require_installed_claude_pin(netizen_metadata: Path, sdk_metadata: Path) -> None:
+    """Only the installed release's declared extra can identify a pip-managed Claude installation."""
+    netizen = BytesParser().parsebytes(netizen_metadata.read_bytes(), headersonly=True)
+    sdk = BytesParser().parsebytes(sdk_metadata.read_bytes(), headersonly=True)
+    requirements = [req for req in netizen.get_all("Requires-Dist", [])
+                    if re.match(r"(?i)claude[-_.]agent[-_.]sdk\b", req)]
+    exact = re.fullmatch(r"""(?i)claude[-_.]agent[-_.]sdk\s*==\s*([\w.+!-]+)\s*;\s*extra\s*==\s*["']claude["']""",
+                         requirements[0]) if len(requirements) == 1 else None
+    if ("claude" not in netizen.get_all("Provides-Extra", []) or exact is None
+            or sdk.get_all("Version", []) != [exact.group(1)]):
+        raise PackageUpdateError("The installed Claude SDK does not match this Netizen release's exact extra. "
+                                 "Repair the environment with its package manager or update manually.")
 
 
 def _digest(path: Path) -> str:
@@ -287,19 +317,12 @@ def _require_uv_tool_version(version: str) -> None:
         )
 
 
-def _tool_receipt(prefix: Path, info: dict[str, Any], env: Mapping[str, str]) -> tuple[Path, Path]:
+def _tool_receipt(prefix: Path, info: dict[str, Any], env: Mapping[str, str]) -> tuple[Path, Path, bool]:
     if env.get("UV_TOOL_BIN_DIR") and not Path(env["UV_TOOL_BIN_DIR"]).is_absolute():
         raise PackageUpdateError("UV_TOOL_BIN_DIR must be absolute for an unambiguous update target.")
     receipt = prefix / "uv-receipt.toml"
     try:
-        if receipt.is_symlink():
-            raise ValueError("receipt symlink is not a supported ownership marker")
-        document = tomllib.loads(receipt.read_text())
-        tool = document["tool"]
-        requirement = tool["requirements"][0]
-        # Only the tested modern name object is accepted, not a PEP 508 parser.
-        if not isinstance(requirement, dict) or _canonical_name(requirement["name"]) != DISTRIBUTION:
-            raise ValueError("wrong requirement identity")
+        tool, requests_claude = read_uv_tool_receipt(receipt)
         entries = [e for e in tool["entrypoints"] if e.get("name") == "netizen"]
         if len(entries) != 1 or _canonical_name(entries[0].get("from", DISTRIBUTION)) != DISTRIBUTION:
             raise ValueError("wrong command identity")
@@ -317,7 +340,7 @@ def _tool_receipt(prefix: Path, info: dict[str, Any], env: Mapping[str, str]) ->
             f"uv tool identity is missing, damaged or unsupported at {receipt}; "
             "repair the tool installation or update it manually."
         ) from exc
-    return receipt, destination.parent.resolve()
+    return receipt, destination.parent.resolve(), requests_claude
 
 
 def _pip_changes(command: list[str], env: Mapping[str, str], cwd: Path) -> bool:
@@ -398,6 +421,10 @@ def prepare_update(
     evidence = _check_environment_layout(info, env)
     info_dir = Path(info["dist_info"])
     evidence.extend([info_dir / "METADATA", info_dir / "entry_points.txt"])
+    has_claude = info["has_claude"]
+    if has_claude:
+        evidence.append(Path(info["claude_metadata"]))
+    requirement = DISTRIBUTION + ("[claude]" if has_claude else "")
     if (info_dir / "INSTALLER").exists():
         evidence.append(info_dir / "INSTALLER")
     overrides: dict[str, str] = {}
@@ -424,7 +451,10 @@ def prepare_update(
             raise PackageUpdateError("A symlinked whole uv tool environment is not a tested update layout; use uv manually.")
         assert uv_version is not None
         _require_uv_tool_version(uv_version)
-        receipt, bin_dir = _tool_receipt(prefix, info, env)
+        receipt, bin_dir, requested = _tool_receipt(prefix, info, env)
+        if requested != has_claude:
+            raise PackageUpdateError("The uv tool receipt and installed Claude SDK disagree. "
+                                     "Repair the tool installation before updating.")
         evidence.append(receipt)
         evidence.append(Path(info["scripts_dir"]) / "netizen")
         paths[str(tool_root)] = _identity(tool_root)
@@ -444,11 +474,11 @@ def prepare_update(
         if not info.get("pip_available"):
             raise PackageUpdateError("This environment has no pip. Netizen will not install one or choose an unrelated pip; update manually.")
         overrides.update({"PIP_DISABLE_PIP_VERSION_CHECK": "1"})
-        command = [executable, "-I", "-m", "pip", "install", "--upgrade", "--no-input", DISTRIBUTION]
+        command = [executable, "-I", "-m", "pip", "install", "--upgrade", "--no-input", requirement]
     elif selected == "uv-pip":
         assert uv is not None
         command = [uv, "--no-python-downloads", "pip", "install", "--python", executable,
-                   "--upgrade", DISTRIBUTION]
+                   "--upgrade", requirement]
     else:
         assert uv is not None
         command = [uv, "--no-python-downloads", "tool", "upgrade", DISTRIBUTION]
@@ -456,14 +486,16 @@ def prepare_update(
     if uv is not None:
         paths[uv] = _identity(Path(uv))
     fingerprints = {str(p): _digest(p) for p in evidence}
+    if selected in {"pip", "uv-pip"} and has_claude:
+        _require_installed_claude_pin(info_dir / "METADATA", Path(info["claude_metadata"]))
     changes = (_pip_changes(command, env, cwd) if selected == "pip" else
                _uv_pip_changes(command, env, cwd) if selected == "uv-pip" else True)
     if any(_digest(Path(p)) != digest for p, digest in fingerprints.items()):
         raise PackageUpdateError("Installation metadata changed during preflight; retry after external maintenance finishes.")
     if any(_identity(Path(p)) != identity for p, identity in paths.items()):
         raise PackageUpdateError("Installation target changed during preflight; retry after external maintenance finishes.")
-    expected = {"prefix": str(prefix), "package_dir": info["package_dir"]}
-    before_expected = {**expected, "version": info["version"]}
+    expected = {"prefix": str(prefix), "package_dir": info["package_dir"], "has_claude": has_claude}
+    before_expected = {**expected, "version": info["version"], "claude_metadata": info["claude_metadata"]}
     return {
         "environment_python": executable, "prefix": str(prefix), "backend": selected,
         "before_version": info["version"], "command": command,
@@ -471,7 +503,8 @@ def prepare_update(
         "revalidation_files": fingerprints,
         "revalidation_paths": paths,
         "revalidation_command": [executable, "-I", "-c", _PROBE, json.dumps(before_expected), "import"],
-        "validation_command": [executable, "-I", "-c", _PROBE, json.dumps(expected), "import"],
+        "validation_command": [executable, "-I", "-c", _PROBE, json.dumps(expected), "validate"],
+        **({"tool_requests_claude": has_claude} if selected == "uv-tool" else {}),
         "uv_version": uv_version,
         "notice": ("uv tool has no equivalent dry-run; originally running instances may restart even without a package change."
                    if selected == "uv-tool" else "Preflight does not reserve candidates against external package/index changes."),

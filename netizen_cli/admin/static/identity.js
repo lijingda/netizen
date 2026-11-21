@@ -78,6 +78,7 @@ window.NetizenIdentity = (() => {
       row.append(remove);
       list.append(row);
     }
+    if (document.body.dataset.backend === "claude") node("admin-user-add").hidden = true;
     node("admin-user-add").disabled = expired || pending || !users?.addAction;
   }
 

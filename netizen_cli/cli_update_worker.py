@@ -11,6 +11,7 @@ import hashlib
 import fcntl
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -18,6 +19,7 @@ import stat
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,24 @@ from typing import Any
 PROTOCOL_VERSION = 1
 _interrupted_signal: int | None = None
 _CHILD_STOP_GRACE = 5.0
+
+
+def read_uv_tool_receipt(receipt: Path) -> tuple[dict, bool]:
+    """Read the primary requirement of the supported uv tool receipt."""
+    if receipt.is_symlink():
+        raise ValueError("symlinked uv tool receipt")
+    try:
+        tool = tomllib.loads(receipt.read_text())["tool"]
+        primary = tool["requirements"][0]
+        name = re.sub(r"[-_.]+", "-", primary["name"]).lower()
+    except (TypeError, KeyError, IndexError) as exc:
+        raise ValueError("invalid primary tool requirement") from exc
+    if name != "netizen-cli":
+        raise ValueError("wrong primary tool requirement")
+    extras = primary.get("extras", [])
+    if not isinstance(extras, list) or not all(isinstance(item, str) and item for item in extras):
+        raise ValueError("invalid primary tool extras")
+    return tool, "claude" in (item.lower() for item in extras)
 
 
 class UpdateInterrupted(KeyboardInterrupt):
@@ -307,6 +327,11 @@ def execute(plan: dict[str, Any], *, runner: Any = _run_owned) -> dict[str, Any]
         installed = json.loads(validation.stdout)
         if not isinstance(installed, dict) or not isinstance(installed.get("version"), str):
             raise ValueError("Fresh-process installation validation returned an invalid result")
+        if "tool_requests_claude" in package:
+            receipt = Path(package["prefix"]) / "uv-receipt.toml"
+            _, requested = read_uv_tool_receipt(receipt)
+            if requested != package["tool_requests_claude"]:
+                raise ValueError("The upgraded uv tool receipt changed the requested Claude extra")
         report["package"].update(state="verified", after_version=installed["version"])
         report["phase"] = "restoring"
         report["unexecuted"] = [f"start:{item['root']}" for item in report["instances"] if item["was_running"]]

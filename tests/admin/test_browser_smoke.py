@@ -120,6 +120,16 @@ async def run_driver(node, config):
 @unittest.skipUnless(os.environ.get("NETIZEN_BROWSER_SMOKE") == "1", "set NETIZEN_BROWSER_SMOKE=1 to run")
 class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
     async def test_admin_pages(self):
+        await self._admin_pages(owner_only=False)
+
+    async def test_owner_admin_pages(self):
+        await self._admin_pages(owner_only=True)
+
+    async def _admin_pages(self, *, owner_only):
+        from netizen_cli.backends import BackendPolicy
+        from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
+        from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
+        from tests.support.claude_client import FakeClaudeClients
         node = shutil.which("node")
         browser = find_browser()
         if not node or not browser:
@@ -151,7 +161,20 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
                                  user_info=AsyncMock(return_value=UserProfile("ou_admin", "Smoke Admin", "")))
         runner = AdminWebRunner(host="127.0.0.1", port=0, users=users, auth=auth, feishu_client=feishu,
                                 instance_root=root)
-        runner.attach_management(fixture.management, group_access=GroupAccessService(),
+        management = fixture.management
+        policy = BackendPolicy("codex")
+        if owner_only:
+            from netizen_cli.domain import FeishuScope, ScopeKind
+            await fixture.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            owner = users.restrict_to_owner()
+            policy = BackendPolicy("claude", owner.open_id)
+            local = ClaudeOrdinarySessions(bindings=fixture.store, owner_id=owner.open_id, clients=FakeClaudeClients(),
+                                          on_completion=AsyncMock(), notice=AsyncMock())
+            management = InstanceManagementService(bindings=fixture.store, projects=fixture.projects,
+                scope_coordinator=ScopeCoordinator(), runtime=ManagementRuntimePort(None, ordinary=local, local=local))
+            management.enable_defaults(app_id="cli_test", chat_info=fixture.channel)
+            self.addAsyncCleanup(management.close)
+        runner.attach_management(management, group_access=GroupAccessService(), backend_policy=policy,
                                  session_policy=SessionPolicyService())
         with patch("netizen_cli.admin.web.accepted_authorities",
                    side_effect=lambda host, port, addresses: (f"127.0.0.1:{addresses[0][1]}",)):
@@ -175,7 +198,8 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
             "browser": browser, "profile": str(directory / "chrome"),
             "origin": f"http://127.0.0.1:{runner.addresses[0][1]}",
             "cookie": {"name": runner.application._session_cookie, "value": token},
-            "paths": sorted(_ADMIN_PAGE_PATHS),
+            "paths": ["/admins", "/sessions/ordinary", "/defaults"] if owner_only else sorted(_ADMIN_PAGE_PATHS),
+            "ownerOnly": owner_only,
         })
         output = report(result)
         self.assertEqual(status, 0, output)

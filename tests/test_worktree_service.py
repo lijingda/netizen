@@ -285,6 +285,33 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         (Path(resource["root"]) / "local.txt").write_text("keep")
         self.assertFalse((await self.service.preview_delete(resource["id"], delete_sessions=True))["safe"])
 
+    async def test_owner_backend_checks_cwd_and_blocks_materialized_cascade(self):
+        from netizen_cli.management import ManagementRuntimePort
+        from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
+        from tests.support.claude_client import FakeClaudeClients
+        from unittest.mock import AsyncMock
+
+        clients = FakeClaudeClients()
+        local = ClaudeOrdinarySessions(bindings=self.store, clients=clients, owner_id="owner",
+                                      on_completion=AsyncMock(), notice=AsyncMock())
+        manager = InstanceManagementService(bindings=self.store, projects=self.projects, scope_coordinator=ScopeCoordinator(),
+            runtime=ManagementRuntimePort(None, ordinary=local, local=local))
+        self.addAsyncCleanup(manager.close)
+        worktrees = manager.enable_worktrees(settings=WorktreeSettingsService(default_root=self.root / "managed"))
+        resource = await self.resource()
+        binding = await self.binding(resource, native="native-owner")
+        for cwd in (None, Path(resource["cwd"])):
+            if cwd:
+                clients.cwds["native-owner"] = cwd
+            preview = await worktrees.preview_delete(resource["id"], delete_sessions=True)
+            self.assertFalse(preview["safe"])
+            with self.assertRaises(WorktreeError):
+                await worktrees.delete(resource["id"], delete_sessions=True, expected_fingerprint=preview["fingerprint"])
+            self.assertTrue(Path(resource["root"]).is_dir())
+            self.assertEqual(self.store.get(binding.id).native_thread_id, "native-owner")
+        self.assertFalse(clients.lookups)
+        self.assertFalse(clients.calls)
+
     async def test_delete_cascade_choice_and_inventory_are_sealed(self):
         resource = await self.resource()
         preview = await self.service.preview_delete(resource["id"])
@@ -530,6 +557,22 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(Path(first.root).exists())
         self.assertTrue(Path(second.root).is_dir())
         self.assertTrue(self.repo.is_dir())
+
+    async def test_live_claude_cwd_outside_the_binding_inventory_blocks_delete(self):
+        resource = await self.resource()
+        original = await self.service.preview_delete(resource["id"])
+        self.assertTrue(original["safe"], original["reasons"])
+        target = Path(resource["root"])
+        class Occupied:
+            def occupying_bindings(self, root):
+                return {"external-binding"} if root == target else set()
+        self.management.local = Occupied()
+        taken = await self.service.preview_delete(resource["id"])
+        self.assertFalse(taken["safe"])
+        self.assertEqual(taken["protectedSessionCount"], 1)
+        with self.assertRaises(WorktreeError):
+            await self.service.delete(resource["id"], expected_fingerprint=original["fingerprint"], delete_sessions=False)
+        self.assertTrue(target.is_dir())
 
     async def test_known_subdirectory_usage_is_protected_but_not_cascaded(self):
         resource = await self.resource()

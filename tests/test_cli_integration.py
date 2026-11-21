@@ -81,18 +81,46 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
                 patch("netizen_cli.cli_services.ServiceManager", return_value=self.manager), \
                 patch("netizen_cli.cli._current_binding", side_effect=lambda root: self.current), \
-                patch("netizen_cli.cli_setup.require_codex_login"), \
+                patch("netizen_cli.cli_setup.require_codex_login") as codex_login, \
                 patch("netizen_cli.cli_setup._helper", side_effect=helper), \
                 patch("netizen_cli.deployment.restart_worker.finish_manual_restart", return_value=None), \
                 patch("sys.stdin", io.StringIO()):
             defaults = ["--admin-open-id", "ou_fixture_admin"] if command == "setup" else []
             code = cli.main([command, "--root", str(self.root), "--json", *defaults, *arguments])
+        self.codex_logins = codex_login.call_count
         return code, json.loads(stdout.getvalue()), stderr.getvalue()
 
     def setup_instance(self) -> None:
         code, report, _ = self.invoke("setup")
         self.assertEqual(code, 0, report)
         self.assertEqual(report["status"], "prepared")
+
+    def test_claude_setup_start_and_repair_use_instance_installation(self):
+        from netizen_cli.claude_installation import REPAIR, verified_claude_cli
+
+        self.current = ServiceBinding(self.root, Path(sys.executable), Path(sys.prefix).resolve())
+        with patch("netizen_cli.claude_installation.verified_claude_cli", side_effect=RuntimeError(REPAIR)):
+            code, report, _ = self.invoke("setup", "--backend", "claude")
+        self.assertEqual((code, report["reason"], self.codex_logins), (1, REPAIR, 0))
+        self.assertFalse(self.root.exists())
+        with patch("netizen_cli.claude_installation.verified_claude_cli", wraps=verified_claude_cli) as verify:
+            code, report, _ = self.invoke("setup", "--backend", "claude")
+            self.assertEqual((code, report["backend"], self.codex_logins), (0, "claude", 0))
+            self.assertTrue(verify.called)
+            verify.reset_mock()
+            code, report, _ = self.invoke("setup")
+            self.assertEqual((code, report["status"], report["backend"]), (0, "already_registered", "claude"))
+            verify.assert_called_once_with()
+            verify.reset_mock()
+            code, report, _ = self.invoke("start")
+            self.assertEqual(code, 0, report)
+            verify.assert_called_once_with()
+        self.assertTrue(self.manager.inspect(self.root).ready)
+        with patch("netizen_cli.claude_installation.verified_claude_cli", side_effect=RuntimeError(REPAIR)):
+            code, report, _ = self.invoke("restart")
+            self.assertEqual((code, report["reason"]), (1, REPAIR))
+            self.assertTrue(self.manager.inspect(self.root).ready)
+        self.assertEqual(self.invoke("stop")[0], 0)
 
     def test_setup_reports_fixed_backend_and_preserves_explicit_and_legacy_configs(self) -> None:
         code, report, _ = self.invoke("setup")
@@ -150,6 +178,31 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         self.assertEqual(self.manager.service_file(self.root).read_bytes(), definition)
         self.assertEqual((self.root / "state/channel.sqlite3").read_bytes(), database)
         self.assertEqual(AdminUsers(self.root, "cli_testapp").list()[0].identity.open_id, "ou_repaired")
+
+    def test_retained_unregistered_root_with_lost_config_requires_explicit_backend(self):
+        self.setup_instance()
+        self.assertEqual(self.invoke("remove", "-y")[0], 0)
+        config = self.root / "config.yaml"
+        config.unlink()
+        code, report, _ = self.invoke("setup")
+        self.assertEqual(code, 1, report)
+        self.assertIn("original --backend", report["reason"])
+        self.assertFalse(config.exists())
+        self.assertIsNone(self.manager.inspect(self.root))
+        code, report, _ = self.invoke("setup", "--backend", "codex")
+        self.assertEqual((code, report["status"], report["backend"]), (0, "prepared", "codex"))
+
+    def test_config_disappearing_after_preflight_is_not_regenerated_implicitly(self):
+        self.setup_instance()
+        self.assertEqual(self.invoke("remove", "-y")[0], 0)
+        def lose_config(root, **kwargs):
+            (root / "config.yaml").unlink()
+            return prepare_configuration(root, **kwargs)
+        with patch("netizen_cli.cli_setup.prepare_configuration", side_effect=lose_config):
+            code, report, _ = self.invoke("setup")
+        self.assertEqual(code, 1, report)
+        self.assertIn("original --backend", report["reason"])
+        self.assertFalse((self.root / "config.yaml").exists())
 
     def test_setup_rechecks_backend_under_lock_without_implying_an_explicit_request(self) -> None:
         self.setup_instance()

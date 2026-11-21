@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from lark_channel import (
@@ -29,6 +30,7 @@ from ..cards import (
 from .messages import _send_result_error_code
 from ..file_inputs import FileInputError
 from ..defaults import DefaultConfigurationError
+from ..backends import BackendUnsupported
 from ..ordinary_sessions import OrdinaryInputRejected
 from ..runtime.contracts import (
     ContextBoundaryCommitFailed,
@@ -44,6 +46,8 @@ from ..runtime.contracts import (
     SkillReferenceError,
     SteerRace,
     TerminalCleanupFailed,
+    TerminalStateUnknown,
+    ThreadActivityChanged,
     ThreadCompactStartFailed,
     ThreadCompacting,
     ThreadGoalActive,
@@ -112,6 +116,9 @@ class ChannelReplies(ChannelState):
 
     async def _report_input_error(self, message: Any, error: Exception) -> None:
         """One user-visible failure policy for message, card and scheduled inputs."""
+        if self._policy.backend == "claude" and isinstance(error, (BackendUnsupported, OrdinaryInputRejected, TerminalStateUnknown, ThreadActivityChanged)):
+            await self._reply(message, str(error) or "本次操作对应的执行已变化。")
+            return
         if isinstance(error, (InvalidInteraction, ScheduleError, DefaultConfigurationError)):
             await self._reply(message, str(error))
         elif isinstance(error, UnknownProject):
@@ -180,6 +187,9 @@ class ChannelReplies(ChannelState):
                 "channel interaction failed",
                 extra={"error_type": type(error).__name__},
             )
+            if self._policy.backend == "claude":
+                await self._reply(message, "Claude 请求处理未完成，请查看 /status。")
+                return
             await self._reply(
                 message,
                 f"Codex 请求处理未完成：{describe_error(error)}。"
@@ -200,6 +210,11 @@ class ChannelReplies(ChannelState):
     ) -> None:
         # Choose the feedback destination once, independently of the exception
         # category. A failed redraw never replays the business operation.
+        if self._policy.backend == "claude":
+            target = _CardReplyTarget(message_id, message_id, callback_chat_id, _CardReplyConversation(scope.topic_id if scope else None))
+            if message_id and callback_chat_id:
+                await self._reply(target, "卡片操作未完成，请重新打开卡片。" if unexpected else str(error))
+            return
         goal = intent is not None and intent.name in {
             CardControlName.GOAL_REFRESH, CardControlName.GOAL_PAUSE,
             CardControlName.GOAL_RESUME, CardControlName.GOAL_CLEAR,
@@ -283,6 +298,9 @@ class ChannelReplies(ChannelState):
         *,
         task_not_executed: bool = False,
     ) -> None:
+        if self._policy.backend == "claude":
+            await self._reply(message, "当前没有已选择的会话。请发送 /new 选择项目并创建会话，或发送 /sessions 切换已有会话。")
+            return
         has_sessions = self._bindings.has_bindings(scope.key)
         has_projects = bool(self._projects.list(enabled_only=True))
         lines = [
@@ -335,6 +353,7 @@ class ChannelReplies(ChannelState):
         content: Any,
         *,
         completion_mention_user_id: str | None = None,
+        on_sent: Callable[[str], None] | None = None,
     ) -> None:
         if isinstance(content, str) and completion_mention_user_id is not None:
             content = OutboundPost(
@@ -342,6 +361,8 @@ class ChannelReplies(ChannelState):
                 mentions=[Identity(open_id=completion_mention_user_id)],
             )
         result = await self._send_completion_reply(message, content)
+        if on_sent is not None and result.success and result.message_id:
+            on_sent(result.message_id)
         failure_notice = _reply_failure_notice(result)
         if failure_notice is None:
             return

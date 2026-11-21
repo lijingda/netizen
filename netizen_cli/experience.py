@@ -7,6 +7,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
 
+from .backends import BackendPolicy
 from .domain import (
     ChannelInteraction,
     ControlIntent,
@@ -304,6 +305,12 @@ def _command_error(
     return InvalidInteraction(" ".join(parts))
 
 
+def require_command(policy: BackendPolicy, name: str, *, archived: bool = False) -> None:
+    refusal = policy.command_refusal(name, archived=archived)
+    if refusal:
+        raise InvalidInteraction(refusal)
+
+
 def parse_message(
     *,
     scope: FeishuScope,
@@ -311,6 +318,7 @@ def parse_message(
     sender_id: str,
     text: str,
     available_capabilities: Collection[NativeCapability] = (),
+    policy: BackendPolicy = BackendPolicy("codex"),
 ) -> ChannelInteraction:
     capabilities = frozenset(available_capabilities)
     body = text.strip()
@@ -323,16 +331,26 @@ def parse_message(
             skill_names = parse_skill_references(body)
         except InvalidSkillReference as error:
             raise InvalidInteraction(str(error)) from error
+        if skill_names and (refusal := policy.operation_refusal("skills", "显式 Skill 调用")):
+            raise InvalidInteraction(refusal)
         if skill_names and NativeCapability.SKILLS not in capabilities:
             raise InvalidInteraction(
                 "当前 Codex Skills 发现功能不可用，$skill 引用未执行。"
             )
         return PromptInput(scope, message_id, sender_id, body, skill_names)
     if body == "/":
+        if policy.backend == "claude":
+            require_command(policy, "menu")
         return ControlIntent(scope, message_id, sender_id, ControlName.MENU)
 
     raw_parts = body[1:].lstrip().split(maxsplit=1)
     raw_spec = _COMMANDS.get(raw_parts[0].lower()) if raw_parts else None
+    checked_command = False
+    if policy.backend == "claude" and raw_parts:
+        name = raw_spec.name if raw_spec else raw_parts[0].lower()
+        if raw_spec is not None or name in {*_CONFIG_ALIASES, "speed"}:
+            require_command(policy, name, archived=len(raw_parts) > 1)
+            checked_command = True
     if (
         raw_spec is not None
         and raw_spec.intent is ControlName.NEW
@@ -361,8 +379,14 @@ def parse_message(
                 spec=raw_spec,
             ) from error
     if not tokens:
+        if policy.backend == "claude":
+            require_command(policy, "menu")
         return ControlIntent(scope, message_id, sender_id, ControlName.MENU)
     spec = _COMMANDS.get(tokens[0].lower())
+    if policy.backend == "claude" and not checked_command:
+        head = tokens[0].lower()
+        if spec is not None or head in {*_CONFIG_ALIASES, "speed"}:
+            require_command(policy, spec.name if spec else head, archived=len(tokens) > 1)
     if spec is None:
         unavailable = tokens[0].lower()
         if unavailable == "project":
