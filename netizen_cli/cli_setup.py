@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, IO
 
-from .backends import instance_backend
+from .backends import DEFAULT_BACKEND, instance_backend
 from .lark_app import encode_lark_app, load_lark_app
 
 
@@ -114,8 +114,10 @@ def require_codex_login(*, runner: Callable = subprocess.run) -> None:
         raise SetupError("sign in to Codex for this account, then rerun netizen setup")
 
 
-def _register(root: Path, app_id: str | None, *, runner: Callable) -> None:
-    arguments = ["--app-id", app_id] if app_id else []
+def _register(root: Path, app_id: str | None, *, backend: str = DEFAULT_BACKEND, runner: Callable) -> None:
+    arguments = ["--backend", backend]
+    if app_id:
+        arguments.extend(["--app-id", app_id])
     value = _helper("netizen_cli.feishu_app_onboarding", arguments,
                     timeout=660, runner=runner, progress=True)
     if (set(value) != {"version", "appId", "appSecret"}
@@ -139,10 +141,10 @@ def _manual_credentials(root: Path, app_id: str | None, *, source: IO[str],
     _write_atomic(root / "lark-app/config.json", encode_lark_app(app_id, secret), mode=0o600)
 
 
-def _browser_or_manual(root: Path, app_id: str | None, *, runner: Callable,
+def _browser_or_manual(root: Path, app_id: str | None, *, backend: str, runner: Callable,
                        source: IO[str], secret_prompt: Callable[[str], str]) -> None:
     try:
-        _register(root, app_id, runner=runner)
+        _register(root, app_id, backend=backend, runner=runner)
     except SetupError:
         if not source.isatty():
             raise
@@ -365,11 +367,11 @@ def prepare_configuration(root: Path, *, backend: str | None = None, admin_port:
                                 source=source, secret_prompt=secret_prompt)
         else:
             started_flow = True
-            _browser_or_manual(root, credentials.app_id or None, runner=runner,
+            _browser_or_manual(root, credentials.app_id or None, backend=effective_backend, runner=runner,
                                source=source, secret_prompt=secret_prompt)
     missing = _missing_permissions(root, runner=runner)
     if any(missing.values()) and not started_flow:
-        _browser_or_manual(root, load_lark_app(profile).app_id, runner=runner,
+        _browser_or_manual(root, load_lark_app(profile).app_id, backend=effective_backend, runner=runner,
                            source=source, secret_prompt=secret_prompt)
         missing = _missing_permissions(root, runner=runner)
     if any(missing.values()):
