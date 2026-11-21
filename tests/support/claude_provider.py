@@ -6,6 +6,8 @@ import uuid
 
 from aiohttp import web
 
+PROJECT_SENTINEL = "NETIZEN-CHANNEL-PROJECT-VERIFIED"
+
 MARK = re.compile(r"\[\[S:([a-z0-9-]+)(?:/([A-Za-z0-9_-]+))?\]\]")
 
 
@@ -68,6 +70,7 @@ class Provider:
                     tool_error = any(p.get("is_error") is True for p in parts if p["type"] == "tool_result")
         # Keep fixture identifiers, never message bodies, arguments, headers or native transcripts.
         row = {"path": request.path, "stream": data.get("stream", False), "scenario": scenario, "label": label,
+               "project_sentinel": PROJECT_SENTINEL in json.dumps([data.get("system"), messages]),
                "history": history, "tool_result": tool_result, "tool_error": tool_error, "model": data.get("model")}
         async with self.arrived:
             self.rows.append(row)
@@ -91,6 +94,10 @@ class Provider:
         if not tool_result:
             if scenario == "tool-barrier":
                 tool = ("Bash", {"command": "./wait-for-fixture", "timeout": 30000, "description": "Wait for fixture gate"})
+            elif scenario in ("foreground", "background"):
+                command = "./fixture-" + scenario
+                tool = ("Bash", {"command": command, "run_in_background": scenario == "background",
+                                 "description": "Run disposable fixture task"})
             elif scenario == "tool-error":
                 tool = ("Bash", {"command": "exit 17", "description": "Fixture tool error"})
             elif scenario == "edit-file":

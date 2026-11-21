@@ -361,6 +361,8 @@ async def worker():
         evidence = Evidence()
         async with asyncio.timeout(245):
             await main_cases(cwd, provider, evidence)
+            from tests.support.claude_channel_e2e import channel_cases
+            await channel_cases(cwd, provider)
         print(json.dumps({"checks": evidence.names, "mockRequests": len(provider.rows)}), flush=True)
     finally:
         await provider.close()
