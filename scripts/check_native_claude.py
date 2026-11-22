@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from uuid import uuid4
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -187,6 +188,16 @@ async def main_cases(cwd, provider, evidence):
             origin=label, admission=admission, context_commit=None, skill_names=())
         result.release_receipt_attempt()
         return result
+    async def check_native_prompt(binding, label, images=()):
+        resumed = store.get(binding.id).native_thread_id is not None
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "subprocess_exec", wraps=loop.subprocess_exec) as launch:
+            result = await submit(binding, "text", label, images)
+        identity_arg = ("--resume=" if resumed else "--session-id=") + result.thread_id
+        commands = [args[1:] for args, _ in launch.call_args_list if Path(args[1]).resolve() == cli and identity_arg in args]
+        evidence.check(label + " CLI uses native system prompt", len(commands) == 1 and
+                       not {"--system-prompt", "--system-prompt-file", "--append-system-prompt"}.intersection(commands[0]))
+        return result
     async def done(label):
         event = await asyncio.wait_for(completions.get(), 45)
         if event.origin != label:
@@ -211,7 +222,7 @@ async def main_cases(cwd, provider, evidence):
         native_settings()
         first = new_binding()
         pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5WcGQAAAAASUVORK5CYII="
-        receipt = await submit(first, "text", "first", (PromptImage("fixture image", "data:image/png;base64," + pixel),))
+        receipt = await check_native_prompt(first, "first", (PromptImage("fixture image", "data:image/png;base64," + pixel),))
         event = await done("first")
         observed = clients.calls[-1]
         evidence.check("typed auto init; no host question", observed.modes == [("auto", False)])
@@ -230,7 +241,7 @@ async def main_cases(cwd, provider, evidence):
         evidence.check("CLI resumes SDK transcript", shell.get("session_id") == session and shell.get("result") == "fixture-reply-cli"
                        and any("fixture-reply-first" in item["answers"] for row in rows("cli") for item in row["history"]))
         native_settings(fallback=True)
-        resumed = await submit(first, "text", "resumed")
+        resumed = await check_native_prompt(first, "resumed")
         await done("resumed")
         evidence.check("SDK resumes CLI transcript and reports strict fallback", resumed.thread_id == session and
                        clients.calls[-1].modes == [("default", False)] and notices.count(DEFAULT_MODE) == 1 and

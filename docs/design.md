@@ -85,6 +85,7 @@ Codex 后端通过共享的官方 SDK/App Server 操作精确的 Thread 和 Turn
   结果仍回到原投递锚点，旧按钮不能中断后继执行。
 - **所有者与权限。** setup 的唯一管理员是所有者。飞书就绪后再等 2 秒才接收任务。群聊准入照常生效，
   非所有者只能单独发送纯文本 `/help`，Admin 不能增设管理员。Claude Code 使用所有者自行配置的原生认证和权限。
+  新建和续接会话均使用 SDK 的 `claude_code` 预设，保留 Claude Code 原生系统提示，不追加宿主提示。
   Netizen 不处理凭据、不核查认证来源，仅按会话申请 `auto`。即使 init 报告 `auto`，操作仍可能被拒；
   根据本轮 `ResultMessage.permission_denials` 在结果前向所有者提示拒绝次数及白名单工具名，与 init 报告 `default` 的提示合并发送。
 - **能力与缺口。** 飞书命令、卡片（含旧卡）、Admin API 和定时派发均按同一后端能力判定。试点支持文本和图片输入、本地状态、

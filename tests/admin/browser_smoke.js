@@ -2,6 +2,7 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
+const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const { setTimeout: poll } = require("node:timers/promises");
 
@@ -215,10 +216,56 @@ async function run() {
         await until(landmarks[path], () => evaluate(`document.readyState === "complete" && ${visible(landmarks[path])}`));
         await settled(phoneWidth);
         result.visits.push(step);
+        if (path === "/projects") {
+          const alias = config.ownerOnly ? "pending" : "test";
+          await click(`[data-project-alias="${alias}"] .project-delete-trigger`);
+          await until("verified deletion scope", () => evaluate(visible("#project-delete-confirm:enabled")));
+          const summary = await evaluate(element("#project-delete-dialog") + ".innerText");
+          if (config.ownerOnly) {
+            assert.match(summary, /1 个未开始的 Claude Code 会话登记/);
+            assert.doesNotMatch(summary, /Codex|Goal|Side|App\/CLI|归档|定时/);
+          } else {
+            assert.match(summary, /Codex 会话、派生子会话、Codex App\/CLI 历史和本地会话登记将永久删除，无法恢复。/);
+            assert.match(summary, /未开始 0，已创建 1/);
+          }
+          await click("#project-delete-cancel");
+          await settled(phoneWidth);
+          result.interactions.push(step + " · deletion preview");
+        }
+        if (path === "/maintenance") {
+          await click(".service-restart summary");
+          await click(".diagnostics-environment summary");
+          const restart = await evaluate(element(".service-restart") + ".innerText");
+          const directories = await evaluate(element(".diagnostics-environment") + ".innerText");
+          if (config.ownerOnly) {
+            assert.match(restart, /中断正在执行的 Claude Code 任务/);
+            assert.doesNotMatch(restart, /Codex|Goal|Side/);
+            assert.match(directories, /实例目录/);
+            assert.doesNotMatch(directories, /Codex 目录/);
+          } else {
+            assert.match(restart, /暂停 Goal，并结束临时 Side 会话/);
+            assert.match(restart, /重启本实例的 Netizen 与 Codex 运行环境/);
+            assert.match(directories, /Codex 目录/);
+          }
+          result.interactions.push(step + " · restart and directories");
+        }
+        if (path === "/sessions/ordinary") {
+          await click("#sessions-body button", "配置");
+          await until("session configuration loaded", () => evaluate(visible("#session-settings-save:enabled")));
+          const settings = await evaluate(element("#session-settings-drawer") + ".innerText");
+          if (config.ownerOnly) {
+            assert.match(settings, /模型沿用 Claude Code 的原生配置/);
+            assert.doesNotMatch(settings, /Codex/);
+          } else {
+            assert.match(settings, /选择继承 Codex 时，沿用 Codex 的原生配置/);
+          }
+          await click("#session-settings-cancel");
+          result.interactions.push(step + " · session configuration");
+        }
         if (path === "/login") {
           const cookie = await page("Network.setCookie", { ...config.cookie, url: config.origin, httpOnly: true });
           if (!cookie.success) throw new Error("Could not install fixture session cookie");
-        } else if (path === "/projects") {
+        } else if (path === "/projects" && !config.ownerOnly) {
           step += " · Project Markdown preview";
           await click("#projects-body button", "查看文件");
           await click('#file-browser-entries button[data-path="readme.md"]');
