@@ -3533,28 +3533,28 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   for (const option of input("context").querySelectorAll("option")) {
     option.disabled = option.value === "catch-up" && contextAvailable === false;
   }
-  if (inheritedModel) {
-    for (const field of ["model", "effort", "tier", "progress"]) {
-      input(field).closest("label").hidden = true;
-    }
-    input("progress-settings").hidden = true;
-    input("progress-reset").hidden = true;
-    input("completion-mention").checked = settings.completion_mention_enabled;
-    input("reactions").checked = settings.reaction_pulse_enabled;
-    return null;
-  }
   const turn = settings.turn_settings;
   const model = models.find((item) => item.id === turn?.model_id);
-  scheduleSelectOptions(input("model"), [["", "继承 Codex"],
-    ...models.map((item) => [item.id, item.display_name])], turn?.model_id);
-  scheduleSelectOptions(input("effort"), (model?.efforts || []).map((item) => [item.id, catalogChoiceLabel(item)]), turn?.effort_id);
-  scheduleSelectOptions(input("tier"), (model?.service_tiers || []).map((item) => [item.id, catalogChoiceLabel(item)]), turn?.service_tier_id);
-  input("effort").disabled = !model;
-  input("tier").disabled = !model;
+  if (inheritedModel) {
+    for (const field of ["model", "effort", "tier"]) input(field).closest("label").hidden = true;
+  } else {
+    scheduleSelectOptions(input("model"), [["", "继承 Codex"],
+      ...models.map((item) => [item.id, item.display_name])], turn?.model_id);
+    scheduleSelectOptions(input("effort"), (model?.efforts || []).map((item) => [item.id, catalogChoiceLabel(item)]), turn?.effort_id);
+    scheduleSelectOptions(input("tier"), (model?.service_tiers || []).map((item) => [item.id, catalogChoiceLabel(item)]), turn?.service_tier_id);
+    input("effort").disabled = !model;
+    input("tier").disabled = !model;
+  }
   input("reactions").checked = settings.reaction_pulse_enabled;
-  input("progress").checked = settings.progress_card_enabled;
   input("completion-mention").checked = settings.completion_mention_enabled;
-  renderProgressCardSettings(input, settings);
+  if (progressUnavailable) {
+    input("progress").closest("label").hidden = true;
+    input("progress-settings").hidden = true;
+    input("progress-reset").hidden = true;
+  } else {
+    input("progress").checked = settings.progress_card_enabled;
+    renderProgressCardSettings(input, settings);
+  }
   return model;
 }
 

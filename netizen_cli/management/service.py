@@ -19,7 +19,7 @@ from ..session_views import (
     SessionInventoryItem as SessionInventoryItem, SessionInventoryPage as SessionInventoryPage,
     SessionInventoryState as SessionInventoryState, SessionObservations, SessionQuery as SessionQuery,
 )
-from ..session_settings import require_local_settings
+from ..session_settings import SessionFormView
 from ..management_errors import ConversationReadError as ConversationReadError, ManagementError
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .project_files import ProjectFileService
@@ -937,6 +937,13 @@ class InstanceManagementService:
     def operation_policy(self, identity: BackendPolicy) -> BackendPolicy:
         return identity.bind(self.has_provider)
 
+    @property
+    def session_form(self) -> SessionFormView:
+        return SessionFormView.from_operations(
+            lambda op: self.has_provider(OPERATIONS[op].provider),
+            inherited_source="原生 Claude 设置" if self.local is not None else "继承 Codex",
+        )
+
     def _unavailable(self, operation: OperationId) -> BackendUnsupported:
         label = OPERATIONS[operation].label
         detail = None if self.local is not None else f"当前实例不支持【{label}】。"
@@ -983,7 +990,7 @@ class InstanceManagementService:
     def enable_defaults(self, *, app_id: str, chat_info: Any = None) -> SessionDefaultsService:
         if self.defaults is None:
             self.defaults = SessionDefaultsService(
-                local_only=self.local is not None,
+                form_view=self.session_form,
                 bindings=self._bindings, projects=self._projects,
                 runtime=self._runtime, app_id=app_id, chat_info=chat_info,
                 chat_target_validator=self.validate_chat_target,
@@ -1787,7 +1794,7 @@ class InstanceManagementService:
     ) -> CreatedBinding:
         if self.local is not None:
             self.local.require_admission()
-            require_local_settings(turn_settings is not None, task_feedback)
+        self.session_form.validate(turn_settings is not None, task_feedback)
         parameters = dict(
             scope=scope, creator_id=creator_id, project_alias=project_alias,
             expected_project_revision=expected_project_revision,
@@ -1997,7 +2004,7 @@ class InstanceManagementService:
     ) -> ThreadBinding:
         if self.local is not None:
             self.local.require_admission()
-            require_local_settings(settings is not None, task_feedback)
+        self.session_form.validate(settings is not None, task_feedback)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             return await self._runtime.configure_context_exact(
@@ -2144,7 +2151,7 @@ class InstanceManagementService:
     ) -> ThreadBinding:
         if self.local is not None:
             self.local.require_admission()
-            require_local_settings(settings is not None, task_feedback)
+        self.session_form.validate(settings is not None, task_feedback)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             if binding.settings_revision != expected_settings_revision:

@@ -40,7 +40,7 @@ from ..domain import (
 from ..model_settings import ModelCatalog, TurnModelSettings
 from ..projects import Project
 from ..progress_card_settings import ProgressCardSettings
-from ..session_settings import SessionSettings, require_local_settings
+from ..session_settings import SessionFormView, SessionSettings
 from ..sdk_gap_adapter import GoalSnapshot
 from .callbacks import (
     ACTION_VERSION,
@@ -346,7 +346,7 @@ def _new_binding_form(
     projects: tuple[Project, ...],
     catalog: ModelCatalog | None,
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     initial_project_alias: str | None,
     allow_context_mode: bool,
     message_context_mode: MentionContextMode,
@@ -414,7 +414,7 @@ def _new_binding_form(
     feedback = _task_feedback_form_elements(prefix="new", initial=task_feedback)
     _restore_settings_draft([*model_fields, *context, *feedback], settings_draft)
     elements.extend(_session_settings_sections(
-        local_only=local_only,
+        form_view=form_view,
         model_fields=model_fields, context_fields=context, feedback_fields=feedback,
     ))
     if allow_workspace_selection:
@@ -500,47 +500,38 @@ def _form_section(title: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _session_settings_sections(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     model_fields: list[dict[str, Any]],
     context_fields: list[dict[str, Any]],
     feedback_fields: list[dict[str, Any]],
     model_notices: Sequence[dict[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Share presentation while each caller owns field values and validation."""
-    if local_only:
-        def field(elements: list[dict[str, Any]], suffix: str) -> dict[str, Any]:
-            return next(item for item in elements if item.get("name", "").endswith("_" + suffix))
-
-        selector = field(model_fields, "model")
-        selector["placeholder"] = _plain_text("原生 Claude 设置")
+    if not form_view.model_editable:
+        selector = model_fields[1]
+        selector["placeholder"] = _plain_text(form_view.inherited_source)
         def inherited(value: str) -> bool:
             if selector["name"] == "config_model":
                 return _decode_config_model_reference(value)[-1] is None
             return _decode_new_model_reference(value) is None
 
         inherit = next(option["value"] for option in selector["options"] if inherited(option["value"]))
-        selector["options"] = [{"text": _plain_text("原生 Claude 设置"), "value": inherit}]
+        selector["options"] = [{"text": _plain_text(form_view.inherited_source), "value": inherit}]
         selector["initial_option"] = inherit
         sections = [_form_section("模型来源", [selector])]
-        if context_fields:
-            sections.append(_form_section("消息上下文", context_fields))
-        sections.append(_form_section("执行中表情闪烁", [field(feedback_fields, "task_reactions")]))
-        sections.append(_form_section("结束时 @ 提醒", [field(feedback_fields, "completion_mention")]))
-        return sections
-    model_elements = [*model_notices, model_fields[1]]
-    if len(model_fields) > 2:
-        # These are fixed form labels, not submitted text. Markdown avoids a
-        # separate div/plain_text pair in cards that also contain search pages.
-        model_elements.append(_form_columns(*(
-            (1, [{"tag": "markdown", "content": label["text"]["content"]}, select])
-            for label, select in zip(model_fields[2::2], model_fields[3::2], strict=True)
-        )))
-    sections = [_form_section("模型配置", model_elements)]
+    else:
+        model_elements = [*model_notices, model_fields[1]]
+        if len(model_fields) > 2:
+            model_elements.append(_form_columns(*(
+                (1, [{"tag": "markdown", "content": label["text"]["content"]}, select])
+                for label, select in zip(model_fields[2::2], model_fields[3::2], strict=True)
+            )))
+        sections = [_form_section("模型配置", model_elements)]
     if context_fields:
-        sections.append(_form_section("消息上下文", [
-            context_fields[1],
-            _form_hint("机器人始终只响应 @。选择“自动带上”会把两次 @ 之间未 @ 机器人的群聊消息交给 Codex。"),
-        ]))
+        context = context_fields
+        if form_view.model_editable:
+            context = [context_fields[1], _form_hint("机器人始终只响应 @。选择“自动带上”会把两次 @ 之间未 @ 机器人的群聊消息交给 Codex。")]
+        sections.append(_form_section("消息上下文", context))
     feedback_hints = (
         "执行时闪烁；关闭仍保留状态表情。部分移动端会显示为消息。",
         "展示执行状态与清单，结束后自动折叠。",
@@ -551,7 +542,7 @@ def _session_settings_sections(
             "content": label["text"]["content"] + "\n<font color='grey'>" + hint + "</font>"}]), (1, [select]))
         for label, select, hint in zip(
             feedback_fields[::3], feedback_fields[1::3], feedback_hints, strict=True,
-        )
+        ) if form_view.progress_editable or not select["name"].endswith("_progress_card")
     ]))
     return sections
 
@@ -611,7 +602,7 @@ def _new_workspace_load_button() -> dict[str, Any]:
 
 def _binding_config_form(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     binding_id: str,
     settings_revision: int,
     context_revision: int,
@@ -650,7 +641,7 @@ def _binding_config_form(
             inherit_initial_when_unset=True,
         )
     elements = _session_settings_sections(
-        local_only=local_only,
+        form_view=form_view,
         model_fields=model_fields,
         context_fields=(
             _context_mode_form_elements(prefix="config", initial_mode=message_context_mode)
@@ -870,7 +861,7 @@ def _decode_task_feedback_fields(payload: Mapping[str, Any], *, prefix: str) -> 
 
 def session_settings_form_elements(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     prefix: str,
     settings: SessionSettings,
     catalog: ModelCatalog | None,
@@ -930,7 +921,7 @@ def session_settings_form_elements(
     _restore_settings_draft(fields, settings_draft)
     if grouped:
         return _session_settings_sections(
-        local_only=local_only,
+            form_view=form_view,
             model_fields=model_fields, context_fields=context, feedback_fields=feedback,
             model_notices=model_notices,
         )
@@ -1030,7 +1021,7 @@ def _form_submit_button(*, name: str, label: str) -> dict[str, Any]:
 
 def new_binding_card(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     scope: FeishuScope,
     projects: tuple[Project, ...],
     initial_project_alias: str | None = None,
@@ -1055,15 +1046,15 @@ def new_binding_card(
             "再发送 `/new`。发送 `/help` 查看快速开始。"
         )
     else:
-        if local_only:
-            builder.markdown("使用原生 Claude 设置；可调整消息范围和执行中表情。")
+        if not form_view.model_editable:
+            builder.markdown(f"使用{form_view.inherited_source}；可调整消息范围和执行中表情。")
         else:
             builder.markdown(
                 "不确定模型配置时，可选择“继承 Codex”；"
                 "也可选择 Model（模型）、Effort（思考强度）和 Speed（速度），"
                 "应用于这个会话后续的新任务。空闲时可通过 `/config` 调整。"
             )
-        if catalog is None and not local_only:
+        if catalog is None and form_view.model_editable:
             builder.raw(
                 _notice(
                     (catalog_error or "Model / Effort / Speed 暂不可用。")
@@ -1075,12 +1066,12 @@ def new_binding_card(
             _new_binding_form(
                 projects,
                 catalog,
-                local_only=local_only,
+                form_view=form_view,
                 initial_project_alias=initial_project_alias,
                 allow_context_mode=allow_context_mode,
                 message_context_mode=message_context_mode,
                 task_feedback=(
-                    task_feedback or SessionSettings.new_defaults(catalog).task_feedback
+                    task_feedback or form_view.defaults(catalog).task_feedback
                 ),
                 workspace_options=workspace_options,
                 allow_workspace_selection=allow_workspace_selection,
@@ -1093,7 +1084,7 @@ def new_binding_card(
 
 def config_card(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     scope: FeishuScope,
     binding_id: str,
     short_id: str,
@@ -1109,14 +1100,14 @@ def config_card(
     catalog_error: str | None = None,
 ) -> OutboundCard:
     builder = _builder("当前会话配置", f"Netizen 会话编号：{short_id} · {project_alias}")
-    if local_only:
-        builder.markdown("使用原生 Claude 设置；可调整消息范围和执行中表情。")
+    if not form_view.model_editable:
+        builder.markdown(f"使用{form_view.inherited_source}；可调整消息范围和执行中表情。")
     else:
         builder.markdown(
             "Model 可继承 Codex，也可显式选择 Model / Effort / Speed；"
             "保存不会启动任务。Model 是模型，Effort 是思考强度，Speed 是速度。"
         )
-    if catalog is None and not local_only:
+    if catalog is None and form_view.model_editable:
         builder.raw(
             _notice(
                 (catalog_error or "Model / Effort / Speed 暂不可用。")
@@ -1141,7 +1132,7 @@ def config_card(
             )
     builder.raw(
         _binding_config_form(
-            local_only=local_only,
+            form_view=form_view,
             binding_id=binding_id,
             settings_revision=settings_revision,
             context_revision=context_revision,
@@ -1985,7 +1976,7 @@ def binding_created_card(
     settings: TurnModelSettings | None = None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     workspace_cwd: str | None = None,
 ) -> OutboundCard:
     builder = _builder(
@@ -2004,7 +1995,7 @@ def binding_created_card(
         "如果刚才的任务因没有会话而未执行，请重新发送。\n"
         "在群聊和群话题中，每条消息都需要 @机器人。"
     )
-    builder.markdown("模型来源：原生 Claude 设置。" if local_only else _model_source_summary(settings))
+    builder.markdown(f"模型来源：{form_view.inherited_source}。" if not form_view.model_editable else _model_source_summary(settings))
     builder.markdown(_context_mode_summary(message_context_mode))
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
@@ -2357,7 +2348,7 @@ def decode_button_action(
     )
 
 
-def local_form_fields(payload: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+def permitted_form_fields(payload: Mapping[str, Any], prefix: str, form_view: SessionFormView) -> dict[str, Any]:
     fields = dict(payload)
     has_model = any(f"{prefix}_{key}" in fields for key in ("effort", "speed"))
     model = fields.get(f"{prefix}_model")
@@ -2367,8 +2358,9 @@ def local_form_fields(payload: Mapping[str, Any], prefix: str) -> dict[str, Any]
         has_model = has_model or model_id is not None
     progress = f"{prefix}_progress_card"
     enabled, settings = _decode_progress_card_reference(fields[progress], progress) if progress in fields else (False, None)
-    require_local_settings(has_model, BindingTaskFeedback(progress_card_enabled=enabled, progress_card_settings=settings))
-    fields.setdefault(progress, _progress_card_reference(False, None))
+    form_view.validate(has_model, BindingTaskFeedback(progress_card_enabled=enabled, progress_card_settings=settings))
+    if not form_view.progress_editable:
+        fields.setdefault(progress, _progress_card_reference(False, None))
     _require_completion_mention_field(fields, prefix=prefix)
     return fields
 
@@ -2381,7 +2373,7 @@ def decode_card_form(
     tag: str,
     form_value: Any,
     value: Any = None,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
 ) -> CardControlIntent:
     if not isinstance(form_value, Mapping):
         raise CardActionError("卡片表单值必须是对象。")
@@ -2393,8 +2385,8 @@ def decode_card_form(
         raise CardActionError("卡片表单混合了不同操作的字段。")
     if value is not None and value != {} and not has_new:
         raise CardActionError("卡片表单操作与字段不匹配。")
-    if local_only and (has_new or has_config):
-        form_value = local_form_fields(form_value, "new" if has_new else "config")
+    if (has_new or has_config) and not (form_view.model_editable and form_view.progress_editable):
+        form_value = permitted_form_fields(form_value, "new" if has_new else "config", form_view)
     if has_new:
         return _decode_new_binding_form(
             scope=scope,

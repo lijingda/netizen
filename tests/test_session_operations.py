@@ -13,11 +13,13 @@ from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import CurrentBindingTarget
 from netizen_cli.runtime.contracts import NativeThreadMetadata
 from netizen_cli.session_providers import SessionNames
+from netizen_cli.session_settings import SessionFormView, SessionSettings
 from tests.support.channel_cards import (
     _card_button_value,
     _elements,
     direct_button_event,
     direct_card_event,
+    form_values,
 )
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -34,10 +36,13 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
         self.fx.runtime.thread_metadata_values["native"] = NativeThreadMetadata(
             "native", "Before", ""
         )
-        users = AdminUsers(self.fx.project_root, "cli_test")
-        member = users.add_initial("ou_admin")
+        self.open_admin(self.fx.project_root, self.fx.management, "ou_admin")
+
+    def open_admin(self, root, management, identity, **options):
+        users = AdminUsers(root, "cli_test")
+        member = users.add_initial(identity)
         auth = AdminAuth(users)
-        self.admin = AdminWebApplication(auth=auth, management=self.fx.management)
+        self.admin = AdminWebApplication(auth=auth, management=management, **options)
         self.admin.configure_authorities(("localhost",))
         self.admin.open_admission()
         self.addCleanup(self.admin.close_auth)
@@ -80,6 +85,40 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
     async def command(self, text):
         await self.fx.app.handle_message(FakeMessage(text, message_id="om_command"))
         return self.fx.channel.replies[-1][1]
+
+    async def test_owner_forms_and_authenticated_post_reject_unsupported_fields(self):
+        async with owner_channel() as (app, fx, clients, clock, _):
+            clock[0] = 2
+            binding = (await fx.create_binding(self.scope)).binding
+            self.open_admin(fx.project_root, app._management, "ou_user", backend_policy=app._policy)
+            for command, prefix in (("/new", "new"), ("/config", "config"), ("/defaults", "defaults_session")):
+                await app.handle_message(FakeMessage(command, message_id=prefix))
+                values = form_values(fx.channel.replies[-1][1])
+                for field, value, notice in (("effort", "high", "模型"), ("speed", "fast", "模型"),
+                                             ("progress_card", "progress-card:v1:[true,null]", "过程卡")):
+                    with self.subTest(command=command, field=field):
+                        await app.handle_card_action(direct_card_event(fx.channel, {**values, prefix + "_" + field: value}))
+                        self.assertIn(notice, fx.channel.replies[-1][1])
+            for override in ({"progress_card_enabled": True}, {"turn_settings": {
+                "model_id": "invented", "effort_id": "high", "service_tier_id": "fast",
+            }}):
+                action = (await self.actions())["configure"]
+                denied = await self.request("/api/v1/sessions/configure", self.payload(
+                    action, sessionSettings=SessionSettings().to_dict() | override,
+                ))
+                self.assertEqual((denied.status, json.loads(denied.body)["code"]), (409, "backend_unsupported"))
+            self.assertEqual(fx.store.list_bindings(self.scope.key), [binding])
+            self.assertEqual(clients.calls, [])
+
+    def test_model_and_progress_authority_are_independent(self):
+        for model_editable, progress_editable in ((True, False), (False, True)):
+            view = SessionFormView(model_editable, progress_editable)
+            feedback = view.defaults(None).task_feedback
+            self.assertEqual(feedback.progress_card_enabled, progress_editable)
+            view.validate(model_editable, feedback)
+            if not model_editable:
+                with self.assertRaises(BackendUnsupported):
+                    view.validate(True, feedback)
 
     async def test_manual_only_form_and_authenticated_dispatch(self):
         names = self.fx.management.names

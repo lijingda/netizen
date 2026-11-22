@@ -317,6 +317,10 @@ class BackendPolicy:
         if self.backend == "claude" and not self.owner_id:
             raise BackendError("Claude 实例需要一名所有者。")
 
+    @property
+    def owner_only(self) -> bool:
+        return self.backend == "claude"
+
     def bind(self, providers: Callable[[Provider], bool]) -> "BackendPolicy":
         return replace(self, providers=providers)
 
@@ -374,7 +378,7 @@ class BackendPolicy:
     def sender_refusal(
         self, sender_id: str | None, *, bare_help: bool = False
     ) -> str | None:
-        if self.backend == "claude" and (
+        if self.owner_only and (
             not sender_id or (sender_id != self.owner_id and not bare_help)
         ):
             return "这个 Claude 实例仅限所有者使用。"

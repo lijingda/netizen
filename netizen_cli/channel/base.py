@@ -826,7 +826,7 @@ class ChannelState:
                 sender_id=sender_id,
                 tag=tag,
                 form_value=form_value,
-                local_only=self._policy.backend == "claude",
+                form_view=self._management.session_form,
                 value=getattr(action, "value", None),
             )
             if (

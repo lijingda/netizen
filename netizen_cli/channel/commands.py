@@ -118,9 +118,8 @@ class CommandChannel(CardControlChannel):
                 app_id=self._app_id, chat_id=chat_id, topic_id=scope.topic_id,
                 root_message_id=None,
             )
-            if self._policy.backend == "claude":
-                if decoded.target_kind == "side" or side is not None:
-                    raise InvalidInteraction("Claude 试点暂不支持【Side】。")
+            if decoded.target_kind == "side" or side is not None:
+                self._policy.require(OperationId.SIDE)
             if decoded.target_kind == "side":
                 if side is None or side.id != decoded.target_id:
                     raise CardActionError("状态卡对应的 Side 已变化或不可用，本次未执行。")
@@ -133,7 +132,7 @@ class CommandChannel(CardControlChannel):
             else:
                 if side is not None:
                     raise CardActionError("状态卡与当前 Side 话题不一致，本次未执行。")
-                if self._policy.backend == "codex":
+                if self._management.local is None:
                     renewed_card = decoded.card()
                 await self._control(origin, decoded.command, expected_binding_id=decoded.target_id)
         except CardActionError as error:
@@ -152,9 +151,8 @@ class CommandChannel(CardControlChannel):
     async def _control(
         self, message: Any, intent: ControlIntent, *, expected_binding_id: str | None = None,
     ) -> None:
-        if self._policy.backend == "claude":
+        if self._management.local is not None:
             if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.DEFAULTS}:
-                assert self._management.local is not None
                 self._management.local.require_admission()
         refusal = self._policy.command_refusal(intent.name.value, archived=bool(intent.arguments))
         if refusal:
@@ -281,8 +279,7 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if self._policy.backend == "claude":
-            assert self._management.local is not None
+        if self._management.local is not None:
             snapshot = self._management.local.local_snapshot(binding.id)
             if snapshot.turn is not None or snapshot.unavailable:
                 await self._reply(message, "当前会话不允许修改配置。")
@@ -336,7 +333,7 @@ class CommandChannel(CardControlChannel):
         await self._reply(
             message,
             config_card(
-                local_only=self._policy.backend == "claude",
+                form_view=self._management.session_form,
                 scope=intent.scope,
                 binding_id=binding.id,
                 short_id=binding.short_id,
@@ -399,7 +396,7 @@ class CommandChannel(CardControlChannel):
             await self._reply(
                 message,
                 card,
-                **({"on_sent": remember_card} if self._policy.backend == "claude" else {}),
+                **({"on_sent": remember_card} if self._management.local is not None else {}),
             )
         except asyncio.CancelledError:
             raise
@@ -445,7 +442,7 @@ class CommandChannel(CardControlChannel):
         )
         await self._reply(
             message,
-            f"{'已恢复并切换' if binding.native_thread_id and self._policy.backend == 'codex' else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
+            f"{'已恢复并切换' if binding.native_thread_id and self._management.session_reads.native_catalog else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
         )
 
     async def _command_unarchive(self, message: Any, intent: ControlIntent) -> None:
@@ -708,7 +705,7 @@ class CommandChannel(CardControlChannel):
         result = stopped.disposition
         if result is StopDisposition.NOT_RUNNING and not acknowledged:
             await self._reply(message, "当前任务恰好已经结束。")
-        elif result is StopDisposition.STOPPING and self._policy.backend == "claude":
+        elif result is StopDisposition.STOPPING and self._management.local is not None:
             await self._reply(message, "已在等待上一次停止请求的结果。")
         elif result is StopDisposition.COMPACTING:
             await self._reply(
