@@ -9,7 +9,10 @@ from contextlib import contextmanager
 import logging
 import time
 
-from claude_agent_sdk import RateLimitInfo, ResultMessage
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from claude_agent_sdk import RateLimitInfo, ResultMessage
 
 from ..session_views import Availability, ObservationPresentation, SessionField, SessionObservations
 
@@ -35,7 +38,7 @@ _USAGE = (("input_tokens", "输入 token"), ("output_tokens", "输出 token"),
 _PRESENTATION = ObservationPresentation(
     provider="Claude Code", identity_label="Claude 会话 ID",
     workspace=(("cwd", "上次观测的工作目录"),),
-    model=(("model", "Model"), ("effort", "Effort"), ("speed", "Speed"), ("configuration", "配置来源")),
+    model_rows=((("model", "Model"),), (("effort", "Effort"), ("speed", "Speed")), (("configuration", "配置来源"),)),
     usage=(("context", "上下文窗口"), *_USAGE), details=(("subscription", "订阅"),),
     row=(("model", "上次观测的模型"),), admin=(("model", "模型"), *_USAGE, ("context", "上下文窗口")),
 )
@@ -91,6 +94,8 @@ class ClaudeObservations:
         return sample if sample and (sample.session, sample.execution) == (session, execution) else None
 
     def rate(self, binding: str, session: str, execution: str, info: RateLimitInfo) -> None:
+        from claude_agent_sdk import RateLimitInfo
+
         sample = self._exact(binding, session, execution)
         if sample is None or not isinstance(info, RateLimitInfo):
             return
@@ -115,9 +120,9 @@ class ClaudeObservations:
         valid = type(cost) in (int, float) and cost is not None and 0 <= cost <= 1e100 and math.isfinite(cost)
         self._set(sample, "totalCostUsd", cost if valid else None, "Claude Result", now)
 
-    def read(self, binding: str, session: str | None, execution: str | None = None) -> SessionObservations:
+    def read(self, binding: str, session: str | None, execution: str | None) -> SessionObservations:
         sample = self._sessions.get(binding)
-        if sample and sample.session == session and (execution is None or sample.execution == execution):
+        if sample and sample.session == session and sample.execution == execution:
             return SessionObservations(tuple(sample.fields.items()), _DEFAULTS, _PRESENTATION)
         return DEFAULT_OBSERVATIONS
 

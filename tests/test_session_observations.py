@@ -52,7 +52,7 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("claude-test", warm)
             self.assertIn("allowed", warm)
             self.assertNotIn(private_value, warm)
-            values = ordinary.observations.read(binding, client.session).json()
+            values = ordinary.observations.read(binding, client.session, client.inputs[0]["uuid"]).json()
             self.assertEqual(Path(values["cwd"]["value"]).resolve(), fx.project.resolve())
             self.assertEqual(values["input_tokens"]["value"], 0)
             self.assertEqual(values["totalCostUsd"]["value"], 0)
@@ -83,7 +83,7 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(next_page.items, (next_page.current,))
             statuses = await app._management.binding_statuses_exact(binding_ids=(first.id,), deadline=deadline)
-            self.assertEqual(_runtime_binding_json(statuses[0])["observations"], ordinary.observations.read(first.id, None).json())
+            self.assertEqual(_runtime_binding_json(statuses[0])["observations"], ordinary.observations.read(first.id, None, None).json())
             self.assertIsNone(await app._management.binding_metadata_exact(first.id, deadline=deadline))
             self.assertEqual((clients.calls, clients.lookups), ([], []))
 
@@ -164,6 +164,39 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             again = await app._management.binding_status_exact(binding.id, snapshot=idle)
             self.assertEqual(again.observations.json(), historical)
 
+    async def test_idle_revision_after_failed_init_sampling_does_not_inherit_earlier_execution(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            binding = (await fx.create_binding(scope)).binding
+            await app.handle_message(FakeMessage("A", message_id="A"))
+            first = clients.calls[-1]
+            first.init(model="first-model")
+            first.result(usage={"input_tokens": 17})
+            self.assertTrue(await ordinary.wait_idle(2))
+            before = ordinary.capture_status(binding.id)
+            self.assertEqual(before.observations.get("input_tokens").value, 17)
+
+            with patch.object(ordinary.observations, "init", side_effect=ValueError), self.assertLogs(
+                "netizen_cli.runtime.claude_status", level="WARNING",
+            ):
+                await app.handle_message(FakeMessage("B", message_id="B"))
+                second = clients.calls[-1]
+                second.init(model="second-model")
+                second.result(usage={"input_tokens": 31})
+                self.assertTrue(await ordinary.wait_idle(2))
+            current = await app._management.binding_status_exact(binding.id)
+            self.assertGreater(current.snapshot.activity_revision, before.activity_revision)
+            retained = await app._management.binding_status_exact(binding.id, snapshot=current.snapshot)
+            for view in (current, retained):
+                self.assertEqual(view.local_label, "空闲")
+                for key in ("model", "input_tokens"):
+                    field = view.observations.get(key)
+                    self.assertIs(field.availability, Availability.UNOBSERVED)
+                    self.assertIsNone(field.execution_id)
+            historical = await app._management.binding_status_exact(binding.id, snapshot=before)
+            self.assertEqual(historical.observations.get("model").value, "first-model")
+
     async def test_sampling_failures_leave_native_result_and_delivery_intact(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2
@@ -195,22 +228,25 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             await app.handle_card_action(event)
             self.assertIn("原生提问", fx.channel.replies[-1][1])
 
-    async def test_local_third_page_activation_retains_previous_and_fallback_row_controls(self):
+    async def test_local_fourth_page_activation_can_return_to_every_predecessor(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2
             scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
-            records = [(await fx.create_binding(scope)).binding for _ in range(3)]
+            records = [(await fx.create_binding(scope)).binding for _ in range(4)]
             direct_card_event(fx.channel, {}, message_id="page")
             async def click(card, label):
                 await app.handle_card_action(direct_button_event(_card_button_value(card, label), message_id="page"))
                 return OutboundCard(card=fx.channel.updates[-1][1])
             with patch("netizen_cli.channel.session_cards.SESSIONS_PAGE_SIZE", 1):
                 card = await app._sessions_card(scope=scope)
-                card = await click(await click(card, "下一页"), "下一页")
+                for _ in range(3):
+                    card = await click(card, "下一页")
                 card = await click(card, "设为当前")
                 self.assertEqual(fx.store.active_binding(scope.key).id, records[0].id)
-                previous = await click(card, "上一页")
-                self.assertIn("第 2 页", str(previous.card))
+                for page in (3, 2, 1):
+                    card = await click(card, "上一页")
+                    self.assertIn(f"第 {page} 页", str(card.card))
+                    self.assertIn(records[-page].short_id, str(card.card))
                 with patch.object(app._management, "binding_status_exact", side_effect=TimeoutError):
                     fallback = (await app._sessions_card(scope=scope)).card
                 buttons = [button["text"]["content"] for button in _elements(fallback, "button")]
@@ -254,8 +290,8 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
         samples.init("a", "x", "first", "old", "/project")
         samples.init("a", "y", "second", "new", "/project")
         samples.rate("a", "y", "first", RateLimitInfo("rejected"))
-        self.assertFalse(samples.read("a", "x").fields)
-        self.assertEqual(samples.read("a", "y").json()["limitStatus"]["availability"], "未观测")
+        self.assertFalse(samples.read("a", "x", "first").fields)
+        self.assertEqual(samples.read("a", "y", "second").json()["limitStatus"]["availability"], "未观测")
         samples.init("b", "z", "third", {"private": "ignored"}, "/different")
-        self.assertFalse(samples.read("a", "y").fields)
-        self.assertEqual(samples.read("b", "z").json()["model"]["availability"], "取不到")
+        self.assertFalse(samples.read("a", "y", "second").fields)
+        self.assertEqual(samples.read("b", "z", "third").json()["model"]["availability"], "取不到")

@@ -164,7 +164,6 @@ class SessionIdentityCardTest(unittest.TestCase):
 
     def test_deep_local_page_keeps_two_positions_per_action_and_fits_the_card(self):
         from netizen_cli.bindings import BindingCursor
-        from netizen_cli.session_views import SessionObservations
 
         navigation = SessionCardPage("lazy")
         items = []
@@ -174,7 +173,7 @@ class SessionIdentityCardTest(unittest.TestCase):
             navigation = navigation.next(BindingCursor(stamp, identity))
             items.append(SessionCardItem(
                 identity, identity[:8], "project" * 8, self.native_id, "", "running", False,
-                turn_id=self.native_id, observations=SessionObservations(), registered_at=stamp,
+                turn_id=self.native_id, registered_at=stamp,
             ))
         token = navigation.encode(self.scope)
         self.assertGreater(len(token), 650)
@@ -189,6 +188,7 @@ class SessionIdentityCardTest(unittest.TestCase):
         actions = [button["behaviors"][0]["value"] for button in _elements(card, "button")
                    if "binding_id" in button["behaviors"][0]["value"]]
         self.assertEqual(len(actions), 21)
+        self.assertEqual(str(card).count("上次观测的模型：未观测"), 11)
         for action in actions:
             reference = SessionCardPage.decode(action["session_cursor"], self.scope)
             self.assertEqual(reference.positions, navigation.positions[-2:])

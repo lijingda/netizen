@@ -30,7 +30,7 @@ from ..cards import (
 from .messages import public_chat_kind as _public_chat_kind
 from ..cards.controls import local_status_card
 from ..cards.status import (
-    decode_status_command, render_codex_status,
+    codex_context_line, codex_model_lines, decode_status_command, session_status_card,
 )
 from ..runtime.contracts import (
     ReleaseDisposition,
@@ -76,7 +76,7 @@ from .base import (
     _turn_progress_status_lines,
 )
 from .card_controls import CardControlChannel
-from ..session_views import Availability, ContextUsageField, SessionStatusView
+from ..session_views import Availability, ContextUsageField
 
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
@@ -656,11 +656,13 @@ class CommandChannel(CardControlChannel):
         )
         await self._reply(
             message,
-            render_codex_status(intent.scope, binding.id, SessionStatusView(
-                binding.short_id, binding.project_alias, binding.native_thread_id, state,
-                thread_metadata_lines, git_branch_lines, context, context_mode_lines, model,
-                progress_lines, subscription_line,
-            )),
+            session_status_card(
+                scope=intent.scope, binding_id=binding.id, short_id=binding.short_id, project_alias=binding.project_alias,
+                native_thread_id=binding.native_thread_id, state=state, metadata_lines=thread_metadata_lines,
+                git_branch_lines=git_branch_lines, context_window_line=codex_context_line(context),
+                context_mode_lines=context_mode_lines, model_lines=codex_model_lines(model),
+                progress_lines=progress_lines, subscription_line=subscription_line,
+            ),
         )
 
     def _context_usage_field(self, binding: ThreadBinding, *, active_turn: bool) -> ContextUsageField:

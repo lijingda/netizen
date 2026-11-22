@@ -1475,6 +1475,7 @@ class InstanceManagementService:
         scope: FeishuScope,
         archived: bool = False,
         lazy: bool = False,
+        recover_previous: bool = False,
         cursor: BindingCursor | SessionNativeCursor | None = None,
         limit: int = 10,
         deadline: float,
@@ -1512,7 +1513,19 @@ class InstanceManagementService:
                     BindingInventoryRecord(current_binding, self._bindings.get_scope(scope.key)),
                     views.get(current_binding.native_thread_id), ChatLabelResolver.fallback(scope.chat_id),
                 )
+        previous_cursor = None
+        if recover_previous and not native_catalog and isinstance(cursor, BindingCursor):
+            # Descending pages start just after their cursor. Walk one page in
+            # the opposite direction to find the preceding page's start.
+            newer = await self._bindings.query_bindings(
+                query=replace(local, sort_direction="asc"), cursor=cursor, limit=limit,
+                deadline_seconds=self._query_seconds(deadline),
+            )
+            if len(newer.items) == limit:
+                boundary = newer.items[-1].binding
+                previous_cursor = BindingCursor(boundary.created_at, boundary.id)
         return ScopeSessionPage(
+            previous_cursor=previous_cursor,
             items=items, next_cursor=next_cursor, current=current,
             active_binding_id=current_binding.id if current_binding is not None else None,
             has_lazy=has_lazy,
@@ -1622,7 +1635,9 @@ class InstanceManagementService:
         assert local is not None
         status = _project_binding_status(binding=binding, snapshot=capture.snapshot, primary_status_unavailable=local.unavailable,
                                          persisted_goal_resolved=True)
-        return replace(status, local_label=local.label, observations=capture.observations)
+        assert self.local is not None
+        observations = capture.observations if capture.observations is not None else self.local.observation_defaults
+        return replace(status, local_label=local.label, observations=observations)
 
     async def binding_status_exact(
         self,
@@ -1719,14 +1734,16 @@ class InstanceManagementService:
                 raise
             except (GoalControlError, ThreadLifecycleError, TimeoutError):
                 binding = self._bindings.get(binding_id)
-                snapshot = self._runtime.runtime_snapshot_exact(binding_id)
-                status = _project_binding_status(
+                if self.local is not None:
+                    local = self.local.local_snapshot(binding_id)
+                    snapshot = local.capture(binding_id, binding.native_thread_id, self.local.observation_defaults)
+                    return self._local_binding_status(binding, StatusCapture(snapshot, local))
+                return _project_binding_status(
                     binding=binding,
-                    snapshot=snapshot,
+                    snapshot=self._runtime.runtime_snapshot_exact(binding_id),
                     primary_status_unavailable=True,
                     catalog_state=catalog_state,
                 )
-                return replace(status, observations=self.local.observation_defaults) if self.local is not None else status
 
         return tuple(await asyncio.gather(*(resolve(item) for item in binding_ids)))
 

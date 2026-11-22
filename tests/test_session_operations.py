@@ -1,6 +1,7 @@
 """Exercise the same operation through the published Feishu and Admin entries."""
 
 import json
+from dataclasses import replace
 from html.parser import HTMLParser
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -109,6 +110,52 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
     async def command(self, text):
         await self.fx.app.handle_message(FakeMessage(text, message_id="om_command"))
         return self.fx.channel.replies[-1][1]
+
+    async def test_local_observation_failures_and_absent_fields_use_defaults_across_transports(self):
+        async with owner_channel() as (app, fx, _, clock, ordinary):
+            clock[0] = 2
+            bindings = [(await fx.create_binding(self.scope)).binding for _ in range(4)]
+            self.open_admin(fx.project_root, app._management, "ou_user")
+            defaults = ordinary.observation_defaults.json()
+            ids = ",".join(binding.id for binding in bindings)
+
+            def check_rows(rows):
+                self.assertEqual({row["bindingId"] for row in rows}, {binding.id for binding in bindings})
+                for row in rows:
+                    self.assertEqual(row["observations"], defaults)
+                    self.assertEqual(row["localLabel"], "空闲")
+
+            async def lists():
+                await app.handle_message(FakeMessage("/sessions", message_id="list"))
+                self.assertIn("上次观测的模型：未观测", str(fx.channel.replies[-1][1].card))
+                response = await self.request("/api/v1/sessions")
+                self.assertEqual(response.status, 200)
+                check_rows([item["runtime"] for item in json.loads(response.body)["items"]])
+
+            with patch.object(ordinary.observations, "read", side_effect=TimeoutError) as read, self.assertLogs(
+                "netizen_cli.runtime.claude_status", level="WARNING",
+            ):
+                await lists()
+                self.assertEqual(read.call_count, 2 * len(bindings))
+
+            source = app._management.status_source
+            def without_observations(binding, snapshot=None):
+                return replace(source.capture(binding, snapshot), observations=None)
+
+            with patch.object(app._management, "status_source", Mock(capture=without_observations)):
+                await lists()
+                await app.handle_message(FakeMessage("/status", message_id="status"))
+                self.assertIn("上下文窗口：取不到", str(fx.channel.replies[-1][1].card))
+                self.assertIn("订阅：不适用", str(fx.channel.replies[-1][1].card))
+                for resolve in ("false", "true"):
+                    response = await self.request(f"/api/v1/runtime-snapshots?bindingIds={ids}&resolvePrimary={resolve}")
+                    self.assertEqual(response.status, 200)
+                    check_rows(json.loads(response.body)["bindings"])
+
+            with (patch.object(app._management, "status_source", Mock(capture=Mock(side_effect=TimeoutError))),
+                  patch.object(ordinary.observations, "read", side_effect=AssertionError("retried read")) as read):
+                await lists()
+                read.assert_not_called()
 
     async def test_channel_and_admin_inherit_the_bound_policy(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):

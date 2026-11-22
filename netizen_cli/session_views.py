@@ -49,7 +49,7 @@ class ObservationPresentation:
     provider: str = ""
     identity_label: str = "原生会话 ID"
     workspace: tuple[tuple[str, str], ...] = ()
-    model: tuple[tuple[str, str], ...] = ()
+    model_rows: tuple[tuple[tuple[str, str], ...], ...] = ()
     usage: tuple[tuple[str, str], ...] = ()
     details: tuple[tuple[str, str], ...] = ()
     row: tuple[tuple[str, str], ...] = ()
@@ -97,17 +97,33 @@ class ModelStatusFields:
 
 @dataclass(frozen=True, slots=True)
 class SessionStatusView:
-    short_id: str
+    """All ordinary status cards present these rows, including callback redraws."""
+
     project_alias: str
-    native_thread_id: str | None
     state: str
+    state_label: str
     metadata_lines: tuple[str, str]
     workspace_lines: tuple[str, ...]
-    context: ContextUsageField
-    message_scope_lines: tuple[str, ...]
-    model: ModelStatusFields
+    model_rows: tuple[tuple[str, ...], ...]
+    context_lines: tuple[str, ...]
     progress_lines: tuple[str, ...]
-    subscription_line: str
+    identity_lines: tuple[str, str]
+    subscription_lines: tuple[str, ...]
+
+    @classmethod
+    def from_observations(
+        cls, binding: ThreadBinding, state: str, label: str, observed: SessionObservations,
+    ) -> "SessionStatusView":
+        layout = observed.presentation
+        return cls(
+            project_alias=binding.project_alias, state=state, state_label=label,
+            metadata_lines=(layout.provider, f"本地任务：{label}"), workspace_lines=observed.lines(layout.workspace),
+            model_rows=tuple(lines for group in layout.model_rows if (lines := observed.lines(group))),
+            context_lines=observed.lines(layout.usage), progress_lines=(),
+            identity_lines=(f"Netizen 会话编号（/resume）：{binding.short_id}",
+                            f"{layout.identity_label}：{binding.native_thread_id or '尚未建立'}"),
+            subscription_lines=observed.lines(layout.details),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +190,7 @@ class ScopeSessionPage:
     current: SessionInventoryItem | None
     active_binding_id: str | None
     has_lazy: bool
+    previous_cursor: BindingCursor | None = None
 
 
 @dataclass(frozen=True, slots=True)

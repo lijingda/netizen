@@ -105,6 +105,13 @@ class LocalExecutionSnapshot:
     turn: ActiveTurnSnapshot | None
     unavailable: bool
 
+    def capture(self, binding_id: str, session_id: str | None, observations: SessionObservations) -> "LocalStatusSnapshot":
+        return LocalStatusSnapshot(
+            binding_id=binding_id, activity_revision=self.revision, turn=self.turn, goal=None,
+            compacting=False, lifecycle=None, subscription=None, context_window_usage=None,
+            local=self, session_id=session_id, observations=observations,
+        )
+
     @property
     def label(self) -> str:
         if self.unavailable:

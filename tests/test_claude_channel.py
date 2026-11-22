@@ -12,7 +12,7 @@ from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions, GRACE, UNKNOWN
-from tests.support.channel_cards import _card_button_value, direct_card_event, form_values, elements
+from tests.support.channel_cards import _card_button_value, _elements, direct_button_event, direct_card_event, form_values, elements
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from tests.support.claude_client import FakeClaudeClients
@@ -116,6 +116,12 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             await app.handle_message(FakeMessage("work", message_id="om-input"))
             client = clients.calls[-1]
             client.init()
+            def check_model_columns(card):
+                rows = [[column["elements"][0]["text"]["content"] for column in group["columns"]]
+                        for group in _elements(card, "column_set")
+                        if all(column["elements"][0]["tag"] == "div" for column in group["columns"])]
+                self.assertIn(["Effort：未观测", "Speed：不适用"], rows)
+
             try:
                 for command in ("/sessions", "/status"):
                     with self.subTest(command=command):
@@ -126,6 +132,11 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(action["intent"], "binding.stop.exact")
                         self.assertEqual(action["expected_turn_id"], "turn:v1:" + client.inputs[0]["uuid"])
                         self.assertEqual(action["expected_activity_revision"], ordinary.local_snapshot(binding.binding.id).revision)
+                check_model_columns(card.card)
+                direct_card_event(fx.channel, {}, message_id="om-view")
+                await app.handle_card_action(direct_button_event(action, message_id="om-view"))
+                self.assertEqual(client.interrupts, 1)
+                check_model_columns(fx.channel.updates[-1][1])
             finally:
                 client.result()
                 self.assertTrue(await ordinary.wait_idle(2))

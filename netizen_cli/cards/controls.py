@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any
 from lark_channel import OutboundCard
 
 from ..backends import BackendPolicy, OperationId
-from ..session_views import SessionObservations
-from .status import render_observed_status
+from ..session_views import SessionObservations, SessionStatusView
+from .status import render_session_status
 if TYPE_CHECKING:
     from ..management.service import BindingStatusProjection
 from ..bindings import (
@@ -1464,7 +1464,8 @@ def local_status_card(
     controls = ((_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, turn.turn_id,
                                     SessionCardPage("lazy"), from_status=True),)
                 if turn is not None and status.can_stop else ())
-    return render_observed_status(binding, status.primary_status or "unknown", label, observed, exact_controls=controls)
+    view = SessionStatusView.from_observations(binding, status.primary_status or "unknown", label, observed)
+    return render_session_status(view, controls)
 
 
 def sessions_card(
@@ -1570,8 +1571,7 @@ def _session_row(
     )
     marker_text = "● 当前" if session.active else "○"
     if local_directory:
-        observed = session.observations
-        assert observed is not None
+        observed = session.observations or policy.observation_defaults
         text = (f"{marker_text} {session.short_id}\nProject：{session.project_alias} · 状态：{session.state_label or '状态待确认'}\n"
                 f"{observed.presentation.identity_label}：{session.native_thread_id or '尚未建立'}\n登记时间：{session.registered_at}")
         text = "\n".join((text, *observed.lines(observed.presentation.row)))

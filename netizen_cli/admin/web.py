@@ -671,17 +671,15 @@ class AdminWebApplication:
             return await self._project_files(context)
         if context.method == "GET" and context.path in _ADMIN_PAGE_PATHS:
             page = self._assets["index.html"]
-            attributes = []
+            attributes = [f'data-backend-name="{self._backend_policy.display_name}"']
             if self._backend_policy.owner_only:
-                attributes.extend((f'data-backend="{self._backend_policy.backend}"', 'data-owner-only="true"',
-                                   f'data-backend-name="{self._backend_policy.display_name}"'))
+                attributes.extend((f'data-backend="{self._backend_policy.backend}"', 'data-owner-only="true"'))
             disabled = [operation.value for operation in OperationId if not self._backend_policy.allows(operation)]
             if disabled:
                 attributes.append('data-unavailable="' + " ".join(disabled) + '"')
             if not self._backend_policy.allows(OperationId.MODEL):
                 attributes.append(f'data-inherited-model="{html.escape(self._backend_policy.inherited_model_label)}"')
-            if attributes:
-                page = page.replace(b"<body>", ("<body " + " ".join(attributes) + ">").encode(), 1)
+            page = page.replace(b"<body>", ("<body " + " ".join(attributes) + ">").encode(), 1)
             can_generate = self._backend_policy.allows(OperationId.GENERATE_NAME)
             page = page.replace(b"__NETIZEN_RENAME_HINT__", (
                 "自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。" if can_generate else

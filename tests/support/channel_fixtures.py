@@ -194,6 +194,7 @@ async def channel_fixture(*, ordinary: OrdinarySessionPort | None = None):
         "11111111-0000-0000-0000-000000000001",
         "22222222-0000-0000-0000-000000000002",
         "33333333-0000-0000-0000-000000000003",
+        "44444444-0000-0000-0000-000000000004",
     ))
     with tempfile.TemporaryDirectory() as directory, closing(BindingStore(id_factory=lambda: next(ids))) as store:
         root = Path(directory)

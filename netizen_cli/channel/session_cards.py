@@ -149,7 +149,9 @@ class SessionCardChannel(QuestionChannel):
                 scope=scope, session_cursor=session_cursor, notice=notice,
             )
         deadline = asyncio.get_running_loop().time() + constants.SESSION_QUERY_TIMEOUT_SECONDS
+        previous = navigation.previous()
         inventory = await self._management.query_scope_sessions(
+            recover_previous=local_directory and previous is None and navigation.page > 1,
             scope=scope, lazy=navigation.state == "lazy", cursor=navigation.cursor,
             limit=SESSIONS_PAGE_SIZE, deadline=deadline,
         )
@@ -173,9 +175,6 @@ class SessionCardChannel(QuestionChannel):
         for item, projection in zip(items, projections, strict=True):
             binding = item.record.binding
             snapshot = projection.snapshot
-            observations = projection.observations
-            if observations is None and self._local_sessions is not None:
-                observations = self._local_sessions.observation_defaults
             sessions.append(SessionCardItem(
                 binding_id=binding.id,
                 short_id=binding.short_id,
@@ -183,7 +182,7 @@ class SessionCardChannel(QuestionChannel):
                 native_thread_id=binding.native_thread_id,
                 title=_session_title(binding, item.native.metadata if item.native else None),
                 state=projection.primary_status or "暂不可用",
-                state_label=projection.local_label, observations=observations,
+                state_label=projection.local_label, observations=projection.observations,
                 registered_at=binding.created_at,
                 catalog_unconfirmed=item.inventory_state is SessionInventoryState.UNKNOWN,
                 active=binding.active,
@@ -191,7 +190,9 @@ class SessionCardChannel(QuestionChannel):
                 turn_id=snapshot.turn.turn_id if snapshot.turn is not None else None,
             ))
         current_session = sessions.pop() if current is not None else None
-        previous = navigation.previous()
+        if local_directory and previous is None and navigation.page:
+            previous = (SessionCardPage("lazy", navigation.page - 1, (inventory.previous_cursor,))
+                        if inventory.previous_cursor is not None else SessionCardPage("lazy"))
         return sessions_card(
             scope=scope, sessions=tuple(sessions), current=current_session,
             native_delete_available=self._management.native_delete_available,

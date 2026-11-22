@@ -3,7 +3,10 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
+
+if TYPE_CHECKING:
+    from .session_views import SessionObservations
 
 from .domain import NativeCapability
 from .management_errors import ManagementError
@@ -331,6 +334,14 @@ class BackendPolicy:
     @property
     def display_name(self) -> str:
         return "Claude Code" if self.backend == "claude" else "Codex"
+
+    @property
+    def observation_defaults(self) -> "SessionObservations":
+        if self.backend == "claude":
+            from .runtime.claude_status import DEFAULT_OBSERVATIONS
+            return DEFAULT_OBSERVATIONS
+        from .session_views import SessionObservations
+        return SessionObservations()
 
     @property
     def inherited_model_label(self) -> str:

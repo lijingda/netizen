@@ -51,6 +51,12 @@ _WRITE_SECONDS = 30.0
 
 
 @dataclass(slots=True)
+class _BindingActivity:
+    revision: int = 0
+    last_execution_id: str | None = None
+
+
+@dataclass(slots=True)
 class _Execution:
     binding: ThreadBinding
     origin: object
@@ -145,7 +151,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
         self._locks: dict[str, asyncio.Lock] = {}
-        self._revisions: dict[str, int] = {}
+        self._activity: dict[str, _BindingActivity] = {}
         self._active: dict[str, _Execution] = {}
         self._tasks: dict[asyncio.Task[None], _Execution] = {}
         self._closes: set[asyncio.Task[None]] = set()
@@ -171,10 +177,12 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             self._locks[binding_id] = asyncio.Lock()
         return self._locks[binding_id]
 
-    def _advance(self, binding_id: str) -> int:
-        revision = self._revisions.get(binding_id, 0) + 1
-        self._revisions[binding_id] = revision
-        return revision
+    def _advance(self, binding_id: str, *, execution_id: str | None = None) -> int:
+        activity = self._activity.setdefault(binding_id, _BindingActivity())
+        activity.revision += 1
+        if execution_id is not None:
+            activity.last_execution_id = execution_id
+        return activity.revision
 
     async def binding_pointer_changed(self, previous_binding_id: str | None, current_binding_id: str | None) -> None:
         if previous_binding_id == current_binding_id:
@@ -206,7 +214,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         return binding
 
     def _admission(self, binding: ThreadBinding) -> SubmissionAdmission:
-        return SubmissionAdmission(binding.id, self._revisions.get(binding.id, 0), None, None,
+        return SubmissionAdmission(binding.id, self._activity.get(binding.id, _BindingActivity()).revision, None, None,
                                    binding.settings_revision, binding.context_revision, binding.feedback_revision)
 
     async def capture_submission_admission(self, binding_id: str) -> SubmissionAdmission:
@@ -232,7 +240,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             input_id = str(uuid4())
             message = user_message(input, input_id)
             execution = _Execution(binding, origin, binding.native_thread_id or str(uuid4()), input_id,
-                                   self._advance(binding.id), asyncio.get_running_loop().create_future())
+                                   self._advance(binding.id, execution_id=input_id), asyncio.get_running_loop().create_future())
             self._active[binding.id] = execution
             execution.task = asyncio.create_task(self._run(execution, cwd, message, context_commit))
             self._tasks[execution.task] = execution
@@ -264,7 +272,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if execution.stopping:
             raise OrdinaryInputRejected(START_CANCELLED)
         binding_id = execution.binding.id
-        if self._revisions[binding_id] != execution.revision or self._current(binding_id) != execution.binding:
+        if self._activity[binding_id].revision != execution.revision or self._current(binding_id) != execution.binding:
             raise OrdinaryInputRejected(STALE)
 
     def _candidate_dirs(self, binding: ThreadBinding) -> tuple[Path, ...]:
@@ -544,13 +552,11 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
     def capture_status(self, binding_id: str) -> LocalStatusSnapshot:
         local = self.local_snapshot(binding_id)
         session = self._bindings.get(binding_id).native_thread_id
-        execution = local.turn.turn_id if local.turn is not None else None
-        samples = self.observations.read(binding_id, session, execution)
-        return LocalStatusSnapshot(
-            binding_id=binding_id, activity_revision=local.revision, turn=local.turn, goal=None,
-            compacting=False, lifecycle=None, subscription=None, context_window_usage=None,
-            local=local, session_id=session, observations=samples,
-        )
+        execution_id = self._activity.get(binding_id, _BindingActivity()).last_execution_id
+        samples = self.observation_defaults
+        with record_observation():
+            samples = self.observations.read(binding_id, session, execution_id)
+        return local.capture(binding_id, session, samples)
 
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot:
         execution = self._active.get(binding_id)
@@ -559,7 +565,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             state = (ActiveState.CLOSING if execution.closing else
                      ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING)
             turn = ActiveTurnSnapshot(binding_id, execution.session, execution.input_id, self._owner, state)
-        return LocalExecutionSnapshot(execution.revision if execution else self._revisions.get(binding_id, 0),
+        return LocalExecutionSnapshot(execution.revision if execution else self._activity.get(binding_id, _BindingActivity()).revision,
                                       turn, binding_id in self._unavailable)
 
     async def activate_exact(self, binding_id: str, *, context_anchor: MessageContextAnchor | None = None) -> ThreadBinding:
