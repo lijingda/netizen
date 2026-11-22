@@ -157,6 +157,9 @@ class FakeManagement:
         return {chat_id: ChatLabelResolver.fallback(chat_id) for chat_id in chat_ids}
 
     def __init__(self, root: Path) -> None:
+        self.names = SimpleNamespace(writer=SimpleNamespace(eligible=lambda binding, state: (
+            binding.native_thread_id is not None and state is NativeThreadCatalogState.ACTIVE
+        )))
         self.native_delete_available = True
         self.defaults = None
         self.calls: list[tuple[str, object]] = []

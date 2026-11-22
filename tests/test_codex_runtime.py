@@ -6394,6 +6394,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(handle.stream_calls, 1)
         self.assertIsNone(self.runtime.context_window_usage(binding.id))
+        failed_at = self.runtime.context_window_read_failed_at(binding.id, submission.thread_id)
+        self.assertIsNotNone(failed_at)
+        self.assertEqual(self.runtime.context_window_read_failed_at(binding.id, submission.thread_id), failed_at)
+        self.assertIsNone(self.runtime.context_window_read_failed_at(binding.id, "other"))
         self.assertEqual(len(self.outcomes), 1)
         self.assertIsNone(self.outcomes[0].error)
         self.assertEqual(self.outcomes[0].final_response, "done:turn-1")

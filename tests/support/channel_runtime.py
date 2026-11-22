@@ -320,6 +320,9 @@ class StubRuntime:
                 return values[thread_id]
         raise KeyError(thread_id)
 
+    def context_window_read_failed_at(self, binding_id: str, thread_id: str) -> float | None:
+        return None
+
     def context_window_usage(self, binding_id: str) -> ContextWindowUsage | None:
         self.context_window_usage_calls.append(binding_id)
         return self.context_window_usage_values.get(binding_id)
@@ -439,6 +442,8 @@ class StubRuntime:
             or actual_turn_id != expected_turn_id
         ):
             raise ThreadLifecycleError("会话运行状态已经变化。")
+
+    name_generation_available = True
 
     async def generate_name_exact(self, binding_id: str) -> str:
         assert self.binding_store is not None

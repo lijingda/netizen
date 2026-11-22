@@ -173,6 +173,8 @@ class ChannelEntry(CommandChannel):
             if is_status_command(value):
                 if value.get("target_kind") == "side":
                     raise CardActionError("Claude 试点暂不支持【Side】。")
+                if value.get("command") == "stop":
+                    raise CardActionError("停止操作需要原执行标识，请重新发送 /status。")
                 require_command(self._policy, str(value.get("command", "")))
             elif value.get("intent"):
                 try:
@@ -195,25 +197,6 @@ class ChannelEntry(CommandChannel):
         action = getattr(event, "action", None)
         value = getattr(action, "value", None)
         form = getattr(action, "form_value", None)
-        special = None
-        if not refusal:
-            if is_fork_card_action(value, form):
-                special = OperationId.FORK
-            elif is_schedule_card_action(value, form):
-                special = OperationId.SCHEDULE
-            elif is_question_card_action(value, form):
-                special = OperationId.QUESTIONS
-            elif is_turn_file_action(value):
-                special = OperationId.FILES
-            try:
-                if special is not None:
-                    self._policy.require(special)
-                elif local is not None:
-                    assert self._local_sessions is not None
-                    self._check_local_card(value, form)
-                    self._local_sessions.require_admission()
-            except (BackendUnsupported, CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
-                refusal = str(error)
         if refusal:
             message_id = getattr(event, "message_id", "")
             if message_id and chat_id:
@@ -255,23 +238,33 @@ class ChannelEntry(CommandChannel):
                         reply_in_thread=getattr(chat_info, "chat_mode", None) == "topic",
                     )
                 return
+        handler = None
+        operation = None
         if is_status_command(value):
-            await self._handle_status_command(event)
+            handler = self._handle_status_command
+        elif is_fork_card_action(value, form):
+            handler, operation = self._handle_fork_card_action, OperationId.FORK
+        elif is_defaults_card_action(value, form):
+            handler = self._handle_defaults_card_action
+        elif is_question_card_action(value, form):
+            handler, operation = self._handle_question_card_action, OperationId.QUESTIONS
+        elif is_schedule_card_action(value, form):
+            handler, operation = self._handle_schedule_card_action, OperationId.SCHEDULE
+        elif is_turn_file_action(value):
+            handler, operation = self._handle_turn_file_card_action, OperationId.FILES
+        try:
+            if operation is not None:
+                self._policy.require(operation)
+            elif local is not None:
+                self._check_local_card(value, form)
+                local.require_admission()
+        except (BackendUnsupported, CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
+            message_id = getattr(event, "message_id", "")
+            if message_id and chat_id:
+                await self._reply(_CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(None)), str(error))
             return
-        if special is OperationId.FORK:
-            await self._handle_fork_card_action(event)
-            return
-        if is_defaults_card_action(value, form):
-            await self._handle_defaults_card_action(event)
-            return
-        if special is OperationId.QUESTIONS:
-            await self._handle_question_card_action(event)
-            return
-        if special is OperationId.SCHEDULE:
-            await self._handle_schedule_card_action(event)
-            return
-        if special is OperationId.FILES:
-            await self._handle_turn_file_card_action(event)
+        if handler is not None:
+            await handler(event)
             return
         intent: CardControlIntent | None = None
         context = _CardCallbackContext()

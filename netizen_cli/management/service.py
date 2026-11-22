@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
-from ..backends import BackendPolicy, BackendUnsupported as BackendUnsupported, OperationId, OPERATIONS, Provider
+from ..backends import BackendPolicy, BackendUnsupported as BackendUnsupported, OperationId, Provider
 from ..session_providers import CodexStatusSource, LocalStatusSource, ManualTitleWriter, SessionListReads, SessionNames, StatusCapture, StatusSource
 from ..session_views import (
     NativeThreadView as NativeThreadView, ScopeSessionPage as ScopeSessionPage,
@@ -654,8 +654,7 @@ class ManagementRuntimePort:
 
     def runtime_snapshot_exact(self, binding_id: str) -> BindingRuntimeSnapshot:
         if self.local is not None:
-            state = self.local.local_snapshot(binding_id)
-            return BindingRuntimeSnapshot(binding_id, state.revision, state.turn, None, False, None, None, None)
+            return self.local.local_snapshot(binding_id).runtime_snapshot(binding_id)
         return self.__runtime.binding_runtime_snapshot(binding_id)
 
     async def goal_snapshot_exact(
@@ -789,12 +788,13 @@ class InstanceManagementService:
         self._runtime = runtime
         self.local = runtime.local if isinstance(runtime, ManagementRuntimePort) else None
         self.names = runtime.names if isinstance(runtime, ManagementRuntimePort) else SessionNames.from_runtime(runtime)
+        identity = self.local.backend_policy if self.local is not None else BackendPolicy("codex")
+        self.policy = identity.bind(self.has_provider)
         self.status_source: StatusSource
         if self.local is None:
             self.status_source = CodexStatusSource(lambda binding_id: runtime.runtime_snapshot_exact(binding_id))
         else:
-            cache = getattr(self.local, "observations", None)
-            self.status_source = LocalStatusSource(self.local, cache.read if cache is not None else lambda *_: SessionObservations())
+            self.status_source = LocalStatusSource(self.local)
         self.session_reads = (
             SessionListReads(True, self._native_session_page, self._native_binding_metadata)
             if self.local is None else SessionListReads(False, self._local_session_page, self._local_binding_metadata)
@@ -849,20 +849,20 @@ class InstanceManagementService:
         )
 
     def progress_card_settings(self) -> dict[str, Any]:
-        self._require_operation(OperationId.PROGRESS)
+        self.policy.require(OperationId.PROGRESS)
         return self._progress_card_config.view()
 
     async def update_progress_card_settings(
         self, settings: ProgressCardSettings, *, expected_revision: str,
     ) -> dict[str, Any]:
-        self._require_operation(OperationId.PROGRESS)
+        self.policy.require(OperationId.PROGRESS)
         await self.submit_config_write(
             self._progress_card_config.update, settings, expected_revision=expected_revision,
         )
         return self.progress_card_settings()
 
     def question_notification_settings(self) -> dict[str, Any]:
-        self._require_operation(OperationId.QUESTIONS)
+        self.policy.require(OperationId.QUESTIONS)
         return self._question_notification_config.view()
 
     @property
@@ -872,7 +872,7 @@ class InstanceManagementService:
     async def update_question_notification_settings(
         self, settings: QuestionNotificationSettings, *, expected_revision: str,
     ) -> dict[str, Any]:
-        self._require_operation(OperationId.QUESTIONS)
+        self.policy.require(OperationId.QUESTIONS)
         await self.submit_config_write(
             self._question_notification_config.update, settings, expected_revision=expected_revision,
         )
@@ -880,7 +880,7 @@ class InstanceManagementService:
 
     async def completion_thread_name(self, thread_id: str) -> str | None:
         """One bounded exact read; a timed-out SDK worker still occupies its slot."""
-        self._require_codex_feature("会话命名")
+        self.policy.require_provider(Provider.CODEX_RUNTIME, "会话命名")
         try:
             metadata = await self._read_thread_summary(
                 thread_id, deadline=asyncio.get_running_loop().time() + 1,
@@ -892,7 +892,7 @@ class InstanceManagementService:
     async def update_session_tool_access(
         self, service: SessionPolicyService, policy: SessionAccessPolicy, *, expected_revision: str,
     ) -> None:
-        self._require_operation(OperationId.COLLABORATION)
+        self.policy.require(OperationId.COLLABORATION)
         await self.submit_config_write(
             service.update, policy, expected_revision=expected_revision,
         )
@@ -940,37 +940,24 @@ class InstanceManagementService:
     @property
     def session_form(self) -> SessionFormView:
         return SessionFormView.from_operations(
-            lambda op: self.has_provider(OPERATIONS[op].provider),
+            self.policy.allows,
             inherited_source="原生 Claude 设置" if self.local is not None else "继承 Codex",
         )
 
-    def _unavailable(self, operation: OperationId) -> BackendUnsupported:
-        label = OPERATIONS[operation].label
-        detail = None if self.local is not None else f"当前实例不支持【{label}】。"
-        return BackendUnsupported(label, detail=detail)
-
-    def _require_operation(self, operation: OperationId) -> None:
-        if not self.has_provider(OPERATIONS[operation].provider):
-            raise self._unavailable(operation)
-
     def _title_writer(self) -> ManualTitleWriter:
+        self.policy.require(OperationId.MANUAL_RENAME)
         writer = self.names.writer
-        if writer is None:
-            raise self._unavailable(OperationId.MANUAL_RENAME)
+        assert writer is not None
         return writer
 
     def _name_generator(self) -> Callable[[str], Awaitable[str]]:
+        self.policy.require(OperationId.GENERATE_NAME)
         generate = self.names.generate
-        if generate is None:
-            raise self._unavailable(OperationId.GENERATE_NAME)
+        assert generate is not None
         return generate
 
-    def _require_codex_feature(self, label: str) -> None:
-        if not self.has_provider(Provider.CODEX_RUNTIME):
-            raise BackendUnsupported(label)
-
     def enable_schedules(self, *, app_id: str, chat_info: Any = None) -> ScheduleService:
-        self._require_codex_feature("定时任务")
+        self.policy.require_provider(Provider.CODEX_RUNTIME, "定时任务")
         if self.schedules is None:
             self.schedules = ScheduleService(
                 bindings=self._bindings, runtime=self._runtime,
@@ -1490,7 +1477,7 @@ class InstanceManagementService:
         """Read one Scope page, with an independent exact current-session entry."""
         native_catalog = self.session_reads.native_catalog
         if archived and not native_catalog:
-            self._require_operation(OperationId.ARCHIVED)
+            self.policy.require(OperationId.ARCHIVED)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("page size must be between 1 and 100")
         if archived and lazy:
@@ -1531,7 +1518,7 @@ class InstanceManagementService:
         cursor: str | None = None, limit: int = 10,
         previous_page: NativeConversationPage | None = None,
     ) -> NativeConversationPage:
-        self._require_operation(OperationId.HISTORY)
+        self.policy.require(OperationId.HISTORY)
         binding = self._bindings.get(binding_id)
         if binding.native_thread_id is None or binding.native_thread_id != thread_id:
             raise NativeThreadMissing("Exact native Thread identity is no longer available")
@@ -1571,7 +1558,7 @@ class InstanceManagementService:
         A missing summary says nothing about native archive/existence state.
         Timed-out SDK workers remain counted until their requests finish.
         """
-        self._require_operation(OperationId.HISTORY)
+        self.policy.require(OperationId.HISTORY)
         binding = self._bindings.get(binding_id)
         views = await self._session_native_views((binding,), native=None, deadline=deadline)
         view = views.get(binding.native_thread_id)
@@ -1585,7 +1572,7 @@ class InstanceManagementService:
         limit: int = 25,
         deadline: float,
     ) -> SideTopicInventoryPage:
-        self._require_operation(OperationId.SIDE)
+        self.policy.require(OperationId.SIDE)
         projects = (query.project_alias,) if query.project_alias is not None else query.project_aliases
         page = await self._bindings.query_side_topics(
             query=query,
@@ -1641,7 +1628,7 @@ class InstanceManagementService:
         deadline: float | None = None,
     ) -> BindingStatusProjection:
         binding = self._bindings.get(binding_id)
-        capture = self.status_source.capture(binding) if snapshot is None or self.local is not None else StatusCapture(snapshot)
+        capture = self.status_source.capture(binding, snapshot)
         if capture.local is not None:
             return self._local_binding_status(binding, capture)
         before = capture.snapshot
@@ -1748,7 +1735,7 @@ class InstanceManagementService:
         if len(binding_ids) + len(side_ids) > 50:
             raise ValueError("runtime snapshot request accepts at most 50 IDs")
         if side_ids:
-            self._require_operation(OperationId.SIDE)
+            self.policy.require(OperationId.SIDE)
         binding_snapshots = []
         for binding_id in binding_ids:
             binding = self._bindings.get(binding_id)
@@ -1976,7 +1963,7 @@ class InstanceManagementService:
         reference: str,
         context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.UNARCHIVE)
+        self.policy.require(OperationId.UNARCHIVE)
         async with self._scope_coordinator.hold(scope_key):
             previous_id = self._active_id(scope_key)
             binding = self._bindings.resolve_reference(
@@ -2050,7 +2037,7 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.ARCHIVE)
+        self.policy.require(OperationId.ARCHIVE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             previous_id = binding.id
@@ -2067,7 +2054,7 @@ class InstanceManagementService:
         target: CurrentBindingTarget,
         expected_native_thread_id: str | None,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.DELETE)
+        self.policy.require(OperationId.DELETE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             if binding.native_thread_id != expected_native_thread_id:
@@ -2093,7 +2080,7 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
     ) -> ReleasedBinding:
-        self._require_operation(OperationId.RELEASE)
+        self.policy.require(OperationId.RELEASE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             disposition = await self._runtime.release_exact(binding.id)
@@ -2214,7 +2201,7 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.ARCHIVE)
+        self.policy.require(OperationId.ARCHIVE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact_lifecycle_target(target)
         archived = await self._runtime.archive_exact(binding.id)
@@ -2229,7 +2216,7 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.UNARCHIVE)
+        self.policy.require(OperationId.UNARCHIVE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             return await self._runtime.restore_exact(binding.id)
@@ -2239,7 +2226,7 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.UNARCHIVE)
+        self.policy.require(OperationId.UNARCHIVE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact(target)
             restored = await self._runtime.restore_as_current_exact(binding.id)
@@ -2251,7 +2238,7 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.DELETE)
+        self.policy.require(OperationId.DELETE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact(target)
             deleted = await self._runtime.delete_lazy_exact(binding.id)
@@ -2265,7 +2252,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         expected_native_thread_id: str | None,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.DELETE)
+        self.policy.require(OperationId.DELETE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
@@ -2288,7 +2275,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         expected_native_thread_id: str,
     ) -> ThreadBinding:
-        self._require_operation(OperationId.DELETE)
+        self.policy.require(OperationId.DELETE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
@@ -2311,7 +2298,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> ReleasedBinding:
-        self._require_operation(OperationId.RELEASE)
+        self.policy.require(OperationId.RELEASE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             self._require_runtime_precondition(binding.id, runtime_precondition)
@@ -2363,7 +2350,7 @@ class InstanceManagementService:
         acknowledge: StopAcknowledger | None = None,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> StopDisposition:
-        self._require_operation(OperationId.SIDE)
+        self.policy.require(OperationId.SIDE)
         record = self._bindings.get_side_topic(target.side_id)
         self._require_side_identity(record, target)
         if record.state is not SideTopicState.OPEN:
@@ -2381,7 +2368,7 @@ class InstanceManagementService:
         *,
         target: CurrentSideTarget,
     ) -> ClosedSide:
-        self._require_operation(OperationId.SIDE)
+        self.policy.require(OperationId.SIDE)
         record = self._bindings.get_side_topic(target.side_id)
         self._require_side_identity(record, target)
         if record.state.terminal and self._runtime.side_snapshot_exact(record.id) is None:

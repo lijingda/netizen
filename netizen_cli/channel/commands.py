@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 import asyncio
 import logging
+import time
 from dataclasses import replace
 from typing import Any
 
@@ -14,7 +15,7 @@ from lark_channel import (
 
 from ..backends import OperationId
 from ..bindings import (
-    SideTopicState,
+    SideTopicState, ThreadBinding,
 )
 from ..cards import (
     CardActionError,
@@ -29,7 +30,7 @@ from ..cards import (
 from .messages import public_chat_kind as _public_chat_kind
 from ..cards.controls import local_status_card
 from ..cards.status import (
-    decode_status_command, session_status_card,
+    decode_status_command, render_codex_status,
 )
 from ..runtime.contracts import (
     ReleaseDisposition,
@@ -71,11 +72,11 @@ from .base import (
     _session_title,
     _thread_metadata_status_lines,
     _git_branch_status_lines,
-    _context_window_status_line,
     _thread_subscription_status_line,
     _turn_progress_status_lines,
 )
 from .card_controls import CardControlChannel
+from ..session_views import Availability, ContextUsageField, SessionStatusView
 
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
@@ -134,6 +135,8 @@ class CommandChannel(CardControlChannel):
                     raise CardActionError("状态卡与当前 Side 话题不一致，本次未执行。")
                 if self._local_sessions is None:
                     renewed_card = decoded.card()
+                elif decoded.command.name is ControlName.STOP:
+                    raise CardActionError("停止操作需要原执行标识，请重新发送 /status。")
                 await self._control(origin, decoded.command, expected_binding_id=decoded.target_id)
         except CardActionError as error:
             await self._report_input_error(origin, InvalidInteraction(str(error)))
@@ -601,8 +604,8 @@ class CommandChannel(CardControlChannel):
             await self._reply_no_current_binding(message, intent.scope)
             return
         status = await self._management.binding_status_exact(binding.id)
-        if status.observations is not None:
-            await self._reply(message, local_status_card(intent.scope, binding, status))
+        if self._local_sessions is not None:
+            await self._reply(message, local_status_card(intent.scope, binding, status, allow_stop=self._policy.allows(OperationId.STOP)))
             return
         state = status.primary_status
         assert state is not None
@@ -631,15 +634,11 @@ class CommandChannel(CardControlChannel):
             git_branch_lines = (f"工作目录：{cwd}", *await _git_branch_status_lines(cwd))
             if not cwd.is_dir():
                 git_branch_lines += ("工作目录当前不可用；保留原目录，执行结果以 Codex 返回为准。",)
-        context_window_line = _context_window_status_line(
-            binding,
-            self._runtime.context_window_usage(binding.id),
-            active_turn=state in ACTIVE_STATE_VALUES,
-        )
+        context = self._context_usage_field(binding, active_turn=state in ACTIVE_STATE_VALUES)
         progress_lines = _turn_progress_status_lines(
             self._runtime.turn_progress(binding.id)
         )
-        model_lines = await self._binding_model_status_lines(binding)
+        model = await self._binding_model_status(binding)
         subscription_line = _thread_subscription_status_line(
             binding,
             self._runtime.thread_subscription_snapshot(binding.id),
@@ -654,22 +653,28 @@ class CommandChannel(CardControlChannel):
         )
         await self._reply(
             message,
-            session_status_card(
-                scope=intent.scope,
-                binding_id=binding.id,
-                short_id=binding.short_id,
-                project_alias=binding.project_alias,
-                native_thread_id=binding.native_thread_id,
-                state=state,
-                metadata_lines=thread_metadata_lines,
-                git_branch_lines=git_branch_lines,
-                context_window_line=context_window_line,
-                context_mode_lines=context_mode_lines,
-                model_lines=model_lines,
-                progress_lines=progress_lines,
-                subscription_line=subscription_line,
-            ),
+            render_codex_status(intent.scope, binding.id, SessionStatusView(
+                binding.short_id, binding.project_alias, binding.native_thread_id, state,
+                thread_metadata_lines, git_branch_lines, context, context_mode_lines, model,
+                progress_lines, subscription_line,
+            )),
         )
+
+    def _context_usage_field(self, binding: ThreadBinding, *, active_turn: bool) -> ContextUsageField:
+        source = "Codex token usage"
+        try:
+            usage = self._runtime.context_window_usage(binding.id)
+        except Exception as error:
+            logger.warning("context usage read failed", extra={"error_type": type(error).__name__})
+            return ContextUsageField(Availability.UNAVAILABLE, source, time.time())
+        if binding.native_thread_id is None:
+            return ContextUsageField(Availability.NOT_APPLICABLE, source, time.time())
+        if usage is None:
+            failed_at = self._runtime.context_window_read_failed_at(binding.id, binding.native_thread_id)
+            if failed_at is not None:
+                return ContextUsageField(Availability.UNAVAILABLE, source, failed_at)
+            return ContextUsageField(Availability.UNOBSERVED, source, time.time())
+        return ContextUsageField(Availability.OBSERVED, source, usage.observed_at, usage, active_turn)
 
     async def _command_stop(self, message: Any, intent: ControlIntent) -> None:
         binding = self._bindings.active_binding(intent.scope.key)

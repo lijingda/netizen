@@ -1,6 +1,7 @@
 """Exercise the same operation through the published Feishu and Admin entries."""
 
 import json
+from html.parser import HTMLParser
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -8,7 +9,7 @@ from netizen_cli.admin.auth import AdminAuth
 from netizen_cli.admin.transport import Request
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.admin.web import AdminWebApplication
-from netizen_cli.backends import BackendUnsupported
+from netizen_cli.backends import BackendPolicy, BackendUnsupported, Provider
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import CurrentBindingTarget
 from netizen_cli.runtime.contracts import NativeThreadMetadata
@@ -24,6 +25,29 @@ from tests.support.channel_cards import (
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from tests.test_claude_channel import owner_channel
+
+
+class RenameControls(HTMLParser):
+    def __init__(self, page):
+        super().__init__()
+        self.in_editor = False
+        self.hidden = {}
+        self.feed(page.decode())
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "form":
+            self.in_editor = attributes.get("id") == "session-rename-editor"
+        if self.in_editor:
+            key = attributes.get("id")
+            if tag == "p" and key is None and "hint" in attributes.get("class", "").split():
+                key = "save-hint"
+            if key:
+                self.hidden[key] = "hidden" in attributes
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self.in_editor = False
 
 
 class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
@@ -126,8 +150,9 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
         old_generate = _card_button_value(old_card, "自动生成")
         old_actions = await self.actions()
         original_page = await self.request("/sessions/ordinary")
-        self.assertIn(b'id="session-rename-generate" class=', original_page.body)
-        self.assertIn('<p class="hint">自动生成'.encode(), original_page.body)
+        original = RenameControls(original_page.body).hidden
+        self.assertFalse(original["session-rename-generate"])
+        self.assertFalse(original["save-hint"])
         with patch.object(
             self.fx.management, "names", SessionNames(writer=names.writer)
         ):
@@ -151,8 +176,9 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("rename", actions)
             self.assertNotIn("generateName", actions)
             page = await self.request("/sessions/ordinary")
-            self.assertIn(b'id="session-rename-generate" hidden', page.body)
-            self.assertIn('<p class="hint" hidden>自动生成'.encode(), page.body)
+            controls = RenameControls(page.body).hidden
+            self.assertTrue(controls["session-rename-generate"])
+            self.assertFalse(controls["save-hint"])
             denied = await self.request(
                 "/api/v1/sessions/generate-name",
                 self.payload(old_actions["generateName"]),
@@ -206,6 +232,29 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fx.runtime.rename_binding_calls, [])
         self.assertEqual(self.fx.runtime.generate_name_calls, [])
 
+    async def test_no_generator_with_unassembled_thread_namer(self):
+        from netizen_cli.codex_runtime import CodexRuntime
+        from netizen_cli.management import ManagementRuntimePort
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.test_codex_runtime import FakeCodex, FakeTerminalCleanup
+
+        codex = FakeCodex()
+        runtime = CodexRuntime(codex=codex, bindings=self.fx.store, terminal_cleanup=FakeTerminalCleanup(codex.events))
+        self.addAsyncCleanup(runtime.cancel_tasks)
+        port = ManagementRuntimePort(runtime, ordinary=CodexOrdinarySessions(runtime))
+        self.assertIsNotNone(port.names.writer)
+        self.assertIsNone(port.names.generate)
+
+    async def test_protected_api_descendants_and_delete_grant(self):
+        policy = BackendPolicy("codex").bind(lambda provider: provider in {Provider.ORDINARY, Provider.HOST})
+        with patch.object(self.admin, "_backend_policy", policy):
+            for family in ("schedules", "side-topics", "session-tools", "session-tool-access", "progress-card",
+                           "question-notifications", "sessions/conversation", "sessions/delete-materialized"):
+                with self.subTest(family=family):
+                    reply = await self.request("/api/v1/" + family + "/future")
+                    self.assertEqual((reply.status, json.loads(reply.body)["code"]), (409, "backend_unsupported"))
+            self.assertNotIn("deleteMaterialized", await self.actions())
+
     async def test_unknown_entries_and_absent_schedule_service(self):
         card = await self.command("/rename")
         action = dict(
@@ -238,6 +287,9 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
             fx.store.assign_native_thread_id(row.binding.id, "sample")
             writer = Mock()
             writer.rename_exact = AsyncMock(return_value="allowed")
+            writer.eligible.side_effect = lambda binding, state: binding.native_thread_id is not None
+            self.open_admin(fx.project_root, app._management, "ou_user", backend_policy=app._policy)
+            self.assertNotIn("rename", await self.actions())
             with patch.object(app._management, "names", SessionNames(writer=writer)):
                 await app.handle_message(
                     FakeMessage(
@@ -259,4 +311,12 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
                     direct_card_event(fx.channel, {field: "stale"}, message_id="om_old")
                 )
                 writer.rename_exact.assert_awaited_once()
+                rows = json.loads((await self.request("/api/v1/sessions")).body)["items"]
+                actual = next(item for item in rows if item["bindingId"] == row.binding.id)["actions"]
+                self.assertIn("rename", actual)
+                self.assertNotIn("generateName", actual)
+                self.assertNotIn("rename", next(item for item in rows if item["catalogState"] == "lazy")["actions"])
+                saved = await self.request("/api/v1/sessions/rename", self.payload(actual["rename"], name="admin"))
+                self.assertEqual(saved.status, 200)
+                writer.rename_exact.assert_awaited_with(row.binding.id, "admin")
                 self.assertEqual(clients.calls, [])

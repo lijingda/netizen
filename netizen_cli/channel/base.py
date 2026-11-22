@@ -54,7 +54,6 @@ from ..codex_runtime import CodexRuntime
 from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort
 from ..session_settings import SessionFormView
 from ..runtime.contracts import (
-    ContextWindowUsage,
     NativeThreadMetadata,
     SideSessionConflict,
     SideSessionNotFound,
@@ -231,32 +230,6 @@ async def _git_branch_status_lines(cwd: Path) -> tuple[str, ...]:
     if status is None:
         return ()
     return (f"Git Branch：{status}",)
-
-
-def _context_window_status_line(
-    binding: ThreadBinding,
-    usage: ContextWindowUsage | None,
-    *,
-    active_turn: bool,
-) -> str:
-    if binding.native_thread_id is None:
-        return "上下文窗口：暂无（首条消息后生成）"
-    if usage is None:
-        return "上下文窗口：暂不可用（下次可观测 Turn 完成后更新）"
-    label = "上下文窗口（上一轮完成时）" if active_turn else "上下文窗口"
-    if usage.context_window_tokens is None:
-        return (
-            f"{label}：已用 {usage.used_tokens:,} tokens"
-            "（窗口大小暂不可用）"
-        )
-    percent_used = min(
-        100.0,
-        usage.used_tokens * 100 / usage.context_window_tokens,
-    )
-    return (
-        f"{label}：{usage.used_tokens:,} / "
-        f"{usage.context_window_tokens:,} tokens（{percent_used:.1f}% 已用）"
-    )
 
 
 def _thread_subscription_status_line(

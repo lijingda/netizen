@@ -250,6 +250,16 @@ async function run() {
           result.interactions.push(step + " · restart and directories");
         }
         if (path === "/sessions/ordinary") {
+          await until("session identity details", () => evaluate('document.querySelector("#sessions-body .session-identities") !== null'));
+          const identities = await evaluate('[...document.querySelectorAll("#sessions-body .session-identities")].map(el => el.textContent)');
+          for (const identity of identities) {
+            if (config.ownerOnly) {
+              assert.match(identity, /Claude Code 会话 ID/);
+              assert.doesNotMatch(identity, /Codex|跨会话工具/);
+            } else {
+              assert.match(identity, /完整 Codex 会话 ID/);
+            }
+          }
           await click("#sessions-body button", "配置");
           await until("session configuration loaded", () => evaluate(visible("#session-settings-save:enabled")));
           const settings = await evaluate(element("#session-settings-drawer") + ".innerText");

@@ -676,15 +676,20 @@ class AdminWebApplication:
             page = self._assets["index.html"]
             attributes = []
             if self._backend_policy.owner_only:
-                attributes.extend(('data-backend="claude"', 'data-owner-only="true"'))
+                attributes.extend((f'data-backend="{self._backend_policy.backend}"', 'data-owner-only="true"',
+                                   f'data-backend-name="{self._backend_policy.display_name}"'))
             disabled = [operation.value for operation in OperationId if not self._backend_policy.allows(operation)]
             if disabled:
                 attributes.append('data-unavailable="' + " ".join(disabled) + '"')
             if attributes:
                 page = page.replace(b"<body>", ("<body " + " ".join(attributes) + ">").encode(), 1)
-            page = page.replace(
+            can_generate = self._backend_policy.allows(OperationId.GENERATE_NAME)
+            page = page.replace(b"__NETIZEN_RENAME_HINT__", (
+                "自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。" if can_generate else
+                "保存后才会改名，新名称将同步到原生会话。"
+            ).encode()).replace(
                 b" data-netizen-generate-name-visibility",
-                b"" if self._backend_policy.allows(OperationId.GENERATE_NAME) else b" hidden",
+                b"" if can_generate else b" hidden",
             ).replace(b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(self._instance_root)).encode())
             return Response(
                 200,
@@ -1889,10 +1894,14 @@ class AdminWebApplication:
             )
         for operation in (OperationId.MANUAL_RENAME, OperationId.GENERATE_NAME):
             definition = OPERATIONS[operation]
-            if self._backend_policy.allows(operation) and definition.offers_name_action(
-                materialized=binding.native_thread_id is not None,
-                active_catalog_row=native_state is NativeThreadCatalogState.ACTIVE,
-            ):
+            if not self._backend_policy.allows(operation):
+                continue
+            if operation is OperationId.MANUAL_RENAME:
+                writer = self._management.names.writer
+                eligible = writer is not None and writer.eligible(binding, native_state)
+            else:
+                eligible = binding.native_thread_id is not None and native_state is NativeThreadCatalogState.ACTIVE
+            if eligible:
                 actions[definition.action_key] = grants.add(definition.grant, target, preconditions)
         if native_state is NativeThreadCatalogState.ACTIVE:
             if status.can_release and self._backend_policy.allows(OperationId.RELEASE):
@@ -1916,7 +1925,8 @@ class AdminWebApplication:
                 target,
                 lifecycle_preconditions,
             )
-        if binding.native_thread_id is not None and self._management.native_delete_available:
+        if (binding.native_thread_id is not None and self._backend_policy.allows(OperationId.DELETE)
+                and self._management.native_delete_available):
             actions["deleteMaterialized"] = grants.add(
                 "sessions.delete-materialized",
                 target,

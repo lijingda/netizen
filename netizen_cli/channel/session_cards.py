@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Mapping, Sequence
 
 from lark_channel import (
     OutboundCard,
 )
 
+from ..session_views import Availability, ModelStatusFields, SessionField
 from ..bindings import BindingCursor
 from ..bindings import (
     BindingTaskFeedback,
@@ -190,6 +192,7 @@ class SessionCardChannel(QuestionChannel):
         return sessions_card(
             scope=scope, sessions=tuple(sessions), current=current_session,
             native_delete_available=self._management.native_delete_available,
+            policy=self._policy,
             page=navigation.page, session_cursor=_session_card_cursor(navigation, scope),
             previous_cursor=_session_card_cursor(previous, scope) if previous is not None else None,
             next_cursor=(
@@ -241,57 +244,42 @@ class SessionCardChannel(QuestionChannel):
             notice=notice, notice_is_error=notice_is_error,
         )
 
-    async def _binding_model_status_lines(
+    async def _binding_model_status(
         self,
         binding: ThreadBinding,
-    ) -> tuple[str, str, str, str]:
+    ) -> ModelStatusFields:
         configured = binding.turn_settings
+
+        def fields(model: str | None, effort: str | None, speed: str | None, configuration: str, source: str) -> ModelStatusFields:
+            read_at = time.time()
+
+            def observed(value: str | None, origin: str) -> SessionField:
+                availability = Availability.UNOBSERVED if value is None else Availability.OBSERVED
+                return SessionField(availability, origin, value, read_at)
+
+            return ModelStatusFields(observed(model, source), observed(effort, source), observed(speed, source),
+                                     observed(configuration, "Binding settings"))
+
         if configured is None:
-            value = "继承 Codex"
-            return (
-                f"Model：{value}",
-                f"Effort：{value}",
-                f"Speed：{value}",
-                "配置来源：Codex",
-            )
+            return fields(None, None, None, "inherited", "Binding settings")
 
         try:
             catalog = await self._runtime.model_catalog()
         except Exception as error:
-            # Status is read-only and must remain useful when the live catalog
-            # cannot be read. The persisted IDs remain the exact Binding
-            # selection; submission will revalidate them before every new Turn.
-            logger.warning(
-                "native model catalog unavailable for /status Binding settings",
-                extra={"error_type": type(error).__name__},
-            )
-            return (
-                f"Model：{configured.model_id}",
-                f"Effort：{configured.effort_id}",
-                f"Speed：{configured.service_tier_id}",
-                "配置来源：Netizen 会话配置（模型目录暂不可用）",
-            )
+            logger.warning("native model catalog unavailable for /status Binding settings",
+                           extra={"error_type": type(error).__name__})
+            return fields(configured.model_id, configured.effort_id, configured.service_tier_id,
+                          "catalog-unavailable", "Binding settings")
 
         try:
             settings = catalog.resolve(
-                model_id=configured.model_id,
-                effort_id=configured.effort_id,
-                service_tier_id=configured.service_tier_id,
+                model_id=configured.model_id, effort_id=configured.effort_id, service_tier_id=configured.service_tier_id,
             )
         except ModelCatalogError:
-            return (
-                f"Model：{configured.model_id}",
-                f"Effort：{configured.effort_id}",
-                f"Speed：{configured.service_tier_id}",
-                "配置来源：Netizen 会话配置（已失效，请使用 /config 更新）",
-            )
-
-        return (
-            f"Model：{settings.model}",
-            f"Effort：{settings.effort_id}",
-            f"Speed：{settings.service_tier_name}",
-            "配置来源：Netizen 会话配置",
-        )
+            return fields(configured.model_id, configured.effort_id, configured.service_tier_id,
+                          "selection-invalid", "Binding settings")
+        return fields(settings.model, settings.effort_id, settings.service_tier_name,
+                      "configured", "Codex model catalog")
 
     async def _create_binding(
         self,

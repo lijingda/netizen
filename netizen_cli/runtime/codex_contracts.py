@@ -40,6 +40,7 @@ class BindingRuntimeSnapshot:
     lifecycle: ThreadLifecycleSnapshot | None
     subscription: ThreadSubscriptionSnapshot | None
     context_window_usage: ContextWindowUsage | None
+    local_unavailable: bool = False
 
     def __post_init__(self) -> None:
         if not self.binding_id:

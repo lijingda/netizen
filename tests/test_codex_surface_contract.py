@@ -17,7 +17,7 @@ from netizen_cli.admin.auth import AdminAuth
 from netizen_cli.admin.transport import Request
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.admin.web import AdminWebApplication
-from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings
+from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
 from netizen_cli.codex_runtime import CodexRuntime
 from netizen_cli.domain import FeishuScope, NativeCapability, ScopeKind
 from netizen_cli.management import SessionQuery, SessionInventoryState, CurrentBindingTarget, InstanceManagementService, ManagementRuntimePort
@@ -60,12 +60,37 @@ def delivery_recorder(channel, stack):
     return events
 
 
-async def channel_surfaces(fx, events):
+def native_access_recorder(runtime, stack):
+    calls = []
+
+    def argument(value):
+        if isinstance(value, ThreadBinding):
+            return {"bindingId": value.id, "threadId": value.native_thread_id}
+        if isinstance(value, Path):
+            return str(value)
+        return value
+
+    def capture(method):
+        async def call(*args, **kwargs):
+            options = {key: "bounded" if key == "deadline" and value is not None else argument(value)
+                       for key, value in kwargs.items()}
+            calls.append([method.__name__, [argument(value) for value in args], options])
+            return await method(*args, **kwargs)
+        return call
+
+    for name in ("model_catalog", "thread_metadata", "thread_summary", "thread_catalog_page", "goal_snapshot",
+                 "native_thread_cwd", "resolve_binding_cwd", "rename_exact", "generate_name_exact"):
+        stack.enter_context(patch.object(runtime, name, capture(getattr(runtime, name))))
+    return calls
+
+
+async def channel_surfaces(fx, events, calls):
     seen = {}
 
     def captured(label):
-        seen[label] = events[:]
+        seen[label] = {"delivery": events[:], "nativeAccess": calls[:]}
         events.clear()
+        calls.clear()
 
     async def command(label, text, **kwargs):
         await fx.app.handle_message(FakeMessage(text, message_id="om-" + label, **kwargs))
@@ -115,7 +140,8 @@ async def channel_surfaces(fx, events):
     return seen
 
 
-async def admin_surfaces(fx):
+async def admin_surfaces(fx, calls):
+    traces = []
     users = AdminUsers(fx.project_root, "cli_test")
     member = users.add_initial("ou_admin")
     auth = AdminAuth(users, clock=lambda: 1000.0)
@@ -131,6 +157,8 @@ async def admin_surfaces(fx):
             b"GET" if payload is None else b"POST", ("/api/v1/" + path).encode(), b"1.1", headers,
             b"" if payload is None else json.dumps(payload).encode(), ("127.0.0.1", 1234), ("127.0.0.1", 80), "r1",
         ))
+        traces.append([path, calls[:]])
+        calls.clear()
         return response.status, json.loads(response.body)
 
     try:
@@ -153,6 +181,7 @@ async def admin_surfaces(fx):
                 payload["name"] = "from admin"
             result[key] = await request("sessions/" + route, payload)
             result[key + "_replay"] = await request("sessions/" + route, payload)
+        result["nativeAccess"] = traces
         return result
     finally:
         admin.close_auth()
@@ -228,8 +257,9 @@ async def reference():
               patch("netizen_cli.cards.defaults.uuid4", return_value=UUID(int=1)),
               patch("netizen_cli.bindings._now", return_value="2026-01-01T00:00:00.000000+00:00")):
             with ExitStack() as stack:
-                channel = await channel_surfaces(fx, delivery_recorder(fx.channel, stack))
-            admin = await admin_surfaces(fx)
+                calls = native_access_recorder(fx.runtime, stack)
+                channel = await channel_surfaces(fx, delivery_recorder(fx.channel, stack), calls)
+                admin = await admin_surfaces(fx, calls)
             sdk = await sdk_requests(fx)
             return json.loads(json.dumps({"channel": channel, "admin": admin, "sdk": sdk},
                                          ensure_ascii=False).replace(str(fx.project_root), "<root>"))

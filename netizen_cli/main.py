@@ -60,7 +60,6 @@ from .worktrees.settings import WorktreeSettingsService
 from .admin.users import AdminIdentity, AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
 from .cli_setup import require_admin_binding, SetupError
-from .session_providers import SessionNames
 from .backends import BackendPolicy, instance_backend
 from .bindings import BindingStore, SideTopicRecord
 from .builtin_skills import builtin_skill_root
@@ -189,12 +188,12 @@ def build_channel(settings: Settings, store: BindingStore) -> FeishuChannel:
 
 @dataclass(frozen=True, slots=True)
 class BackendAssembly:
-    display_name: str
     policy: BackendPolicy
     ordinary: OrdinarySessionPort
     shutdown: SessionShutdownPort
     management: ManagementRuntimePort
     expired_sides: tuple[SideTopicRecord, ...] = ()
+    recovery_started_at: float | None = None
 
 
 BackendFactory = Callable[[ConfigFileEditor | None, ProgressCardConfigService], Awaitable[BackendAssembly]]
@@ -278,8 +277,8 @@ class ServiceCore:
             on_completion=completed, notice=notice,
         )
         return BackendAssembly(
-            "Claude Code", BackendPolicy("claude", owner_id=owner.open_id), self._claude, self._claude,
-            ManagementRuntimePort(None, ordinary=self._claude, local=self._claude, names=SessionNames()),
+            self._claude.backend_policy, self._claude, self._claude,
+            ManagementRuntimePort(None, ordinary=self._claude, local=self._claude),
         )
 
     async def _assemble_codex(
@@ -327,7 +326,7 @@ class ServiceCore:
         # Release-local Skills must be active before catalogs, recovery or
         # any native Thread can be reached. Failure closes this startup.
         await AppServerSkillRoots(self._codex).set_roots((builtin_skill_root(),))
-        _log_startup_timing("Codex connection", stage_started_at)
+        recovery_started_at = _log_startup_timing("Codex connection", stage_started_at)
         terminal_cleanup = PinnedExperimentalTerminalCleanup(self._codex)
         thread_subscription_control = AppServerThreadSubscriptionControl(
             self._codex
@@ -379,8 +378,8 @@ class ServiceCore:
         )
         ordinary = CodexOrdinarySessions(self._runtime)
         return BackendAssembly(
-            "Codex", BackendPolicy("codex"), ordinary, self._runtime,
-            ManagementRuntimePort(self._runtime, ordinary=ordinary, names=SessionNames.from_runtime(self._runtime)), expired_sides,
+            BackendPolicy("codex"), ordinary, self._runtime,
+            ManagementRuntimePort(self._runtime, ordinary=ordinary), expired_sides, recovery_started_at,
         )
 
     async def start(self) -> None:
@@ -509,7 +508,7 @@ class ServiceCore:
                 if backend.expired_sides:
                     await self.application.refresh_expired_side_cards(backend.expired_sides)
             self._started = True
-            _log_startup_timing("runtime recovery", stage_started_at)
+            _log_startup_timing("runtime recovery", backend.recovery_started_at if backend.recovery_started_at is not None else stage_started_at)
         except BaseException:
             await self._close_partial_start()
             raise

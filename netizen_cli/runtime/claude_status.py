@@ -2,15 +2,46 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 import math
-import re
+from contextlib import contextmanager
+import logging
 import time
 
 from claude_agent_sdk import RateLimitInfo, ResultMessage
 
 from ..session_views import Availability, SessionField, SessionObservations
+
+
+_DEFAULTS = tuple(
+    (key, SessionField(Availability.UNOBSERVED, source))
+    for source, keys in (
+        ("Claude init", ("model", "cwd")),
+        ("Claude Result", ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "totalCostUsd")),
+        ("Claude rate_limit", ("limitStatus", "limitWindow", "limitReset", "limitUtilization")),
+    )
+    for key in keys
+) + (
+    ("context", SessionField(Availability.UNAVAILABLE, "Claude context")),
+    ("subscription", SessionField(Availability.NOT_APPLICABLE, "ordinary session")),
+)
+
+
+@contextmanager
+def record_observation() -> Iterator[None]:
+    try:
+        yield
+    except Exception as error:
+        logging.getLogger(__name__).warning("Claude status sample dropped (%s)", type(error).__name__)
+
+
+def _model_id(value: object) -> str | None:
+    if not isinstance(value, str) or not 0 < len(value) <= 160 or not value.isprintable():
+        return None
+    if any(char.isspace() or char in "<>`" for char in value):
+        return None
+    return value
 
 
 @dataclass(slots=True)
@@ -28,19 +59,18 @@ class ClaudeObservations:
 
     def init(self, binding: str, session: str, execution: str, model: object, cwd: str) -> None:
         sample = self._sessions.get(binding)
-        if sample is None or sample.session != session:
+        if sample is None or (sample.session, sample.execution) != (session, execution):
             sample = self._sessions[binding] = _LastSession(session, execution)
-        sample.execution = execution
         self._sessions.move_to_end(binding)
         if len(self._sessions) > self._capacity:
             self._sessions.popitem(last=False)
         now = self._clock()
-        sample.fields["cwd"] = SessionField(Availability.OBSERVED, "Claude init", cwd, now)
-        self._set(sample, "model", model if isinstance(model, str) and re.fullmatch(r"[\w./:-]{1,160}", model) else None, "Claude init", now)
+        sample.fields["cwd"] = SessionField(Availability.OBSERVED, "Claude init", cwd, now, execution)
+        self._set(sample, "model", _model_id(model), "Claude init", now)
 
     @staticmethod
     def _set(sample: _LastSession, name: str, value: str | int | float | None, source: str, now: float) -> None:
-        sample.fields[name] = SessionField(Availability.UNAVAILABLE if value is None else Availability.OBSERVED, source, value, now)
+        sample.fields[name] = SessionField(Availability.UNAVAILABLE if value is None else Availability.OBSERVED, source, value, now, sample.execution)
 
     def _exact(self, binding: str, session: str, execution: str) -> _LastSession | None:
         sample = self._sessions.get(binding)
@@ -71,9 +101,11 @@ class ClaudeObservations:
         valid = type(cost) in (int, float) and cost is not None and 0 <= cost <= 1e100 and math.isfinite(cost)
         self._set(sample, "totalCostUsd", cost if valid else None, "Claude Result", now)
 
-    def read(self, binding: str, session: str | None) -> SessionObservations:
+    def read(self, binding: str, session: str | None, execution: str | None = None) -> SessionObservations:
         sample = self._sessions.get(binding)
-        return SessionObservations(tuple(sample.fields.items())) if sample and session == sample.session else SessionObservations()
+        if sample and sample.session == session and (execution is None or sample.execution == execution):
+            return SessionObservations(tuple(sample.fields.items()), _DEFAULTS)
+        return SessionObservations(defaults=_DEFAULTS)
 
 
 def _count(value: object) -> int | None:

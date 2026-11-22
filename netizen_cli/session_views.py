@@ -1,15 +1,14 @@
 """Immutable display values. Observations never participate in session admission."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-import time
 from typing import TYPE_CHECKING, Literal
 
 from .bindings import BindingCursor, BindingInventoryRecord, BindingQuery, ThreadBinding
-from .runtime.contracts import NativeThreadCatalogState, NativeThreadMetadata
+from .runtime.contracts import ContextWindowUsage, NativeThreadCatalogState, NativeThreadMetadata
 from .session_inventory import NativeSessionCursor as SessionNativeCursor
 
 if TYPE_CHECKING:
@@ -29,61 +28,69 @@ class SessionField:
     source: str
     value: str | int | float | None = None
     sampled_at: float | None = None
+    execution_id: str | None = None
 
     def display(self) -> str:
         if self.availability is not Availability.OBSERVED:
             return self.availability.value
-        assert self.sampled_at is not None
+        if self.sampled_at is None:
+            return str(self.value)
         stamp = datetime.fromtimestamp(self.sampled_at, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         return f"{self.value}（{self.source} · {stamp}）"
 
     def json(self) -> dict[str, object]:
         return {"availability": self.availability.value, "source": self.source,
-                "value": self.value, "sampledAt": self.sampled_at}
+                "value": self.value, "sampledAt": self.sampled_at,
+                **({"executionId": self.execution_id} if self.execution_id is not None else {})}
 
 
 @dataclass(frozen=True, slots=True)
 class SessionObservations:
     fields: tuple[tuple[str, SessionField], ...] = ()
+    defaults: tuple[tuple[str, SessionField], ...] = ()
 
-    def get(self, name: str, source: str) -> SessionField:
-        return next((value for key, value in self.fields if key == name),
-                    SessionField(Availability.UNOBSERVED, source))
+    def get(self, name: str, source: str = "") -> SessionField:
+        for key, value in (*self.fields, *self.defaults):
+            if key == name:
+                return value
+        return SessionField(Availability.UNOBSERVED, source)
 
     def json(self) -> dict[str, object]:
-        result = {name: self.get(name, source).json() for source, names in (
-            ("Claude init", ("model", "cwd")),
-            ("Claude Result", ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "totalCostUsd")),
-            ("Claude rate_limit", ("limitStatus", "limitWindow", "limitReset", "limitUtilization")),
-        ) for name in names}
-        result["context"] = SessionField(Availability.UNAVAILABLE, "Claude context").json()
-        result["subscription"] = SessionField(Availability.NOT_APPLICABLE, "ordinary session").json()
-        return dict(result)
+        return {key: value.json() for key, value in (*self.defaults, *self.fields)}
+
+
+@dataclass(frozen=True, slots=True)
+class ContextUsageField:
+    availability: Availability
+    source: str
+    sampled_at: float | None
+    usage: ContextWindowUsage | None = None
+    previous_turn: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ModelStatusFields:
+    model: SessionField
+    effort: SessionField
+    speed: SessionField
+    configuration: SessionField
 
 
 @dataclass(frozen=True, slots=True)
 class SessionStatusView:
-    """Text sections at one display capture, including the Codex v1 snapshot projection."""
     short_id: str
     project_alias: str
     native_thread_id: str | None
     state: str
     metadata_lines: tuple[str, str]
-    git_branch_lines: tuple[str, ...]
-    context_window_line: str
-    context_mode_lines: tuple[str, ...]
-    model_lines: tuple[str, str, str, str]
+    workspace_lines: tuple[str, ...]
+    context: ContextUsageField
+    message_scope_lines: tuple[str, ...]
+    model: ModelStatusFields
     progress_lines: tuple[str, ...]
     subscription_line: str
-    source: str = "Codex status snapshot"
-    sampled_at: float = field(default_factory=time.time)
-
-    def callback_snapshot(self) -> dict[str, object]:
-        return {key: getattr(self, key) for key in (
-            "short_id", "project_alias", "native_thread_id", "state", "metadata_lines",
-            "git_branch_lines", "context_window_line", "context_mode_lines", "model_lines",
-            "progress_lines", "subscription_line",
-        )}
+    usage_lines: tuple[str, ...] = ()
+    state_label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,5 +170,3 @@ class ResultView:
     content: str
     cwd: Path | None
     mention_user_id: str | None
-    source: str
-    sampled_at: float = field(default_factory=time.time)

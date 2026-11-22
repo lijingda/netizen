@@ -771,4 +771,4 @@ body.navigation-open { overflow: hidden; }
   #schedule-detail table { min-width: 0; }
 }
 
-body[data-backend="claude"] [hidden] { display: none !important; }
+[hidden] { display: none !important; }

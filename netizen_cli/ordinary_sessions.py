@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .backends import BackendPolicy
 from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
 from .domain import ActiveState, MessageContextAnchor, MentionContextMode
+from .runtime.codex_contracts import BindingRuntimeSnapshot
+from .session_views import SessionObservations
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
@@ -102,6 +105,9 @@ class LocalExecutionSnapshot:
     turn: ActiveTurnSnapshot | None
     unavailable: bool
 
+    def runtime_snapshot(self, binding_id: str) -> BindingRuntimeSnapshot:
+        return BindingRuntimeSnapshot(binding_id, self.revision, self.turn, None, False, None, None, None, self.unavailable)
+
     @property
     def label(self) -> str:
         if self.unavailable:
@@ -113,6 +119,9 @@ class LocalExecutionSnapshot:
 
 
 class LocalSessionManagement(Protocol):
+    @property
+    def backend_policy(self) -> BackendPolicy: ...
+    def session_observations(self, binding_id: str, session: str | None, execution: str | None) -> SessionObservations: ...
     def occupying_bindings(self, directory: Path) -> frozenset[str]: ...
     async def resource_usage(self, binding_id: str) -> dict[str, str | None]: ...
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding: ...

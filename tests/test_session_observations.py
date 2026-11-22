@@ -1,11 +1,19 @@
 import asyncio
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from dataclasses import replace
 import unittest
+
+from lark_channel import OutboundCard
 
 from claude_agent_sdk import RateLimitEvent, RateLimitInfo
 from netizen_cli.admin.presentation import _runtime_binding_json
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.group_access import GroupAccessRule, GroupAccessService, GROUP_ACCESS_NOTICE
+from netizen_cli.session_views import Availability
+from netizen_cli.runtime.contracts import ContextWindowUsage
+from tests.support.channel_cards import _card_button_value, _elements, direct_button_event, direct_card_event
+from tests.support.channel_fixtures import channel_fixture
 from netizen_cli.runtime.claude_status import ClaudeObservations
 from tests.support.channel_messages import FakeMessage
 from tests.test_claude_channel import owner_channel
@@ -95,6 +103,129 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([item.open_id for item in getattr(reply, "mentions", ())],
                                  ["ou_user"] if mention else [])
                 self.assertEqual(client.consumers, 1)
+
+    async def test_execution_change_never_exposes_previous_result_or_stops_successor(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            binding = (await fx.create_binding(scope)).binding
+            await fx.app.handle_message(FakeMessage("/status", message_id="old"))
+            alias = _card_button_value(fx.channel.replies[-1][1], "停止")
+            await app.handle_message(FakeMessage("A", message_id="A"))
+            first = clients.calls[-1]
+            first.init()
+            first.result(usage={"input_tokens": 17})
+            self.assertTrue(await ordinary.wait_idle(2))
+            idle = app._management._runtime.runtime_snapshot_exact(binding.id)
+            first_field = (await app._management.binding_status_exact(binding.id)).observations.json()["input_tokens"]
+            self.assertEqual((first_field["value"], first_field["executionId"]), (17, first.inputs[0]["uuid"]))
+
+            await app.handle_message(FakeMessage("B", message_id="B"))
+            second = clients.calls[-1]
+            async def fields():
+                return (await app._management.binding_status_exact(binding.id)).observations.json()
+
+            self.assertEqual((await fields())["input_tokens"]["availability"], "未观测")
+            second.init(model="claude-opus-4-6[1m]")
+            async with asyncio.timeout(2):
+                while (await fields())["model"]["value"] is None:
+                    await asyncio.sleep(0)
+            live = await fields()
+            self.assertEqual(live["model"]["executionId"], second.inputs[0]["uuid"])
+            self.assertEqual(live["input_tokens"]["availability"], "未观测")
+            with patch.object(ordinary, "local_snapshot", side_effect=AssertionError("unexpected runtime reread")):
+                captured = await app._management.binding_status_exact(binding.id, snapshot=idle)
+                self.assertIs(captured.snapshot, idle)
+                self.assertEqual(captured.local_label, "空闲")
+            direct_card_event(fx.channel, {}, message_id="alias")
+            event = direct_button_event(alias, message_id="alias")
+            with patch.object(ordinary, "preview_stop", new_callable=AsyncMock) as preview:
+                await app.handle_card_action(event)
+                await app._handle_status_command(event)
+                preview.assert_not_awaited()
+            self.assertEqual(second.interrupts, 0)
+            second.result()
+            self.assertTrue(await ordinary.wait_idle(2))
+
+    async def test_sampling_failures_leave_native_result_and_delivery_intact(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            with (patch.object(ordinary.observations, "init", side_effect=ValueError("private")),
+                  patch.object(ordinary.observations, "rate", side_effect=ValueError("private")),
+                  patch.object(ordinary.observations, "result", side_effect=ValueError("private")),
+                  self.assertLogs("netizen_cli.runtime.claude_status", level="WARNING") as warnings):
+                await app.handle_message(FakeMessage("work", message_id="source"))
+                client = clients.calls[-1]
+                client.init()
+                client.stream.put_nowait(RateLimitEvent(RateLimitInfo("allowed"), "event", client.session))
+                client.result(result="native conclusion")
+                self.assertTrue(await ordinary.wait_idle(2))
+            self.assertEqual(len(warnings.output), 3)
+            self.assertNotIn("private", str(warnings.output))
+            origin, answer = fx.channel.replies[-1]
+            self.assertEqual((origin, answer.markdown, client.interrupts), ("source", "native conclusion", 0))
+
+    async def test_group_refusal_precedes_capabilities_and_question_precedes_schedule(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            event = direct_button_event({"kind": "netizen_cron"}, form_value={"netizen_question_choice": "choice"})
+            event.chat_id = "oc_group"
+            fx.channel.chat_types["oc_group"] = "group"
+            app._group_access = GroupAccessService(GroupAccessRule("only"))
+            await app.handle_card_action(event)
+            self.assertEqual(fx.channel.replies[-1][1], GROUP_ACCESS_NOTICE)
+            app._group_access = GroupAccessService()
+            await app.handle_card_action(event)
+            self.assertIn("原生提问", fx.channel.replies[-1][1])
+
+    async def test_local_third_page_activation_retains_previous_and_fallback_row_controls(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            records = [(await fx.create_binding(scope)).binding for _ in range(3)]
+            direct_card_event(fx.channel, {}, message_id="page")
+            async def click(card, label):
+                await app.handle_card_action(direct_button_event(_card_button_value(card, label), message_id="page"))
+                return OutboundCard(card=fx.channel.updates[-1][1])
+            with patch("netizen_cli.channel.session_cards.SESSIONS_PAGE_SIZE", 1):
+                card = await app._sessions_card(scope=scope)
+                card = await click(await click(card, "下一页"), "下一页")
+                card = await click(card, "设为当前")
+                self.assertEqual(fx.store.active_binding(scope.key).id, records[0].id)
+                self.assertIsNotNone(_card_button_value(card, "上一页"))
+                with patch.object(app._management, "binding_status_exact", side_effect=TimeoutError):
+                    fallback = (await app._sessions_card(scope=scope)).card
+                buttons = [button["text"]["content"] for button in _elements(fallback, "button")]
+                for action in ("归档", "删除", "重新检查", "停止"):
+                    self.assertNotIn(action, buttons)
+            with patch.object(ordinary, "local_snapshot", return_value=replace(
+                ordinary.local_snapshot(records[0].id), unavailable=True,
+            )):
+                await app.handle_message(FakeMessage("/status", message_id="unavailable"))
+                text = str(fx.channel.replies[-1][1].card)
+                self.assertIn("无法确认 Claude 客户端已关闭", text)
+                self.assertNotIn("unknown", text)
+
+    async def test_codex_status_preserves_context_sample_and_model_read_times(self):
+        async with channel_fixture() as fx:
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            binding = (await fx.create_binding(scope)).binding
+            self.assertIs(fx.app._context_usage_field(binding, active_turn=False).availability, Availability.NOT_APPLICABLE)
+            fx.runtime.materialize(binding.id, "native", cwd=fx.project)
+            binding = fx.store.get(binding.id)
+            self.assertIs(fx.app._context_usage_field(binding, active_turn=False).availability, Availability.UNOBSERVED)
+            fx.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(7, 100, 123)
+            for active in (True, False):
+                field = fx.app._context_usage_field(binding, active_turn=active)
+                self.assertEqual((field.sampled_at, field.source, field.usage.used_tokens), (123, "Codex token usage", 7))
+            with patch.object(fx.runtime, "context_window_usage", side_effect=OSError):
+                self.assertIs(fx.app._context_usage_field(binding, active_turn=False).availability, Availability.UNAVAILABLE)
+            model = await fx.app._binding_model_status(binding)
+            for field in (model.model, model.effort, model.speed, model.configuration):
+                self.assertIsNotNone(field.sampled_at)
+                self.assertEqual(field.source, "Binding settings")
+            self.assertIs(model.model.availability, Availability.UNOBSERVED)
+            self.assertIs(model.configuration.availability, Availability.OBSERVED)
 
     def test_bound_and_execution_identity(self):
         samples = ClaudeObservations(capacity=1, clock=lambda: 1.5)

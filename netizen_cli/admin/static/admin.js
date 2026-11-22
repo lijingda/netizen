@@ -1665,9 +1665,11 @@ function sessionIdentityCell(row, session) {
   const summary = document.createElement("summary");
   summary.textContent = "会话标识";
   details.append(summary);
+  const nativeIdLabel = `${document.body.dataset.backendName || "Codex"} 会话 ID`;
+  const collaboration = !unavailableOperations.has("collaboration");
   for (const [label, value] of [["飞书聊天 ID（位置）", session.chatId], ["飞书话题 ID（位置）", session.topicId],
     ["Netizen 会话编号（管理与切换）", session.bindingId],
-    ["Codex 会话 ID（Thread ID，跨会话工具）", session.nativeThreadId]]) {
+    [collaboration ? `${nativeIdLabel}（Thread ID，跨会话工具）` : nativeIdLabel, session.nativeThreadId]]) {
     if (!value) continue;
     const field = document.createElement("label");
     field.textContent = label;
@@ -1682,12 +1684,13 @@ function sessionIdentityCell(row, session) {
     details.append(field);
   }
   const hint = document.createElement("small");
-  hint.textContent = "点击标识全选，再按 Ctrl/Cmd+C 复制。跨会话工具使用完整 Codex 会话 ID；现有管理与 /resume 使用 Netizen 编号。";
+  hint.textContent = "点击标识全选，再按 Ctrl/Cmd+C 复制。" +
+    (collaboration ? `跨会话工具使用完整 ${nativeIdLabel}；` : "") + "现有管理与 /resume 使用 Netizen 编号。";
   details.append(hint);
   if (!session.nativeThreadId) {
     const pending = document.createElement("p");
     pending.className = "meta-line";
-    pending.textContent = "Codex 会话 ID 尚未生成，首条消息后创建。";
+    pending.textContent = `${nativeIdLabel} 尚未生成，首条消息后创建。`;
     details.append(pending);
   }
   td.append(details);

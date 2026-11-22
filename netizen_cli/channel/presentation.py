@@ -105,7 +105,10 @@ class CompletionPresentationChannel(ChannelReplies):
                 await self._park_observation(outcome)
             return
         if local:
-            result = self._result_view(outcome, local=True)
+            result = self._result_view(
+                outcome, failure=lambda: outcome.error_detail or "Claude 本次执行失败。",
+                interruption=lambda: "Claude 本次执行已停止。", empty_answer="Claude 已完成本次执行。",
+            )
             content = result.content
             if result.status == "completed":
                 content = await self._prepare_task_result_images(result) or content
@@ -246,23 +249,24 @@ class CompletionPresentationChannel(ChannelReplies):
         await self._reply(outcome.origin, message)
 
     @staticmethod
-    def _result_view(outcome: OrdinaryConclusion | SideTurnOutcome, *, local: bool = False) -> ResultView:
+    def _result_view(
+        outcome: OrdinaryConclusion | SideTurnOutcome, *, failure: Callable[[], str],
+        interruption: Callable[[], str], empty_answer: str,
+    ) -> ResultView:
         if _task_has_error(outcome) or outcome.status not in {"completed", "interrupted"}:
             status = "failed"
-            content = ((outcome.error_detail or "Claude 本次执行失败。") if local and isinstance(outcome, OrdinaryConclusion)
-                       else _task_failure_text(outcome))
+            content = failure()
         elif outcome.status == "interrupted":
             status = "interrupted"
-            content = "Claude 本次执行已停止。" if local else _task_interruption_text(outcome)
+            content = interruption()
         else:
             status = "completed"
-            content = outcome.final_response or ("Claude 已完成本次执行。" if local else "任务已结束，未产生文本回复。")
+            content = outcome.final_response or empty_answer
         return ResultView(
             session_id=outcome.binding_id if isinstance(outcome, OrdinaryConclusion) else outcome.side_id,
             thread_id=outcome.thread_id, turn_id=outcome.turn_id, origin=outcome.origin,
             status=status, content=content, cwd=outcome.cwd,
             mention_user_id=_outcome_completion_mention_user_id(outcome),
-            source="Claude Result" if local else "Codex Turn",
         )
 
     async def _finish_result_reactions(self, result: ResultView) -> None:
@@ -280,7 +284,10 @@ class CompletionPresentationChannel(ChannelReplies):
         allow_suppression: bool = True,
     ) -> None:
         """Present one ordinary or SDK logical execution through the same reply path."""
-        result = self._result_view(outcome)
+        result = self._result_view(
+            outcome, failure=lambda: _task_failure_text(outcome), interruption=lambda: _task_interruption_text(outcome),
+            empty_answer="任务已结束，未产生文本回复。",
+        )
         silent = (allow_suppression and result.status == "completed"
                   and not outcome.final_response
                   and self._reply_suppression.is_suppressed(

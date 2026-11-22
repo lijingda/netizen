@@ -92,12 +92,6 @@ class Operation:
     grant: str = ""
     action_key: str = ""
 
-    def offers_name_action(
-        self, *, materialized: bool, active_catalog_row: bool
-    ) -> bool:
-        return bool(self.grant) and materialized and active_catalog_row
-
-
 # Each route is an actual authenticated endpoint. The router retains ownership
 # of unknown paths, HTTP methods, request schemas and one-time grant redemption.
 OPERATIONS = {
@@ -299,6 +293,16 @@ _COMMANDS = {
 _CARDS = {card: name for name, op in OPERATIONS.items() for card in op.cards}
 _ROUTES = {route: name for name, op in OPERATIONS.items() for route in op.routes}
 
+# These families also protect future authenticated descendants and alternate methods.
+_API_FAMILIES = {
+    path: operation for (_, path), operation in _ROUTES.items()
+    if path.startswith("/sessions/") or path in ("/side-topics", "/schedules", "/session-tool-access")
+} | {
+    "/session-tools": OperationId.COLLABORATION,
+    "/progress-card": OperationId.PROGRESS,
+    "/question-notifications": OperationId.QUESTIONS,
+}
+
 
 def command_operation(command: str, *, archived: bool = False) -> OperationId | None:
     op = _COMMANDS.get(command)
@@ -324,13 +328,23 @@ class BackendPolicy:
     def bind(self, providers: Callable[[Provider], bool]) -> "BackendPolicy":
         return replace(self, providers=providers)
 
-    def allows(self, operation: OperationId) -> bool:
-        provider = OPERATIONS[operation].provider
+    @property
+    def display_name(self) -> str:
+        return "Claude Code" if self.backend == "claude" else "Codex"
+
+    def has_provider(self, provider: Provider) -> bool:
         if self.providers is not None:
             return self.providers(provider)
         # Standalone parser/identity compatibility. Application services bind the
         # concrete provider lookup before admission.
         return self.backend == "codex" or provider in (Provider.HOST, Provider.ORDINARY)
+
+    def allows(self, operation: OperationId) -> bool:
+        return self.has_provider(OPERATIONS[operation].provider)
+
+    def require_provider(self, provider: Provider, label: str) -> None:
+        if not self.has_provider(provider):
+            raise BackendUnsupported(label, detail=self.refusal(label))
 
     def refusal(self, label: str) -> str:
         return (
@@ -340,9 +354,8 @@ class BackendPolicy:
         )
 
     def require(self, operation: OperationId) -> None:
-        if not self.allows(operation):
-            label = OPERATIONS[operation].label
-            raise BackendUnsupported(label, detail=self.refusal(label))
+        definition = OPERATIONS[operation]
+        self.require_provider(definition.provider, definition.label)
 
     def operation_refusal(self, operation: str, label: str) -> str | None:
         # Kept for standalone callers of the original diagnostic API.
@@ -374,6 +387,11 @@ class BackendPolicy:
     def require_api(self, method: str, path: str) -> None:
         if (selected := _ROUTES.get((method, path))) is not None:
             self.require(selected)
+            return
+        for family, operation in _API_FAMILIES.items():
+            if path == family or path.startswith(family + "/"):
+                self.require(operation)
+                return
 
     def sender_refusal(
         self, sender_id: str | None, *, bare_help: bool = False

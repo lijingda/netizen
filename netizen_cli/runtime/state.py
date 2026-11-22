@@ -236,7 +236,8 @@ def _same_goal_generation(
 @dataclass(frozen=True, slots=True)
 class _ContextWindowUsageSnapshot:
     thread_id: str
-    usage: ContextWindowUsage
+    usage: ContextWindowUsage | None
+    failed_at: float | None = None
 
 
 @dataclass(slots=True)

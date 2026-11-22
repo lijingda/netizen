@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING, Any
 
 from lark_channel import OutboundCard
 
-from ..session_views import Availability, SessionField, SessionObservations, SessionStatusView
-from .status import render_status
+from ..backends import BackendPolicy, OperationId
+from ..session_views import ContextUsageField, ModelStatusFields, Availability, SessionField, SessionObservations, SessionStatusView
+from .status import render_observed_status
 if TYPE_CHECKING:
     from ..management.service import BindingStatusProjection
 from ..bindings import (
@@ -1162,8 +1163,8 @@ def rename_binding_card(
     builder = _builder("重命名当前会话", f"Netizen 会话编号：{short_id} · {project_alias}")
     if current_title is not None:
         builder.markdown(f"当前名称：`{_md_code(current_title)}`")
-    if can_generate:
-        builder.markdown("保存后名称同步显示在 Codex App/CLI。自动生成会清空当前输入，生成后可修改再保存。")
+    builder.markdown("保存后名称同步显示在 Codex App/CLI。自动生成会清空当前输入，生成后可修改再保存。"
+                     if can_generate else "保存后才会改名，新名称将同步到原生会话。")
     if notice:
         builder.raw(_notice(notice, error=True))
     if generating:
@@ -1455,29 +1456,33 @@ def _local_stop_button(
 
 
 def local_status_card(
-    scope: FeishuScope, binding: ThreadBinding, status: BindingStatusProjection,
+    scope: FeishuScope, binding: ThreadBinding, status: BindingStatusProjection, *, allow_stop: bool,
 ) -> OutboundCard:
-    observed = status.observations
-    assert observed is not None and status.local_label is not None
-    def sample(key: str, source: str) -> str:
-        return observed.get(key, source).display()
-
-    unavailable = SessionField(Availability.UNAVAILABLE, "Claude context").display()
-    excluded = SessionField(Availability.NOT_APPLICABLE, "ordinary session").display()
+    observed = status.observations or SessionObservations()
+    context = observed.get("context")
+    subscription = observed.get("subscription")
+    label = status.local_label or "状态待确认"
     view = SessionStatusView(
-        binding.short_id, binding.project_alias, binding.native_thread_id, status.primary_status or "unknown",
-        ("Claude Code", f"本地任务：{status.local_label}"), ("上次观测的工作目录：" + sample("cwd", "Claude init"),),
-        f"上下文窗口：{unavailable}",
-        ("输入 token：" + sample("input_tokens", "Claude Result"), "输出 token：" + sample("output_tokens", "Claude Result"),
-         "SDK 累计费用（USD）：" + sample("totalCostUsd", "Claude Result"), "额度状态：" + sample("limitStatus", "Claude rate_limit")),
-        ("Model：" + sample("model", "Claude init"), "Effort：未观测", f"Speed：{excluded}", "配置来源：原生 Claude 设置"),
-        (), f"订阅：{excluded}", source="Claude local snapshot",
+        short_id=binding.short_id, project_alias=binding.project_alias, native_thread_id=binding.native_thread_id,
+        state=status.primary_status or "unknown", state_label=label, metadata_lines=("Claude Code", f"本地任务：{label}"),
+        workspace_lines=("上次观测的工作目录：" + observed.get("cwd").display(),),
+        context=ContextUsageField(context.availability, context.source, context.sampled_at),
+        message_scope_lines=(), usage_lines=tuple(
+            title + observed.get(key).display() for key, title in (
+                ("input_tokens", "输入 token："), ("output_tokens", "输出 token："),
+                ("totalCostUsd", "SDK 累计费用（USD）："), ("limitStatus", "额度状态："),
+            )
+        ),
+        model=ModelStatusFields(observed.get("model"), SessionField(Availability.UNOBSERVED, "native settings"),
+                                SessionField(Availability.NOT_APPLICABLE, "native settings"),
+                                SessionField(Availability.OBSERVED, "native settings", "原生 Claude 设置")),
+        progress_lines=(), subscription_line="订阅：" + subscription.display(),
     )
     turn = status.snapshot.turn
     controls = ((_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, turn.turn_id,
                                     SessionCardPage("lazy"), from_status=True),)
-                if turn is not None and status.can_stop else ())
-    return render_status(scope, binding.id, view, exact_controls=controls, identity=(
+                if turn is not None and allow_stop and status.can_stop else ())
+    return render_observed_status(view, exact_controls=controls, identity=(
         f"Netizen 会话编号（/resume）：{binding.short_id}", f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}",
     ))
 
@@ -1498,8 +1503,10 @@ def sessions_card(
     lazy: bool = False,
     has_lazy: bool = False,
     local_directory: bool = False,
+    policy: BackendPolicy = BackendPolicy("codex"),
 ) -> OutboundCard:
-    session_cursor = _session_action_cursor(scope, session_cursor)
+    if not local_directory:
+        session_cursor = _session_action_cursor(scope, session_cursor)
     subtitle = "尚未开始对话的会话" if lazy else "按 Codex 更新时间排序"
     builder = _builder("会话", "按本地登记时间排序" if local_directory else subtitle)
     if notice:
@@ -1515,7 +1522,8 @@ def sessions_card(
         builder.raw(_session_row(
             scope=scope, session=current, page=page,
             expected_active_binding_id=active_binding_id,
-            native_delete_available=native_delete_available,
+            native_delete_available=native_delete_available, local_directory=local_directory,
+            policy=policy,
             session_cursor=session_cursor,
         ))
         builder.markdown("**本页会话**")
@@ -1533,7 +1541,8 @@ def sessions_card(
                 session=session,
                 page=page,
                 expected_active_binding_id=active_binding_id,
-                native_delete_available=native_delete_available,
+                native_delete_available=native_delete_available, local_directory=local_directory,
+                policy=policy,
                 session_cursor=session_cursor,
             )
         )
@@ -1572,6 +1581,8 @@ def _session_row(
     page: int,
     expected_active_binding_id: str | None,
     native_delete_available: bool,
+    local_directory: bool,
+    policy: BackendPolicy,
     session_cursor: str | None = None,
 ) -> dict[str, Any]:
     navigation = {"session_cursor": session_cursor} if session_cursor else {}
@@ -1579,10 +1590,10 @@ def _session_row(
         _turn_reference(session.turn_id) if session.turn_id is not None else None
     )
     marker_text = "● 当前" if session.active else "○"
-    local = session.observations
-    if local is not None:
-        model = local.get("model", "Claude init").display()
-        text = (f"{marker_text} {session.short_id}\nProject：{session.project_alias} · 状态：{session.state_label}\n"
+    if local_directory:
+        observed = session.observations or SessionObservations()
+        model = observed.get("model", "Claude init").display()
+        text = (f"{marker_text} {session.short_id}\nProject：{session.project_alias} · 状态：{session.state_label or '状态待确认'}\n"
                 f"Claude 会话 ID：{session.native_thread_id or '尚未建立'}\n登记时间：{session.registered_at}\n"
                 f"上次观测的模型：{model}")
     else:
@@ -1596,7 +1607,7 @@ def _session_row(
             short_id=session.short_id, native_thread_id=session.native_thread_id,
         ))
     controls: list[dict[str, Any]] = []
-    if not session.active:
+    if not session.active and policy.allows(OperationId.ACTIVATE):
         controls.append(
             _repeatable_callback_button(
                 label="设为当前",
@@ -1609,7 +1620,7 @@ def _session_row(
                 style="primary_filled",
             )
         )
-    if local is None and session.native_thread_id is not None:
+    if policy.allows(OperationId.ARCHIVE) and session.native_thread_id is not None:
         controls.append(
             _callback_button(
                 label="归档",
@@ -1629,7 +1640,7 @@ def _session_row(
                 ),
             )
         )
-    if local is None and (
+    if policy.allows(OperationId.DELETE) and (
         (
             session.native_thread_id is None
             and session.state == SESSION_IDLE_STATE
@@ -1657,7 +1668,7 @@ def _session_row(
                 style="danger",
             )
         )
-    if session_stop_available(session.state):
+    if policy.allows(OperationId.STOP) and session_stop_available(session.state) and (not local_directory or session.turn_id is not None):
         controls.append(
             _callback_button(
                 label="停止",
@@ -1678,7 +1689,7 @@ def _session_row(
             )
         )
     if (
-        local is None and session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
+        not local_directory and policy.allows(OperationId.RECHECK) and session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
         and session.turn_id is not None
     ):
         controls.append(

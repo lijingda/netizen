@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, StreamEvent, SystemInitData, SystemMessage
 
+from ..backends import BackendPolicy
 from ..bindings import BindingNotFound, BindingStore, ProjectDeleting, ProjectNotFound, ScopeNotFound, ThreadBinding
 from ..bindings import BindingTaskFeedback, BindingTurnSettings
 from ..domain import ActiveState, MessageContextAnchor, MentionContextMode
@@ -21,7 +22,8 @@ from ..ordinary_sessions import (
     LocalExecutionSnapshot, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
     PreparedPrompt, SessionShutdownPort, StopPreview,
 )
-from .claude_status import ClaudeObservations
+from ..session_views import SessionObservations
+from .claude_status import ClaudeObservations, record_observation
 from .claude_client import ClaudeClient, ClaudeClients, single_message, user_message
 from .contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
@@ -463,7 +465,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     mode = data.get("permissionMode")
                     if mode not in ("auto", "default"):
                         await self._invalid_init(client)
-                    self.observations.init(execution.binding.id, execution.session, execution.input_id, data.get("model"), str(cwd))
+                    with record_observation():
+                        self.observations.init(execution.binding.id, execution.session, execution.input_id, data.get("model"), str(cwd))
                     initialized = True
                     if mode == "default":
                         execution.permission_notice = DEFAULT_MODE
@@ -473,7 +476,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                              (isinstance(msg.user_message_uuids, list) and execution.input_id in msg.user_message_uuids))):
                     await commit_intake()
                 if initialized and isinstance(msg, RateLimitEvent) and msg.session_id == execution.session:
-                    self.observations.rate(execution.binding.id, execution.session, execution.input_id, msg.rate_limit_info)
+                    with record_observation():
+                        self.observations.rate(execution.binding.id, execution.session, execution.input_id, msg.rate_limit_info)
                 if not isinstance(msg, ResultMessage):
                     continue
                 if msg.session_id != execution.session:
@@ -503,7 +507,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 if denial := _denial_notice(msg.permission_denials):
                     execution.permission_notice = (f"{DEFAULT_MODE}\n{denial}" if execution.permission_notice else denial)
                 status, answer, detail = _terminal(msg)
-                self.observations.result(execution.binding.id, execution.session, execution.input_id, msg)
+                with record_observation():
+                    self.observations.result(execution.binding.id, execution.session, execution.input_id, msg)
                 return OrdinaryConclusion(execution.binding.id, execution.session, execution.input_id, self._owner, execution.origin,
                                           status, answer, detail, task_feedback=execution.binding.task_feedback,
                                           feedback_revision=execution.binding.feedback_revision, cwd=cwd)
@@ -533,6 +538,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             removed = self._bindings.delete_binding(binding_id)
             self._advance(binding_id)
             return removed
+
+    @property
+    def backend_policy(self) -> BackendPolicy:
+        return BackendPolicy("claude", self._owner)
+
+    def session_observations(self, binding_id: str, session: str | None, execution: str | None) -> SessionObservations:
+        return self.observations.read(binding_id, session, execution)
 
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot:
         execution = self._active.get(binding_id)

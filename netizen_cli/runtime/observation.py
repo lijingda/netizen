@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from openai_codex import (
     InternalRpcError,
@@ -12,6 +13,7 @@ from openai_codex import (
 )
 from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
+from ..session_views import Availability
 from ..domain import (
     ActiveState,
 )
@@ -145,8 +147,8 @@ class TurnObservationRuntime(ThreadNamingRuntime):
             logger.warning("child patch evidence unavailable", exc_info=True)
             return TaskPatchChildren(complete=False)
 
-    async def _drain_terminal_turn_stream(self, active: _ActiveTurn) -> bool:
-        observed_usage = False
+    async def _drain_terminal_turn_stream(self, active: _ActiveTurn) -> Availability:
+        availability = Availability.UNOBSERVED
         try:
             # This handle is the sole consumer of its retained notifications.
             # The SDK retains notifications from the start request, including
@@ -202,6 +204,8 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                     continue
                 usage = _context_window_usage_from_native(payload.token_usage)
                 if usage is None:
+                    if availability is not Availability.OBSERVED:
+                        availability = Availability.UNAVAILABLE
                     logger.warning(
                         "native token usage notification has an invalid shape",
                         extra={
@@ -217,10 +221,12 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                             usage=usage,
                         )
                     )
-                observed_usage = True
+                availability = Availability.OBSERVED
         except asyncio.CancelledError:
             raise
         except Exception:
+            if availability is not Availability.OBSERVED:
+                availability = Availability.UNAVAILABLE
             # Usage and aggregate diff are completion metadata. Persisted
             # thread.read remains the exact terminal-state source of truth
             # even when this public stream is unavailable.
@@ -232,7 +238,7 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                     "turn_id": active.handle.id,
                 },
             )
-        return observed_usage
+        return availability
 
     async def _consume(
         self,
@@ -328,10 +334,10 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                     )
                 activity = self._turn_activity_snapshot(active)
                 if active.terminal_observed:
-                    observed_usage = False
+                    availability = Availability.UNAVAILABLE
                     try:
                         async with asyncio.timeout(limits.TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS):
-                            observed_usage = await self._drain_terminal_turn_stream(active)
+                            availability = await self._drain_terminal_turn_stream(active)
                     except TimeoutError:
                         logger.warning(
                             "terminal Turn metadata stream timed out; delivering proven terminal: "
@@ -339,8 +345,13 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                             active.handle.thread_id, active.handle.id,
                         )
                     finally:
-                        if not observed_usage and self._active.get(active.binding_id) is active:
-                            self._invalidate_context_window_usage(active.binding_id)
+                        if self._active.get(active.binding_id) is active:
+                            if availability is Availability.UNAVAILABLE:
+                                self._context_window_usage[active.binding_id] = _ContextWindowUsageSnapshot(
+                                    active.handle.thread_id, None, failed_at=time.time(),
+                                )
+                            elif availability is Availability.UNOBSERVED:
+                                self._invalidate_context_window_usage(active.binding_id)
             finally:
                 while not retain_active:
                     if self._active.get(active.binding_id) is not active:
