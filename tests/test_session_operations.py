@@ -1,5 +1,6 @@
 """Exercise the same operation through the published Feishu and Admin entries."""
 
+import asyncio
 import json
 from dataclasses import replace
 from html.parser import HTMLParser
@@ -307,6 +308,67 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
         port = ManagementRuntimePort(runtime, ordinary=CodexOrdinarySessions(runtime))
         self.assertIsNotNone(port.names.writer)
         self.assertIsNone(port.names.generate)
+
+    async def test_background_stop_grants_expire_at_wake_and_receipts_use_the_local_provider(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            binding = (await fx.create_binding(self.scope)).binding
+            self.open_admin(fx.project_root, app._management, "ou_user", backend_policy=app._policy)
+
+            async def start(label):
+                await app.handle_message(FakeMessage("work", message_id=label))
+                client = clients.calls[-1]
+                client.init()
+                client.start_background()
+                client.stop_snapshot(["task"])
+                client.result(snapshot=False)
+                async with asyncio.timeout(2):
+                    while client.background.single_task is None:
+                        await asyncio.sleep(0)
+                return client
+
+            first = await start("first")
+            listing = json.loads((await self.request("/api/v1/sessions?inventoryState=active")).body)["items"][0]
+            self.assertEqual(listing["runtime"]["localLabel"], "首答已发，后台任务运行中")
+            grant = listing["actions"]["stop"]
+            await app.handle_message(FakeMessage("/status", message_id="status"))
+            button = _card_button_value(fx.channel.replies[-1][1], "停止")
+            first.end_background()
+            first.init(user_message_uuids=[])
+            async with asyncio.timeout(2):
+                while not first.background.turn_open:
+                    await asyncio.sleep(0)
+            self.assertNotIn("stop", await self.actions())
+            response = await self.request("/api/v1/sessions/stop", self.payload(grant))
+            self.assertEqual(response.status, 409)
+            direct_card_event(fx.channel, {}, message_id="stale-card")
+            await app.handle_card_action(direct_button_event(button, message_id="stale-card"))
+            await app.handle_message(FakeMessage("/stop", message_id="during-wake"))
+            self.assertIn("后台完成轮", str(fx.channel.replies[-1][1]))
+            with self.assertRaises(BackendUnsupported):
+                await app.dispatch_scheduled_run(None)
+            self.assertEqual((first.stops, first.interrupts, len(first.inputs)), ([], 0, 1))
+            first.wake_result()
+            self.assertTrue(await ordinary.wait_idle(2))
+
+            for entry in ("admin", "card"):
+                client = await start(entry)
+                if entry == "admin":
+                    grant = (await self.actions())["stop"]
+                    response = await self.request("/api/v1/sessions/stop", self.payload(grant))
+                    self.assertEqual(response.status, 200)
+                else:
+                    await app.handle_message(FakeMessage("/status", message_id="current"))
+                    button = _card_button_value(fx.channel.replies[-1][1], "停止")
+                    direct_card_event(fx.channel, {}, message_id="current-card")
+                    await app.handle_card_action(direct_button_event(button, message_id="current-card"))
+                    self.assertIn(("current-card", "正在请求停止这个 Claude 后台任务。"), fx.channel.replies)
+                    self.assertIn("正在停止", str(fx.channel.updates[-1]))
+                self.assertEqual((client.stops, client.interrupts), (["task"], 0))
+                client.end_background(status="killed")
+                client.system("session_state_changed", state="idle")
+                self.assertTrue(await ordinary.wait_idle(2))
+                self.assertIsNone(ordinary.local_snapshot(binding.id).turn)
 
     async def test_protected_api_descendants_and_delete_grant(self):
         policy = BackendPolicy("codex").bind(lambda provider: provider in {Provider.ORDINARY, Provider.HOST})

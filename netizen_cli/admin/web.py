@@ -1929,7 +1929,7 @@ class AdminWebApplication:
                 target,
                 delete_preconditions,
             )
-        if status.can_stop:
+        if status.can_stop and self._backend_policy.allows(OperationId.STOP):
             actions["stop"] = grants.add(
                 "sessions.stop", target, preconditions
             )

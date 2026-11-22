@@ -975,7 +975,11 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([mention.open_id for mention in reply.mentions], ["ou_admin"])
                 await send("second", "om_second")
                 second = clients.calls[-1]
+                await send("/stop", "om_not_started")
+                self.assertEqual(second.interrupts, 0)
+                self.assertIn("无法精确停止", channel.replies[-1][1])
                 second.init()
+                await second.consumed()
                 await send("/stop", "om_stop")
                 self.assertEqual(second.interrupts, 1)
                 second.result("error_during_execution", "aborted_tools", True)
@@ -983,6 +987,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 await send("third", "om_third")
                 last = clients.calls[-1]
                 last.init()
+                await last.consumed()
                 async def on_interrupt():
                     last.interrupts += 1
                     last.result("error_during_execution", "aborted_streaming", True)

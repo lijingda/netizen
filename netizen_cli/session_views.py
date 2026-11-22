@@ -48,6 +48,7 @@ class SessionField:
 class ObservationPresentation:
     provider: str = ""
     identity_label: str = "原生会话 ID"
+    state_labels: tuple[tuple[str, str], ...] = ()
     workspace: tuple[tuple[str, str], ...] = ()
     model_rows: tuple[tuple[tuple[str, str], ...], ...] = ()
     usage: tuple[tuple[str, str], ...] = ()

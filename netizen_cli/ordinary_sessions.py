@@ -7,7 +7,7 @@ from typing import Protocol
 
 from .backends import BackendPolicy
 from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
-from .domain import ActiveState, MessageContextAnchor, MentionContextMode
+from .domain import MessageContextAnchor, MentionContextMode
 from .runtime.codex_contracts import BindingRuntimeSnapshot
 from .session_views import SessionObservations
 from .file_evidence import FileEvidence
@@ -15,7 +15,7 @@ from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
 from .runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
-    TurnActivitySnapshot, TurnObservationUnavailableOutcome,
+    TerminalStateUnknown, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
 
 
@@ -51,6 +51,10 @@ class OrdinaryConclusion:
 
 OrdinaryEvent = OrdinaryConclusion | TurnObservationUnavailableOutcome
 OrdinaryCompletionHandler = Callable[[OrdinaryEvent], Awaitable[None]]
+
+
+class OrdinaryTerminalQueued(TerminalStateUnknown):
+    """The submission is unconfirmed and its ordinary terminal owns presentation."""
 
 
 class OrdinaryInputRejected(RuntimeError):
@@ -104,6 +108,7 @@ class LocalExecutionSnapshot:
     revision: int
     turn: ActiveTurnSnapshot | None
     unavailable: bool
+    stop_acknowledgement: str | None = None
 
     def capture(self, binding_id: str, session_id: str | None, observations: SessionObservations) -> "LocalStatusSnapshot":
         return LocalStatusSnapshot(
@@ -112,14 +117,9 @@ class LocalExecutionSnapshot:
             local=self, session_id=session_id, observations=observations,
         )
 
-    @property
-    def label(self) -> str:
-        if self.unavailable:
-            return "无法确认 Claude 客户端已关闭"
-        if self.turn is None:
-            return "空闲"
-        return {ActiveState.CLOSING: "正在收尾", ActiveState.RUNNING: "执行中", ActiveState.STOPPING: "正在停止",
-                ActiveState.OBSERVATION_UNAVAILABLE: "状态待确认"}[self.turn.state]
+    def state_label(self, defaults: SessionObservations) -> str:
+        state = "unavailable" if self.unavailable else self.turn.state.value if self.turn else "idle"
+        return dict(defaults.presentation.state_labels).get(state, "状态待确认")
 
 
 @dataclass(frozen=True, slots=True)

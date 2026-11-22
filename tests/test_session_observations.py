@@ -3,6 +3,7 @@ import json
 from unittest.mock import AsyncMock, patch
 from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 import unittest
 
 from lark_channel import OutboundCard
@@ -163,6 +164,134 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await fields())["input_tokens"]["value"], 31)
             again = await app._management.binding_status_exact(binding.id, snapshot=idle)
             self.assertEqual(again.observations.json(), historical)
+
+    async def test_background_phases_and_each_wake_have_their_own_status_samples(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            binding = (await fx.create_binding(scope)).binding
+            await app.handle_message(FakeMessage("work", message_id="origin"))
+            client = clients.calls[-1]
+            human = client.inputs[0]["uuid"]
+            client.init(model="human-model")
+            client.start_background()
+            both = [{"task_id": "task", "run_id": "run"}, {"task_id": "other", "run_id": "other-run"}]
+            client.start_background("other-run", "other", "other-tool", members=both)
+            client.stop_snapshot(["task", "other"])
+            client.result(snapshot=False, usage={"input_tokens": 11})
+
+            async def until(predicate):
+                async with asyncio.timeout(3):
+                    while not predicate():
+                        await asyncio.sleep(0)
+
+            async def surfaces(expected):
+                await app.handle_message(FakeMessage("/status", message_id="status"))
+                self.assertIn(expected, str(fx.channel.replies[-1][1].card))
+                self.assertIn(expected, str((await app._sessions_card(scope=scope)).card))
+                statuses = await app._management.binding_statuses_exact(
+                    binding_ids=(binding.id,), deadline=asyncio.get_running_loop().time() + 2)
+                row = _runtime_binding_json(statuses[0])
+                self.assertEqual(row["localLabel"], expected)
+                return row
+
+            await until(lambda: client.background.first_done and client.background.idle)
+            pending = ordinary.capture_status(binding.id)
+            row = await surfaces("首答已发，后台交接中")
+            self.assertEqual(row["observations"]["input_tokens"]["executionId"], human)
+            client.end_background(members=both[1:])
+            client.system("session_state_changed", state="running")
+            await until(lambda: client.background.wake)
+            self.assertIs(ordinary.capture_status(binding.id).observations.get("model").availability, Availability.UNOBSERVED)
+            first_wake = str(uuid4())
+            client.init(user_message_uuids=[], uuid=first_wake, model="first-wake")
+            client.stream.put_nowait(RateLimitEvent(RateLimitInfo("allowed"), "rate", client.session))
+            await until(lambda: ordinary.capture_status(binding.id).observations.get("limitStatus").value == "allowed")
+            row = await surfaces("后台完成轮运行中")
+            self.assertEqual(row["observations"]["model"]["executionId"], first_wake)
+            self.assertEqual(row["observations"]["limitStatus"]["executionId"], first_wake)
+            self.assertEqual(row["observations"]["input_tokens"]["availability"], "未观测")
+            client.stop_snapshot(["other"])
+            client.wake_result(snapshot=False, result="first completion", usage={"input_tokens": 27})
+            await until(lambda: client.background.runs["run"].settled and client.background.idle)
+            first = ordinary.capture_status(binding.id)
+            self.assertEqual((first.observations.get("input_tokens").execution_id,
+                              first.observations.get("input_tokens").value), (first_wake, 27))
+            second_wake = str(uuid4())
+            client.end_background(run="other-run", task="other")
+            client.init(user_message_uuids=[], uuid=second_wake, model="second-wake")
+            client.wake_result(run="other-run", result="last completion", usage={"input_tokens": 41})
+            self.assertTrue(await ordinary.wait_idle(3))
+            row = await surfaces("空闲")
+            self.assertEqual(row["observations"]["input_tokens"]["executionId"], second_wake)
+            self.assertEqual(row["observations"]["input_tokens"]["value"], 41)
+            self.assertEqual(row["observations"]["limitStatus"]["availability"], "未观测")
+            for snapshot, execution in ((pending, human), (first, first_wake)):
+                old = await app._management.binding_status_exact(binding.id, snapshot=snapshot)
+                self.assertEqual(old.observations.get("model").execution_id, execution)
+            answers = [reply.markdown for origin, reply in fx.channel.replies if origin == "origin" and hasattr(reply, "markdown")]
+            self.assertEqual(answers, ["answer", "first completion", "last completion"])
+            self.assertEqual((client.consumers, len(client.inputs)), (1, 1))
+
+    async def test_cron_status_uses_provider_label_and_abandon_requires_bound_provider(self):
+        from netizen_cli.backends import BackendUnsupported
+        from netizen_cli.management import CurrentBindingTarget
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            binding = (await fx.create_binding(scope)).binding
+            await app.handle_message(FakeMessage("work", message_id="origin"))
+            client = clients.calls[-1]
+            client.init()
+            client.stop_snapshot(crons=["registered"])
+            client.result(snapshot=False)
+            async with asyncio.timeout(2):
+                while not any("/stop abandon-background " in str(reply) for _, reply in fx.channel.replies):
+                    await asyncio.sleep(0)
+            await app.handle_message(FakeMessage("/status", message_id="status"))
+            self.assertIn("等待后台唤醒，可放弃", str(fx.channel.replies[-1][1].card))
+            self.assertIn("等待后台唤醒，可放弃", str((await app._sessions_card(scope=scope)).card))
+            self.assertEqual(_runtime_binding_json(await app._management.binding_status_exact(binding.id))["localLabel"],
+                             "等待后台唤醒，可放弃")
+            target = CurrentBindingTarget(scope.key, binding.id)
+            generation = client.inputs[0]["uuid"]
+            with patch.object(app._management, "background_control", None):
+                with self.assertRaises(BackendUnsupported):
+                    await app._management.abandon_background(target, generation, "ou_user")
+                await app.handle_message(FakeMessage("/stop abandon-background " + generation, message_id="denied"))
+                self.assertFalse(client.closing.is_set())
+            await app._management.abandon_background(target, generation, "ou_user")
+            self.assertTrue(await ordinary.wait_idle(2))
+
+    async def test_wake_sampling_failure_preserves_delivery_and_idle_ownership(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+            await app.handle_message(FakeMessage("work", message_id="origin"))
+            client = clients.calls[-1]
+            client.init(model="human-model")
+            client.start_background()
+            client.stop_snapshot(["task"])
+            client.result(snapshot=False, usage={"input_tokens": 7})
+            async with asyncio.timeout(3):
+                while not client.background.first_done:
+                    await asyncio.sleep(0)
+            with (patch.object(ordinary.observations, "init", side_effect=ValueError),
+                  patch.object(ordinary.observations, "rate", side_effect=ValueError),
+                  patch.object(ordinary.observations, "result", side_effect=ValueError),
+                  self.assertLogs("netizen_cli.runtime.claude_status", level="WARNING") as warnings):
+                client.end_background()
+                client.init(user_message_uuids=[])
+                client.stream.put_nowait(RateLimitEvent(RateLimitInfo("allowed"), "rate", client.session))
+                client.wake_result(result="wake completion")
+                self.assertTrue(await ordinary.wait_idle(3))
+            self.assertEqual(len(warnings.output), 3)
+            current = ordinary.capture_status(binding.id)
+            self.assertIsNone(current.turn)
+            for key in ("model", "input_tokens", "limitStatus"):
+                self.assertIs(current.observations.get(key).availability, Availability.UNOBSERVED)
+            self.assertEqual(fx.channel.replies[-1][1].markdown, "wake completion")
 
     async def test_idle_revision_after_failed_init_sampling_does_not_inherit_earlier_execution(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):

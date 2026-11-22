@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
 from ..backends import BackendPolicy, BackendUnsupported as BackendUnsupported, OperationId, Provider
-from ..session_providers import CodexStatusSource, LocalStatusSource, ManualTitleWriter, SessionListReads, SessionNames, StatusCapture, StatusSource
+from ..session_providers import BackgroundControl, CodexStatusSource, LocalStatusSource, ManualTitleWriter, SessionListReads, SessionNames, StatusCapture, StatusSource
 from ..session_views import (
     NativeThreadView as NativeThreadView, ScopeSessionPage as ScopeSessionPage,
     SessionInventoryItem as SessionInventoryItem, SessionInventoryPage as SessionInventoryPage,
@@ -58,7 +58,7 @@ from ..bindings import (
 )
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
-from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort
+from ..ordinary_sessions import LocalSessionManagement, OrdinaryInputRejected, OrdinarySessionPort
 from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
@@ -787,6 +787,7 @@ class InstanceManagementService:
         self._projects = projects
         self._runtime = runtime
         self.local = runtime.local if isinstance(runtime, ManagementRuntimePort) else None
+        self.background_control = self.local if isinstance(self.local, BackgroundControl) else None
         self.names = runtime.names if isinstance(runtime, ManagementRuntimePort) else SessionNames.from_runtime(runtime)
         identity = self.local.backend_policy if self.local is not None else BackendPolicy("codex")
         self.policy = identity.bind(self.has_provider)
@@ -929,6 +930,8 @@ class InstanceManagementService:
                 return self._runtime.has_codex_runtime if isinstance(self._runtime, ManagementRuntimePort) else self.local is None
             case Provider.SCHEDULER:
                 return self.schedules is not None
+            case Provider.BACKGROUND_CONTROL:
+                return self.background_control is not None
             case Provider.TITLE_WRITER:
                 return self.names.writer is not None
             case Provider.NAME_GENERATOR:
@@ -1637,7 +1640,7 @@ class InstanceManagementService:
                                          persisted_goal_resolved=True)
         assert self.local is not None
         observations = capture.observations if capture.observations is not None else self.local.observation_defaults
-        return replace(status, local_label=local.label, observations=observations)
+        return replace(status, local_label=local.state_label(self.local.observation_defaults), observations=observations)
 
     async def binding_status_exact(
         self,
@@ -2110,6 +2113,17 @@ class InstanceManagementService:
             disposition = await self._runtime.release_exact(binding.id)
             return ReleasedBinding(binding=binding, disposition=disposition)
 
+    async def abandon_background(self, target: CurrentBindingTarget | None, generation: str | None, owner_id: str) -> str:
+        self.policy.require(OperationId.ABANDON_BACKGROUND)
+        assert self.background_control is not None
+        if generation is not None:
+            return await self.background_control.abandon_background(None, generation, owner_id)
+        if target is None:
+            raise OrdinaryInputRejected("当前会话没有可放弃的后台执行。")
+        async with self._scope_coordinator.hold(target.scope_key):
+            binding = self._require_current(target)
+            return await self.background_control.abandon_background(binding.id, None, owner_id)
+
     async def stop_current_binding(
         self,
         *,
@@ -2117,6 +2131,7 @@ class InstanceManagementService:
         acknowledge: StopAcknowledger | None = None,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> StoppedBinding:
+        self.policy.require(OperationId.STOP)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             stop_kwargs: dict[str, object] = {"acknowledge": acknowledge}
@@ -2337,6 +2352,7 @@ class InstanceManagementService:
         acknowledge: StopAcknowledger | None = None,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> StoppedBinding:
+        self.policy.require(OperationId.STOP)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             stop_kwargs: dict[str, object] = {"acknowledge": acknowledge}
@@ -2359,6 +2375,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         runtime_precondition: RuntimePrecondition,
     ) -> ActiveTurnSnapshot:
+        self.policy.require(OperationId.RECHECK)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             turn_id = runtime_precondition.physical_turn_id

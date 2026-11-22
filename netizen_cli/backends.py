@@ -44,6 +44,7 @@ class Provider(Enum):
     ORDINARY = "ordinary"
     CODEX_RUNTIME = "codex-runtime"
     SCHEDULER = "scheduler"
+    BACKGROUND_CONTROL = "background-control"
     TITLE_WRITER = "title-writer"
     NAME_GENERATOR = "name-generator"
 
@@ -51,6 +52,8 @@ class Provider(Enum):
 class OperationId(str, Enum):
     HELP = "help"
     NEW = "new"
+    SUBMIT = "submit"
+    ABANDON_BACKGROUND = "abandon_background"
     STOP = "stop"
     RECHECK = "recheck"
     STATUS = "status"
@@ -102,6 +105,8 @@ OPERATIONS = {
     OperationId.NEW: Operation(
         "新建会话", Provider.ORDINARY, ("new",), ("binding.create",)
     ),
+    OperationId.SUBMIT: Operation("普通输入", Provider.ORDINARY),
+    OperationId.ABANDON_BACKGROUND: Operation("放弃当前后台工作", Provider.BACKGROUND_CONTROL),
     OperationId.STOP: Operation(
         "停止",
         Provider.ORDINARY,
@@ -352,6 +357,8 @@ class BackendPolicy:
             return self.providers(provider)
         # Standalone parser/identity compatibility. Application services bind the
         # concrete provider lookup before admission.
+        if provider is Provider.BACKGROUND_CONTROL:
+            return False
         return self.backend == "codex" or provider in (Provider.HOST, Provider.ORDINARY)
 
     def allows(self, operation: OperationId) -> bool:

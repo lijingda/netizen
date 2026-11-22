@@ -12,13 +12,14 @@ from lark_channel import (
 )
 
 from .base import CHANNEL_LOGGER_NAME
+from ..backends import OperationId
 from ..bindings import (
     ThreadBinding,
 )
 from .question_inputs import CardAnswerOrigin
 from ..cards.defaults import defaults_card
 from ..defaults import DefaultConfigurationError
-from ..ordinary_sessions import OrdinaryInputRejected
+from ..ordinary_sessions import OrdinaryInputRejected, OrdinaryTerminalQueued
 from ..runtime.contracts import (
     ModelProviderRejected,
     ContextCursorCommit,
@@ -221,6 +222,7 @@ class PromptChannel(CompletionPresentationChannel):
         on_accepted: Callable[[], None] | None = None,
     ) -> None:
         """Share preparation, exact admission, acceptance and feedback for inputs."""
+        self._policy.require(OperationId.SUBMIT)
         if admission is None:
             admission = await self._ordinary.capture_submission_admission(binding.id)
         cwd = self._binding_creation_cwd(binding)
@@ -291,6 +293,8 @@ class PromptChannel(CompletionPresentationChannel):
             accepted = True
             if on_accepted is not None:
                 on_accepted()
+        except OrdinaryTerminalQueued:
+            return
         except BaseException as error:
             if not accepted:
                 await self._discard_unsubmitted_attachments(prepared, error, attempted=attempted)

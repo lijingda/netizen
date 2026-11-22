@@ -91,6 +91,9 @@ class ObservedClient:
     async def interrupt(self):
         await self.client.interrupt()
 
+    async def stop_task(self, task_id):
+        await self.client.stop_task(task_id)
+
     async def query(self, prompt):
         async def observe_input():
             async for message in prompt:
@@ -123,8 +126,8 @@ class ObservedClients:
         self.calls = []
         self.drop_receipt = False
 
-    def create(self, session_id, cwd, *, resume):
-        client = ObservedClient(self.bundled.create(session_id, cwd, resume=resume), self)
+    def create(self, session_id, cwd, *, resume, background=None):
+        client = ObservedClient(self.bundled.create(session_id, cwd, resume=resume, background=background), self)
         self.calls.append(client)
         return client
 

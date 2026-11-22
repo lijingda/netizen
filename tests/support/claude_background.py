@@ -4,6 +4,7 @@ from importlib.metadata import version
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from claude_agent_sdk import AssistantMessage, HookMatcher, ResultMessage, SystemMessage, ToolUseBlock
@@ -16,6 +17,14 @@ from netizen_cli.runtime.claude_client import BundledClaudeClients, single_messa
 async def background_cases(cwd, provider, evidence):
     # Requalify the untyped run_id / origin.runId and membership shapes together on upgrades.
     evidence.check("background metadata qualified pin", (version("claude-agent-sdk"), CLI_VERSION) == ("0.2.186", "2.1.329"))
+    with (patch("netizen_cli.runtime.claude_client.verified_claude_cli", return_value=Path("/unused")),
+          patch("netizen_cli.claude_installation.CLI_VERSION", "next")):
+        try:
+            BundledClaudeClients()
+        except RuntimeError as exc:
+            evidence.check("changed pin refuses background decoder", "重新验证" in str(exc))
+        else:
+            raise AssertionError("unqualified pin enabled the decoder")
     for case in ("single", "reverse", "early", "merge", "stop", "omitted", "interrupt", "cron", "batch", "stale"):
         async with asyncio.timeout(30):
             await _scenario(case, cwd, provider)

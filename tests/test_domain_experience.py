@@ -51,6 +51,7 @@ class SessionActionPolicyTest(unittest.TestCase):
             frozenset(
                 {
                     ActiveState.RUNNING.value,
+                    ActiveState.BACKGROUND_TASK.value,
                     ActiveState.STOPPING.value,
                     ActiveState.OBSERVATION_UNAVAILABLE.value,
                     GoalOperationState.RUNNING.value,
@@ -64,6 +65,7 @@ class SessionActionPolicyTest(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertTrue(session_stop_available(state))
         self.assertFalse(session_stop_available("goal-paused"))
+        self.assertFalse(session_stop_available(ActiveState.HANDOFF.value))
         self.assertFalse(session_stop_available("externally-active-goal"))
         self.assertFalse(session_stop_available(None))
 

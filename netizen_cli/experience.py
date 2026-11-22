@@ -418,6 +418,9 @@ def parse_message(
         arguments = (raw_parts[1],) if len(raw_parts) == 2 else ()
     elif name is ControlName.RENAME and len(tokens) > 1:
         arguments = (" ".join(tokens[1:]),)
+    if (name is ControlName.STOP and len(arguments) in (1, 2) and arguments[0] == "abandon-background"
+            and policy.allows(OperationId.ABANDON_BACKGROUND)):
+        return ControlIntent(scope, message_id, sender_id, name, arguments)
     try:
         _validate_arguments(name, arguments)
     except InvalidInteraction as error:

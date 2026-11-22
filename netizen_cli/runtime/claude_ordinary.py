@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 import logging
 import os
@@ -11,7 +12,7 @@ import time
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, StreamEvent, SystemInitData, SystemMessage
+from claude_agent_sdk import AssistantMessage, Message, RateLimitEvent, ResultMessage, StreamEvent, SystemInitData, SystemMessage
 
 from ..backends import BackendPolicy
 from ..bindings import BindingNotFound, BindingStore, ProjectDeleting, ProjectNotFound, ScopeNotFound, ThreadBinding
@@ -19,11 +20,11 @@ from ..bindings import BindingTaskFeedback, BindingTurnSettings
 from ..domain import ActiveState, MessageContextAnchor, MentionContextMode
 from ..session_settings import require_local_settings
 from ..ordinary_sessions import (
-    LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
+    LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort, OrdinaryTerminalQueued,
     PreparedPrompt, SessionShutdownPort, StopPreview,
 )
 from .claude_status import ClaudeObservations, DEFAULT_OBSERVATIONS, record_observation
-from .claude_client import ClaudeClient, ClaudeClients, single_message, user_message
+from .claude_client import BackgroundTask, ClaudeBackground, ClaudeClient, ClaudeClients, Evidence, single_message, user_message
 from .contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     SubmitDisposition, TerminalStateUnknown, ThreadActivityChanged, TurnActivitySnapshot,
@@ -32,10 +33,14 @@ from .contracts import (
 
 logger = logging.getLogger(__name__)
 UNKNOWN = "本次 Claude 提交结果未知，请检查原会话；系统不会自动重发。"
+BACKGROUND_PENDING = "首答已发，后台任务仍在运行"
+WAKE_STOP = "Claude 正在处理后台完成轮，无法精确停止这一轮。"
+MULTI_STOP = "有多个后台任务，无法确定要停止哪一个。"
+DEGRADED = "本轮结果无法确认，后续回答不再发送。后台任务可能仍在运行，Netizen 无法确认或终止它。客户端关闭后可发送新消息继续。"
+ABANDON_HELP = "所有者可发送以下命令，关闭当前客户端并终止其后台工作。\n/stop abandon-background"
 CLOSE_FAILED = "无法确认 Claude 客户端已关闭，本会话暂不可再提交。"
 CLOSING_CONCLUDED = "这次 Claude 执行已经结束，结果正在送出。"
 CLOSING = "正在关闭 Claude 客户端，执行结果尚未确认。"
-MODE_UNKNOWN = "无法确认 Claude 的有效权限模式，已尝试停止，结果未知。"
 DEFAULT_MODE = "Claude 的自动审核不可用，本次使用默认权限；未预先允许的操作会被拒绝。"
 START_FAILED = "Claude 会话启动失败，本条输入未发送。"
 START_CANCELLED = "已取消启动，本条输入未发送。"
@@ -68,6 +73,12 @@ class _Execution:
     submit_finished: asyncio.Event = field(default_factory=asyncio.Event)
     client: ClaudeClient | None = None
     task: asyncio.Task[None] | None = None
+    background: ClaudeBackground = field(init=False)
+    delivery: asyncio.Task[None] | None = None
+    visible: tuple[object, ...] | None = None
+    close_task: asyncio.Task[bool] | None = None
+    hold_notice: bool = False
+    abandoned: bool = False
     started: bool = False
     writing: bool = False
     stopping: bool = False
@@ -79,6 +90,43 @@ class _Execution:
     detached: bool = False
     stop_receipt: asyncio.Event | None = None
     permission_notice: str | None = None
+
+
+    def __post_init__(self) -> None:
+        self.background = ClaudeBackground(self.session, self.input_id, before_resumed_input=self.binding.native_thread_id is not None)
+
+
+class _ReaderEnded(Exception):
+    """The SDK pull ended independently of cancellation of its owning execution."""
+
+
+async def _messages(client: ClaudeClient, changed: asyncio.Event) -> AsyncGenerator[Message | None]:
+    read: asyncio.Future[Message] | None = None
+    signal = asyncio.create_task(changed.wait())
+    try:
+        stream = client.receive_messages()
+        while True:
+            if read is None:
+                read = asyncio.ensure_future(anext(stream))
+            await asyncio.wait((read, signal), return_when=asyncio.FIRST_COMPLETED)
+            if signal.done():
+                changed.clear()
+                signal = asyncio.create_task(changed.wait())
+                yield None
+            if read.done():
+                msg = read.result()
+                read = None
+                yield msg
+    except (Exception, asyncio.CancelledError) as error:
+        owner_task = asyncio.current_task()
+        if isinstance(error, asyncio.CancelledError) and owner_task is not None and owner_task.cancelling():
+            raise
+        raise _ReaderEnded from None
+    finally:
+        pending: list[asyncio.Future[Any]] = [signal] if read is None else [read, signal]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 # Only fixed public labels may reach Feishu. Custom tools and MCP names can contain private identifiers.
@@ -101,13 +149,18 @@ def _denial_notice(denials: object) -> str | None:
     return f"本次有 {len(denials)} 个操作被 Claude Code 的权限设置拒绝{tools}。如需允许，请在 Claude Code 设置中调整权限规则。"
 
 
+def _native_uuid(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) != 36:
+        return None
+    try:
+        return value if str(UUID(value)) == value else None
+    except ValueError:
+        return None
+
+
 def _terminal(message: ResultMessage) -> tuple[str, str | None, str | None]:
-    if type(message.is_error) is not bool:
-        raise TerminalStateUnknown(UNKNOWN)
     match (message.subtype, message.terminal_reason, message.is_error):
         case ("success", "completed", False):
-            if message.result is not None and not isinstance(message.result, str):
-                raise TerminalStateUnknown(UNKNOWN)
             return "completed", message.result, None
         case ("error_during_execution", "aborted_streaming" | "aborted_tools", True):
             return "interrupted", None, None
@@ -154,7 +207,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._activity: dict[str, _BindingActivity] = {}
         self._active: dict[str, _Execution] = {}
         self._tasks: dict[asyncio.Task[None], _Execution] = {}
-        self._closes: set[asyncio.Task[None]] = set()
+        self._deliveries: set[asyncio.Task[None]] = set()
+        self._closes: set[asyncio.Task[bool]] = set()
         self._owned_cwds: dict[str, Path] = {}
         self._controls: set[asyncio.Task[None]] = set()
         self._unavailable: set[str] = set()
@@ -198,7 +252,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             raise OrdinaryInputRejected(CLOSE_FAILED)
         if binding_id in self._active and self._active[binding_id].closing:
             raise OrdinaryInputRejected("上一轮正在收尾，本条消息未发送。")
-        if binding_id in self._active:
+        if active := self._active.get(binding_id):
+            if active.hold_notice and active.background.abandonable:
+                raise OrdinaryInputRejected(self._abandon_notice(active))
+            if active.background.first_done:
+                if active.background.handoff:
+                    raise OrdinaryInputRejected(BACKGROUND_PENDING)
+                raise OrdinaryInputRejected("上一轮正在收尾，本条消息未发送。")
             raise OrdinaryInputRejected("当前会话正在执行，本条消息未发送。")
 
     def _current(self, binding_id: str) -> ThreadBinding:
@@ -254,9 +314,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if not execution.ready.done():
                 execution.ready.cancel()
             elif not execution.ready.cancelled():
-                execution.ready.exception()
+                execution.ready.exception()  # Consume an already reconciled submission failure.
             if not execution.writing and not execution.closing:
                 self._cancel_opening(execution)
+            raise
+        except Exception:
+            # A failed submit returns no Submission to release the receipt gate.
+            execution.receipt.set()
             raise
         finally:
             execution.submit_finished.set()
@@ -303,7 +367,6 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                    commit: ContextCursorCommit | None) -> None:
         execution.started = True
         binding = execution.binding
-        event: OrdinaryEvent | None = None
         failure: OrdinaryInputRejected | TerminalStateUnknown | None = None
         try:
             self._check_opening(execution)
@@ -311,7 +374,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 actual = await self._cwd(execution, cwd)
                 self._check_opening(execution)
                 self._bindings.require_actual_cwd_not_deleting(actual)
-                execution.client = self._clients.create(execution.session, actual, resume=binding.native_thread_id is not None)
+                execution.background.snapshot_changed = lambda: self._refresh(execution)
+                execution.client = self._clients.create(execution.session, actual, resume=binding.native_thread_id is not None,
+                                                       background=execution.background)
                 self._owned_cwds[binding.id] = actual
                 await execution.client.connect()
             async with self._lock(binding.id):
@@ -322,6 +387,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                         raise OrdinaryInputRejected(STALE)
                     self._bindings.assign_native_thread_id(binding.id, execution.session)
                 execution.writing = True
+                self._refresh(execution)
             confirmed_write = True
             try:
                 async with asyncio.timeout(_WRITE_SECONDS):
@@ -332,18 +398,49 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             del message
             if confirmed_write:
                 self._accepted(execution)
-            event = await self._observe(execution, execution.client, actual, commit, confirmed_write=confirmed_write)
-            self._accepted(execution)
+            bg = execution.background
+            async with aclosing(_messages(execution.client, bg.changed)) as native:
+                try:
+                    async with aclosing(self._read(execution, native)) as stream:
+                        event = await self._observe(execution, stream, actual, commit, confirmed_write=confirmed_write)
+                        self._accepted(execution)
+                        execution.concluded = True
+                        self._queue_delivery(execution, event)
+                        await self._follow(execution, stream, actual)
+                except _ReaderEnded:
+                    if bg.unresolved_work:
+                        bg.degraded = True
+                    elif not execution.concluded:
+                        failure = TerminalStateUnknown(UNKNOWN)
+                except Exception:
+                    bg.degraded = True
+                if bg.degraded:
+                    if not execution.ready.done():
+                        execution.ready.set_exception(OrdinaryTerminalQueued(DEGRADED))
+                    self._queue_delivery(execution, TurnObservationUnavailableOutcome(
+                        binding.id, execution.session, execution.input_id, self._owner, execution.origin, TerminalStateUnknown(DEGRADED)))
+                    async def drain() -> None:
+                        async for _ in native:
+                            pass
+                    reader = asyncio.create_task(drain())
+                    try:
+                        await self._close_client(execution)
+                        if execution.close_task is not None and not execution.close_task.done():
+                            # A timed-out disconnect still owns the transport until it
+                            # returns or the SDK stream ends. Admission is quarantined.
+                            await asyncio.wait((execution.close_task, reader), return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        reader.cancel()
+                        await asyncio.gather(reader, return_exceptions=True)
         except OrdinaryInputRejected as exc:
-            # Never send a traceback holding the still-running owner's frame to another task.
             failure = OrdinaryInputRejected(str(exc))
-        except (Exception, asyncio.CancelledError) as exc:
-            if execution.writing:
-                failure = TerminalStateUnknown(str(exc) if isinstance(exc, TerminalStateUnknown) else UNKNOWN)
-            else:
+        except (Exception, asyncio.CancelledError):
+            if not execution.writing:
                 failure = OrdinaryInputRejected(START_CANCELLED if execution.stopping else START_FAILED)
+            elif not execution.abandoned and not execution.concluded and not execution.background.degraded:
+                failure = TerminalStateUnknown(UNKNOWN)
         finally:
-            await self._finish(execution, event, failure)
+            await self._finish(execution, failure)
 
     @staticmethod
     def _accepted(execution: _Execution) -> None:
@@ -353,87 +450,139 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                                   execution.input_id, execution.receipt.set,
                                                   binding.task_feedback, binding.feedback_revision))
 
-    async def _disconnect(self, execution: _Execution, client: ClaudeClient) -> None:
+    def _close_quarantine(self, execution: _Execution, *, unavailable: bool) -> None:
+        key = execution.binding.id
+        if (key in self._unavailable) != unavailable:
+            if unavailable:
+                self._unavailable.add(key)
+            else:
+                self._unavailable.discard(key)
+            execution.revision = self._advance(key)
+
+    async def _disconnect(self, execution: _Execution, client: ClaudeClient, may_close: Callable[[], bool] | None) -> bool:
         binding_id = execution.binding.id
+        if may_close is not None and not may_close():
+            return False
+        execution.closing = True
+        self._refresh(execution)
         try:
             await client.disconnect()
         except (Exception, asyncio.CancelledError):
-            self._unavailable.add(binding_id)
+            self._close_quarantine(execution, unavailable=True)
         else:
             execution.closed = True
             self._owned_cwds.pop(binding_id, None)
-            if binding_id in self._unavailable:
-                self._unavailable.remove(binding_id)
-                self._advance(binding_id)
+            self._close_quarantine(execution, unavailable=False)
+            if execution.background.degraded:
+                self._release(execution)
+        return True
 
     async def _finish(
-        self, execution: _Execution, event: OrdinaryEvent | None,
-        failure: OrdinaryInputRejected | TerminalStateUnknown | None,
+        self, execution: _Execution, failure: OrdinaryInputRejected | TerminalStateUnknown | None,
     ) -> None:
         binding = execution.binding
         execution.closing = True
-        execution.concluded = event is not None
-        if event is not None:
+        self._refresh(execution)
+        if execution.concluded:
             try:
-                await asyncio.gather(self._close_client(execution), self._deliver(execution, event))
+                assert execution.delivery is not None
+                tail = execution.delivery
+                await asyncio.gather(self._close_client(execution), tail, return_exceptions=True)
+                while execution.delivery is not tail:
+                    tail = execution.delivery
+                    await asyncio.gather(tail, return_exceptions=True)
             finally:
+                if not execution.close_finished and not execution.closed:
+                    self._close_quarantine(execution, unavailable=True)
                 self._release(execution)
         else:
             await self._close_client(execution)
+            self._release(execution)
         if failure is not None:
             # A confirmed close releases the UUID for the next explicit input.
             # Delivery of the old outcome may still be waiting on Feishu.
-            self._release(execution)
-            if execution.permission_notice:
-                await self._tell(execution, execution.permission_notice)
-            if not execution.ready.done():
-                if execution.stop_receipt is not None:
-                    try:
-                        async with asyncio.timeout(self._remaining(_CONTROL_SECONDS + 1)):
-                            await execution.stop_receipt.wait()
-                    except TimeoutError:
-                        pass
-                if not execution.ready.done():
-                    execution.ready.set_exception(failure)
-                # The waiting handler reports this write failure unless it was cancelled.
-                await execution.submit_finished.wait()
-                report_unknown = execution.detached
-            else:
-                report_unknown = True
-            if report_unknown and isinstance(failure, TerminalStateUnknown):
-                await self._deliver(execution, TurnObservationUnavailableOutcome(
-                    binding.id, execution.session, execution.input_id, self._owner, execution.origin, failure))
-        if binding.id in self._unavailable:
+            await self._report_failure(execution, failure)
+        execution.background.snapshot_changed = None
+        if binding.id in self._unavailable and not execution.background.degraded:
             await self._tell(execution, CLOSE_FAILED)
 
-    async def _close_client(self, execution: _Execution) -> None:
-        if execution.client is not None:
-            close = asyncio.create_task(self._disconnect(execution, execution.client))
-            self._closes.add(close)
-            close.add_done_callback(self._closes.discard)
-            await asyncio.wait([close], timeout=self._remaining(_CLOSE_SECONDS))
-            if not close.done():
-                self._unavailable.add(execution.binding.id)
-        execution.close_finished = True
+    async def _report_failure(self, e: _Execution, failure: OrdinaryInputRejected | TerminalStateUnknown) -> None:
+        if e.stop_receipt is not None:
+            await e.stop_receipt.wait()
+        if e.permission_notice:
+            notice, e.permission_notice = e.permission_notice, None
+            await self._tell(e, notice)
+        if not e.ready.done():
+            e.ready.set_exception(failure)
+            await e.submit_finished.wait()
+            if not e.detached:
+                return
+        if isinstance(failure, TerminalStateUnknown):
+            await self._queue_delivery(e, TurnObservationUnavailableOutcome(
+                e.binding.id, e.session, e.input_id, self._owner, e.origin, failure))
 
-    async def _deliver(self, execution: _Execution, event: OrdinaryEvent) -> None:
+    async def _close_client(self, execution: _Execution, may_close: Callable[[], bool] | None = None) -> bool:
+        if execution.close_finished:
+            return True
+        if execution.client is not None:
+            close = execution.close_task
+            if close is None:
+                close = asyncio.create_task(self._disconnect(execution, execution.client, may_close))
+                execution.close_task = close
+                self._closes.add(close)
+                close.add_done_callback(self._closes.discard)
+            await asyncio.wait([close], timeout=self._remaining(_CLOSE_SECONDS))
+            if close.done() and not close.result():
+                execution.close_task = None
+                if may_close is None:
+                    return await self._close_client(execution)
+                return False
+            if not close.done():
+                self._close_quarantine(execution, unavailable=True)
+        execution.close_finished = True
+        return True
+
+    def _queue_delivery(self, execution: _Execution, event: OrdinaryEvent) -> asyncio.Task[None]:
+        previous, notice = execution.delivery, execution.permission_notice
+        execution.permission_notice = None
+        execution.delivery_finished = False
+
+        async def deliver() -> None:
+            if previous is not None:
+                await asyncio.shield(asyncio.gather(previous, return_exceptions=True))
+            await self._deliver(execution, event, notice)
+            if execution.delivery is asyncio.current_task():
+                execution.delivery_finished = True
+                self._refresh(execution)
+
+        execution.delivery = asyncio.create_task(deliver())
+        self._deliveries.add(execution.delivery)
+        execution.delivery.add_done_callback(self._deliveries.discard)
+        return execution.delivery
+
+    async def _deliver(self, execution: _Execution, event: OrdinaryEvent, notice: str | None) -> None:
         try:
             await execution.receipt.wait()
             if execution.stop_receipt is not None:
                 await execution.stop_receipt.wait()
-            if isinstance(event, OrdinaryConclusion) and execution.permission_notice:
-                await self._tell(execution, execution.permission_notice)
+            if notice and not execution.background.degraded:
+                await self._tell(execution, notice)
             async with asyncio.timeout(self._remaining(30.0)):
+                if isinstance(event, OrdinaryConclusion) and execution.background.degraded:
+                    return
                 await self._completion(event)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             logger.warning("Claude completion delivery failed for Binding %s", execution.binding.id)
-        finally:
-            execution.delivery_finished = execution.concluded
 
     def _release(self, execution: _Execution) -> None:
         if self._active.get(execution.binding.id) is execution:
             del self._active[execution.binding.id]
             self._advance(execution.binding.id)
+
+    def _schedule(self, operation: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(operation)
+        self._controls.add(task)
+        task.add_done_callback(self._controls.discard)
 
     async def _tell(self, execution: _Execution, text: str) -> None:
         try:
@@ -442,17 +591,25 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         except Exception:
             logger.warning("Claude notice delivery failed for Binding %s", execution.binding.id)
 
-    async def _invalid_init(self, client: ClaudeClient) -> None:
+    async def _invalid_init(self, execution: _Execution) -> None:
+        bg = execution.background
+        if bg.handoff or bg.crons:
+            bg.degraded = True
+            raise TerminalStateUnknown(UNKNOWN)
+        if not bg.human_open:
+            raise TerminalStateUnknown(UNKNOWN)
+        client = execution.client
+        assert client is not None
         try:
             async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
                 await client.interrupt()
         except Exception:
             pass
-        raise TerminalStateUnknown(f"{MODE_UNKNOWN}\n{UNKNOWN}")
+        raise TerminalStateUnknown(UNKNOWN)
 
-    async def _observe(self, execution: _Execution, client: ClaudeClient, cwd: Path,
-                       commit: ContextCursorCommit | None, *, confirmed_write: bool = True) -> OrdinaryConclusion:
-        async def commit_intake() -> None:
+    async def _observe(self, execution: _Execution, stream: AsyncIterator[Message | None], cwd: Path,
+                       commit: ContextCursorCommit | None, *, confirmed_write: bool = True) -> OrdinaryEvent:
+        def commit_intake() -> None:
             nonlocal commit
             if commit is not None:
                 cursor, commit = commit, None
@@ -462,35 +619,61 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                                          anchor=cursor.anchor)
                 except Exception:
                     self.close_admission(reason=CURSOR_FAILURE)
-                    await self._tell(execution, f"Claude 已接收本次任务，但{CURSOR_FAILURE}")
+                    self._schedule(self._tell(execution, f"Claude 已接收本次任务，但{CURSOR_FAILURE}"))
+
+        loop = asyncio.get_running_loop()
+        bg = execution.background
+        reconciliation = None if confirmed_write else loop.call_later(self._remaining(_RECONCILE_SECONDS), bg.changed.set)
+
+        def accepted() -> None:
+            nonlocal confirmed_write, reconciliation
+            if not confirmed_write:
+                self._accepted(execution)
+                confirmed_write = True
+                if reconciliation is not None:
+                    reconciliation.cancel()
+                    reconciliation = None
+            commit_intake()
 
         initialized = False
-        async with asyncio.timeout(None if confirmed_write else self._remaining(_RECONCILE_SECONDS)) as reconciliation:
-            async for msg in client.receive_messages():
+        human_init = False
+        # Wake the reader on expiry without cancelling its in-flight SDK pull.
+        try:
+            async for msg in stream:
+                assert execution.client is not None
+                verdict = bg.observe(msg) if msg is not None else None
+                self._refresh(execution)
+                if reconciliation is not None and reconciliation.when() <= loop.time():
+                    raise TerminalStateUnknown(UNKNOWN)
+                if msg is None or verdict is not Evidence.NEW or bg.degraded:
+                    continue
+                if (isinstance(msg, (AssistantMessage, StreamEvent)) and msg.parent_tool_use_id is None
+                        and msg.session_id == execution.session
+                        and (msg.user_message_uuid == execution.input_id or msg.user_message_uuids == [execution.input_id])
+                        and msg.user_message_uuid in (None, execution.input_id)
+                        and msg.user_message_uuids in (None, [], [execution.input_id])):
+                    accepted()
                 if not initialized and isinstance(msg, AssistantMessage):
-                    await self._invalid_init(client)
+                    await self._invalid_init(execution)
                 if isinstance(msg, SystemMessage) and msg.subtype == "init":
                     data = cast(SystemInitData, msg.data)
                     init_cwd = data.get("cwd")
                     if (data.get("session_id") != execution.session or not isinstance(init_cwd, str)
                             or not Path(init_cwd).is_absolute() or Path(init_cwd).resolve() != cwd):
                         raise TerminalStateUnknown(UNKNOWN)
-                    if confirmed_write:
-                        await commit_intake()
+                    human_init = msg.data.get("user_message_uuids") == [execution.input_id]
+                    if human_init:
+                        accepted()
                     mode = data.get("permissionMode")
                     if mode not in ("auto", "default"):
-                        await self._invalid_init(client)
-                    with record_observation():
-                        self.observations.init(execution.binding.id, execution.session, execution.input_id, data.get("model"), str(cwd))
+                        await self._invalid_init(execution)
+                    if human_init:
+                        with record_observation():
+                            self.observations.init(execution.binding.id, execution.session, execution.input_id, data.get("model"), str(cwd))
                     initialized = True
                     if mode == "default":
                         execution.permission_notice = DEFAULT_MODE
-                if (initialized and isinstance(msg, (AssistantMessage, StreamEvent)) and msg.parent_tool_use_id is None
-                        and msg.session_id == execution.session
-                        and (msg.user_message_uuid == execution.input_id or
-                             (isinstance(msg.user_message_uuids, list) and execution.input_id in msg.user_message_uuids))):
-                    await commit_intake()
-                if initialized and isinstance(msg, RateLimitEvent) and msg.session_id == execution.session:
+                if human_init and isinstance(msg, RateLimitEvent) and msg.session_id == execution.session:
                     with record_observation():
                         self.observations.rate(execution.binding.id, execution.session, execution.input_id, msg.rate_limit_info)
                 if not isinstance(msg, ResultMessage):
@@ -498,36 +681,206 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 if msg.session_id != execution.session:
                     raise TerminalStateUnknown(UNKNOWN)
                 ids = [] if msg.user_message_uuids is None else msg.user_message_uuids
-                valid_ids = isinstance(ids, list) and all(isinstance(value, str) and value for value in ids)
                 single = msg.user_message_uuid
-                valid_single = single is None or (isinstance(single, str) and bool(single))
                 origin = msg.origin
                 # The SDK says any origin kind other than "human" is not a person's
                 # input, including kinds newer CLIs add (types.MessageOriginKind).
                 injected = isinstance(origin, dict) and origin.get("kind") not in (None, "human")
-                if valid_ids and valid_single and (single or ids):
+                if single or ids:
                     if single != execution.input_id and execution.input_id not in ids:
+                        bg.skip_foreign_result()
+                        self._refresh(execution)
                         continue
-                elif injected and valid_ids and valid_single:
+                elif injected:
                     # For example, resuming after a killed background task replays its
                     # notification as a Result with no input attribution at all.
+                    bg.skip_foreign_result()
+                    self._refresh(execution)
                     continue
                 else:
-                    if reconciliation.when() is None:
-                        reconciliation.reschedule(asyncio.get_running_loop().time() + _RECONCILE_SECONDS)
+                    if reconciliation is None:
+                        reconciliation = loop.call_later(self._remaining(_RECONCILE_SECONDS), bg.changed.set)
                     continue
-                await commit_intake()
+                if (origin not in (None, {"kind": "human"}) or any(value != execution.input_id for value in ids)
+                        or single not in (None, execution.input_id)):
+                    bg.degraded = True
+                    raise TerminalStateUnknown(UNKNOWN)
+                accepted()
+                bg.human_open = False
                 if not initialized:
-                    await self._invalid_init(client)
+                    await self._invalid_init(execution)
                 if denial := _denial_notice(msg.permission_denials):
                     execution.permission_notice = (f"{DEFAULT_MODE}\n{denial}" if execution.permission_notice else denial)
                 status, answer, detail = _terminal(msg)
                 with record_observation():
                     self.observations.result(execution.binding.id, execution.session, execution.input_id, msg)
+                result_id = _native_uuid(msg.uuid)
+                if result_id is None:
+                    bg.degraded = True
+
+                bg.first_done = True
+                bg.finish_turn(attributed=True)
+                self._refresh(execution)
+                bg.credit(msg, result_id)
                 return OrdinaryConclusion(execution.binding.id, execution.session, execution.input_id, self._owner, execution.origin,
                                           status, answer, detail, task_feedback=execution.binding.task_feedback,
                                           feedback_revision=execution.binding.feedback_revision, cwd=cwd)
+        finally:
+            if reconciliation is not None:
+                reconciliation.cancel()
         raise TerminalStateUnknown(UNKNOWN)
+
+    @staticmethod
+    def _abandon_notice(execution: _Execution) -> str:
+        return f"Claude 有会话定时唤醒。{ABANDON_HELP} {execution.input_id}"
+
+    def _hold(self, execution: _Execution) -> None:
+        if not execution.hold_notice:
+            execution.hold_notice = True
+            self._refresh(execution)
+            self._schedule(self._tell(execution, self._abandon_notice(execution)))
+
+    async def abandon_background(self, binding_id: str | None, generation: str | None, owner_id: str) -> str:
+        stale = "后台交接目标已变化或不可放弃，本次未关闭。"
+        if owner_id != self._owner:
+            raise OrdinaryInputRejected(stale)
+        if binding_id is None:
+            binding_id = next((key for key, e in self._active.items() if e.input_id == generation), None)
+            if binding_id is None:
+                raise OrdinaryInputRejected(stale)
+        async with self._lock(binding_id):
+            e = self._active.get(binding_id)
+            if generation is None:
+                if e is None:
+                    raise OrdinaryInputRejected("当前会话没有可放弃的后台执行。")
+                current = self._bindings.active_binding(e.binding.scope_key)
+                if current is None or current.id != binding_id:
+                    raise OrdinaryInputRejected(stale)
+                generation = e.input_id
+            if (self._shutdown_deadline is not None or e is None or e.input_id != generation
+                    or not e.hold_notice or not e.background.abandonable or e.closing):
+                raise OrdinaryInputRejected(stale)
+            label = getattr(e.origin, "id", None) or e.input_id
+            tasks = e.background.pending_tasks | set((e.background.members or {}).values())
+            e.abandoned = e.closing = True
+            self._refresh(e)
+            assert e.task is not None
+            e.task.cancel()
+            return f"已请求关闭原消息 {label} 的客户端并终止其后台工作。任务：{len(tasks)}，会话定时唤醒：{len(e.background.crons)}。"
+
+    async def _read(self, e: _Execution, stream: AsyncIterator[Message | None]) -> AsyncGenerator[Message | None]:
+        bg = e.background
+        deadlines: dict[tuple[str, str], float] = {}
+        loop = asyncio.get_running_loop()
+        while not bg.degraded:
+            if bg.closable and await self._close_client(e, lambda: bg.closable):
+                return
+            now = loop.time()
+            gaps = bg.pending_proofs() if bg.first_done else set()
+            deadlines = {gap: deadlines.get(gap, now + self._remaining(_RECONCILE_SECONDS)) for gap in gaps}
+            if any(end <= now for end in deadlines.values()):
+                bg.degraded = True
+                return
+            if bg.abandonable:
+                self._hold(e)
+            else:
+                e.hold_notice = False
+            self._refresh(e)
+            alarm = loop.call_at(min(deadlines.values()), bg.changed.set) if deadlines else None
+            try:
+                yield await anext(stream)
+            finally:
+                if alarm is not None:
+                    alarm.cancel()
+
+    async def _follow(self, e: _Execution, stream: AsyncIterator[Message | None], cwd: Path) -> None:
+        bg = e.background
+        wake_id: str | None = None
+        activity = self._activity[e.binding.id]
+        async for msg in stream:
+            if msg is None:
+                continue
+            was_wake = bg.wake
+            previous_turn = bg.turn_number
+            verdict = bg.observe(msg)
+            if verdict is not Evidence.NEW or bg.degraded:
+                continue
+            if bg.wake and not was_wake:
+                activity.last_execution_id = wake_id = None
+            if isinstance(msg, SystemMessage) and msg.subtype == "init" and bg.turn_number != previous_turn:
+                directory = msg.data.get("cwd")
+                mode = msg.data.get("permissionMode")
+                if (not isinstance(directory, str) or not Path(directory).is_absolute()
+                        or Path(directory).resolve() != cwd or mode not in ("auto", "default")):
+                    bg.degraded = True
+                    bg.wake_context = False
+                activity.last_execution_id = wake_id = None
+                raw_id = _native_uuid(msg.data.get("uuid"))
+                if (not bg.degraded and msg.data.get("user_message_uuids") in (None, [])
+                        and raw_id and raw_id != e.input_id):
+                    activity.last_execution_id = wake_id = raw_id
+                    with record_observation():
+                        self.observations.init(e.binding.id, e.session, wake_id, msg.data.get("model"), str(cwd))
+                e.permission_notice = DEFAULT_MODE if mode == "default" else None
+            if (wake_id and bg.turn_open and not bg.degraded and isinstance(msg, RateLimitEvent)
+                    and msg.session_id == e.session):
+                with record_observation():
+                    self.observations.rate(e.binding.id, e.session, wake_id, msg.rate_limit_info)
+            if isinstance(msg, ResultMessage):
+                self._wake_terminal(e, msg, cwd, wake_id)
+            bg.settle_cancellations()
+            self._refresh(e)
+
+    def _wake_terminal(self, e: _Execution, msg: ResultMessage, cwd: Path, wake_id: str | None) -> None:
+        bg = e.background
+        if msg.session_id != e.session:
+            bg.degraded = True
+            return
+        result_id = _native_uuid(msg.uuid)
+        task = bg.wake_result(msg)
+        if not task or msg.user_message_uuid is not None or msg.user_message_uuids not in (None, []):
+            # A second terminal for H1 cannot be delivered a second time. A foreign
+            # native wake never inherits H1's Feishu destination.
+            if msg.user_message_uuid == e.input_id and not msg.origin and not bg.wake:
+                return
+            bg.degraded = True
+            bg.finish_turn(attributed=False)
+            return
+        if task.settled:
+            if bg.turn_open:
+                bg.degraded = True
+                bg.finish_turn(attributed=False)
+            return
+        if not bg.wake_context or not bg.turn_open:
+            bg.degraded = True
+            task.settled = True
+            bg.finish_turn(attributed=False)
+            return
+        empty_receipt = (msg.subtype == "success" and msg.terminal_reason is None and msg.is_error is False
+                         and msg.result in (None, "") and not msg.errors and msg.structured_output is None)
+        event: OrdinaryEvent | None = None
+        if not empty_receipt or result_id is None:
+            try:
+                if result_id is None:
+                    raise TerminalStateUnknown(UNKNOWN)
+                status, answer, detail = _terminal(msg)
+                if status == "completed" and not (answer and answer.strip()):
+                    raise TerminalStateUnknown(UNKNOWN)
+            except TerminalStateUnknown:
+                bg.degraded = True
+            else:
+                if denial := _denial_notice(msg.permission_denials):
+                    e.permission_notice = (f"{DEFAULT_MODE}\n{denial}" if e.permission_notice else denial)
+                event = OrdinaryConclusion(e.binding.id, e.session, result_id, self._owner, e.origin, status, answer,
+                    detail, task_feedback=e.binding.task_feedback, feedback_revision=e.binding.feedback_revision, cwd=cwd)
+        bg.credit(msg, result_id)
+        if event is not None:
+            self._queue_delivery(e, event)
+        task.settled = True
+        bg.finish_turn(attributed=True)
+        if wake_id and not bg.degraded:
+            with record_observation():
+                self.observations.result(e.binding.id, e.session, wake_id, msg)
 
     def occupying_bindings(self, directory: Path) -> frozenset[str]:
         target = directory.resolve()
@@ -565,15 +918,49 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             samples = self.observations.read(binding_id, session, execution_id)
         return local.capture(binding_id, session, samples)
 
+    def _state(self, e: _Execution) -> ActiveState:
+        bg = e.background
+        if e.closing or bg.degraded:
+            return ActiveState.CLOSING
+        if e.hold_notice:
+            return ActiveState.QUARANTINED
+        if bg.wake:
+            return ActiveState.WAKE
+        if task := bg.single_task:
+            return ActiveState.STOPPING if task.cancel_requested else ActiveState.BACKGROUND_TASK
+        if bg.first_done:
+            return ActiveState.PENDING if bg.handoff else ActiveState.CLOSING
+        if bg.handoff:
+            return ActiveState.HANDOFF
+        if e.stopping:
+            return ActiveState.STOPPING
+        if e.writing and not bg.human_open:
+            return ActiveState.AWAITING_INPUT
+        return ActiveState.RUNNING
+
+    def _refresh(self, e: _Execution) -> None:
+        if self._active.get(e.binding.id) is not e:
+            return
+        bg = e.background
+        task = bg.single_task
+        signature = (self._state(e), task.task_id if task else None, bg.turn_number, bg.human_open,
+                     e.hold_notice and bg.abandonable, e.closing and e.delivery_finished)
+        if e.visible != signature:
+            e.revision = self._advance(e.binding.id)
+            e.visible = signature
+
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot:
         execution = self._active.get(binding_id)
         turn = None
+        stop_acknowledgement = None
         if execution is not None:
-            state = (ActiveState.CLOSING if execution.closing else
-                     ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING)
+            task = execution.background.single_task
+            state = self._state(execution)
             turn = ActiveTurnSnapshot(binding_id, execution.session, execution.input_id, self._owner, state)
+            if state in (ActiveState.RUNNING, ActiveState.BACKGROUND_TASK):
+                stop_acknowledgement = self._stop_acknowledgement(execution, task)
         return LocalExecutionSnapshot(execution.revision if execution else self._activity.get(binding_id, _BindingActivity()).revision,
-                                      turn, binding_id in self._unavailable)
+                                      turn, binding_id in self._unavailable, stop_acknowledgement)
 
     async def activate_exact(self, binding_id: str, *, context_anchor: MessageContextAnchor | None = None) -> ThreadBinding:
         self.require_admission()
@@ -620,8 +1007,34 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 # The client close can take several seconds (longer with background
                 # tasks); saying "nothing is running" here reads as a lost answer.
                 raise OrdinaryInputRejected(self._closing_notice(execution))
-            return StopPreview("正在请求停止当前 Claude 执行。" if execution.writing else "正在取消 Claude 会话启动。",
-                               execution.revision, execution.input_id)
+            task = self._stop_target(execution)
+            return StopPreview(self._stop_acknowledgement(execution, task), execution.revision, execution.input_id)
+
+    @staticmethod
+    def _stop_acknowledgement(execution: _Execution, task: BackgroundTask | None) -> str:
+        if task is not None:
+            return "正在请求停止这个 Claude 后台任务。"
+        return "正在请求停止当前 Claude 执行。" if execution.writing else "正在取消 Claude 会话启动。"
+
+    def _stop_target(self, e: _Execution) -> BackgroundTask | None:
+        bg = e.background
+        if e.hold_notice and bg.abandonable:
+            raise OrdinaryInputRejected(self._abandon_notice(e))
+        if bg.degraded:
+            raise OrdinaryInputRejected(CLOSING)
+        elif task := bg.single_task:
+            return task
+        elif bg.first_done and not bg.wake and bg.members and len(bg.members) > 1:
+            reason = MULTI_STOP
+        elif bg.first_done and not bg.handoff:
+            raise OrdinaryInputRejected(self._closing_notice(e))
+        elif bg.handoff:
+            reason = WAKE_STOP if bg.wake else "Claude 已进入后台交接，无法精确中断当前执行。"
+        elif e.writing and not bg.human_open:
+            raise OrdinaryInputRejected("尚未确认当前人工输入已开始执行，无法精确停止。")
+        else:
+            return None
+        raise OrdinaryInputRejected(f"{reason}若稍后提示可放弃后台工作，{ABANDON_HELP} {e.input_id}")
 
     @staticmethod
     def _closing_notice(execution: _Execution) -> str:
@@ -642,9 +1055,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                          expected_turn_id: str | None = None) -> StopDisposition:
         async with self._lock(binding_id):
             execution = self._exact(binding_id, expected_activity_revision, expected_turn_id)
-            if execution.stopping:
+            task = self._stop_target(execution)
+            if (task.cancel_requested if task else execution.stopping):
                 return StopDisposition.STOPPING
-            execution.stopping = True
+            if task:
+                task.cancel_requested = True
+            else:
+                execution.stopping = True
+            self._refresh(execution)
             if acknowledge is not None:
                 execution.stop_receipt = asyncio.Event()
             client = execution.client if execution.writing else None
@@ -656,15 +1074,23 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         try:
             if client is not None:
                 async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
-                    await client.interrupt()
+                    if task:
+                        await client.stop_task(task.task_id)
+                    else:
+                        await client.interrupt()
             acknowledge_success = True
         except (Exception, asyncio.CancelledError) as exc:
             async with self._lock(binding_id):
                 if self._active.get(binding_id) is execution:
-                    execution.stopping = False
+                    if task and not task.settled and not task.terminal:
+                        execution.background.degraded = True
+                        execution.background.changed.set()
+                    elif task is None:
+                        execution.stopping = False
+                    self._refresh(execution)
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            if execution.concluded:
+            if (task and task.terminal) or (task is None and execution.concluded):
                 return StopDisposition.NOT_RUNNING
             raise TerminalStateUnknown("无法确认 Claude 停止请求的结果。") from None
         finally:
@@ -685,8 +1111,10 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                  expected_turn_id: str) -> ActiveTurnSnapshot:
         async with self._lock(binding_id):
             execution = self._exact(binding_id, expected_activity_revision, expected_turn_id)
-            return ActiveTurnSnapshot(binding_id, execution.session, execution.input_id, self._owner,
-                                      ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING)
+            self._stop_target(execution)
+            snapshot = self.local_snapshot(binding_id)
+            assert snapshot.turn is not None
+            return snapshot.turn
 
     def _remaining(self, seconds: float) -> float:
         if self._shutdown_deadline is None:
@@ -728,14 +1156,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
 
     async def wait_idle(self, timeout: float) -> bool:
         deadline = time.monotonic() + self._remaining(timeout)
-        while tasks := {task for task in (*self._tasks, *self._controls, *self._closes) if not task.done()}:
+        while tasks := {task for task in (*self._tasks, *self._controls, *self._closes, *self._deliveries) if not task.done()}:
             _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - time.monotonic()))
             if pending:
                 return False
         return not self._unavailable
 
     def _begin_client_cleanup(self) -> None:
-        for task in self._controls:
+        for task in (*self._controls, *self._deliveries):
             if not task.cancelling():
                 task.cancel()
         for execution in self._tasks.values():

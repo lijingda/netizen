@@ -152,6 +152,12 @@ class NativeCapability(str, Enum):
 
 
 class ActiveState(str, Enum):
+    AWAITING_INPUT = "awaiting-input-confirmation"
+    HANDOFF = "background-handoff"
+    PENDING = "background-pending"
+    WAKE = "background-wake"
+    QUARANTINED = "background-quarantined"
+    BACKGROUND_TASK = "background-task"
     CLOSING = "closing"
     RUNNING = "running"
     STOPPING = "stopping"
@@ -188,6 +194,7 @@ SESSION_IDLE_STATE = "idle"
 SESSION_STOP_ACTION_STATES: frozenset[str] = frozenset(
     {
         ActiveState.RUNNING.value,
+        ActiveState.BACKGROUND_TASK.value,
         ActiveState.STOPPING.value,
         ActiveState.OBSERVATION_UNAVAILABLE.value,
         GoalOperationState.RUNNING.value,

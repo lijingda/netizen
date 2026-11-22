@@ -7,11 +7,12 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 import unittest
 
+from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.backends import BackendPolicy, BackendUnsupported
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
-from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions, GRACE, UNKNOWN
+from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions, DEGRADED, GRACE, UNKNOWN
 from tests.support.channel_cards import _card_button_value, _elements, direct_button_event, direct_card_event, form_values, elements
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -116,6 +117,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             await app.handle_message(FakeMessage("work", message_id="om-input"))
             client = clients.calls[-1]
             client.init()
+            await client.consumed()
             def check_model_columns(card):
                 rows = [[column["elements"][0]["text"]["content"] for column in group["columns"]]
                         for group in _elements(card, "column_set")
@@ -157,6 +159,50 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     await app.handle_message(FakeMessage(command, message_id="om"))
                 channel_codex.assert_not_called()
                 management_codex.assert_not_called()
+
+    async def test_short_abandon_rechecks_the_captured_generation(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            created = await fx.create_binding(scope)
+
+            async def send(text, label):
+                await app.handle_message(FakeMessage(text, message_id=label))
+
+            async def start(label):
+                await send("work", label)
+                client = clients.calls[-1]
+                client.init()
+                client.stop_snapshot(crons=["registered"])
+                client.result(snapshot=False)
+                async with asyncio.timeout(2):
+                    while not any(target == label and "/stop abandon-background " in str(reply)
+                                  for target, reply in fx.channel.replies):
+                        await asyncio.sleep(0)
+                return client
+
+            command = "/stop abandon-background"
+            await send(command, "empty")
+            self.assertIn("没有可放弃", fx.channel.replies[-1][1])
+            first = await start("first")
+            token = first.inputs[0]["uuid"]
+            await fx.create_binding(scope)
+            await send(command, "empty-successor")
+            self.assertIn("没有可放弃", fx.channel.replies[-1][1])
+            self.assertFalse(first.closing.is_set())
+            self.assertIn(created.binding.id, ordinary.occupying_bindings(first.cwd))
+            await app.handle_message(FakeMessage(f"{command} {token}", chat_id="other", message_id="exact"))
+            self.assertTrue(await ordinary.wait_idle(2))
+            self.assertNotIn(created.binding.id, ordinary.occupying_bindings(first.cwd))
+            self.assertIn("原消息 first", fx.channel.replies[-1][1])
+            second = await start("second")
+            await send(f"{command} {token}", "stale")
+            self.assertIn("目标已变化", fx.channel.replies[-1][1])
+            self.assertFalse(second.closing.is_set())
+            await send(command, "current")
+            self.assertIn("原消息 second", fx.channel.replies[-1][1])
+            self.assertIn("任务：0，会话定时唤醒：1", fx.channel.replies[-1][1])
+            self.assertTrue(await ordinary.wait_idle(2))
 
     async def test_each_recognized_slash_command_is_checked_once(self):
         from netizen_cli.experience import require_command
@@ -232,6 +278,59 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             await app.handle_card_action(direct_card_event(fx.channel, form))
             self.assertIn("设置已保存", fx.channel.replies[-1][1])
             self.assertEqual(len(clients.calls), 1)
+
+    async def test_unconfirmed_write_uses_one_ordinary_terminal_without_an_acceptance_reaction(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            clients.configure = lambda c: setattr(c, "failure", "query")
+            submit = asyncio.create_task(app.handle_message(FakeMessage("hello", message_id="lost")))
+            await asyncio.wait_for(clients.created.wait(), 1)
+            client = clients.calls[0]
+            await asyncio.wait_for(client.writing.wait(), 1)
+            client.system("session_state_changed", state=17)
+            await asyncio.wait_for(submit, 1)
+            self.assertTrue(await ordinary.wait_idle(1))
+            self.assertEqual([body for _, body in fx.channel.replies], [DEGRADED])
+            self.assertEqual(fx.channel.reactions, [])
+
+    async def test_degraded_terminal_orders_inflight_body_and_cleans_inflight_receipt(self):
+        for reaction in ("DONE", "Typing", "THINKING"):
+            with self.subTest(reaction=reaction):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                        creator_id="ou_user", project_alias="test", task_feedback=BindingTaskFeedback(reaction_pulse_enabled=reaction == "THINKING"))
+                    entered, release = asyncio.Event(), asyncio.Event()
+                    add = fx.channel.add_reaction
+                    async def paused(message_id, emoji_type):
+                        if emoji_type == reaction:
+                            entered.set()
+                            await release.wait()
+                        return await add(message_id, emoji_type)
+                    fx.channel.add_reaction = paused
+                    submit = asyncio.create_task(app.handle_message(FakeMessage("hello", message_id="old")))
+                    try:
+                        await clients.created.wait()
+                        c = clients.calls[0]
+                        if reaction == "DONE":
+                            await submit
+                            c.init()
+                            c.result(result="first body", idle=False)
+                        await asyncio.wait_for(entered.wait(), 1)
+                        c.system("session_state_changed", state=17)
+                        await asyncio.wait_for(c.closing.wait(), 1)
+                        self.assertFalse(any(body == DEGRADED for _, body in fx.channel.replies))
+                    finally:
+                        release.set()
+                        await submit
+                    self.assertTrue(await ordinary.wait_idle(2))
+                    replies = [getattr(body, "markdown", body) for _, body in fx.channel.replies]
+                    self.assertEqual(replies[-1], DEGRADED)
+                    self.assertEqual(replies.count(DEGRADED), 1)
+                    if reaction == "DONE":
+                        self.assertIn("first body", replies[-2])
+                    self.assertFalse(app._reactions._pulses)
 
     async def test_terminal_and_unknown_are_text_only(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):

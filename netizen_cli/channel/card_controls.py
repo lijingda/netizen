@@ -861,8 +861,9 @@ class CardControlChannel(TurnFileChannel):
         precondition = self._runtime_precondition(intent)
         try:
             if self._local_sessions is not None:
+                local = self._local_sessions.local_snapshot(binding.id)
                 async def acknowledge() -> None:
-                    await self._safe_reply_to_card(intent, "正在请求停止当前 Claude 执行。")
+                    await self._safe_reply_to_card(intent, local.stop_acknowledgement or "正在请求停止当前任务。")
 
                 stopped = await self._management.stop_exact_binding(
                     target=target, runtime_precondition=precondition, acknowledge=acknowledge,
@@ -894,7 +895,7 @@ class CardControlChannel(TurnFileChannel):
         }
         notice = notices[stopped.disposition]
         if self._local_sessions is not None:
-            notice = "已请求停止本次 Claude 执行。" if stopped.disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
+            notice = "已请求停止本次任务。" if stopped.disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
         try:
             if self._local_sessions is not None and intent.from_status:
                 card = local_status_card(intent.scope, binding, await self._management.binding_status_exact(binding.id),

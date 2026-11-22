@@ -37,6 +37,11 @@ _USAGE = (("input_tokens", "输入 token"), ("output_tokens", "输出 token"),
           ("totalCostUsd", "SDK 累计费用（USD）"), ("limitStatus", "额度状态"))
 _PRESENTATION = ObservationPresentation(
     provider="Claude Code", identity_label="Claude 会话 ID",
+    state_labels=(("idle", "空闲"), ("running", "执行中"), ("stopping", "正在停止"),
+                  ("closing", "正在收尾"), ("unavailable", "无法确认 Claude 客户端已关闭"),
+                  ("turn-observation-unavailable", "状态待确认"), ("awaiting-input-confirmation", "等待确认输入"), ("background-handoff", "后台交接中"),
+                  ("background-task", "首答已发，后台任务运行中"),
+                  ("background-pending", "首答已发，后台交接中"), ("background-wake", "后台完成轮运行中"), ("background-quarantined", "等待后台唤醒，可放弃")),
     workspace=(("cwd", "上次观测的工作目录"),),
     model_rows=((("model", "Model"),), (("effort", "Effort"), ("speed", "Speed")), (("configuration", "配置来源"),)),
     usage=(("context", "上下文窗口"), *_USAGE), details=(("subscription", "订阅"),),

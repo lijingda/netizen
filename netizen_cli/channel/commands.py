@@ -679,6 +679,14 @@ class CommandChannel(CardControlChannel):
 
     async def _command_stop(self, message: Any, intent: ControlIntent) -> None:
         binding = self._bindings.active_binding(intent.scope.key)
+        if intent.arguments:
+            if len(intent.arguments) not in (1, 2) or intent.arguments[0] != "abandon-background":
+                raise InvalidInteraction("停止命令参数无效。")
+            generation = intent.arguments[1] if len(intent.arguments) == 2 else None
+            target = CurrentBindingTarget(intent.scope.key, binding.id) if binding is not None else None
+            summary = await self._management.abandon_background(target, generation, intent.sender_id)
+            await self._reply(message, summary)
+            return
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return

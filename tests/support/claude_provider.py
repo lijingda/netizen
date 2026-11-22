@@ -1,5 +1,6 @@
 """Deterministic Messages fixture. The only executable tool inputs are fixed here."""
 import asyncio
+import inspect
 import json
 import re
 import uuid
@@ -108,7 +109,8 @@ class Provider:
             elif scenario == "mcp":
                 tool = ("mcp__fixture__identify", {})
         if self.background_script and any(item.get("name") == "Bash" for item in data.get("tools", [])):
-            tool, scenario, label = self.background_script()
+            response = self.background_script()
+            tool, scenario, label = await response if inspect.isawaitable(response) else response
         content = ({"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex, "name": tool[0], "input": tool[1]}
                    if tool else {"type": "text", "text": "fixture-reply-" + label})
         if scenario == "inline-image":

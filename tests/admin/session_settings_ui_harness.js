@@ -139,6 +139,13 @@ const cases = {
   async localized_presentation() {
     const runtimeCell = document.createElement("td");
     for (const status of knownRuntimeStates) {
+      if (Object.hasOwn(providerLabels, status)) {
+        const localLabel = providerLabels[status];
+        updateRuntimeCell(runtimeCell, { primaryStatus: status, primaryStatusResolution: "local", localLabel });
+        assert.equal(runtimeCell.querySelector(".runtime-primary").textContent, localLabel);
+        assert.match(localLabel, /[\u4e00-\u9fff]/);
+        continue;
+      }
       updateRuntimeCell(runtimeCell, { primaryStatus: status, primaryStatusResolution: "local" });
       const label = runtimeCell.querySelector(".runtime-primary").textContent;
       assert.match(label, /[\u4e00-\u9fff]/, `missing Chinese label for ${status}`);

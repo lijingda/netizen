@@ -13,6 +13,11 @@ from .runtime.contracts import NativeThreadCatalogState, NativeThreadMetadata
 
 
 @runtime_checkable
+class BackgroundControl(Protocol):
+    async def abandon_background(self, binding_id: str | None, generation: str | None, owner_id: str) -> str: ...
+
+
+@runtime_checkable
 class _NativeTitleWrite(Protocol):
     """Validate materialization and lifecycle at the exact Binding's native write boundary."""
 
