@@ -27,7 +27,7 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
-from ..cards.controls import local_status_card, local_status_text
+from ..cards.controls import local_status_card
 from ..cards.status import (
     decode_status_command, session_status_card,
 )
@@ -43,7 +43,6 @@ from ..runtime.contracts import (
 from ..domain import (
     ACTIVE_STATE_VALUES,
     ActiveState,
-    session_stop_available,
     ControlIntent,
     ControlName,
     GoalStatus,
@@ -604,16 +603,12 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if self._policy.backend == "claude":
-            assert self._management.local is not None
-            snapshot = self._management.local.local_snapshot(binding.id)
-            turn = snapshot.turn
-            if turn is not None and session_stop_available(turn.state.value):
-                await self._reply(message, local_status_card(intent.scope, binding, snapshot))
-            else:
-                await self._reply(message, local_status_text(binding, snapshot))
+        status = await self._management.binding_status_exact(binding.id)
+        if status.observations is not None:
+            await self._reply(message, local_status_card(intent.scope, binding, status))
             return
-        state = await self._binding_state(binding)
+        state = status.primary_status
+        assert state is not None
         try:
             metadata = await self._management.binding_metadata_exact(
                 binding.id,

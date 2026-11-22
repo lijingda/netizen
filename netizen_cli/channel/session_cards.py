@@ -27,7 +27,6 @@ from ..cards import (
     new_binding_card,
 )
 from .session_pages import SessionCardPage
-from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     NativeThreadMetadata,
     ThreadLifecycleError,
@@ -89,19 +88,6 @@ class SessionCardChannel(QuestionChannel):
             activity_revision=intent.expected_activity_revision,
             physical_turn_id=intent.expected_turn_id,
         )
-
-    async def _binding_state(
-        self,
-        binding: ThreadBinding,
-        *,
-        snapshot: BindingRuntimeSnapshot | None = None,
-    ) -> str:
-        projection = await self._management.binding_status_exact(
-            binding.id,
-            snapshot=snapshot,
-        )
-        assert projection.primary_status is not None
-        return projection.primary_status
 
     async def _read_thread_metadata(
         self,

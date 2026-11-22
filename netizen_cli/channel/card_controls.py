@@ -894,9 +894,8 @@ class CardControlChannel(TurnFileChannel):
         if self._policy.backend == "claude":
             notice = "已请求停止本次 Claude 执行。" if stopped.disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
         try:
-            if self._policy.backend == "claude" and intent.from_status:
-                assert self._management.local is not None
-                card = local_status_card(intent.scope, binding, self._management.local.local_snapshot(binding.id))
+            if self._management.local is not None and intent.from_status:
+                card = local_status_card(intent.scope, binding, await self._management.binding_status_exact(binding.id))
             else:
                 card = await self._sessions_card(scope=intent.scope, page=intent.page,
                                                  session_cursor=intent.session_cursor, notice=notice)

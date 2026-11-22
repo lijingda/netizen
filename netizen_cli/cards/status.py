@@ -14,6 +14,7 @@ from .callbacks import (
     CardActionError, _builder, _button_row, _repeatable_callback_button, _plain,
     _plain_text, _required_string,
 )
+from ..session_views import SessionStatusView
 from .session_ids import session_identity_lines
 
 
@@ -150,46 +151,50 @@ def session_status_card(
     progress_lines: tuple[str, ...],
     subscription_line: str,
 ) -> OutboundCard:
-    builder = _builder("当前会话", metadata_lines[0], template=_state_template(state))
-    builder.raw(_columns(f"Project：{project_alias}", f"状态：{state}"))
-    builder.raw(_plain(metadata_lines[1]))
-    for line in git_branch_lines:
+    view = SessionStatusView(short_id, project_alias, native_thread_id, state, metadata_lines, git_branch_lines,
+                             context_window_line, context_mode_lines, model_lines, progress_lines, subscription_line)
+    return render_status(scope, binding_id, view)
+
+
+def render_status(
+    scope: FeishuScope, binding_id: str, view: SessionStatusView, *,
+    identity: tuple[str, str] | None = None, exact_controls: tuple[dict[str, Any], ...] | None = None,
+) -> OutboundCard:
+    builder = _builder("当前会话", view.metadata_lines[0], template=_state_template(view.state))
+    builder.raw(_columns(f"Project：{view.project_alias}", f"状态：{view.state}"))
+    builder.raw(_plain(view.metadata_lines[1]))
+    for line in view.git_branch_lines:
         builder.raw(_plain(line))
 
     builder.raw({"tag": "hr"})
     builder.markdown("**模型配置**")
-    builder.raw(_plain(model_lines[0]))
-    builder.raw(_columns(model_lines[1], model_lines[2]))
-    builder.raw(_plain(model_lines[3]))
+    builder.raw(_plain(view.model_lines[0]))
+    builder.raw(_columns(view.model_lines[1], view.model_lines[2]))
+    builder.raw(_plain(view.model_lines[3]))
 
     builder.raw({"tag": "hr"})
-    builder.raw(_plain(context_window_line))
-    for line in context_mode_lines:
+    builder.raw(_plain(view.context_window_line))
+    for line in view.context_mode_lines:
         builder.raw(_plain(line))
-    if progress_lines:
+    if view.progress_lines:
         builder.raw({"tag": "hr"})
         builder.markdown("**任务进展**")
-        builder.raw(_plain("\n".join(progress_lines[1:])))
+        builder.raw(_plain("\n".join(view.progress_lines[1:])))
 
     builder.raw({
         "tag": "collapsible_panel",
         "expanded": False,
         "header": {"title": _plain_text("会话详情与订阅")},
         "elements": [_plain("\n".join((
-            *session_identity_lines(
-                short_id=short_id, native_thread_id=native_thread_id,
-            ),
-            subscription_line,
+            *(identity or session_identity_lines(short_id=view.short_id, native_thread_id=view.native_thread_id)),
+            view.subscription_line,
         )))],
     })
-    builder.raw(_command_buttons(scope, "binding", binding_id, {
-        "short_id": short_id, "project_alias": project_alias,
-        "native_thread_id": native_thread_id, "state": state,
-        "metadata_lines": metadata_lines, "git_branch_lines": git_branch_lines,
-        "context_window_line": context_window_line, "context_mode_lines": context_mode_lines,
-        "model_lines": model_lines, "progress_lines": progress_lines,
-        "subscription_line": subscription_line,
-    }))
+    if exact_controls is None:
+        builder.raw(_command_buttons(scope, "binding", binding_id, view.callback_snapshot()))
+    else:
+        for button in exact_controls:
+            builder.raw(button)
     builder.markdown("<font color='grey'>本次查询快照 · 按钮与对应命令的处理方式相同</font>")
     return _status_card(builder.to_dict())
 

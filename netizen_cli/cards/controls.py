@@ -7,11 +7,14 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lark_channel import OutboundCard
 
-from ..ordinary_sessions import LocalExecutionSnapshot
+from ..session_views import Availability, SessionField, SessionStatusView
+from .status import render_status
+if TYPE_CHECKING:
+    from ..management.service import BindingStatusProjection
 from ..bindings import (
     ThreadBinding,
     BindingTaskFeedback,
@@ -1458,21 +1461,32 @@ def _local_stop_button(
     ))
 
 
-def local_status_text(binding: ThreadBinding, snapshot: LocalExecutionSnapshot) -> str:
-    return (f"Project：{binding.project_alias}\n会话：{binding.short_id}\n"
-            f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}\n本地任务：{snapshot.label}\n"
-            "模型用量及执行详情在 Claude 试点中不可用。")
-
-
 def local_status_card(
-    scope: FeishuScope, binding: ThreadBinding, snapshot: LocalExecutionSnapshot,
+    scope: FeishuScope, binding: ThreadBinding, status: BindingStatusProjection,
 ) -> OutboundCard:
-    builder = _builder("当前会话", "Claude 本地任务")
-    builder.raw(_plain(local_status_text(binding, snapshot)))
-    if snapshot.turn is not None and session_stop_available(snapshot.turn.state.value):
-        builder.raw(_local_stop_button(scope, binding.id, binding.id, snapshot.revision,
-                                      snapshot.turn.turn_id, SessionCardPage("lazy"), from_status=True))
-    return OutboundCard(card=builder.to_dict())
+    observed = status.observations
+    assert observed is not None and status.local_label is not None
+    def sample(key: str, source: str) -> str:
+        return observed.get(key, source).display()
+
+    unavailable = SessionField(Availability.UNAVAILABLE, "Claude context").display()
+    excluded = SessionField(Availability.NOT_APPLICABLE, "ordinary session").display()
+    view = SessionStatusView(
+        binding.short_id, binding.project_alias, binding.native_thread_id, status.primary_status or "unknown",
+        ("Claude Code", f"本地任务：{status.local_label}"), ("上次观测的工作目录：" + sample("cwd", "Claude init"),),
+        f"上下文窗口：{unavailable}",
+        ("输入 token：" + sample("input_tokens", "Claude Result"), "输出 token：" + sample("output_tokens", "Claude Result"),
+         "SDK 累计费用（USD）：" + sample("totalCostUsd", "Claude Result"), "额度状态：" + sample("limitStatus", "Claude rate_limit")),
+        ("Model：" + sample("model", "Claude init"), "Effort：未观测", f"Speed：{excluded}", "配置来源：原生 Claude 设置"),
+        (), f"订阅：{excluded}", source="Claude local snapshot",
+    )
+    turn = status.snapshot.turn
+    controls = ((_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, turn.turn_id,
+                                    SessionCardPage("lazy"), from_status=True),)
+                if turn is not None and status.can_stop else ())
+    return render_status(scope, binding.id, view, exact_controls=controls, identity=(
+        f"Netizen 会话编号（/resume）：{binding.short_id}", f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}",
+    ))
 
 
 def local_sessions_card(

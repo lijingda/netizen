@@ -102,7 +102,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("原生 Claude 设置", content)
                     self.assertNotIn("_progress_card", content)
             await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
-            self.assertIn("本地任务", await send("/status"))
+            self.assertIn("本地任务", json.dumps((await send("/status")).card, ensure_ascii=False))
             for cmd in ("/config", "/sessions"):
                 content = json.dumps((await send(cmd)).card, ensure_ascii=False)
                 self.assertNotIn("Codex", content)

@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
 from ..backends import BackendPolicy, BackendUnsupported as BackendUnsupported, OperationId, OPERATIONS, Provider
-from ..session_providers import ManualTitleWriter, SessionNames
+from ..session_providers import CodexStatusSource, LocalStatusSource, ManualTitleWriter, SessionNames, StatusCapture, StatusSource
+from ..session_views import SessionObservations
 from ..session_settings import require_local_settings
 from ..management_errors import ConversationReadError as ConversationReadError, ManagementError
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
@@ -214,6 +215,7 @@ class BindingStatusProjection:
     can_stop: bool
     can_release: bool
     local_label: str | None = None
+    observations: SessionObservations | None = None
 
     @property
     def binding_id(self) -> str:
@@ -849,6 +851,12 @@ class InstanceManagementService:
         self._runtime = runtime
         self.local = runtime.local if isinstance(runtime, ManagementRuntimePort) else None
         self.names = runtime.names if isinstance(runtime, ManagementRuntimePort) else SessionNames.from_runtime(runtime)
+        self.status_source: StatusSource
+        if self.local is None:
+            self.status_source = CodexStatusSource(lambda binding_id: runtime.runtime_snapshot_exact(binding_id))
+        else:
+            cache = getattr(self.local, "observations", None)
+            self.status_source = LocalStatusSource(self.local, cache.read if cache is not None else lambda *_: SessionObservations())
         self._scope_coordinator = scope_coordinator
         self._updates = updates or UpdateService(root=root)
         self._progress_card_config = progress_card_config or ProgressCardConfigService()
@@ -1665,12 +1673,12 @@ class InstanceManagementService:
             ))
         return SideTopicInventoryPage(items=tuple(items), next_cursor=page.next_cursor)
 
-    def _local_binding_status(self, binding: ThreadBinding, snapshot: BindingRuntimeSnapshot) -> BindingStatusProjection:
-        assert self.local is not None
-        local = self.local.local_snapshot(binding.id)
-        status = _project_binding_status(binding=binding, snapshot=snapshot, primary_status_unavailable=local.unavailable,
+    def _local_binding_status(self, binding: ThreadBinding, capture: StatusCapture) -> BindingStatusProjection:
+        local = capture.local
+        assert local is not None
+        status = _project_binding_status(binding=binding, snapshot=capture.snapshot, primary_status_unavailable=local.unavailable,
                                          persisted_goal_resolved=True)
-        return replace(status, local_label=local.label)
+        return replace(status, local_label=local.label, observations=capture.observations)
 
     async def binding_status_exact(
         self,
@@ -1681,9 +1689,10 @@ class InstanceManagementService:
         deadline: float | None = None,
     ) -> BindingStatusProjection:
         binding = self._bindings.get(binding_id)
-        before = snapshot or self._runtime.runtime_snapshot_exact(binding.id)
-        if self.local is not None:
-            return self._local_binding_status(binding, before)
+        capture = self.status_source.capture(binding) if snapshot is None or self.local is not None else StatusCapture(snapshot)
+        if capture.local is not None:
+            return self._local_binding_status(binding, capture)
+        before = capture.snapshot
         local = _project_binding_status(
             binding=binding,
             snapshot=before,
@@ -1791,13 +1800,14 @@ class InstanceManagementService:
         binding_snapshots = []
         for binding_id in binding_ids:
             binding = self._bindings.get(binding_id)
-            if self.local is not None:
-                binding_snapshots.append(self._local_binding_status(binding, self._runtime.runtime_snapshot_exact(binding.id)))
+            capture = self.status_source.capture(binding)
+            if capture.local is not None:
+                binding_snapshots.append(self._local_binding_status(binding, capture))
                 continue
             binding_snapshots.append(
                 _project_binding_status(
                     binding=binding,
-                    snapshot=self._runtime.runtime_snapshot_exact(binding.id),
+                    snapshot=capture.snapshot,
                 )
             )
         sides: list[SideSessionSnapshot] = []
