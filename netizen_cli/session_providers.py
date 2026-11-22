@@ -1,14 +1,15 @@
-"""The exact session naming capabilities consumed by management."""
+"""Narrow read and naming providers consumed by session management."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-
-from .bindings import ThreadBinding
+from .bindings import BindingCursor, ThreadBinding
 from .ordinary_sessions import LocalExecutionSnapshot, LocalSessionManagement
 from .runtime.codex_contracts import BindingRuntimeSnapshot
-from .session_views import SessionObservations
+from .session_views import SessionInventoryPage, SessionObservations, SessionQuery
+from .session_inventory import NativeSessionCursor
+from .runtime.contracts import NativeThreadMetadata
 
 
 @runtime_checkable
@@ -80,3 +81,10 @@ class LocalStatusSource:
         local = self.runtime.local_snapshot(binding.id)
         snapshot = BindingRuntimeSnapshot(binding.id, local.revision, local.turn, None, False, None, None, None)
         return StatusCapture(snapshot, local, self.read_samples(binding.id, binding.native_thread_id))
+
+
+@dataclass(frozen=True, slots=True)
+class SessionListReads:
+    native_catalog: bool
+    page: Callable[[SessionQuery, BindingCursor | NativeSessionCursor | None, int, float], Awaitable[SessionInventoryPage]]
+    metadata: Callable[[str, float], Awaitable[NativeThreadMetadata | None]]

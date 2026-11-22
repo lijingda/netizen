@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from lark_channel import OutboundCard
 
-from ..session_views import Availability, SessionField, SessionStatusView
+from ..session_views import Availability, SessionField, SessionObservations, SessionStatusView
 from .status import render_status
 if TYPE_CHECKING:
     from ..management.service import BindingStatusProjection
@@ -122,6 +122,8 @@ class SessionCardItem:
     turn_id: str | None = None
     catalog_unconfirmed: bool = False
     state_label: str | None = None
+    observations: SessionObservations | None = None
+    registered_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1489,35 +1491,6 @@ def local_status_card(
     ))
 
 
-def local_sessions_card(
-    scope: FeishuScope, items: tuple[SessionCardItem, ...], *, navigation: SessionCardPage,
-    next_cursor: str | None, notice: str | None, active_binding_id: str | None,
-) -> OutboundCard:
-    builder = _builder("普通会话", "按本地创建时间排序")
-    if notice:
-        builder.raw(_notice(notice))
-    if not items:
-        builder.markdown("当前聊天或话题还没有会话。")
-    for item in items:
-        builder.markdown(f"{_md_code(item.project_alias)} · {_md_code(item.short_id)}"
-                         + (" · 当前会话" if item.active else "") + " · " + (item.state_label or item.state))
-        if not item.active:
-            builder.raw(_repeatable_callback_button(
-                label="设为当前", value=_envelope(scope, CardControlName.ACTIVATE_BINDING,
-                    binding_id=_binding_reference(item.binding_id), session_cursor=navigation.encode(scope)),
-            ))
-        if item.turn_id is not None and session_stop_available(item.state):
-            builder.raw(_local_stop_button(scope, item.binding_id, active_binding_id,
-                                           item.activity_revision, item.turn_id, navigation))
-    previous = navigation.previous()
-    builder.raw(_sessions_pagination(
-        scope=scope, local_only=True, page=navigation.page,
-        previous_cursor=previous.encode(scope) if previous else None, next_cursor=next_cursor,
-        state=navigation.state, has_lazy=False,
-    ))
-    return _session_list_card(builder.to_dict())
-
-
 def sessions_card(
     *,
     scope: FeishuScope,
@@ -1533,13 +1506,15 @@ def sessions_card(
     current: SessionCardItem | None = None,
     lazy: bool = False,
     has_lazy: bool = False,
+    local_directory: bool = False,
 ) -> OutboundCard:
     session_cursor = _session_action_cursor(scope, session_cursor)
     subtitle = "尚未开始对话的会话" if lazy else "按 Codex 更新时间排序"
-    builder = _builder("会话", subtitle)
+    builder = _builder("会话", "按本地登记时间排序" if local_directory else subtitle)
     if notice:
         builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
+        "切换不会停止其他会话正在运行的任务。" if local_directory else
         "切换不会停止其他会话正在运行的任务。"
         "归档保留历史，可恢复；删除需红色确认，并级联删除派生会话。\n"
         "更多管理请使用 Admin 会话列表，发送 `/admin` 打开。"
@@ -1555,6 +1530,7 @@ def sessions_card(
         builder.markdown("**本页会话**")
     if not sessions:
         builder.markdown(
+            "本页没有会话。发送 `/new` 新建会话。" if local_directory else
             ("本页没有未开始的会话。" if lazy else "本页没有普通会话。")
             + "发送 `/new` 新建会话，"
             "或发送 `/sessions archived` 查找已归档会话。"
@@ -1573,7 +1549,7 @@ def sessions_card(
 
     builder.raw(_sessions_pagination(
         scope=scope, page=page, previous_cursor=previous_cursor, next_cursor=next_cursor,
-        state="lazy" if lazy else "active", has_lazy=has_lazy,
+        state="lazy" if lazy else "active", has_lazy=has_lazy, local_only=local_directory,
     ))
     return _session_list_card(builder.to_dict())
 
@@ -1612,15 +1588,22 @@ def _session_row(
         _turn_reference(session.turn_id) if session.turn_id is not None else None
     )
     marker_text = "● 当前" if session.active else "○"
-    text = (
-        f"{marker_text} {session.title}\n"
-        f"Project：{session.project_alias} · 状态：{session.state}"
-    )
-    if session.catalog_unconfirmed:
-        text += " · 归档状态：未确认"
-    text += "\n" + "\n".join(session_identity_lines(
-        short_id=session.short_id, native_thread_id=session.native_thread_id,
-    ))
+    local = session.observations
+    if local is not None:
+        model = local.get("model", "Claude init").display()
+        text = (f"{marker_text} {session.short_id}\nProject：{session.project_alias} · 状态：{session.state_label}\n"
+                f"Claude 会话 ID：{session.native_thread_id or '尚未建立'}\n登记时间：{session.registered_at}\n"
+                f"上次观测的模型：{model}")
+    else:
+        text = (
+            f"{marker_text} {session.title}\n"
+            f"Project：{session.project_alias} · 状态：{session.state}"
+        )
+        if session.catalog_unconfirmed:
+            text += " · 归档状态：未确认"
+        text += "\n" + "\n".join(session_identity_lines(
+            short_id=session.short_id, native_thread_id=session.native_thread_id,
+        ))
     controls: list[dict[str, Any]] = []
     if not session.active:
         controls.append(
@@ -1635,7 +1618,7 @@ def _session_row(
                 style="primary_filled",
             )
         )
-    if session.native_thread_id is not None:
+    if local is None and session.native_thread_id is not None:
         controls.append(
             _callback_button(
                 label="归档",
@@ -1655,7 +1638,7 @@ def _session_row(
                 ),
             )
         )
-    if (
+    if local is None and (
         (
             session.native_thread_id is None
             and session.state == SESSION_IDLE_STATE
@@ -1704,7 +1687,7 @@ def _session_row(
             )
         )
     if (
-        session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
+        local is None and session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
         and session.turn_id is not None
     ):
         controls.append(

@@ -13,8 +13,12 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
 from ..backends import BackendPolicy, BackendUnsupported as BackendUnsupported, OperationId, OPERATIONS, Provider
-from ..session_providers import CodexStatusSource, LocalStatusSource, ManualTitleWriter, SessionNames, StatusCapture, StatusSource
-from ..session_views import SessionObservations
+from ..session_providers import CodexStatusSource, LocalStatusSource, ManualTitleWriter, SessionListReads, SessionNames, StatusCapture, StatusSource
+from ..session_views import (
+    NativeThreadView as NativeThreadView, ScopeSessionPage as ScopeSessionPage,
+    SessionInventoryItem as SessionInventoryItem, SessionInventoryPage as SessionInventoryPage,
+    SessionInventoryState as SessionInventoryState, SessionObservations, SessionQuery as SessionQuery,
+)
 from ..session_settings import require_local_settings
 from ..management_errors import ConversationReadError as ConversationReadError, ManagementError
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
@@ -161,14 +165,6 @@ class ForkPublicationInProgress(ManagementError):
     pass
 
 
-@dataclass(frozen=True, slots=True)
-class NativeThreadView:
-    # None means the management catalog could not classify a materialized Thread.
-    # An absent NativeThreadView, rather than an absent state, represents Lazy.
-    state: NativeThreadCatalogState | None
-    metadata: NativeThreadMetadata | None
-
-
 def classify_native_thread_view(
     thread_id: str | None,
     *,
@@ -296,64 +292,6 @@ def _project_binding_status(
         can_stop=session_stop_available(primary_status),
         can_release=can_release,
     )
-
-
-class SessionInventoryState(str, Enum):
-    ACTIVE = "active"
-    LAZY = "lazy"
-    ARCHIVED = "archived"
-    MISSING = "missing"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True, slots=True)
-class SessionQuery:
-    search_term: str | None = None
-    local: BindingQuery = BindingQuery()
-    inventory_state: SessionInventoryState = SessionInventoryState.ACTIVE
-    sort_by: Literal["created_at", "updated_at"] = "updated_at"
-    sort_direction: Literal["asc", "desc"] = "desc"
-    # Native Unix seconds, independent of the Binding's registration time.
-    created_from: float | None = None
-    created_before: float | None = None
-    updated_from: float | None = None
-    updated_before: float | None = None
-
-
-def _session_inventory_state(
-    binding: ThreadBinding, native: NativeThreadView | None,
-) -> SessionInventoryState:
-    if binding.native_thread_id is None:
-        return SessionInventoryState.LAZY
-    if native is None or native.state is None:
-        return SessionInventoryState.UNKNOWN
-    return SessionInventoryState(native.state.value)
-
-
-@dataclass(frozen=True, slots=True)
-class SessionInventoryItem:
-    record: BindingInventoryRecord
-    native: NativeThreadView | None
-    chat: ChatLabel
-
-    @property
-    def inventory_state(self) -> SessionInventoryState:
-        return _session_inventory_state(self.record.binding, self.native)
-
-
-@dataclass(frozen=True, slots=True)
-class SessionInventoryPage:
-    items: tuple[SessionInventoryItem, ...]
-    next_cursor: BindingCursor | SessionNativeCursor | None
-
-
-@dataclass(frozen=True, slots=True)
-class ScopeSessionPage:
-    items: tuple[SessionInventoryItem, ...]
-    next_cursor: BindingCursor | SessionNativeCursor | None
-    current: SessionInventoryItem | None
-    active_binding_id: str | None
-    has_lazy: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -857,6 +795,10 @@ class InstanceManagementService:
         else:
             cache = getattr(self.local, "observations", None)
             self.status_source = LocalStatusSource(self.local, cache.read if cache is not None else lambda *_: SessionObservations())
+        self.session_reads = (
+            SessionListReads(True, self._native_session_page, self._native_binding_metadata)
+            if self.local is None else SessionListReads(False, self._local_session_page, self._local_binding_metadata)
+        )
         self._scope_coordinator = scope_coordinator
         self._updates = updates or UpdateService(root=root)
         self._progress_card_config = progress_card_config or ProgressCardConfigService()
@@ -1443,7 +1385,7 @@ class InstanceManagementService:
         deadline: float,
     ) -> SessionInventoryPage:
         if query is None:
-            query = SessionQuery(sort_by="created_at") if self.local is not None else SessionQuery()
+            query = SessionQuery() if self.session_reads.native_catalog else SessionQuery(sort_by="created_at")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("page size must be between 1 and 100")
         if not isinstance(query.inventory_state, SessionInventoryState) or query.inventory_state not in {
@@ -1467,22 +1409,31 @@ class InstanceManagementService:
             if query.inventory_state is SessionInventoryState.LAZY:
                 raise ValueError("Lazy sessions do not support native search")
 
-        if self.local is not None:
-            if (query.inventory_state is SessionInventoryState.ARCHIVED or query.search_term or
-                    query.sort_by != "created_at" or query.updated_from is not None or query.updated_before is not None):
-                raise BackendUnsupported("原生会话目录或历史")
-            if cursor is not None and not isinstance(cursor, BindingCursor):
-                raise ValueError("会话分页已过期，请刷新列表。")
-            local_query = replace(query.local, sort_direction=query.sort_direction,
-                                  materialized=False if query.inventory_state is SessionInventoryState.LAZY else None)
-            if query.created_from is not None or query.created_before is not None:
-                local_query = replace(local_query,
-                    created_from=datetime.fromtimestamp(query.created_from, timezone.utc).isoformat() if query.created_from is not None else None,
-                    created_before=datetime.fromtimestamp(query.created_before, timezone.utc).isoformat() if query.created_before is not None else None)
-            local_page = await self._bindings.query_bindings(query=local_query, cursor=cursor, limit=limit,
-                                                            deadline_seconds=self._query_seconds(deadline))
-            return self._session_page(local_page.items, native={}, next_cursor=local_page.next_cursor)
+        return await self.session_reads.page(query, cursor, limit, deadline)
 
+    async def _local_session_page(
+        self, query: SessionQuery, cursor: BindingCursor | SessionNativeCursor | None,
+        limit: int, deadline: float,
+    ) -> SessionInventoryPage:
+        if (query.inventory_state is SessionInventoryState.ARCHIVED or query.search_term or
+                query.sort_by != "created_at" or query.updated_from is not None or query.updated_before is not None):
+            raise BackendUnsupported("原生会话目录或历史")
+        if cursor is not None and not isinstance(cursor, BindingCursor):
+            raise ValueError("会话分页已过期，请刷新列表。")
+        local_query = replace(query.local, sort_direction=query.sort_direction,
+                              materialized=False if query.inventory_state is SessionInventoryState.LAZY else None)
+        if query.created_from is not None or query.created_before is not None:
+            local_query = replace(local_query,
+                created_from=datetime.fromtimestamp(query.created_from, timezone.utc).isoformat() if query.created_from is not None else None,
+                created_before=datetime.fromtimestamp(query.created_before, timezone.utc).isoformat() if query.created_before is not None else None)
+        local_page = await self._bindings.query_bindings(query=local_query, cursor=cursor, limit=limit,
+                                                        deadline_seconds=self._query_seconds(deadline))
+        return self._session_page(local_page.items, native={}, next_cursor=local_page.next_cursor)
+
+    async def _native_session_page(
+        self, query: SessionQuery, cursor: BindingCursor | SessionNativeCursor | None,
+        limit: int, deadline: float,
+    ) -> SessionInventoryPage:
         # Native timestamps belong to Codex, not the local Binding index. Lazy
         # has no native times and uses its separate registration-time order.
         local = replace(
@@ -1530,40 +1481,25 @@ class InstanceManagementService:
         deadline: float,
     ) -> ScopeSessionPage:
         """Read one Scope page, with an independent exact current-session entry."""
-        self._require_operation(OperationId.HISTORY)
+        native_catalog = self.session_reads.native_catalog
+        if archived and not native_catalog:
+            self._require_operation(OperationId.ARCHIVED)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("page size must be between 1 and 100")
         if archived and lazy:
             raise ValueError("a Scope session page cannot be both archived and Lazy")
-        if cursor is not None and not isinstance(cursor, BindingCursor if lazy else SessionNativeCursor):
+        if cursor is not None and not isinstance(cursor, BindingCursor if lazy or not native_catalog else SessionNativeCursor):
             raise ValueError("Session cursor does not match its inventory state")
         self._query_seconds(deadline)
         current_binding = self._bindings.active_binding(scope.key)
-        local = BindingQuery(
-            app_id=scope.app_id, chat_id=scope.chat_id, scope_kind=scope.kind,
-            topic_id=scope.topic_id, materialized=not lazy,
-        )
-        has_lazy = self._bindings.has_bindings(scope.key, materialized=False)
-        if lazy:
-            page = await self._bindings.query_bindings(
-                query=local, cursor=cursor, limit=limit,
-                deadline_seconds=self._query_seconds(deadline),
-            )
-            items = tuple(SessionInventoryItem(
-                record, None, ChatLabelResolver.fallback(scope.chat_id),
-            ) for record in page.items)
-            next_cursor = page.next_cursor
-        elif self._bindings.has_bindings(scope.key, materialized=True):
-            page = await query_native_sessions(
-                bindings=self._bindings, read_page=self._runtime.thread_catalog_page_exact, query=local,
-                archived=archived, cursor=cursor, limit=limit, deadline=deadline,
-            )
-            native_state = NativeThreadCatalogState.ARCHIVED if archived else NativeThreadCatalogState.ACTIVE
-            items = tuple(SessionInventoryItem(
-                item.record, NativeThreadView(native_state, item.metadata),
-                ChatLabelResolver.fallback(scope.chat_id),
-            ) for item in page.items)
-            next_cursor = page.next_cursor
+        local = BindingQuery(app_id=scope.app_id, chat_id=scope.chat_id, scope_kind=scope.kind, topic_id=scope.topic_id)
+        has_lazy = native_catalog and self._bindings.has_bindings(scope.key, materialized=False)
+        if not native_catalog or lazy or self._bindings.has_bindings(scope.key, materialized=True):
+            inventory = SessionInventoryState.ARCHIVED if archived else SessionInventoryState.ACTIVE
+            query = SessionQuery(local=local, inventory_state=SessionInventoryState.LAZY if lazy and native_catalog else inventory,
+                                 sort_by="updated_at" if native_catalog else "created_at")
+            page = await self.session_reads.page(query, cursor, limit, deadline)
+            items, next_cursor = page.items, page.next_cursor
         else:
             items, next_cursor = (), None
         current = None
@@ -1572,7 +1508,7 @@ class InstanceManagementService:
             if current is None:
                 # A current session omitted by the native list stays reachable
                 # by its exact local identity, without hydrating all old rows.
-                views = await self._session_native_views((current_binding,), native=None, deadline=deadline)
+                views = await self._session_native_views((current_binding,), native=None, deadline=deadline) if native_catalog else {}
                 current = SessionInventoryItem(
                     BindingInventoryRecord(current_binding, self._bindings.get_scope(scope.key)),
                     views.get(current_binding.native_thread_id), ChatLabelResolver.fallback(scope.chat_id),
@@ -1614,6 +1550,15 @@ class InstanceManagementService:
     async def binding_metadata_exact(
         self, binding_id: str, *, deadline: float,
     ) -> NativeThreadMetadata | None:
+        return await self.session_reads.metadata(binding_id, deadline)
+
+    async def _local_binding_metadata(self, binding_id: str, deadline: float) -> NativeThreadMetadata | None:
+        self._query_seconds(deadline)
+        self._bindings.get(binding_id)
+        # Claude init and Result do not attest a session title or a native creation time.
+        return None
+
+    async def _native_binding_metadata(self, binding_id: str, deadline: float) -> NativeThreadMetadata | None:
         """Read an exact Binding's display summary with the shared worker budget.
 
         A missing summary says nothing about native archive/existence state.

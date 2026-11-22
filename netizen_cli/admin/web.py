@@ -642,7 +642,7 @@ class AdminWebApplication:
             raise OwnerOnly()
 
     async def _dispatch_authenticated(self, context: _RequestContext) -> Response:
-        if self._backend_policy.backend == "claude":
+        if self._backend_policy.owner_id is not None:
             self._check_owner_route(context)
         if context.path.startswith("/api/v1/"):
             self._backend_policy.require_api(context.method, context.path.removeprefix("/api/v1"))
@@ -674,8 +674,14 @@ class AdminWebApplication:
             return await self._project_files(context)
         if context.method == "GET" and context.path in _ADMIN_PAGE_PATHS:
             page = self._assets["index.html"]
-            if self._backend_policy.backend == "claude":
-                page = page.replace(b"<body>", b'<body data-backend="claude">', 1)
+            attributes = []
+            if self._backend_policy.owner_id is not None:
+                attributes.extend(('data-backend="claude"', 'data-owner-only="true"'))
+            disabled = [operation.value for operation in OperationId if not self._backend_policy.allows(operation)]
+            if disabled:
+                attributes.append('data-unavailable="' + " ".join(disabled) + '"')
+            if attributes:
+                page = page.replace(b"<body>", ("<body " + " ".join(attributes) + ">").encode(), 1)
             page = page.replace(
                 b" data-netizen-generate-name-visibility",
                 b"" if self._backend_policy.allows(OperationId.GENERATE_NAME) else b" hidden",
@@ -712,7 +718,7 @@ class AdminWebApplication:
             session = self._authenticate(context)
             profile = await self._identity_call(context, self._identity_credentials().profile(session.identity, session.add_revision))
             return _json_response(200, {"openId": profile.open_id, "name": profile.name, "avatarUrl": _user_avatar(profile.avatar_url),
-                **({"backend": "claude", "ownerOnly": True} if self._backend_policy.backend == "claude" else {})})
+                **({"backend": "claude", "ownerOnly": True} if self._backend_policy.owner_id is not None else {})})
         if route == ("GET", "/api/v1/admin-users"):
             return self._admin_users(context)
         if route == ("GET", "/api/v1/group-access"):
@@ -2709,9 +2715,9 @@ class AdminWebApplication:
             } for member in members]
             result = {
                 "revision": revision, "currentOpenId": session.identity.open_id, "users": rows,
-                "addAction": None if self._backend_policy.backend == "claude" else grants.add(
+                "addAction": None if self._backend_policy.owner_id is not None else grants.add(
                     "admin-users.add", AdminActionTarget("admin-users", self._users.app_id), preconditions),
-                "selectorAction": None if self._backend_policy.backend == "claude" else grants.add(
+                "selectorAction": None if self._backend_policy.owner_id is not None else grants.add(
                     "admin-users.selector-config", AdminActionTarget("admin-users", self._users.app_id), preconditions),
             }
             grants.issue()
