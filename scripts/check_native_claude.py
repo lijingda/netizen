@@ -379,6 +379,8 @@ async def worker():
             await main_cases(cwd, provider, evidence)
             from tests.support.claude_channel_e2e import channel_cases
             await channel_cases(cwd, provider)
+            from tests.support.claude_background import background_cases
+            await background_cases(cwd, provider, evidence)
         print(json.dumps({"checks": evidence.names, "mockRequests": len(provider.rows)}), flush=True)
     finally:
         await provider.close()
