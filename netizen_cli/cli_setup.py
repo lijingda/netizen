@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, IO
 
-from .backends import instance_backend
+from .backends import DEFAULT_BACKEND, instance_backend
 from .lark_app import encode_lark_app, load_lark_app
 
 
@@ -114,8 +114,10 @@ def require_codex_login(*, runner: Callable = subprocess.run) -> None:
         raise SetupError("sign in to Codex for this account, then rerun netizen setup")
 
 
-def _register(root: Path, app_id: str | None, *, runner: Callable) -> None:
-    arguments = ["--app-id", app_id] if app_id else []
+def _register(root: Path, app_id: str | None, *, backend: str = DEFAULT_BACKEND, runner: Callable) -> None:
+    arguments = ["--backend", backend]
+    if app_id:
+        arguments.extend(["--app-id", app_id])
     value = _helper("netizen_cli.feishu_app_onboarding", arguments,
                     timeout=660, runner=runner, progress=True)
     if (set(value) != {"version", "appId", "appSecret"}
@@ -139,10 +141,10 @@ def _manual_credentials(root: Path, app_id: str | None, *, source: IO[str],
     _write_atomic(root / "lark-app/config.json", encode_lark_app(app_id, secret), mode=0o600)
 
 
-def _browser_or_manual(root: Path, app_id: str | None, *, runner: Callable,
+def _browser_or_manual(root: Path, app_id: str | None, *, backend: str, runner: Callable,
                        source: IO[str], secret_prompt: Callable[[str], str]) -> None:
     try:
-        _register(root, app_id, runner=runner)
+        _register(root, app_id, backend=backend, runner=runner)
     except SetupError:
         if not source.isatty():
             raise
@@ -260,8 +262,11 @@ def read_setup_config(path: Path) -> dict[str, Any] | None:
     return config
 
 
-def setup_backend(config: dict[str, Any] | None, requested: str | None) -> str:
+def setup_backend(config: dict[str, Any] | None, requested: str | None, *, root: Path) -> str:
     if config is None:
+        from .cli_data import has_retained_setup_data
+        if requested is None and has_retained_setup_data(root):
+            raise SetupError("Retained instance data has no config.yaml. Specify its original --backend to repair setup.")
         return instance_backend({} if requested is None else {"backend": requested})
     saved = instance_backend(config["instance"])
     if requested is not None and requested != saved:
@@ -277,12 +282,32 @@ def resolve_setup_backend(root: Path, requested: str | None, *, already_register
             if requested is not None:
                 raise SetupError("cannot verify --backend without the registered instance configuration")
             return None
-        return setup_backend(config, requested)
+        return setup_backend(config, requested, root=root)
     except (OSError, ValueError, SetupError):
         # Optional metadata must never prevent an idempotent setup result.
         if already_registered and requested is None:
             return None
         raise
+
+
+def verify_setup_backend(backend: str | None, bound_python: Path | None = None) -> None:
+    if backend != "claude":
+        return
+    from .claude_installation import REPAIR, verified_claude_cli
+
+    if bound_python is None or bound_python == Path(sys.executable):
+        verified_claude_cli()
+        return
+    # Bindings keep their original interpreter, including its venv symlink.
+    try:
+        subprocess.run(
+            [str(bound_python), "-I", "-B", "-c",
+             "from netizen_cli.claude_installation import verified_claude_cli; verified_claude_cli()"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30, check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupError(REPAIR) from exc
 
 
 def check_unbound_start_backend(root: Path) -> None:
@@ -292,11 +317,11 @@ def check_unbound_start_backend(root: Path) -> None:
         # Service startup handles unreadable configuration after registration.
         return
     if config is not None:
-        instance_backend(config["instance"])
+        verify_setup_backend(instance_backend(config["instance"]))
 
 
 def prepare_configuration(root: Path, *, backend: str | None = None, admin_port: int | None = None,
-                          admin_open_id: str | None = None,
+                          admin_open_id: str | None = None, bound_python: Path | None = None,
                           runner: Callable = subprocess.run,
                           input_stream: IO[str] | None = None,
                           secret_prompt: Callable[[str], str] = getpass.getpass) -> str:
@@ -307,7 +332,8 @@ def prepare_configuration(root: Path, *, backend: str | None = None, admin_port:
     source = sys.stdin if input_stream is None else input_stream
     config_file = root / "config.yaml"
     existing = read_setup_config(config_file)
-    effective_backend = setup_backend(existing, backend)
+    effective_backend = setup_backend(existing, backend, root=root)
+    verify_setup_backend(effective_backend, bound_python)
     if existing is None:
         config = {
             "instance": {"backend": effective_backend, "dataDir": str(root / "state"),
@@ -341,11 +367,11 @@ def prepare_configuration(root: Path, *, backend: str | None = None, admin_port:
                                 source=source, secret_prompt=secret_prompt)
         else:
             started_flow = True
-            _browser_or_manual(root, credentials.app_id or None, runner=runner,
+            _browser_or_manual(root, credentials.app_id or None, backend=effective_backend, runner=runner,
                                source=source, secret_prompt=secret_prompt)
     missing = _missing_permissions(root, runner=runner)
     if any(missing.values()) and not started_flow:
-        _browser_or_manual(root, load_lark_app(profile).app_id, runner=runner,
+        _browser_or_manual(root, load_lark_app(profile).app_id, backend=effective_backend, runner=runner,
                            source=source, secret_prompt=secret_prompt)
         missing = _missing_permissions(root, runner=runner)
     if any(missing.values()):

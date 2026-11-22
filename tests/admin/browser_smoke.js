@@ -230,6 +230,30 @@ async function run() {
           await until("closed file browser", () => evaluate('!document.querySelector("#file-browser-drawer").open'));
           await settled(phoneWidth);
           result.interactions.push(step);
+        } else if (config.ownerOnly && path !== "/login") {
+          step += " · owner controls";
+          const unsupported = ["#nav-temporary", "#nav-schedules", "#nav-progress-card", "#nav-question-notifications", "#nav-session-tools", "#admin-user-add"];
+          for (const selector of unsupported) {
+            if (await evaluate(visible(selector))) throw Error("Unsupported owner action is visible: " + selector);
+          }
+          if (path === "/sessions/ordinary") {
+            const created = '[data-session-sort="session"][data-sort-by="createdAt"]';
+            const updated = '[data-session-sort="session"][data-sort-by="updatedAt"]';
+            const verify = () => evaluate(`document.querySelector('${created} .sort-label').textContent === "登记时间"
+              && document.querySelector('${updated}').disabled
+              && [...document.querySelectorAll("#sessions-body [data-binding-id]")].some(row =>
+                row.textContent.includes("原生 Claude 设置") && row.textContent.includes("空闲")
+                && /[0-9]/.test(row.querySelector(".session-time")?.textContent))`);
+            await until("local registration time, settings and status", verify);
+            await click('#sessions-body [aria-haspopup="menu"]');
+            await until("Claude row menu contains only available actions", () => evaluate(
+              '[...document.querySelectorAll(\'[role="menuitem"]\')].some(el => el.textContent === "设为当前") && ![...document.querySelectorAll(\'[role="menuitem"]\')].some(el => el.textContent.includes("创建定时任务"))'));
+            await evaluate('document.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape", bubbles:true}))');
+            await click(created);
+            await until("local sort after refresh", () => evaluate(`document.querySelector('${created}').parentElement.getAttribute("aria-sort") === "ascending"`));
+            await until("local columns after refresh", verify);
+          }
+          result.interactions.push(step);
         } else if (path === "/sessions/ordinary") {
           step += " · conversation";
           await click('#sessions-body [aria-haspopup="menu"]');

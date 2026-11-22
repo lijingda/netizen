@@ -21,6 +21,10 @@ from scripts import build_cli_distribution as distribution
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "a" * 40
+FIXTURE_METADATA = (
+    'Metadata-Version: 2.4\nName: netizen-cli\nVersion: 1.2.3\n'
+    'Provides-Extra: claude\nRequires-Dist: claude-agent-sdk==0.2.186; extra == "claude"\n'
+).encode()
 
 
 class DistributionContractTest(unittest.TestCase):
@@ -48,7 +52,7 @@ class DistributionContractTest(unittest.TestCase):
             )}
             members.update({name: b"fixture" for name in distribution.REQUIRED_WHEEL_FILES
                             if name.startswith("netizen_cli/admin/static/")})
-            members["PKG-INFO"] = b"Metadata-Version: 2.1\nName: netizen-cli\nVersion: 1.2.3\n"
+            members["PKG-INFO"] = FIXTURE_METADATA
             with tarfile.open(output / "netizen_cli-1.2.3.tar.gz", "w:gz") as archive:
                 for name, body in members.items():
                     member = tarfile.TarInfo("netizen_cli-1.2.3/" + name)
@@ -60,7 +64,7 @@ class DistributionContractTest(unittest.TestCase):
             with zipfile.ZipFile(output / "netizen_cli-1.2.3-py3-none-any.whl", "w") as archive:
                 for name in distribution.REQUIRED_WHEEL_FILES:
                     archive.writestr(name, b"fixture")
-                archive.writestr("netizen_cli-1.2.3.dist-info/METADATA", "Metadata-Version: 2.1\nName: netizen-cli\nVersion: 1.2.3\n")
+                archive.writestr("netizen_cli-1.2.3.dist-info/METADATA", FIXTURE_METADATA)
                 archive.writestr("netizen_cli-1.2.3.dist-info/entry_points.txt", "[console_scripts]\nnetizen = netizen_cli.cli:main\n")
 
     def build(self) -> dict:
@@ -205,8 +209,7 @@ class ReleaseWorkflowContractTest(unittest.TestCase):
                          "${{ needs.build-artifact.outputs.manifest-sha256 }}")
         commands = "\n".join(step.get("run", "") for step in verify["steps"])
         self.assertIn('git rev-parse HEAD', commands)
-        self.assertIn('-I -m netizen_cli --help', commands)
-        self.assertIn('cd "$RUNNER_TEMP"', commands)
+        self.assertIn('--smoke-installs', verification["run"])
         self.assertNotIn("make check", commands)  # Reuse exact main qualification.
         self.assertNotIn("probe_python_sdk.py", commands)
 

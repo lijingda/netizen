@@ -89,6 +89,10 @@ from .queries import (
 )
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
+from ..backends import BackendPolicy
+from ..ordinary_sessions import OrdinaryInputRejected
+from ..backends import BackendUnsupported
+from .users import OwnerOnly
 from ..instance import instance_digest
 from ..error_messages import describe_error
 from ..chat_avatars import CHAT_AVATAR_IMAGE_SOURCES, avatar_url
@@ -120,6 +124,7 @@ from ..management.blocking_io import (
 from ..management.updates import UpdateError
 from ..management.chat_directory import AvailableChat, ChatDirectoryError
 from ..runtime.contracts import (
+    TerminalStateUnknown,
     NativeThreadCatalogState,
     RuntimeClosed,
     SideCloseFailed,
@@ -342,6 +347,7 @@ class AdminWebApplication:
         *,
         auth: AdminAuth,
         management: InstanceManagementService,
+        backend_policy: BackendPolicy = BackendPolicy("codex"),
         instance_root: Path | None = None,
         credentials: AdminCredentials | None = None,
         login: AdminLogin | None = None,
@@ -350,6 +356,7 @@ class AdminWebApplication:
     ) -> None:
         self._auth = auth
         self._management = management
+        self._backend_policy = backend_policy
         self._instance_root = instance_root
         self._users = auth.users
         self._credentials = credentials
@@ -624,7 +631,22 @@ class AdminWebApplication:
             return _json_response(200, {"state": "cancelled"})
         raise AdminWebError(404, "not_found", "接口不存在。")
 
+    def _check_owner_route(self, context: _RequestContext) -> None:
+        session = self._authenticate(context)
+        if self._backend_policy.sender_refusal(session.identity.open_id):
+            raise AdminWebError(403, "owner_only", "这个 Claude 实例仅限所有者使用。")
+        if not context.path.startswith("/api/v1/"):
+            return
+        path = context.path.removeprefix("/api/v1")
+        if path in {"/admin-users/add", "/admin-users/selector-config"}:
+            raise OwnerOnly()
+        self._backend_policy.require_api(path)
+        if path == "/runtime-snapshots" and context.query.get("sideIds"):
+            raise BackendUnsupported("Side")
+
     async def _dispatch_authenticated(self, context: _RequestContext) -> Response:
+        if self._backend_policy.backend == "claude":
+            self._check_owner_route(context)
         route = (context.method, context.path)
         if context.method == "GET" and context.path.removeprefix("/static/") in _CONTENT_VIEWER_ASSETS and context.path.startswith("/static/"):
             name = context.path.removeprefix("/static/")
@@ -653,7 +675,8 @@ class AdminWebApplication:
             return Response(
                 200,
                 ((b"Content-Type", b"text/html; charset=utf-8"), (b"Content-Security-Policy", _SELECTOR_CSP)),
-                self._assets["index.html"],
+                (self._assets["index.html"].replace(b"<body>", b'<body data-backend="claude">', 1)
+                 if self._backend_policy.backend == "claude" else self._assets["index.html"]),
             )
         if route == ("GET", "/static/admin.js"):
             return Response(
@@ -681,7 +704,8 @@ class AdminWebApplication:
             _require_query_keys(context.query, set())
             session = self._authenticate(context)
             profile = await self._identity_call(context, self._identity_credentials().profile(session.identity, session.add_revision))
-            return _json_response(200, {"openId": profile.open_id, "name": profile.name, "avatarUrl": _user_avatar(profile.avatar_url)})
+            return _json_response(200, {"openId": profile.open_id, "name": profile.name, "avatarUrl": _user_avatar(profile.avatar_url),
+                **({"backend": "claude", "ownerOnly": True} if self._backend_policy.backend == "claude" else {})})
         if route == ("GET", "/api/v1/admin-users"):
             return self._admin_users(context)
         if route == ("GET", "/api/v1/group-access"):
@@ -1703,6 +1727,12 @@ class AdminWebApplication:
         _require_query_keys(context.query, allowed)
         page_size = _session_page_size(context.query)
         sort_by, sort_direction = _session_order_query(context.query)
+        local_only = self._backend_policy.backend == "claude"
+        if local_only:
+            if "sortBy" not in context.query:
+                sort_by = "created_at"
+            if sort_by != "created_at" or any(key in context.query for key in ("updatedFrom", "updatedBefore", "searchTerm")):
+                raise BackendUnsupported("原生会话目录或历史")
         created_from, created_before = _created_range_query(context.query)
         updated_from, updated_before = _updated_range_query(context.query)
         local = BindingQuery(
@@ -1712,8 +1742,11 @@ class AdminWebApplication:
             topic_id=_optional_text_query(context.query, "topicId"),
             identity=_optional_text_query(context.query, "identity"),
             current=_current_query(context.query),
+            created_from=created_from if local_only else None, created_before=created_before if local_only else None,
         )
         inventory_state = _session_inventory_state(context.query)
+        if local_only and inventory_state is SessionInventoryState.ARCHIVED:
+            raise BackendUnsupported("原生会话目录或历史")
         search_term = _optional_text_query(context.query, "searchTerm")
         if search_term and inventory_state is SessionInventoryState.LAZY:
             raise AdminWebError(400, "invalid_query", "Lazy 会话不支持搜索。")
@@ -1732,7 +1765,7 @@ class AdminWebApplication:
         fingerprint = _fingerprint("sessions", filter_values)
         cursor = _decode_session_cursor(
             _optional_one(context.query, "cursor"), fingerprint,
-            inventory_state=inventory_state,
+            inventory_state=SessionInventoryState.LAZY if local_only else inventory_state,
         )
         deadline = (
             asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS
@@ -1837,7 +1870,8 @@ class AdminWebApplication:
             actions["activate"] = grants.add(
                 "sessions.activate", target, preconditions
             )
-        if binding.native_thread_id is None:
+        local_only = self._backend_policy.backend == "claude"
+        if binding.native_thread_id is None and not local_only:
             actions["deleteLazy"] = grants.add(
                 "sessions.delete-lazy", target, preconditions
             )
@@ -1862,7 +1896,7 @@ class AdminWebApplication:
                 )
         # A persistent fork may exist before it appears in native catalogs.
         # Keep exact lifecycle controls available and let the native call decide.
-        if binding.native_thread_id is not None and native_state is not NativeThreadCatalogState.ARCHIVED:
+        if not local_only and binding.native_thread_id is not None and native_state is not NativeThreadCatalogState.ARCHIVED:
             actions["archive"] = grants.add(
                 "sessions.archive",
                 target,
@@ -1912,6 +1946,7 @@ class AdminWebApplication:
             "sessionSettings": SessionSettings.from_binding(binding).to_dict(),
             "runtime": _runtime_binding_json(status),
             "actions": actions,
+            **({"nativeDetailsAvailable": False} if local_only else {}),
         }
 
     async def _runtime_snapshots(self, context: _RequestContext) -> Response:
@@ -2666,9 +2701,9 @@ class AdminWebApplication:
             } for member in members]
             result = {
                 "revision": revision, "currentOpenId": session.identity.open_id, "users": rows,
-                "addAction": grants.add(
+                "addAction": None if self._backend_policy.backend == "claude" else grants.add(
                     "admin-users.add", AdminActionTarget("admin-users", self._users.app_id), preconditions),
-                "selectorAction": grants.add(
+                "selectorAction": None if self._backend_policy.backend == "claude" else grants.add(
                     "admin-users.selector-config", AdminActionTarget("admin-users", self._users.app_id), preconditions),
             }
             grants.issue()
@@ -2987,6 +3022,7 @@ class AdminWebRunner:
             raise
 
     def attach_management(self, management: InstanceManagementService, *,
+                          backend_policy: BackendPolicy = BackendPolicy("codex"),
                           session_policy: SessionPolicyService | None = None,
                           group_access: GroupAccessService | None = None) -> None:
         """Attach the sole application service after the closed listener binds."""
@@ -2994,6 +3030,7 @@ class AdminWebRunner:
         if self._application is not None:
             raise RuntimeError("Admin management application is already attached")
         application = AdminWebApplication(
+            backend_policy=backend_policy,
             auth=self._auth, management=management, instance_root=self._instance_root,
             credentials=self._credentials, login=self._login,
             session_policy=session_policy, group_access=group_access,
@@ -3621,6 +3658,14 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(409, "stale_action", "操作授权已过期或名单已变化，请刷新后重试。")
     if isinstance(error, FeishuError):
         return AdminWebError(502, "feishu_error", "飞书请求未完成，请稍后重试。")
+    if isinstance(error, OrdinaryInputRejected):
+        return AdminWebError(409, "ordinary_input_rejected", str(error))
+    if isinstance(error, TerminalStateUnknown):
+        return AdminWebError(409, "terminal_state_unknown", str(error))
+    if isinstance(error, BackendUnsupported):
+        return AdminWebError(409, "backend_unsupported", str(error))
+    if isinstance(error, OwnerOnly):
+        return AdminWebError(403, error.code, str(error))
     if isinstance(error, AdminUsersError):
         if isinstance(error, AdminPermissionDenied):
             return AdminWebError(401, "not_authenticated", "请重新登录。")

@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .bindings import BindingTaskFeedback, ThreadBinding
+from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
+from .domain import ActiveState, MessageContextAnchor, MentionContextMode
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
@@ -58,6 +59,12 @@ class StopPreview:
     """Receipt text captured before the stop operation selects its target."""
 
     acknowledgement: str
+    activity_revision: int | None = None
+    turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.activity_revision is None) != (self.turn_id is None):
+            raise ValueError("exact stop preview requires both revision and execution ID")
 
 
 class OrdinarySessionPort(Protocol):
@@ -87,6 +94,40 @@ class OrdinarySessionPort(Protocol):
     async def recheck_turn_exact(
         self, binding_id: str, *, expected_activity_revision: int, expected_turn_id: str,
     ) -> ActiveTurnSnapshot: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LocalExecutionSnapshot:
+    revision: int
+    turn: ActiveTurnSnapshot | None
+    unavailable: bool
+
+    @property
+    def label(self) -> str:
+        if self.unavailable:
+            return "无法确认 Claude 客户端已关闭"
+        if self.turn is None:
+            return "空闲"
+        return {ActiveState.CLOSING: "正在收尾", ActiveState.RUNNING: "执行中", ActiveState.STOPPING: "正在停止",
+                ActiveState.OBSERVATION_UNAVAILABLE: "状态待确认"}[self.turn.state]
+
+
+class LocalSessionManagement(Protocol):
+    def occupying_bindings(self, directory: Path) -> frozenset[str]: ...
+    async def resource_usage(self, binding_id: str) -> dict[str, str | None]: ...
+    async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding: ...
+
+    def require_admission(self) -> None: ...
+    def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot: ...
+    async def binding_pointer_changed(self, previous_binding_id: str | None, current_binding_id: str | None) -> None: ...
+    async def activate_exact(
+        self, binding_id: str, *, context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding: ...
+    async def configure_context_exact(
+        self, *, binding_id: str, expected_settings_revision: int, expected_context_revision: int,
+        expected_feedback_revision: int, settings: BindingTurnSettings | None, task_feedback: BindingTaskFeedback,
+        message_context_mode: MentionContextMode, context_anchor: MessageContextAnchor | None,
+    ) -> ThreadBinding: ...
 
 
 class SessionShutdownPort(Protocol):

@@ -86,6 +86,7 @@ class FeishuAppOnboardingTest(unittest.TestCase):
         self.assertIn("https://accounts.feishu.cn/device/example", stderr.getvalue())
         self.assertIn("QR:https://accounts.feishu.cn/device/example", stderr.getvalue())
         self.assertEqual(captured["source"], "netizen-installer")
+        self.assertEqual(captured["app_preset"]["desc"], "Use native Codex threads from Feishu or Lark.")
         self.assertNotIn("create_only", captured)
         self.assertNotIn("app_id", captured)
         addons = captured["addons"]

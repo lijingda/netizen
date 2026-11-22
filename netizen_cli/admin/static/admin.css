@@ -770,3 +770,5 @@ body.navigation-open { overflow: hidden; }
   #schedules-body .schedule-state, #schedules-body .schedule-execution { min-width: 0; }
   #schedule-detail table { min-width: 0; }
 }
+
+body[data-backend="claude"] [hidden] { display: none !important; }

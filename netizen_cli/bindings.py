@@ -1801,6 +1801,13 @@ class BindingStore:
         with self._lock:
             return alias in self._project_delete_intents
 
+    def require_actual_cwd_not_deleting(self, canonical_cwd: Path) -> None:
+        with self._lock:
+            for snapshot in self._project_delete_intents.values():
+                if canonical_cwd.is_relative_to(Path(snapshot.project.cwd)):
+                    raise ProjectDeleting(f"Project {snapshot.project.alias} 正在删除，请稍后刷新。")
+            self.worktrees.require_cwd_not_deleting(canonical_cwd)
+
     def require_project_not_deleting(self, alias: str) -> None:
         with self._lock:
             if alias in self._project_delete_intents:

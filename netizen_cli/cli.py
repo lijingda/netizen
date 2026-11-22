@@ -175,11 +175,12 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
 
     if command == "setup":
         from .cli_setup import (admin_binding_ready, prepare_configuration, require_codex_login,
-                                resolve_setup_backend)
+                                resolve_setup_backend, verify_setup_backend)
 
         existing = manager.inspect(root)
-        if existing is not None and admin_binding_ready(root):
+        if existing is not None and (admin_binding_ready(root) or not (root / "config.yaml").exists()):
             backend = resolve_setup_backend(root, args.backend, already_registered=True)
+            verify_setup_backend(backend, existing.binding.python)
             _emit({"phase": "setup", "status": "already_registered",
                    **({"backend": backend} if json_output and backend is not None else {}),
                    "instance": _status_value(existing, root),
@@ -197,6 +198,8 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                 "then rerun setup to authorize or supply --admin-open-id"
             )
         backend = resolve_setup_backend(root, args.backend)
+        bound_python = existing.binding.python if existing is not None else None
+        verify_setup_backend(backend, bound_python)
         if existing is None and backend == "codex":
             require_codex_login()
         ensure_instance_root(root)
@@ -214,7 +217,8 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                     validate_prepared_instance(root)
                 report.update(phase="prepare_configuration")
                 backend = prepare_configuration(root, backend=args.backend, admin_port=args.admin_port,
-                                                admin_open_id=args.admin_open_id)
+                                                admin_open_id=args.admin_open_id,
+                                                bound_python=bound_python)
                 if existing is None:
                     report.update(phase="initialize", completed=1)
                     initialize_instance_data(root, lifetime_descriptor=descriptor)
@@ -230,9 +234,10 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
         status = manager.inspect(root)
         report["instance"] = _status_value(status, root)
         if command in {"start", "restart"} and status is not None:
-            from .cli_setup import require_admin_binding
+            from .cli_setup import require_admin_binding, resolve_setup_backend, verify_setup_backend
 
             require_admin_binding(root)
+            verify_setup_backend(resolve_setup_backend(root, None, already_registered=True), status.binding.python)
         if command == "start":
             if status is None:
                 report["phase"] = "register"

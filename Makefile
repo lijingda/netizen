@@ -27,3 +27,7 @@ check-native:
 	@evidence_dir="$${NATIVE_EVIDENCE_DIR:-$$(mktemp -d)}" && \
 		echo "Native regression evidence: $$evidence_dir" && \
 		$(PYTHON) scripts/run_upgrade_regression.py --group isolated --output-dir "$$evidence_dir"
+
+.PHONY: check-native-claude
+check-native-claude:
+	env -i PATH=/usr/bin:/bin LANG=C.UTF-8 $(PYTHON) -I -B scripts/check_native_claude.py

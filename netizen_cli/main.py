@@ -1,4 +1,4 @@
-"""Single-process Feishu Channel + one long-lived AsyncCodex service."""
+"""Assemble the shared Feishu Channel and the instance-selected native backend."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lark_channel import (
     ChatQueueConfig,
@@ -58,6 +58,7 @@ from .worktrees.settings import WorktreeSettingsService
 from .admin.users import AdminIdentity, AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
 from .cli_setup import require_admin_binding, SetupError
+from .backends import BackendPolicy
 from .bindings import BindingStore
 from .builtin_skills import builtin_skill_root
 from .cli_data import (
@@ -96,7 +97,7 @@ from .schedules.scheduler import Scheduler
 from .sessions.mcp import SessionMcpRunner
 from .sessions.policy import SessionPolicyService
 from .sessions.service import SessionService
-from .ordinary_sessions import SessionShutdownPort
+from .ordinary_sessions import OrdinaryEvent, OrdinarySessionPort, SessionShutdownPort
 from .runtime.codex_ordinary import CodexOrdinarySessions
 from .runtime.codex_session_reads import CodexSessionReads
 from .thread_history import AppServerThreadHistory
@@ -106,6 +107,10 @@ from .turn_plan_observer import (
     TurnActivityObservationUnavailable,
 )
 
+if TYPE_CHECKING:
+    from .runtime.claude_ordinary import ClaudeOrdinarySessions
+
+
 _IMPORT_SECONDS = time.monotonic() - _IMPORT_STARTED_AT
 
 
@@ -114,6 +119,7 @@ logger = logging.getLogger(__name__)
 
 _CODEX_SERVICE_CONFIG_OVERRIDES = ("allow_login_shell=false",)
 _SHUTDOWN_BUDGET_SECONDS = 60.0
+_CLAUDE_SHUTDOWN_CAP_SECONDS = 30.0
 _READY_MARKER_CONTENT = b"netizen service ready\n"
 _LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOG_BACKUP_COUNT = 2
@@ -196,6 +202,7 @@ class ServiceCore:
         self._instance_root = instance_root.resolve()
         self._codex: AsyncCodex | None = None
         self._runtime: CodexRuntime | None = None
+        self._claude: ClaudeOrdinarySessions | None = None
         self._management: InstanceManagementService | None = None
         self._feishu_read_client: Any | None = None
         self._admin: AdminWebRunner | None = None
@@ -215,6 +222,28 @@ class ServiceCore:
             return self._outcome_mcp.thread_config()
         return None
 
+    def _configure_claude(self, owner: AdminIdentity) -> BackendPolicy:
+        from .claude_installation import REPAIR
+        try:
+            from .runtime.claude_client import BundledClaudeClients
+            from .runtime.claude_ordinary import ClaudeOrdinarySessions
+        except ImportError as error:
+            raise SetupError(REPAIR) from error
+
+        async def completed(event: OrdinaryEvent) -> None:
+            assert self.application is not None
+            await self.application.handle_ordinary_completion(event)
+
+        async def notice(origin: object, text: str) -> None:
+            assert self.application is not None
+            await self.application.reply_ordinary_notice(origin, text)
+
+        self._claude = ClaudeOrdinarySessions(
+            bindings=self._store, clients=BundledClaudeClients(), owner_id=owner.open_id,
+            on_completion=completed, notice=notice,
+        )
+        return BackendPolicy("claude", owner_id=owner.open_id)
+
     async def start(self) -> None:
         self._start_loop = asyncio.get_running_loop()
         stage_started_at = time.monotonic()
@@ -222,7 +251,10 @@ class ServiceCore:
             # Admin is mandatory. Identity validation and the closed listener
             # precede native/Channel admission; no interactive authorization here.
             users = AdminUsers(self._instance_root, self._settings.app_id)
-            if not users.has_admins:
+            policy = BackendPolicy("codex")
+            if self._settings.backend == "claude":
+                policy = self._configure_claude(users.restrict_to_owner())
+            elif not users.has_admins:
                 raise SetupError("Admin administrator missing; run netizen setup --root for this instance")
             self._admin = AdminWebRunner(
                 host=self._settings.admin_web.host,
@@ -237,10 +269,11 @@ class ServiceCore:
             await self._admin.bind()
             config_editor = (ConfigFileEditor(self._admin.config_snapshot)
                              if self._admin.config_snapshot is not None else None)
-            self._session_policy = SessionPolicyService(
-                self._settings.session_tools,
-                config_editor=config_editor,
-            )
+            if self._claude is None:
+                self._session_policy = SessionPolicyService(
+                    self._settings.session_tools,
+                    config_editor=config_editor,
+                )
             group_access = GroupAccessService(
                 self._settings.group_access, config_editor=config_editor,
             )
@@ -252,96 +285,103 @@ class ServiceCore:
             )
             stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
 
-            # Bind the native MCP transport before App Server initializes its
-            # catalog. Calls remain closed until the shared application is ready.
-            self._schedule_mcp = ScheduleMcpRunner()
-            await self._schedule_mcp.bind()
-            self._session_mcp = SessionMcpRunner()
-            await self._session_mcp.bind()
-            self._outcome_mcp = OutcomeMcpRunner()
-            try:
-                await self._outcome_mcp.bind()
-            except Exception as error:
-                logger.warning("scheduled outcome MCP bind failed: %s", type(error).__name__)
-                self._outcome_mcp = None
-            stage_started_at = _log_startup_timing("Schedule MCP listener", stage_started_at)
+            ordinary: OrdinarySessionPort
+            if self._claude is None:
+                # Bind the native MCP transport before App Server initializes its
+                # catalog. Calls remain closed until the shared application is ready.
+                self._schedule_mcp = ScheduleMcpRunner()
+                await self._schedule_mcp.bind()
+                self._session_mcp = SessionMcpRunner()
+                await self._session_mcp.bind()
+                self._outcome_mcp = OutcomeMcpRunner()
+                try:
+                    await self._outcome_mcp.bind()
+                except Exception as error:
+                    logger.warning("scheduled outcome MCP bind failed: %s", type(error).__name__)
+                    self._outcome_mcp = None
+                stage_started_at = _log_startup_timing("Schedule MCP listener", stage_started_at)
 
-            expired_sides = self._store.expire_live_side_topics()
-            if expired_sides:
-                logger.info(
-                    "expired Side Topics from a previous process",
-                    extra={"count": len(expired_sides)},
+                expired_sides = self._store.expire_live_side_topics()
+                if expired_sides:
+                    logger.info(
+                        "expired Side Topics from a previous process",
+                        extra={"count": len(expired_sides)},
+                    )
+                self._codex = AsyncCodex(
+                    CodexConfig(
+                        config_overrides=(
+                            *_CODEX_SERVICE_CONFIG_OVERRIDES,
+                            *self._schedule_mcp.config_overrides,
+                            *self._session_mcp.config_overrides,
+                        ),
+                        env={
+                            **os.environ,
+                            **self._schedule_mcp.app_server_env,
+                            **self._session_mcp.app_server_env,
+                            **(self._outcome_mcp.app_server_env if self._outcome_mcp else {}),
+                            "NETIZEN_ROOT": str(self._instance_root),
+                        },
+                    )
                 )
-            self._codex = AsyncCodex(
-                CodexConfig(
-                    config_overrides=(
-                        *_CODEX_SERVICE_CONFIG_OVERRIDES,
-                        *self._schedule_mcp.config_overrides,
-                        *self._session_mcp.config_overrides,
-                    ),
-                    env={
-                        **os.environ,
-                        **self._schedule_mcp.app_server_env,
-                        **self._session_mcp.app_server_env,
-                        **(self._outcome_mcp.app_server_env if self._outcome_mcp else {}),
-                        "NETIZEN_ROOT": str(self._instance_root),
-                    },
+                await self._codex.__aenter__()
+                # Release-local Skills must be active before catalogs, recovery or
+                # any native Thread can be reached. Failure closes this startup.
+                await AppServerSkillRoots(self._codex).set_roots((builtin_skill_root(),))
+                stage_started_at = _log_startup_timing("Codex connection", stage_started_at)
+                terminal_cleanup = PinnedExperimentalTerminalCleanup(self._codex)
+                thread_subscription_control = AppServerThreadSubscriptionControl(
+                    self._codex
                 )
-            )
-            await self._codex.__aenter__()
-            # Release-local Skills must be active before catalogs, recovery or
-            # any native Thread can be reached. Failure closes this startup.
-            await AppServerSkillRoots(self._codex).set_roots((builtin_skill_root(),))
-            stage_started_at = _log_startup_timing("Codex connection", stage_started_at)
-            terminal_cleanup = PinnedExperimentalTerminalCleanup(self._codex)
-            thread_subscription_control = AppServerThreadSubscriptionControl(
-                self._codex
-            )
-            skill_catalog = None
-            account_rate_limits = None
-            goal_control = None
-            side_boundary_control = None
-            thread_delete_control = None
-            turn_plan_observer = None
-            try:
-                skill_catalog = AppServerSkillCatalog(self._codex)
-            except SdkGapCapabilityUnavailable as error:
-                logger.warning("native Skills unavailable: %s", error)
-            try:
-                account_rate_limits = AppServerAccountRateLimits(self._codex)
-            except SdkGapCapabilityUnavailable as error:
-                logger.warning("native account rate limits unavailable: %s", error)
-            try:
-                goal_control = AppServerGoalControl(self._codex)
-            except SdkGapCapabilityUnavailable as error:
-                logger.warning("native Goal unavailable: %s", error)
-            try:
-                side_boundary_control = AppServerSideBoundaryControl(self._codex)
-            except SdkGapCapabilityUnavailable as error:
-                logger.warning("native Side unavailable: %s", error)
-            try:
-                thread_delete_control = AppServerThreadDeleteControl(self._codex)
-            except SdkGapCapabilityUnavailable as error:
-                logger.warning("native Thread Delete unavailable: %s", error)
-            try:
-                turn_plan_observer = PinnedTurnActivityObserver(self._codex)
-            except TurnActivityObservationUnavailable as error:
-                logger.warning("native Turn activity observation unavailable: %s", error)
-            self._runtime = CodexRuntime(
-                codex=self._codex,
-                outcome_thread_config=self._outcome_thread_config if self._outcome_mcp else None,
-                bindings=self._store,
-                terminal_cleanup=terminal_cleanup,
-                skill_catalog=skill_catalog,
-                account_rate_limits=account_rate_limits,
-                goal_control=goal_control,
-                side_boundary_control=side_boundary_control,
-                thread_subscription_control=thread_subscription_control,
-                background_terminal_inspector=terminal_cleanup,
-                thread_delete_control=thread_delete_control,
-                turn_plan_observer=turn_plan_observer,
-                progress_card_defaults=lambda: progress_card_config.current,
-            )
+                skill_catalog = None
+                account_rate_limits = None
+                goal_control = None
+                side_boundary_control = None
+                thread_delete_control = None
+                turn_plan_observer = None
+                try:
+                    skill_catalog = AppServerSkillCatalog(self._codex)
+                except SdkGapCapabilityUnavailable as error:
+                    logger.warning("native Skills unavailable: %s", error)
+                try:
+                    account_rate_limits = AppServerAccountRateLimits(self._codex)
+                except SdkGapCapabilityUnavailable as error:
+                    logger.warning("native account rate limits unavailable: %s", error)
+                try:
+                    goal_control = AppServerGoalControl(self._codex)
+                except SdkGapCapabilityUnavailable as error:
+                    logger.warning("native Goal unavailable: %s", error)
+                try:
+                    side_boundary_control = AppServerSideBoundaryControl(self._codex)
+                except SdkGapCapabilityUnavailable as error:
+                    logger.warning("native Side unavailable: %s", error)
+                try:
+                    thread_delete_control = AppServerThreadDeleteControl(self._codex)
+                except SdkGapCapabilityUnavailable as error:
+                    logger.warning("native Thread Delete unavailable: %s", error)
+                try:
+                    turn_plan_observer = PinnedTurnActivityObserver(self._codex)
+                except TurnActivityObservationUnavailable as error:
+                    logger.warning("native Turn activity observation unavailable: %s", error)
+                self._runtime = CodexRuntime(
+                    codex=self._codex,
+                    outcome_thread_config=self._outcome_thread_config if self._outcome_mcp else None,
+                    bindings=self._store,
+                    terminal_cleanup=terminal_cleanup,
+                    skill_catalog=skill_catalog,
+                    account_rate_limits=account_rate_limits,
+                    goal_control=goal_control,
+                    side_boundary_control=side_boundary_control,
+                    thread_subscription_control=thread_subscription_control,
+                    background_terminal_inspector=terminal_cleanup,
+                    thread_delete_control=thread_delete_control,
+                    turn_plan_observer=turn_plan_observer,
+                    progress_card_defaults=lambda: progress_card_config.current,
+                )
+                ordinary = CodexOrdinarySessions(self._runtime)
+                management_runtime = ManagementRuntimePort(self._runtime, ordinary=ordinary)
+            else:
+                ordinary = self._claude
+                management_runtime = ManagementRuntimePort(None, ordinary=ordinary, local=self._claude)
             scope_coordinator = ScopeCoordinator()
             self._feishu_read_client = (
                 lark.Client.builder()
@@ -352,11 +392,10 @@ class ServiceCore:
                 .build()
             )
             attachment_store = AttachmentStore(self._instance_root / "attachments")
-            ordinary = CodexOrdinarySessions(self._runtime)
             self._management = InstanceManagementService(
                 bindings=self._store,
                 projects=self._projects,
-                runtime=ManagementRuntimePort(self._runtime, ordinary=ordinary),
+                runtime=management_runtime,
                 scope_coordinator=scope_coordinator,
                 chat_labels=self._channel,
                 chat_directory=FeishuChatDirectory(self._feishu_read_client),
@@ -369,25 +408,28 @@ class ServiceCore:
                 self._settings.worktrees, default_root=self._instance_root / "worktrees",
                 config_editor=config_editor,
             ))
-            schedules = self._management.enable_schedules(
-                app_id=self._settings.app_id, chat_info=self._channel,
-            )
+            if self._schedule_mcp is not None:
+                schedules = self._management.enable_schedules(
+                    app_id=self._settings.app_id, chat_info=self._channel,
+                )
             self._management.enable_defaults(
                 app_id=self._settings.app_id, chat_info=self._channel,
             )
 
-            async def manage_schedule(request: dict[str, Any], thread_id: str | None) -> dict[str, Any]:
-                return await schedules.manage(request, native_thread_id=thread_id)
+            if self._schedule_mcp is not None:
+                async def manage_schedule(request: dict[str, Any], thread_id: str | None) -> dict[str, Any]:
+                    return await schedules.manage(request, native_thread_id=thread_id)
 
-            self._schedule_mcp.attach(manage_schedule)
+                self._schedule_mcp.attach(manage_schedule)
             if self._admin is not None:
                 self._admin.attach_management(
                     self._management, session_policy=self._session_policy, group_access=group_access,
+                    **({"backend_policy": policy} if self._claude is not None else {}),
                 )
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
                 channel=self._channel,
-                runtime=self._runtime, ordinary=ordinary,
+                runtime=self._runtime, ordinary=ordinary, policy=policy,
                 bindings=self._store,
                 projects=self._projects,
                 message_history=FeishuMessageHistoryReader(
@@ -403,32 +445,34 @@ class ServiceCore:
                     AdminIdentity(app_id, open_id),
                 ) is not None,
             )
-            self._session_service = SessionService(
-                bindings=self._store,
-                runtime=self._runtime,
-                app_id=self._settings.app_id,
-                policy=self._session_policy,
-                create_thread=self.application.create_session_thread,
-                send_message=self.application.send_session_message,
-                suppress_reply=self.application.suppress_reply,
-                reads=CodexSessionReads(self._codex, AppServerThreadHistory(self._codex)),
-                worktrees=worktrees,
-            )
-            self._session_mcp.attach(self._session_service.call)
-            if self._outcome_mcp is not None:
-                self._outcome_mcp.attach(self.application.report_run_outcome)
-            self._scheduler = Scheduler(
-                bindings=self._store, runtime=self._runtime,
-                app_id=self._settings.app_id,
-                dispatch=self.application.dispatch_scheduled_run,
-            )
-            schedules.set_wake_handler(self._scheduler.wake)
-            schedules.set_refresh_handler(self._scheduler.refresh)
-            schedules.set_run_now_handler(self._scheduler.run_now)
-            self._management.set_schedule_creation_drain(self._scheduler.drain_project_creation)
-            await self._scheduler.recover()
-            if expired_sides:
-                await self.application.refresh_expired_side_cards(expired_sides)
+            if self._runtime is not None:
+                assert self._codex is not None and self._session_mcp is not None and self._session_policy is not None
+                self._session_service = SessionService(
+                    bindings=self._store,
+                    runtime=self._runtime,
+                    app_id=self._settings.app_id,
+                    policy=self._session_policy,
+                    create_thread=self.application.create_session_thread,
+                    send_message=self.application.send_session_message,
+                    suppress_reply=self.application.suppress_reply,
+                    reads=CodexSessionReads(self._codex, AppServerThreadHistory(self._codex)),
+                    worktrees=worktrees,
+                )
+                self._session_mcp.attach(self._session_service.call)
+                if self._outcome_mcp is not None:
+                    self._outcome_mcp.attach(self.application.report_run_outcome)
+                self._scheduler = Scheduler(
+                    bindings=self._store, runtime=self._runtime,
+                    app_id=self._settings.app_id,
+                    dispatch=self.application.dispatch_scheduled_run,
+                )
+                schedules.set_wake_handler(self._scheduler.wake)
+                schedules.set_refresh_handler(self._scheduler.refresh)
+                schedules.set_run_now_handler(self._scheduler.run_now)
+                self._management.set_schedule_creation_drain(self._scheduler.drain_project_creation)
+                await self._scheduler.recover()
+                if expired_sides:
+                    await self.application.refresh_expired_side_cards(expired_sides)
             self._started = True
             _log_startup_timing("runtime recovery", stage_started_at)
         except BaseException:
@@ -438,6 +482,8 @@ class ServiceCore:
     def open_admission(self) -> None:
         if not self._started or self.application is None:
             raise RuntimeError("service core is not ready for admission")
+        if self._claude is not None:
+            self._claude.open_admission()
         if self._admin is not None:
             self._admin.open_admission()
         if self._schedule_mcp is not None:
@@ -453,8 +499,20 @@ class ServiceCore:
     def _session_shutdown(self) -> SessionShutdownPort | None:
         return self._runtime
 
+    async def _close_claude(self, deadline: float) -> None:
+        if self._claude is not None:
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            # Leave time to close presentation, Auth and the Binding Store after an unconfirmed native close.
+            reserve = min(9.0, remaining / 2)
+            await _cleanup_with_budget(
+                "Claude client shutdown", self._claude.interrupt_all, deadline=deadline - reserve,
+                cap=_CLAUDE_SHUTDOWN_CAP_SECONDS,
+            )
+
     async def _close_partial_start(self) -> None:
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
+        if self._claude is not None:
+            self._claude.close_admission()
         if self._scheduler is not None:
             self._scheduler.close_admission()
             await _cleanup_with_budget(
@@ -504,6 +562,7 @@ class ServiceCore:
                 deadline=deadline,
                 cap=10,
             )
+        await self._close_claude(deadline)
         if (shutdown := self._session_shutdown) is not None:
             shutdown.close_admission()
             await _cleanup_with_budget(
@@ -546,6 +605,8 @@ class ServiceCore:
                 )
             except Exception:
                 logger.exception("failed to disable Feishu admission")
+            if self._claude is not None:
+                self._claude.close_admission()
             if (shutdown := self._session_shutdown) is not None:
                 shutdown.close_admission()
             if self._scheduler is not None:
@@ -602,6 +663,7 @@ class ServiceCore:
                     deadline=deadline,
                     cap=15,
                 )
+            await self._close_claude(deadline)
             if (shutdown := self._session_shutdown) is not None:
                 interrupted = await _cleanup_with_budget(
                     "native Turn interrupt",

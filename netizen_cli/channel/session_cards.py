@@ -10,6 +10,8 @@ from lark_channel import (
     OutboundCard,
 )
 
+from ..bindings import BindingCursor, BindingQuery
+from ..cards.controls import local_sessions_card
 from ..bindings import (
     BindingTaskFeedback,
     BindingTurnSettings,
@@ -42,6 +44,7 @@ from ..model_settings import ModelCatalogError, TurnModelSettings
 from ..management import (
     RuntimePrecondition,
     SessionInventoryState,
+    SessionQuery,
 )
 
 from . import constants
@@ -147,6 +150,36 @@ class SessionCardChannel(QuestionChannel):
             navigation = SessionCardPage.decode(session_cursor, scope)
         except ValueError as error:
             raise CardActionError(str(error)) from error
+        if self._policy.backend == "claude":
+            if navigation.state == "archived":
+                raise CardActionError("Claude 试点暂不支持【已归档会话】。")
+            if session_cursor is None:
+                navigation = SessionCardPage("lazy")
+            if navigation.state != "lazy" or (navigation.cursor is not None and not isinstance(navigation.cursor, BindingCursor)):
+                raise CardActionError("会话分页已过期，请重新发送 /sessions。")
+            deadline = asyncio.get_running_loop().time() + constants.SESSION_QUERY_TIMEOUT_SECONDS
+            records = await self._management.query_sessions(
+                query=SessionQuery(sort_by="created_at", local=BindingQuery(
+                    app_id=scope.app_id, chat_id=scope.chat_id, topic_id=scope.topic_id, scope_kind=scope.kind)),
+                cursor=navigation.cursor, limit=SESSIONS_PAGE_SIZE, deadline=deadline,
+            )
+            statuses = await self._management.binding_statuses_exact(
+                binding_ids=[item.record.binding.id for item in records.items], deadline=deadline)
+            items_local = []
+            for item, status in zip(records.items, statuses, strict=True):
+                local_binding = item.record.binding
+                snapshot = status.snapshot
+                assert status.local_label is not None
+                items_local.append(SessionCardItem(
+                    binding_id=local_binding.id, short_id=local_binding.short_id, project_alias=local_binding.project_alias,
+                    native_thread_id=local_binding.native_thread_id, title="", state=status.primary_status or "",
+                    state_label=status.local_label, active=local_binding.active,
+                    activity_revision=snapshot.activity_revision, turn_id=snapshot.turn.turn_id if snapshot.turn else None,
+                ))
+            after = navigation.next(records.next_cursor).encode(scope) if records.next_cursor else None
+            selected = self._bindings.active_binding(scope.key)
+            return local_sessions_card(scope, tuple(items_local), navigation=navigation, next_cursor=after, notice=notice,
+                                       active_binding_id=selected.id if selected else None)
         if navigation.state == "archived":
             return await self._archived_sessions_card(
                 scope=scope, session_cursor=session_cursor, notice=notice,
@@ -338,7 +371,8 @@ class SessionCardChannel(QuestionChannel):
         catalog = None
         catalog_error = None
         try:
-            catalog = await self._runtime.model_catalog()
+            if self._policy.backend == "codex":
+                catalog = await self._runtime.model_catalog()
         except Exception as error:
             logger.warning("native model catalog unavailable for /new settings",
                            extra={"error_type": type(error).__name__})
@@ -355,6 +389,7 @@ class SessionCardChannel(QuestionChannel):
             except WorktreeError as error:
                 workspace_error = str(error) + " 可直接在项目目录创建会话，或重新加载 worktree 选项。"
         return new_binding_card(
+            local_only=self._policy.backend == "claude",
             scope=scope, projects=projects, initial_project_alias=initial_project_alias,
             catalog=catalog, catalog_error=catalog_error,
             allow_context_mode=allow_context_mode,

@@ -269,6 +269,20 @@ def _check_recovery(root: Path) -> None:
         raise InstanceDataError("unfinished legacy activation recovery; resolve it manually before CLI startup")
 
 
+def _has_database_files(root: Path) -> bool:
+    database = root / "state/channel.sqlite3"
+    return any(path.exists() or path.is_symlink() for path in
+               (Path(str(database) + suffix) for suffix in ("", "-wal", "-shm", "-journal")))
+
+
+def has_retained_setup_data(root: Path) -> bool:
+    return _retained_setup_state(root, _data_state(root))
+
+
+def _retained_setup_state(root: Path, state: str | None) -> bool:
+    return state == "initialized" or (state == "initializing" and _has_database_files(root))
+
+
 def begin_instance_setup(root: Path, *, lifetime_descriptor: int) -> MigrationPlan | None:
     """Record explicit setup before configuration or authorization can write data.
 
@@ -279,12 +293,7 @@ def begin_instance_setup(root: Path, *, lifetime_descriptor: int) -> MigrationPl
     _check_recovery(root)
     state = _data_state(root)
     database = root / "state" / "channel.sqlite3"
-    has_data = any(
-        candidate.exists() or candidate.is_symlink()
-        for suffix in ("", "-wal", "-shm", "-journal")
-        for candidate in (Path(str(database) + suffix),)
-    )
-    if state == "initialized" or (state == "initializing" and has_data):
+    if _retained_setup_state(root, state):
         return plan_channel_database(_database(root))
     if state == "purging":
         raise InstanceDataError("instance purge is incomplete; retry remove --purge before setup")

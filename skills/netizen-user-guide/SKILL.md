@@ -10,14 +10,15 @@ description: >-
 
 # Netizen 用户指南
 
-Netizen 通过官方 Codex SDK 将飞书接入原生 Codex。默认按当前 Netizen 飞书场景解答；
-用户明确指定其他宿主时，按其指定场景解释或比较。
+Netizen 默认通过官方 SDK 将飞书接入原生 Codex，也提供仅限所有者的 Claude Code 试点。
+默认按当前 Netizen 飞书场景解答。用户明确指定其他宿主时，按其指定场景解释或比较。
 
 ## 查阅
 
 回答前按问题阅读对应模块；涉及其他功能时沿正文链接补读，不默认通读整套手册。
-首次使用先读[快速开始](references/user-guide.md#快速开始)和[核心心智模型](references/concepts.md)；
-横向比较先读[原生能力与宿主差异](references/native-capabilities.md)，再补读涉及的功能。
+Claude Code 实例先读 [Claude Code 试点](references/user-guide.md#claude-code-试点)。
+首次使用 Codex 先读[快速开始](references/user-guide.md#快速开始)和[核心心智模型](references/concepts.md)。
+比较 Codex 宿主时先读[原生能力与宿主差异](references/native-capabilities.md)，再补读涉及的功能。
 完整能力说明按[手册目录](references/user-guide.md)覆盖各模块。
 
 | 用户问题 | 查阅与解释重点 |

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from netizen_cli.bindings import BindingStore
+from netizen_cli.backends import BackendPolicy, KNOWN_BACKENDS
 from netizen_cli.lark_app import encode_lark_app
 from netizen_cli.projects import (
     ProjectDisabled,
@@ -18,6 +19,18 @@ from netizen_cli.settings import AdminWebSettings, Settings, SettingsError
 
 
 class SettingsTest(unittest.TestCase):
+    def test_claude_pilot_policy_defaults_to_an_explicit_gap(self):
+        self.assertIn("claude", KNOWN_BACKENDS)
+        policy = BackendPolicy("claude", owner_id="owner")
+        for op in ("stop", "list_bindings", "context", "worktrees"):
+            self.assertIsNone(policy.operation_refusal(op, op))
+        for op in ("goal", "schedules", "progress", "unknown"):
+            self.assertIn(op, policy.operation_refusal(op, op))
+            self.assertIsNone(BackendPolicy("codex").operation_refusal(op, op))
+        self.assertIsNone(policy.sender_refusal("owner"))
+        self.assertIsNone(policy.sender_refusal("other", bare_help=True))
+        self.assertIsNotNone(policy.sender_refusal("other"))
+
     def environment(self, directory: Path, **values: str) -> dict[str, str]:
         return values
 
@@ -65,6 +78,8 @@ class SettingsTest(unittest.TestCase):
             template = config.read_text().replace("instance:\n", "instance:\n  backend: __BACKEND__\n")
             config.write_text(template.replace("__BACKEND__", "codex", 1))
             self.assertEqual(Settings.from_file(config, {}).backend, "codex")
+            config.write_text(template.replace("__BACKEND__", "claude", 1))
+            self.assertEqual(Settings.from_file(config, {}).backend, "claude")
             for value, kind in (("unknown" * 200, "str"), ("''", "str"), ("null", "NoneType"),
                                 ("123", "int"), ("[]", "list")):
                 with self.subTest(kind=kind, value=value):

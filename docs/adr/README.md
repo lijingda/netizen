@@ -37,7 +37,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0002](0002-separate-control-and-execution-planes.md) | 飞书控制面与 Codex 执行面分离 | 架构决策 | 已被 [0007](0007-use-official-typescript-sdk-as-codex-boundary.md) 取代 |  |
 | [0003](0003-codex-gateway-sdk-and-app-server.md) | 使用 Codex App Server 支持原生活动 Turn steering | 架构决策 | 已被 [0007](0007-use-official-typescript-sdk-as-codex-boundary.md) 取代 |  |
 | [0007](0007-use-official-typescript-sdk-as-codex-boundary.md) | 使用官方 TypeScript SDK 作为唯一 Codex 后端边界 | 架构决策 | 已被 [0008](0008-use-python-sdk-for-native-turn-control.md) 取代 |  |
-| [0008](0008-use-python-sdk-for-native-turn-control.md) | 使用官方 Python SDK 获得原生 Turn 控制 | 架构决策 | 有效 | 被 [0009](0009-use-version-gated-experimental-terminal-cleanup.md)、[0010](0010-correct-stop-and-background-cleanup-semantics.md)、[0012](0012-use-native-turn-model-settings.md)、[0013](0013-map-public-native-compaction-safely.md)、[0014](0014-use-removable-sdk-gap-adapters.md)、[0026](0026-upgrade-and-requalify-python-sdk-0147.md)、[0049](0049-bound-turn-observation-and-delegate-thread-removal.md)、[0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md)、[0102](0102-record-agent-self-assessment-for-scheduled-topic-runs.md) 修订 |
+| [0008](0008-use-python-sdk-for-native-turn-control.md) | 使用官方 Python SDK 获得原生 Turn 控制 | 架构决策 | 有效 | 被 [0009](0009-use-version-gated-experimental-terminal-cleanup.md)、[0010](0010-correct-stop-and-background-cleanup-semantics.md)、[0012](0012-use-native-turn-model-settings.md)、[0013](0013-map-public-native-compaction-safely.md)、[0014](0014-use-removable-sdk-gap-adapters.md)、[0026](0026-upgrade-and-requalify-python-sdk-0147.md)、[0049](0049-bound-turn-observation-and-delegate-thread-removal.md)、[0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md)、[0102](0102-record-agent-self-assessment-for-scheduled-topic-runs.md)、[0104](0104-host-native-agent-backends-per-instance.md) 修订 |
 | [0009](0009-use-version-gated-experimental-terminal-cleanup.md) | 用版本锁定的实验接口清理 Thread 后台终端 | 架构决策 | 有效 | 被 [0010](0010-correct-stop-and-background-cleanup-semantics.md)、[0014](0014-use-removable-sdk-gap-adapters.md)、[0026](0026-upgrade-and-requalify-python-sdk-0147.md) 修订 |
 | [0014](0014-use-removable-sdk-gap-adapters.md) | 用可逐项移除的薄 Adapter 补齐 Python SDK 高层能力缺口 | 架构决策 | 有效 | 被 [0018](0018-remove-skills-command.md)、[0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md)、[0069](0069-steer-the-current-physical-goal-turn.md)、[0083](0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0084](0084-separate-goal-controls-from-logical-turn-replies.md) 修订 |
 | [0020](0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md) | 用精确锁定的只读 Adapter 观察运行中 Turn 的原生 Plan | 架构决策 | 有效 | 被 [0026](0026-upgrade-and-requalify-python-sdk-0147.md)、[0052](0052-project-safe-turn-activity-with-one-consumer.md) 修订 |
@@ -45,7 +45,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) | 升级并重新认证 lark-channel-sdk 1.4.0 | 升级记录 | 有效 | 被 [0099](0099-project-original-card-content-with-bounded-component-adapter.md) 修订 |
 | [0077](0077-read-account-rate-limits-on-demand.md) | 按需读取共享 Codex 账号额度 | 架构决策 | 有效 |  |
 | [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) | 原生会话历史采用只读分页适配 | 架构决策 | 有效 | 被 [0096](0096-read-admin-conversations-through-summary-turn-pages.md)、[0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md) 修订 |
-| [0104](0104-host-native-agent-backends-per-instance.md) | 按实例接入多个原生 Agent 后端 | 架构决策 | 草案 | 修订 [0008](0008-use-python-sdk-for-native-turn-control.md)、[0060](0060-delete-projects-with-exact-session-inventory.md)、[0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0074](0074-deploy-independent-instances-by-root.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0080](0080-authenticate-admins-with-feishu-identities.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) |
+| [0104](0104-host-native-agent-backends-per-instance.md) | 按实例接入多个原生 Agent 后端 | 架构决策 | 有效 | 修订 [0008](0008-use-python-sdk-for-native-turn-control.md)、[0060](0060-delete-projects-with-exact-session-inventory.md)、[0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0074](0074-deploy-independent-instances-by-root.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0080](0080-authenticate-admins-with-feishu-identities.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) |
 
 ## 会话身份、生命周期与并发
 
@@ -67,7 +67,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0040](0040-make-new-card-only-and-show-all-projects.md) | 把普通会话创建收口到 `/new` 卡片并展示全部 Project | 功能契约 | 有效 |  |
 | [0049](0049-bound-turn-observation-and-delegate-thread-removal.md) | 有界处理 Turn 观测故障，并委托 App Server 移除 Thread | 架构决策 | 有效 | 被 [0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 修订 |
 | [0073](0073-create-sessions-from-chat-defaults.md) | 根据聊天默认配置在原消息位置自动创建普通会话 | 架构决策 | 有效 |  |
-| [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) | 持久分支使用普通会话，恢复与删除以原生返回为准 | 架构决策 | 有效 | 被 [0082](0082-restore-archived-sessions-from-exact-native-results.md)、[0093](0093-reject-only-the-operation-on-native-provider-mismatch.md)、[0094](0094-preserve-execution-observation-on-delete-rejection.md)、[0097](0097-fork-into-chat-main-lines-with-replacement-confirmation.md) 修订 |
+| [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) | 持久分支使用普通会话，恢复与删除以原生返回为准 | 架构决策 | 有效 | 被 [0082](0082-restore-archived-sessions-from-exact-native-results.md)、[0093](0093-reject-only-the-operation-on-native-provider-mismatch.md)、[0094](0094-preserve-execution-observation-on-delete-rejection.md)、[0097](0097-fork-into-chat-main-lines-with-replacement-confirmation.md)、[0104](0104-host-native-agent-backends-per-instance.md) 修订 |
 | [0082](0082-restore-archived-sessions-from-exact-native-results.md) | 归档恢复直接使用精确原生结果 | 架构决策 | 有效 |  |
 | [0088](0088-align-steer-failures-and-input-resume-rejections.md) | 统一追加输入失败与普通消息的恢复拒绝 | 架构决策 | 有效 | 被 [0093](0093-reject-only-the-operation-on-native-provider-mismatch.md) 修订 |
 | [0093](0093-reject-only-the-operation-on-native-provider-mismatch.md) | 原生模型提供方拒绝只拒绝本次操作 | 架构决策 | 有效 |  |
@@ -138,7 +138,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | ADR | 标题 | 类型 | 状态 | 修订 |
 | --- | --- | --- | --- | --- |
 | [0061](0061-schedule-ordinary-threads-in-feishu-topics.md) | 在独立飞书话题中调度普通持久会话 | 架构决策 | 有效 | 被 [0063](0063-mention-task-initiators-in-terminal-results.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0085](0085-manage-worktrees-independently-of-sessions.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md)、[0102](0102-record-agent-self-assessment-for-scheduled-topic-runs.md) 修订 |
-| [0068](0068-run-saved-scheduled-plans-manually.md) | 通过现有调度链路手动执行已保存的计划 | 功能契约 | 有效 | 被 [0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md) 修订 |
+| [0068](0068-run-saved-scheduled-plans-manually.md) | 通过现有调度链路手动执行已保存的计划 | 功能契约 | 有效 | 被 [0070](0070-schedule-inputs-in-existing-bindings.md)、[0075](0075-migrate-channel-databases-during-installation.md)、[0104](0104-host-native-agent-backends-per-instance.md) 修订 |
 | [0070](0070-schedule-inputs-in-existing-bindings.md) | 定时向原会话提交普通输入 | 架构决策 | 有效 | 被 [0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
 | [0102](0102-record-agent-self-assessment-for-scheduled-topic-runs.md) | 定时新话题会话由 Agent 自评任务是否达成 | 架构决策 | 有效 | 修订 [0008](0008-use-python-sdk-for-native-turn-control.md)、[0061](0061-schedule-ordinary-threads-in-feishu-topics.md) |
 
@@ -150,8 +150,8 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0054](0054-allow-admin-to-delete-exact-materialized-sessions.md) | 允许 Admin 删除 exact materialized 会话 | 功能契约 | 有效 | 被 [0060](0060-delete-projects-with-exact-session-inventory.md)、[0100](0100-batch-archive-and-delete-selected-admin-sessions.md) 修订 |
 | [0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md) | 通过共享安装器执行管理页手动升级 | 功能契约 | 有效 | 被 [0059](0059-support-explicit-admin-service-restart.md) 修订 |
 | [0059](0059-support-explicit-admin-service-restart.md) | 通过同一部署执行者支持管理页独立重启 | 功能契约 | 有效 |  |
-| [0060](0060-delete-projects-with-exact-session-inventory.md) | 按精确会话清单删除 Project | 架构决策 | 有效 | 被 [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0100](0100-batch-archive-and-delete-selected-admin-sessions.md) 修订 |
-| [0080](0080-authenticate-admins-with-feishu-identities.md) | 用飞书身份登录并维护实例管理员 | 架构决策 | 有效 | 被 [0091](0091-load-admin-user-credentials-on-demand.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) 修订 |
+| [0060](0060-delete-projects-with-exact-session-inventory.md) | 按精确会话清单删除 Project | 架构决策 | 有效 | 被 [0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0100](0100-batch-archive-and-delete-selected-admin-sessions.md)、[0104](0104-host-native-agent-backends-per-instance.md) 修订 |
+| [0080](0080-authenticate-admins-with-feishu-identities.md) | 用飞书身份登录并维护实例管理员 | 架构决策 | 有效 | 被 [0091](0091-load-admin-user-credentials-on-demand.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md)、[0104](0104-host-native-agent-backends-per-instance.md) 修订 |
 | [0091](0091-load-admin-user-credentials-on-demand.md) | 按用户独立存储并按需读取 Admin 飞书凭证 | 架构决策 | 有效 |  |
 | [0089](0089-browse-current-project-files-through-admin.md) | Admin 按需查看 Project 当前目录中的文件 | 架构决策 | 有效 | 被 [0095](0095-show-uncommitted-changes-against-head-in-project-files.md)、[0098](0098-open-answer-file-links-in-directory-roots.md) 修订 |
 | [0095](0095-show-uncommitted-changes-against-head-in-project-files.md) | Admin 文件查看显示相对 HEAD 的未提交变更 | 架构决策 | 有效 |  |
@@ -173,7 +173,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 | ADR | 标题 | 类型 | 状态 | 修订 |
 | --- | --- | --- | --- | --- |
-| [0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) | 按需限制机器人只在已启用的群聊中执行 | 架构决策 | 有效 |  |
+| [0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) | 按需限制机器人只在已启用的群聊中执行 | 架构决策 | 有效 | 被 [0104](0104-host-native-agent-backends-per-instance.md) 修订 |
 
 ## 安装、部署与发布
 
@@ -189,11 +189,11 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0044](0044-decouple-existing-app-repair-from-terminal-input.md) | 将已有飞书应用补权与终端输入解耦 | 功能契约 | 有效 | 被 [0062](0062-decouple-initial-app-onboarding-from-terminal-input.md) 修订 |
 | [0045](0045-model-chat-info-as-an-alternative-scope-requirement.md) | 将群信息权限建模为等价 scope 能力 | 功能契约 | 有效 |  |
 | [0050](0050-agent-executed-release-chain.md) | 由脚本在维护者指令后执行发布全链 | 功能契约 | 有效 | 被 [0076](0076-separate-cli-installations-from-instance-data.md)、[0103](0103-classify-release-verification-by-changed-area.md) 修订 |
-| [0062](0062-decouple-initial-app-onboarding-from-terminal-input.md) | 将首次飞书应用初始化与终端输入解耦 | 功能契约 | 有效 | 被 [0066](0066-share-lark-app-credentials-with-optional-cli.md) 修订 |
-| [0074](0074-deploy-independent-instances-by-root.md) | 按根目录部署独立实例，继续共享 Codex 用户状态 | 架构决策 | 有效 |  |
-| [0076](0076-separate-cli-installations-from-instance-data.md) | 用普通 Python CLI 分发程序，以实例启动负责数据准入 | 架构决策 | 有效 |  |
+| [0062](0062-decouple-initial-app-onboarding-from-terminal-input.md) | 将首次飞书应用初始化与终端输入解耦 | 功能契约 | 有效 | 被 [0066](0066-share-lark-app-credentials-with-optional-cli.md)、[0104](0104-host-native-agent-backends-per-instance.md) 修订 |
+| [0074](0074-deploy-independent-instances-by-root.md) | 按根目录部署独立实例，继续共享 Codex 用户状态 | 架构决策 | 有效 | 被 [0104](0104-host-native-agent-backends-per-instance.md) 修订 |
+| [0076](0076-separate-cli-installations-from-instance-data.md) | 用普通 Python CLI 分发程序，以实例启动负责数据准入 | 架构决策 | 有效 | 被 [0104](0104-host-native-agent-backends-per-instance.md) 修订 |
 | [0103](0103-classify-release-verification-by-changed-area.md) | 按发布范围内的变更确定验收要求 | 架构决策 | 有效 | 修订 [0050](0050-agent-executed-release-chain.md) |
 
 ## 统计
 
-共 104 个 ADR：架构决策 71 个，功能契约 31 个，升级记录 2 个；其中 8 个已被取代，1 个草案。
+共 104 个 ADR：架构决策 71 个，功能契约 31 个，升级记录 2 个；其中 96 个有效，8 个已被取代，0 个草案。

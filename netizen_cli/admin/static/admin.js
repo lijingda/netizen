@@ -1,5 +1,18 @@
 "use strict";
 
+const claudeBackend = document.body.dataset.backend === "claude";
+if (claudeBackend) {
+  for (const id of ["nav-temporary", "nav-schedules", "nav-progress-card", "nav-question-notifications", "nav-session-tools",
+                    "session-search-help", "admin-user-add"]) {
+    document.getElementById(id).hidden = true;
+  }
+  document.querySelector("#session-search").closest("label").hidden = true;
+  document.querySelector("#session-inventory-state option[value=archived]").remove();
+  document.querySelector("#session-inventory-state option[value=active]").textContent = "全部本地会话";
+  document.querySelector("[data-time-range-id=session-updated]").hidden = true;
+  for (const header of document.querySelectorAll("[data-session-sort=session][data-sort-by=updatedAt]")) header.disabled = true;
+}
+
 const state = {
   tab: "projects",
   sessionTab: "ordinary",
@@ -1408,7 +1421,7 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
 window.NetizenTimeRange.init({ closeOtherFilters: () => openFilter?.close() });
 
 const runtimeLabels = Object.freeze({
-  running: "运行中", stopping: "停止中", "turn-observation-unavailable": "任务观测不可用",
+  running: "运行中", stopping: "停止中", closing: "正在收尾", "turn-observation-unavailable": "任务观测不可用",
   "goal-starting": "Goal 启动中", "goal-running": "Goal 运行中", "goal-pausing": "Goal 暂停中",
   "externally-active-goal": "外部活跃 Goal", "goal-unknown": "Goal 状态未知",
   renaming: "重命名中", archiving: "归档中", unarchiving: "恢复归档中", deleting: "删除中",
@@ -1427,6 +1440,7 @@ function subscriptionStateLabel(value) {
 }
 
 function runtimeLabel(runtime) {
+  if (runtime.localLabel) return runtime.localLabel;
   if (runtime.primaryStatusResolution === "archived") return "—";
   if (runtime.primaryStatus != null) {
     const label = localizedLabel(runtimeLabels, runtime.primaryStatus);
@@ -1763,8 +1777,8 @@ function renderSessions(data, batchActions) {
     sessionState.append(runtime);
     cell(row, session.projectAlias);
     const settings = session.sessionSettings;
-    cell(row, [sessionConfigurationSummary(settings), progressCardSourceLabel(settings)].filter(Boolean).join(" · "));
-    cell(row, session.catalogState === "lazy" ? sessionDateLabel(session.registeredAt) : nativeSessionDateLabel(session.createdAt), "session-time");
+    cell(row, [sessionConfigurationSummary(settings), claudeBackend ? "" : progressCardSourceLabel(settings)].filter(Boolean).join(" · "));
+    cell(row, claudeBackend || session.catalogState === "lazy" ? sessionDateLabel(session.registeredAt) : nativeSessionDateLabel(session.createdAt), "session-time");
     cell(row, sessionUpdatedAtLabel(session), "session-time");
     const actions = actionsCell(row);
     wireSessionActions(actions, session);
@@ -1775,15 +1789,20 @@ function renderSessions(data, batchActions) {
 function wireSessionActions(actions, session) {
   const a = session.actions;
   const secondary = document.createElement("div");
-  const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
-  secondary.append(schedule);
+  if (!claudeBackend) {
+    const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
+    secondary.append(schedule);
+  }
   if (session.canReadLatestAnswer) secondary.append(actionButton("查看对话记录", () => window.NetizenConversation.open(session)));
   if (a.configure) {
     const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
     actions.append(button);
   }
   if (a.stop) actions.append(actionButton("停止", async () => await window.NetizenConfirm.ask({ body: "停止这个会话的当前运行？", danger: false }) && mutate("/api/v1/sessions/stop", a.stop)));
-  if (a.activate) actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
+  if (a.activate) {
+    const container = claudeBackend && a.configure ? secondary : actions;
+    container.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
+  }
   if (a.rename) {
     const button = actionButton("重命名", () => openSessionRenameEditor(session, button));
     secondary.append(button);
@@ -1796,7 +1815,7 @@ function wireSessionActions(actions, session) {
   if (a.release) secondary.append(actionButton("释放订阅", async () => await window.NetizenConfirm.ask({ body: "释放本进程订阅？历史不会删除。", danger: false }) && mutate("/api/v1/sessions/release", a.release)));
   const primary = [...actions.children];
   for (const button of primary.slice(3)) secondary.append(button);
-  actions.append(window.NetizenMenu.create([...secondary.children], `更多操作 · ${session.shortId}`));
+  if (secondary.children.length) actions.append(window.NetizenMenu.create([...secondary.children], `更多操作 · ${session.shortId}`));
 }
 
 async function loadSides(page) {
@@ -2034,7 +2053,7 @@ async function loadSessionSettingsOptions() {
   const serial = ++editor.optionsSerial;
   editor.loading = true;
   renderSessionSettingsEditor();
-  const progressRead = editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
+  const progressRead = !claudeBackend && editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
   try {
     const data = await api("/api/v1/sessions/options");
     if (sessionSettingsEditor !== editor || serial !== editor.optionsSerial) return;
@@ -2452,7 +2471,7 @@ async function loadDefaultOptions(resolveChat = false) {
   editor.workspaceOptions = null;
   editor.workspaceError = "";
   renderDefaultSettings();
-  let progressRead = editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
+  let progressRead = !claudeBackend && editor.settings.progress_card_settings === null ? window.NetizenProgressCard.read() : null;
   try {
     let view = null;
     if (resolveChat && chatId) {
@@ -2497,7 +2516,7 @@ async function loadDefaultOptions(resolveChat = false) {
   } finally {
     if (defaultsEditor === editor && serial === editor.serial
         && editor.settings.progress_card_settings === null && !progressRead) {
-      progressRead = window.NetizenProgressCard.read();
+      progressRead = claudeBackend ? null : window.NetizenProgressCard.read();
     }
     await progressRead;
     if (defaultsEditor === editor && serial === editor.serial) {
@@ -3359,7 +3378,7 @@ function resetScheduleEndOffset() {
 }
 
 function defaultScheduleSessionSettings() {
-  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true,
+  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: !claudeBackend, completion_mention_enabled: true,
     message_context_mode: "current-only", progress_card_settings: null };
 }
 
@@ -3425,6 +3444,7 @@ function messageContextLabel(value) {
 function sessionConfigurationSummary(settings, models = []) {
   const turn = settings.turn_settings;
   const context = messageContextLabel(settings.message_context_mode);
+  if (claudeBackend) return `${context} · 原生 Claude 设置`;
   if (!turn) return `${context} · 继承 Codex`;
   const model = models.find((item) => item.id === turn.model_id);
   const effort = model?.efforts?.find((item) => item.id === turn.effort_id);
@@ -3480,6 +3500,20 @@ function scheduleSelectOptions(node, choices, selected) {
 }
 
 function renderSessionSettingsFields(input, settings, models, contextAvailable) {
+  input("context").value = settings.message_context_mode;
+  for (const option of input("context").querySelectorAll("option")) {
+    option.disabled = option.value === "catch-up" && contextAvailable === false;
+  }
+  if (claudeBackend) {
+    for (const field of ["model", "effort", "tier", "progress"]) {
+      input(field).closest("label").hidden = true;
+    }
+    input("progress-settings").hidden = true;
+    input("progress-reset").hidden = true;
+    input("completion-mention").checked = settings.completion_mention_enabled;
+    input("reactions").checked = settings.reaction_pulse_enabled;
+    return null;
+  }
   const turn = settings.turn_settings;
   const model = models.find((item) => item.id === turn?.model_id);
   scheduleSelectOptions(input("model"), [["", "继承 Codex"],
@@ -3488,10 +3522,6 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   scheduleSelectOptions(input("tier"), (model?.service_tiers || []).map((item) => [item.id, catalogChoiceLabel(item)]), turn?.service_tier_id);
   input("effort").disabled = !model;
   input("tier").disabled = !model;
-  input("context").value = settings.message_context_mode;
-  for (const option of input("context").querySelectorAll("option")) {
-    option.disabled = option.value === "catch-up" && contextAvailable === false;
-  }
   input("reactions").checked = settings.reaction_pulse_enabled;
   input("progress").checked = settings.progress_card_enabled;
   input("completion-mention").checked = settings.completion_mention_enabled;
@@ -4365,6 +4395,10 @@ function pageQuery(tab, sessionTab, raw = "") {
     if (!query.has("pageSize")) query.set("pageSize", "20");
     if (!query.has("sortBy")) query.set("sortBy", "updatedAt");
     if (!query.has("sortDirection")) query.set("sortDirection", "desc");
+  }
+  if (claudeBackend && tab === "sessions" && sessionTab === "ordinary") {
+    query.set("sortBy", "createdAt");
+    for (const key of ["updatedRange", "updatedFrom", "updatedBefore", "searchTerm"]) query.delete(key);
   }
   if (tab === "schedules" && !query.has("ended")) query.set("ended", "false");
   return query;
