@@ -261,8 +261,10 @@ async def reference():
                 channel = await channel_surfaces(fx, delivery_recorder(fx.channel, stack), calls)
                 admin = await admin_surfaces(fx, calls)
             sdk = await sdk_requests(fx)
-            return json.loads(json.dumps({"channel": channel, "admin": admin, "sdk": sdk},
-                                         ensure_ascii=False).replace(str(fx.project_root), "<root>"))
+            recorded = json.dumps({"channel": channel, "admin": admin, "sdk": sdk}, ensure_ascii=False)
+            # macOS may resolve /var/... to /private/var/... before a path reaches a card.
+            return json.loads(recorded.replace(str(fx.project_root.resolve()), "<root>")
+                              .replace(str(fx.project_root), "<root>"))
 
 
 class CodexSurfaceContract(unittest.IsolatedAsyncioTestCase):

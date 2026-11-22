@@ -42,10 +42,6 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
         self._name_writes = ThreadNameWrites()
         self._automatic_thread_naming = automatic_thread_naming
 
-    @property
-    def name_generation_available(self) -> bool:
-        return self._thread_namer is not None
-
     async def generate_name_exact(self, binding_id: str) -> str:
         """Generate a candidate from the exact Thread without resuming or renaming it."""
         if self._thread_namer is None:

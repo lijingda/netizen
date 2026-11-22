@@ -37,8 +37,7 @@ class _ExactTitleWriter:
 @runtime_checkable
 class _CandidateSource(Protocol):
     @property
-    def name_generation_available(self) -> bool: ...
-    async def generate_name_exact(self, binding_id: str) -> str: ...
+    def name_generator(self) -> Callable[[str], Awaitable[str]] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +54,7 @@ class SessionNames:
             writer = _ExactTitleWriter(
                 lambda binding_id, name: native_writer.rename_exact(binding_id, name)
             )
-        if isinstance(runtime, _CandidateSource) and runtime.name_generation_available:
-            return cls(
-                writer, lambda binding_id: runtime.generate_name_exact(binding_id)
-            )
-        return cls(writer)
+        return cls(writer, runtime.name_generator if isinstance(runtime, _CandidateSource) else None)
 
 
 @dataclass(frozen=True, slots=True)

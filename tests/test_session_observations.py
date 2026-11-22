@@ -2,6 +2,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 from dataclasses import replace
+from pathlib import Path
 import unittest
 
 from lark_channel import OutboundCard
@@ -35,17 +36,19 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             await app.handle_message(FakeMessage("work", message_id="work"))
             client = clients.calls[-1]
             client.init(model="claude-test")
-            client.stream.put_nowait(RateLimitEvent(RateLimitInfo("rejected", raw={"secret": "private"}), "wrong", "other"))
+            private_value = "excluded-native-payload"
+            client.stream.put_nowait(RateLimitEvent(RateLimitInfo("rejected", raw={"secret": private_value}), "wrong", "other"))
             client.result(user_message_uuid="other", total_cost_usd=999)
             client.stream.put_nowait(RateLimitEvent(RateLimitInfo("allowed", utilization=0.0), "rate", client.session))
-            client.result(total_cost_usd=0, usage={"input_tokens": 0, "output_tokens": True, "ignored": "private"})
+            client.result(total_cost_usd=0, usage={"input_tokens": 0, "output_tokens": True, "ignored": private_value})
             self.assertTrue(await ordinary.wait_idle(3))
             before = list(clients.lookups)
             warm = await status()
             self.assertIn("claude-test", warm)
             self.assertIn("allowed", warm)
-            self.assertNotIn("private", warm)
+            self.assertNotIn(private_value, warm)
             values = ordinary.observations.read(binding, client.session).json()
+            self.assertEqual(Path(values["cwd"]["value"]).resolve(), fx.project.resolve())
             self.assertEqual(values["input_tokens"]["value"], 0)
             self.assertEqual(values["totalCostUsd"]["value"], 0)
             self.assertEqual(values["output_tokens"]["availability"], "取不到")

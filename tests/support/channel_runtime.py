@@ -443,7 +443,8 @@ class StubRuntime:
         ):
             raise ThreadLifecycleError("会话运行状态已经变化。")
 
-    name_generation_available = True
+    async def name_generator(self, binding_id: str) -> str:
+        return await self.generate_name_exact(binding_id)
 
     async def generate_name_exact(self, binding_id: str) -> str:
         assert self.binding_store is not None

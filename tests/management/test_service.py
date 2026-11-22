@@ -133,9 +133,7 @@ class FakeManagementRuntime:
             context_anchor=context_anchor,
         )
 
-    name_generation_available = True
-
-    async def generate_name_exact(self, binding_id: str) -> str:
+    async def name_generator(self, binding_id: str) -> str:
         self.calls.append(("generate-name", binding_id))
         if self.generation_entered is not None:
             self.generation_entered.set()
