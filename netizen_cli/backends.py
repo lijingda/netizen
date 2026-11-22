@@ -2,10 +2,12 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal, cast
 
 from .management_errors import ManagementError
 
-DEFAULT_BACKEND = "codex"
+BackendId = Literal["codex", "claude"]
+DEFAULT_BACKEND: Literal["codex"] = "codex"
 KNOWN_BACKENDS = (DEFAULT_BACKEND, "claude")
 
 
@@ -13,14 +15,14 @@ class BackendError(ValueError):
     pass
 
 
-def instance_backend(instance: Mapping[str, object]) -> str:
+def instance_backend(instance: Mapping[str, object]) -> BackendId:
     value = instance.get("backend", DEFAULT_BACKEND)
     if not isinstance(value, str) or value not in KNOWN_BACKENDS:
         raise BackendError(
             f"invalid instance.backend ({type(value).__name__}). "
             f"This program version supports only: {', '.join(KNOWN_BACKENDS)}"
         )
-    return value
+    return cast(BackendId, value)
 
 
 class BackendUnsupported(ManagementError):
