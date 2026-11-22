@@ -137,6 +137,8 @@ class ChannelApplication(ChannelEntry):
         self._channel = channel
         self._chat_avatars = ChatAvatarImages(channel)
         self._policy = management.operation_policy(policy)
+        self._local_sessions = management.local
+        self._session_form = management.session_form
         self._codex = runtime
         if ordinary is None:
             if runtime is None:

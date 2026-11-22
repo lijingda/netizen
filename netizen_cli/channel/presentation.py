@@ -65,6 +65,7 @@ from ..turn_files import (
 )
 from ..schedules.models import ScheduleNotFound
 
+from ..session_views import ResultView
 from . import constants
 from .app_values import (
     _task_has_error,
@@ -95,23 +96,21 @@ class CompletionPresentationChannel(ChannelReplies):
     """Completion handling: Result, Files, Goal receipts and reminders."""
 
     async def handle_ordinary_completion(self, outcome: OrdinaryEvent) -> None:
-        if self._policy.backend == "claude":
-            if isinstance(outcome, TurnObservationUnavailableOutcome):
+        local = self._local_sessions is not None
+        if isinstance(outcome, TurnObservationUnavailableOutcome):
+            if local:
                 await self._reactions.stop(outcome.turn_id)
                 await self._reply(outcome.origin, str(outcome.error))
-                return
-            if outcome.status == "completed":
-                reaction = constants.DONE_REACTION
-                content = await self._prepare_task_result_images(outcome) or "Claude 已完成本次执行。"
-            elif outcome.status == "interrupted":
-                reaction, content = constants.INTERRUPTED_REACTION, "Claude 本次执行已停止。"
             else:
-                reaction, content = constants.ERROR_REACTION, outcome.error_detail or "Claude 本次执行失败。"
-            await self._finish_task_reactions(outcome.origin, outcome.turn_id, reaction)
-            await self._reply_task_result(outcome, content)
+                await self._park_observation(outcome)
             return
-        if isinstance(outcome, TurnObservationUnavailableOutcome):
-            await self._park_observation(outcome)
+        if local:
+            result = self._result_view(outcome, local=True)
+            content = result.content
+            if result.status == "completed":
+                content = await self._prepare_task_result_images(result) or content
+            await self._finish_result_reactions(result)
+            await self._reply_task_result(result, content)
             return
         scheduled = outcome.origin if isinstance(outcome.origin, ScheduledOrigin) else None
         completion = _ScheduledCompletion()
@@ -246,6 +245,31 @@ class CompletionPresentationChannel(ChannelReplies):
         )
         await self._reply(outcome.origin, message)
 
+    @staticmethod
+    def _result_view(outcome: OrdinaryConclusion | SideTurnOutcome, *, local: bool = False) -> ResultView:
+        if _task_has_error(outcome) or outcome.status not in {"completed", "interrupted"}:
+            status = "failed"
+            content = ((outcome.error_detail or "Claude 本次执行失败。") if local and isinstance(outcome, OrdinaryConclusion)
+                       else _task_failure_text(outcome))
+        elif outcome.status == "interrupted":
+            status = "interrupted"
+            content = "Claude 本次执行已停止。" if local else _task_interruption_text(outcome)
+        else:
+            status = "completed"
+            content = outcome.final_response or ("Claude 已完成本次执行。" if local else "任务已结束，未产生文本回复。")
+        return ResultView(
+            session_id=outcome.binding_id if isinstance(outcome, OrdinaryConclusion) else outcome.side_id,
+            thread_id=outcome.thread_id, turn_id=outcome.turn_id, origin=outcome.origin,
+            status=status, content=content, cwd=outcome.cwd,
+            mention_user_id=_outcome_completion_mention_user_id(outcome),
+            source="Claude Result" if local else "Codex Turn",
+        )
+
+    async def _finish_result_reactions(self, result: ResultView) -> None:
+        reaction = {"completed": constants.DONE_REACTION, "interrupted": constants.INTERRUPTED_REACTION,
+                    "failed": constants.ERROR_REACTION}[result.status]
+        await self._finish_task_reactions(result.origin, result.turn_id, reaction)
+
     async def _complete_task(
         self,
         outcome: OrdinaryConclusion | SideTurnOutcome,
@@ -256,15 +280,14 @@ class CompletionPresentationChannel(ChannelReplies):
         allow_suppression: bool = True,
     ) -> None:
         """Present one ordinary or SDK logical execution through the same reply path."""
-        silent = (allow_suppression and not _task_has_error(outcome) and outcome.status == "completed"
+        result = self._result_view(outcome)
+        silent = (allow_suppression and result.status == "completed"
                   and not outcome.final_response
                   and self._reply_suppression.is_suppressed(
                       outcome.thread_id, outcome.turn_id, file_turn_id or outcome.turn_id,
                   ))
         partial_delivery = await self._progress_cards.prepare_partial_answers(
-            owner_id=(outcome.binding_id if isinstance(outcome, OrdinaryConclusion) else outcome.side_id),
-            thread_id=outcome.thread_id,
-            turn_id=outcome.turn_id,
+            owner_id=result.session_id, thread_id=result.thread_id, turn_id=result.turn_id,
             side=isinstance(outcome, SideTurnOutcome),
             logical_turn=logical_turn,
             reply=lambda post: self._reply_to_origin(outcome.origin, post),
@@ -273,18 +296,10 @@ class CompletionPresentationChannel(ChannelReplies):
                 if isinstance(outcome.origin, ScheduledOrigin) else None
             ),
         )
-        if _task_has_error(outcome):
-            terminal_reaction = constants.ERROR_REACTION
-        elif outcome.status == "completed":
-            terminal_reaction = constants.DONE_REACTION
-        elif outcome.status == "interrupted":
-            terminal_reaction = constants.INTERRUPTED_REACTION
-        else:
-            terminal_reaction = constants.ERROR_REACTION
-        await self._finish_task_reactions(outcome.origin, outcome.turn_id, terminal_reaction)
+        await self._finish_result_reactions(result)
         task_files = _TaskFiles()
         prepared_response = None
-        if not silent and not _task_has_error(outcome) and outcome.status == "completed":
+        if not silent and result.status == "completed":
             task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence)
         if outcome.task_feedback.progress_card_enabled:
             # A missing card stays silent; failure of an existing card uses
@@ -296,8 +311,7 @@ class CompletionPresentationChannel(ChannelReplies):
             )
             try:
                 attempt = await self._complete_task_progress_card(
-                    outcome,
-                    task_files,
+                    outcome, result, task_files,
                     prepared_response=prepared_response, file_turn_id=file_turn_id,
                     suppress_result=silent,
                 )
@@ -334,7 +348,7 @@ class CompletionPresentationChannel(ChannelReplies):
                     # Only the existing partial-delivery failure notice is nonempty.
                     if content:
                         await self._complete_task_with_files(
-                            outcome, self._prepare_task_files(outcome.cwd, file_evidence),
+                            outcome, result, self._prepare_task_files(outcome.cwd, file_evidence),
                             prepared_response=content, file_turn_id=file_turn_id,
                         )
                         return
@@ -351,30 +365,26 @@ class CompletionPresentationChannel(ChannelReplies):
                     ),
                     final_reply=finish_silent_reply,
                 )
-            elif _task_has_error(outcome) or outcome.status not in {"completed", "interrupted"}:
+            elif result.status != "completed":
                 await self._reply_task_answers(
-                    outcome, _task_failure_text(outcome), partial_delivery=partial_delivery,
-                )
-            elif outcome.status == "interrupted":
-                await self._reply_task_answers(
-                    outcome, _task_interruption_text(outcome), partial_delivery=partial_delivery,
-                    allow_completion_mention=False,
+                    outcome, result.content, partial_delivery=partial_delivery,
+                    allow_completion_mention=result.status != "interrupted",
                 )
             elif not outcome.partial_answers:
                 await self._complete_task_with_files(
-                    outcome, task_files, prepared_response=prepared_response, file_turn_id=file_turn_id,
+                    outcome, result, task_files, prepared_response=prepared_response, file_turn_id=file_turn_id,
                 )
             else:
                 await self._reply_task_answers(
                     outcome,
-                    prepared_response or outcome.final_response or "任务已结束，未产生文本回复。",
+                    prepared_response or result.content,
                     partial_delivery=partial_delivery,
                     unconfirmed_content=(
                         "任务已完成，但阶段性答案投递未确认。"
                         if outcome.partial_answers and not outcome.final_response else None
                     ),
                     final_reply=lambda content: self._complete_task_with_files(
-                        outcome, task_files, prepared_response=content, file_turn_id=file_turn_id,
+                        outcome, result, task_files, prepared_response=content, file_turn_id=file_turn_id,
                     ),
                 )
         finally:
@@ -395,10 +405,9 @@ class CompletionPresentationChannel(ChannelReplies):
         return task_files, response
 
     async def _prepare_task_result_images(
-        self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
+        self, outcome: OrdinaryConclusion | SideTurnOutcome | ResultView,
     ) -> str | None:
-        content = outcome.final_response
+        content = outcome.content if isinstance(outcome, ResultView) else outcome.final_response
         if not content:
             return content
         content = feishu_answer_text(content)
@@ -420,31 +429,23 @@ class CompletionPresentationChannel(ChannelReplies):
     async def _complete_task_progress_card(
         self,
         outcome: OrdinaryConclusion | SideTurnOutcome,
+        result: ResultView,
         task_files: _TaskFiles,
         *,
         prepared_response: str | None = None,
         file_turn_id: str | None = None,
         suppress_result: bool = False,
     ) -> _CardUpdateAttempt | None:
-        terminal_status = "failed"
+        terminal_status = result.status
         final_response: str | None
         files: tuple[TurnFile, ...] = ()
         scope: FeishuScope | None = None
         file_provenance_id: str | None = None
         file_additions: int | None = None
         file_deletions: int | None = None
-        if _task_has_error(outcome):
-            final_response = _task_failure_text(outcome)
-        elif outcome.status == "interrupted":
-            terminal_status = "interrupted"
-            final_response = _task_interruption_text(outcome)
-        elif outcome.status != "completed":
-            final_response = _task_failure_text(outcome)
-        else:
-            terminal_status = "completed"
-            final_response = None if suppress_result else (
-                prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
-            )
+        final_response = result.content
+        if result.status == "completed":
+            final_response = None if suppress_result else prepared_response or result.content
             if not suppress_result and has_file_evidence(task_files.evidence, task_files.summary):
                 try:
                     scope, files, file_provenance_id = (
@@ -582,15 +583,16 @@ class CompletionPresentationChannel(ChannelReplies):
     async def _complete_task_with_files(
         self,
         outcome: OrdinaryConclusion | SideTurnOutcome,
+        result_view: ResultView,
         task_files: _TaskFiles,
         *,
         prepared_response: str | None = None,
         file_turn_id: str | None = None,
     ) -> None:
-        final_response = prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
+        final_response = prepared_response or result_view.content
         if not has_file_evidence(task_files.evidence, task_files.summary):
             await self._reply_task_result(
-                outcome, final_response,
+                result_view, final_response,
             )
             return
         try:
@@ -608,7 +610,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 files=files,
                 additions=task_files.summary.additions,
                 deletions=task_files.summary.deletions,
-                completion_mention_user_id=_outcome_completion_mention_user_id(outcome),
+                completion_mention_user_id=result_view.mention_user_id,
             ) if files else None
         except asyncio.CancelledError:
             raise
@@ -622,7 +624,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 },
             )
             await self._reply_task_result(
-                outcome,
+                result_view,
                 f"{final_response}\n\n⚠️ 本轮文件卡片未生成：{error}",
             )
             return
@@ -636,7 +638,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 },
             )
             await self._reply_task_result(
-                outcome, final_response,
+                result_view, final_response,
             )
             return
 
@@ -644,7 +646,7 @@ class CompletionPresentationChannel(ChannelReplies):
         # Do not catch a text fallback's own failure and send it a second time.
         if card is None:
             await self._reply_task_result(
-                outcome, final_response,
+                result_view, final_response,
             )
             return
         try:
@@ -659,7 +661,7 @@ class CompletionPresentationChannel(ChannelReplies):
         # SendResult.failure can hide a timeout, retry, or partial publication.
         # Keep the scheduled receipt and never replace it with a fallback's ack.
         if not isinstance(outcome.origin, ScheduledOrigin):
-            await self._reply_task_result(outcome, final_response, allow_completion_mention=False)
+            await self._reply_task_result(result_view, final_response, allow_completion_mention=False)
 
     async def _complete_side_lifecycle(
         self,
@@ -888,16 +890,15 @@ class CompletionPresentationChannel(ChannelReplies):
 
     async def _reply_task_result(
         self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
+        outcome: OrdinaryConclusion | SideTurnOutcome | ResultView,
         content: str,
         *,
         origin: object | None = None,
         allow_completion_mention: bool = True,
     ) -> None:
+        mention = outcome.mention_user_id if isinstance(outcome, ResultView) else _outcome_completion_mention_user_id(outcome)
         await self._reply(
             outcome.origin if origin is None else origin,
             content,
-            completion_mention_user_id=(
-                _outcome_completion_mention_user_id(outcome) if allow_completion_mention else None
-            ),
+            completion_mention_user_id=mention if allow_completion_mention else None,
         )

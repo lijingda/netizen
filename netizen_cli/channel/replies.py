@@ -116,7 +116,7 @@ class ChannelReplies(ChannelState):
 
     async def _report_input_error(self, message: Any, error: Exception) -> None:
         """One user-visible failure policy for message, card and scheduled inputs."""
-        if self._policy.backend == "claude" and isinstance(error, (BackendUnsupported, OrdinaryInputRejected, TerminalStateUnknown, ThreadActivityChanged)):
+        if self._local_sessions is not None and isinstance(error, (BackendUnsupported, OrdinaryInputRejected, TerminalStateUnknown, ThreadActivityChanged)):
             await self._reply(message, str(error) or "本次操作对应的执行已变化。")
             return
         if isinstance(error, (InvalidInteraction, ScheduleError, DefaultConfigurationError)):
@@ -187,7 +187,7 @@ class ChannelReplies(ChannelState):
                 "channel interaction failed",
                 extra={"error_type": type(error).__name__},
             )
-            if self._policy.backend == "claude":
+            if self._local_sessions is not None:
                 await self._reply(message, "Claude 请求处理未完成，请查看 /status。")
                 return
             await self._reply(
@@ -210,7 +210,7 @@ class ChannelReplies(ChannelState):
     ) -> None:
         # Choose the feedback destination once, independently of the exception
         # category. A failed redraw never replays the business operation.
-        if self._policy.backend == "claude":
+        if self._local_sessions is not None:
             target = _CardReplyTarget(message_id, message_id, callback_chat_id, _CardReplyConversation(scope.topic_id if scope else None))
             if message_id and callback_chat_id:
                 await self._reply(target, "卡片操作未完成，请重新打开卡片。" if unexpected else str(error))
@@ -298,7 +298,7 @@ class ChannelReplies(ChannelState):
         *,
         task_not_executed: bool = False,
     ) -> None:
-        if self._policy.backend == "claude":
+        if not self._management.session_reads.native_catalog:
             await self._reply(message, "当前没有已选择的会话。请发送 /new 选择项目并创建会话，或发送 /sessions 切换已有会话。")
             return
         has_sessions = self._bindings.has_bindings(scope.key)

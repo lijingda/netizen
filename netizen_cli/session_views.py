@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
@@ -149,3 +150,18 @@ class ScopeSessionPage:
     current: SessionInventoryItem | None
     active_binding_id: str | None
     has_lazy: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ResultView:
+    """One attributed terminal presentation, independent of its delivery transport."""
+    session_id: str
+    thread_id: str
+    turn_id: str
+    origin: object
+    status: Literal["completed", "interrupted", "failed"]
+    content: str
+    cwd: Path | None
+    mention_user_id: str | None
+    source: str
+    sampled_at: float = field(default_factory=time.time)

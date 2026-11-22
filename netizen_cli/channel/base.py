@@ -51,7 +51,8 @@ from .reply_presenter import (
 )
 from .reply_suppression import ReplySuppression
 from ..codex_runtime import CodexRuntime
-from ..ordinary_sessions import OrdinarySessionPort
+from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort
+from ..session_settings import SessionFormView
 from ..runtime.contracts import (
     ContextWindowUsage,
     NativeThreadMetadata,
@@ -351,6 +352,8 @@ class ChannelState:
             raise BackendUnsupported("原生 Codex 操作")
         return self._codex
 
+    _local_sessions: LocalSessionManagement | None
+    _session_form: SessionFormView
     _ordinary: OrdinarySessionPort
     _bindings: BindingStore
     _projects: ProjectRegistry
@@ -826,7 +829,7 @@ class ChannelState:
                 sender_id=sender_id,
                 tag=tag,
                 form_value=form_value,
-                form_view=self._management.session_form,
+                form_view=self._session_form,
                 value=getattr(action, "value", None),
             )
             if (

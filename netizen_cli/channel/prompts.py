@@ -184,7 +184,7 @@ class PromptChannel(CompletionPresentationChannel):
         catalog = None
         try:
             async with asyncio.timeout(5):
-                if self._management.session_form.model_editable:
+                if self._session_form.model_editable:
                     catalog = await self._runtime.model_catalog()
         except Exception:
             # Existing defaults must remain inspectable/deletable even when
@@ -205,7 +205,7 @@ class PromptChannel(CompletionPresentationChannel):
                 workspace_error = str(error) + " 原 worktree 使用方式已保留，请重新加载或选择有效策略。"
         return defaults_card(
             scope, view, self._projects.list(), catalog,
-            notice=notice, notice_is_error=notice_is_error, form_view=self._management.session_form,
+            notice=notice, notice_is_error=notice_is_error, form_view=self._session_form,
             workspace_options=workspace_options, workspace_error=workspace_error,
             allow_workspace_selection=worktrees is not None, draft=draft,
         )
@@ -360,7 +360,7 @@ class PromptChannel(CompletionPresentationChannel):
                     ),
                 )
             ]
-            if not self._management.session_form.progress_editable:
+            if not self._session_form.progress_editable:
                 await asyncio.gather(*presenters)
                 return
             delivery_options = {}

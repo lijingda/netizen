@@ -61,6 +61,7 @@ from ..prompt_projection import (
 )
 from ..skill_references import parse_skill_references
 
+from ..backends import OperationId
 from . import constants
 from .app_values import (
     _CardReplyConversation,
@@ -99,8 +100,8 @@ class QuestionChannel(ScheduleChannel):
         owner_id: str = "",
     ) -> None:
         """Project questions for either target without changing the producing Turn."""
-        if self._policy.backend == "claude":
-            raise RuntimeError("Claude 试点暂不支持【原生提问】。")
+        if not self._policy.allows(OperationId.QUESTIONS):
+            raise RuntimeError(self._policy.refusal("原生提问"))
         scope, _ = self._question_recipient(target)
         if scope.app_id != self._app_id:
             return

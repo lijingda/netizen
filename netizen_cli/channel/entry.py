@@ -97,7 +97,7 @@ class ChannelEntry(CommandChannel):
         group_rule, _ = self._group_access.snapshot()
         scope = self._scope(message)
         try:
-            local = self._management.local
+            local = self._local_sessions
             if self._policy.owner_only:
                 if _message_chat_type(message) != "p2p" and not getattr(message, "mentioned_bot", False):
                     return
@@ -185,12 +185,12 @@ class ChannelEntry(CommandChannel):
                 self._policy.require_card(CardControlName.RENAME_BINDING.value)
             for prefix in ("new", "config", "defaults_session"):
                 if any(isinstance(key, str) and key.startswith(prefix + "_") for key in form):
-                    permitted_form_fields(form, prefix, self._management.session_form)
+                    permitted_form_fields(form, prefix, self._session_form)
 
     async def handle_card_action(self, event: Any) -> None:
         group_rule, _ = self._group_access.snapshot()
         chat_id = str(getattr(event, "chat_id", "") or "")
-        local = self._management.local
+        local = self._local_sessions
         refusal = self._policy.sender_refusal(authenticated_sender(event, self._app_id, card=True)) if self._policy.owner_only else None
         action = getattr(event, "action", None)
         value = getattr(action, "value", None)
@@ -209,9 +209,9 @@ class ChannelEntry(CommandChannel):
                 if special is not None:
                     self._policy.require(special)
                 elif local is not None:
-                    assert self._management.local is not None
+                    assert self._local_sessions is not None
                     self._check_local_card(value, form)
-                    self._management.local.require_admission()
+                    self._local_sessions.require_admission()
             except (BackendUnsupported, CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
                 refusal = str(error)
         if refusal:

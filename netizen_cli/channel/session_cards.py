@@ -335,7 +335,7 @@ class SessionCardChannel(QuestionChannel):
         catalog = None
         catalog_error = None
         try:
-            if self._management.session_form.model_editable:
+            if self._session_form.model_editable:
                 catalog = await self._runtime.model_catalog()
         except Exception as error:
             logger.warning("native model catalog unavailable for /new settings",
@@ -353,7 +353,7 @@ class SessionCardChannel(QuestionChannel):
             except WorktreeError as error:
                 workspace_error = str(error) + " 可直接在项目目录创建会话，或重新加载 worktree 选项。"
         return new_binding_card(
-            form_view=self._management.session_form,
+            form_view=self._session_form,
             scope=scope, projects=projects, initial_project_alias=initial_project_alias,
             catalog=catalog, catalog_error=catalog_error,
             allow_context_mode=allow_context_mode,

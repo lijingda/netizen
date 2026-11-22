@@ -71,6 +71,31 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await app._management.binding_metadata_exact(first.id, deadline=deadline))
             self.assertEqual((clients.calls, clients.lookups), ([], []))
 
+    async def test_terminal_result_uses_original_request_and_safe_native_summary(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            cases = (
+                ({"result": ""}, "Claude 已完成本次执行。", True),
+                ({"reason": "api_error", "is_error": True, "api_error_status": 503,
+                  "result": "unfiltered native error"}, "Claude 请求失败（HTTP 503）。", True),
+                ({"subtype": "error_during_execution", "reason": "aborted_tools", "is_error": True},
+                 "Claude 本次执行已停止。", False),
+            )
+            for index, (native, expected, mention) in enumerate(cases):
+                origin = "result-" + str(index)
+                await app.handle_message(FakeMessage("work", message_id=origin))
+                client = clients.calls[-1]
+                client.init()
+                client.result(**native)
+                self.assertTrue(await ordinary.wait_idle(2))
+                message_id, reply = fx.channel.replies[-1]
+                self.assertEqual(message_id, origin)
+                self.assertEqual(getattr(reply, "markdown", reply), expected)
+                self.assertEqual([item.open_id for item in getattr(reply, "mentions", ())],
+                                 ["ou_user"] if mention else [])
+                self.assertEqual(client.consumers, 1)
+
     def test_bound_and_execution_identity(self):
         samples = ClaudeObservations(capacity=1, clock=lambda: 1.5)
         samples.init("a", "x", "first", "old", "/project")

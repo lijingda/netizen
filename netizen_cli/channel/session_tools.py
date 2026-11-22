@@ -15,7 +15,7 @@ from lark_channel import (
 )
 from openai_codex import ExternalMessage, InvalidRequestError
 
-from ..backends import BackendPolicy
+from ..backends import BackendPolicy, OperationId
 from ..bindings import (
     BindingNotFound,
     BindingTurnSettings,
@@ -91,8 +91,8 @@ class SessionToolChannel(ForkChannel):
     """Session collaboration tool entries and reply suppression."""
 
     async def report_run_outcome(self, *, source_thread_id: str, source_turn_id: str, outcome: str) -> dict[str, Any]:
-        if self._policy.backend == "claude":
-            return {"error": {"code": "backend_unsupported", "message": "Claude 试点暂不支持【定时任务】。"}}
+        if not self._policy.allows(OperationId.SCHEDULE):
+            return {"error": {"code": "backend_unsupported", "message": self._policy.refusal("定时任务")}}
         binding = self._bindings.find_by_native_thread_id(source_thread_id)
         if binding is None or self._bindings.get_scope(binding.scope_key).app_id != self._app_id:
             return {"error": {"code": "not_scheduled_topic", "message": "No scheduled task owns this session. Do not retry in this session."}}
@@ -117,8 +117,8 @@ class SessionToolChannel(ForkChannel):
 
     async def suppress_reply(self, *, source_thread_id: str, source_turn_id: str) -> dict[str, Any]:
         """Record a caller's exact physical Turn choice without changing execution."""
-        if getattr(self, "_policy", BackendPolicy("codex")).backend == "claude":
-            return {"error": {"code": "backend_unsupported", "message": "Claude 试点暂不支持【会话协作】。"}}
+        if not getattr(self, "_policy", BackendPolicy("codex")).allows(OperationId.COLLABORATION):
+            return {"error": {"code": "backend_unsupported", "message": self._policy.refusal("会话协作")}}
         source = resolve_session_source(
             self._bindings, self._runtime, self._app_id, source_thread_id,
         )
@@ -331,8 +331,8 @@ class SessionToolChannel(ForkChannel):
         model: str | None = None,
     ) -> dict[str, Any]:
         """Create an ordinary sibling topic after the session tool's admission."""
-        if self._policy.backend == "claude":
-            return {"error": {"code": "backend_unsupported", "message": "Claude 试点暂不支持【会话协作】。"}}
+        if not self._policy.allows(OperationId.COLLABORATION):
+            return {"error": {"code": "backend_unsupported", "message": self._policy.refusal("会话协作")}}
         group_rule, _ = self._group_access.snapshot()
         binding = root = destination = card = None
         submission_attempted = False
@@ -427,8 +427,8 @@ class SessionToolChannel(ForkChannel):
         model: str | None = None,
     ) -> dict[str, Any]:
         """Deliver an admitted session tool call to its still-current exact Thread."""
-        if self._policy.backend == "claude":
-            return {"error": {"code": "backend_unsupported", "message": "Claude 试点暂不支持【会话协作】。"}}
+        if not self._policy.allows(OperationId.COLLABORATION):
+            return {"error": {"code": "backend_unsupported", "message": self._policy.refusal("会话协作")}}
         group_rule, _ = self._group_access.snapshot()
         source = resolve_session_source(self._bindings, self._runtime, self._app_id, source_thread_id)
         if isinstance(source, ThreadBinding):
