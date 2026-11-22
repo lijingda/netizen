@@ -39,6 +39,7 @@ START_FAILED = "Claude 会话启动失败，本条输入未发送。"
 START_CANCELLED = "已取消启动，本条输入未发送。"
 STALE = "准备本条消息期间会话已变化，本条输入未发送。"
 GRACE = "服务刚启动，请稍后重发"
+CURSOR_FAILURE = "上下文边界未能持久化，服务已停止接收新任务，请重启后对账。"
 # The pinned transport allows 5s each for its write lock, EOF, TERM and KILL waits.
 _CLOSE_SECONDS = 22.0
 _CONTROL_SECONDS = 5.0
@@ -137,6 +138,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._notice = notice
         self._clock = clock
         self._opens_at: float | None = None
+        self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._revisions: dict[str, int] = {}
@@ -148,15 +150,15 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._unavailable: set[str] = set()
 
     def open_admission(self) -> None:
-        if self._opens_at is None and self._shutdown_deadline is None:
+        if self._opens_at is None and self._admission_error is None:
             started = self._clock()
             self._opens_at = started + 2.0
             logger.info("Claude admission grace started pid=%d monotonic=%r deadline=%r",
                         os.getpid(), started, self._opens_at)
 
     def require_admission(self) -> None:
-        if self._shutdown_deadline is not None:
-            raise OrdinaryInputRejected("服务正在关闭，本条输入未发送。")
+        if self._admission_error is not None:
+            raise OrdinaryInputRejected(self._admission_error)
         if self._opens_at is None or self._clock() < self._opens_at:
             raise OrdinaryInputRejected(GRACE)
 
@@ -440,7 +442,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                                          expected_context_revision=cursor.expected_context_revision,
                                                          anchor=cursor.anchor)
                 except Exception:
-                    await self._tell(execution, "已接收，但上下文边界更新失败。")
+                    self.close_admission(reason=CURSOR_FAILURE)
+                    await self._tell(execution, f"Claude 已接收本次任务，但{CURSOR_FAILURE}")
 
         initialized = False
         async with asyncio.timeout(None) as reconciliation:
@@ -653,7 +656,12 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             return seconds
         return max(0.0, min(seconds, self._shutdown_deadline - time.monotonic()))
 
-    def close_admission(self) -> None:
+    def close_admission(self, *, reason: str | None = None) -> None:
+        if reason is not None:
+            # Persistence failure closes intake while accepted executions keep their delivery budget.
+            self._admission_error = reason
+            return
+        self._admission_error = "服务正在关闭，本条输入未发送。"
         if self._shutdown_deadline is None:
             self._shutdown_deadline = time.monotonic() + 60.0
         for execution in self._tasks.values():

@@ -315,23 +315,42 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.events), 1)
         self.assertEqual(len(second.inputs), 1)
 
-    async def test_cursor_updates_only_on_attribution_and_failure_preserves_outcome(self):
-        commit = ContextCursorCommit(1, MessageContextAnchor("new", 200))
-        with patch.object(self.store, "commit_context_anchor", side_effect=ValueError("private")) as save:
-            first = await self.submit(context_commit=commit)
+    async def test_cursor_failure_closes_instance_admission_and_preserves_accepted_result(self):
+        old = MessageContextAnchor("old", 100)
+        binding = self.store.create_channel_binding(
+            scope=FeishuScope("app", "group", ScopeKind.GROUP), project_alias="work", creator_id="owner",
+            message_context_mode=MentionContextMode.CATCH_UP, context_anchor=old,
+        )
+        commit = ContextCursorCommit(binding.context_revision, MessageContextAnchor("new", 200))
+        prepared = await self.runtime.capture_submission_admission(self.binding.id)
+        with patch.object(self.store, "commit_context_anchor", side_effect=OSError("disk failure")) as save:
+            first = await self.submit(binding, context_commit=commit)
             save.assert_not_called()
-            first.release_receipt_attempt()
             client = self.clients.calls[-1]
             client.init()
             client.result(user_message_uuid="other")
-            client.stream.put_nowait(None)
-            await self.runtime.wait_idle(1)
-            save.assert_called_once()
-            save.reset_mock()
-            await self.finish(await self.submit(context_commit=commit))
-            save.assert_called_once_with(binding_id=self.binding.id, expected_context_revision=1, anchor=commit.anchor)
-            self.assertEqual(self.events[-1].status, "completed")
-            self.assertIn(("origin", "已接收，但上下文边界更新失败。"), self.notices)
+            client.result()
+            await asyncio.wait_for(client.closing.wait(), 1)
+            save.assert_called_once_with(binding_id=binding.id, expected_context_revision=binding.context_revision,
+                                         anchor=commit.anchor)
+            self.assertEqual(self.store.get(binding.id).context_anchor, old)
+            self.assertEqual(len(self.notices), 1)
+            origin, notice = self.notices[0]
+            self.assertEqual(origin, "origin")
+            self.assertIn("已接收", notice)
+            self.assertIn("上下文边界未能持久化", notice)
+            self.assertEqual(self.events, [])
+            with self.assertRaisesRegex(OrdinaryInputRejected, "上下文边界未能持久化"):
+                await self.submit(self.binding, admission=prepared)
+            first.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(1))
+            self.assertEqual([(e.turn_id, e.final_response, e.status) for e in self.events],
+                             [(first.turn_id, "answer", "completed")])
+            for target in (binding, self.binding):
+                with self.assertRaisesRegex(OrdinaryInputRejected, "上下文边界未能持久化"):
+                    await self.submit(target)
+            self.assertEqual(len(self.clients.calls), 1)
+            self.assertEqual(len(client.inputs), 1)
 
     async def test_failed_write_init_and_injected_result_do_not_advance_group_cursor(self):
         from claude_agent_sdk import ResultMessage
