@@ -2,24 +2,35 @@ import asyncio
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock
+from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock, patch
 
-from netizen_cli.bindings import BindingTaskFeedback, ThreadBinding
+from netizen_cli.backends import BackendPolicy
+from netizen_cli.bindings import BindingStore, BindingTaskFeedback, ThreadBinding
 from netizen_cli.channel import constants
-from netizen_cli.domain import ActiveState
+from netizen_cli.codex_runtime import CodexRuntime
+from netizen_cli.domain import ActiveState, FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.file_evidence import FileEvidence
-from netizen_cli.management import ExactBindingTarget, RuntimePrecondition
+from netizen_cli.management import (
+    ExactBindingTarget, InstanceManagementService, ManagementRuntimePort, RuntimePrecondition, ScopeCoordinator,
+)
 from netizen_cli.ordinary_sessions import (
     OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, StopPreview,
 )
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+from netizen_cli.runtime.codex_replies import codex_completion_handler
 from netizen_cli.runtime.contracts import (
-    ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission, SubmitDisposition, TerminalStateUnknown,
-    ThreadActivityChanged, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
+    ActiveTurnSnapshot, ContextBoundaryCommitFailed, ContextCursorCommit, RuntimeClosed, SteerRace, StopAcknowledger,
+    StopDisposition, Submission, SubmissionAdmission, SubmitDisposition, TerminalStateUnknown, ThreadActivityChanged,
+    ThreadStopping, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from tests.support.channel_results import sent_result
+from tests.support.claude_client import FakeClaudeClients
+from tests.test_codex_runtime import FakeCodex, FakeTerminalCleanup
 
 
 class StartOnlySessions:
@@ -221,72 +232,282 @@ class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn((message.id, "正在停止任务。"), fixture.channel.replies)
 
 
-class OrdinaryPortContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_start_busy_policy_completion_and_stale_admission_on_both_runtimes(self):
-        from tempfile import TemporaryDirectory
+class OrdinaryPortContract:
+    """Run the same ordinary operations against each production runtime and its SDK double."""
 
-        from netizen_cli.bindings import BindingStore
-        from netizen_cli.codex_runtime import CodexRuntime
-        from netizen_cli.domain import FeishuScope, ScopeKind
-        from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
-        from netizen_cli.runtime.codex_replies import codex_completion_handler
-        from netizen_cli.runtime.contracts import SteerRace
-        from tests.support.claude_client import FakeClaudeClients
-        from tests.test_codex_runtime import FakeCodex, FakeTerminalCleanup
+    async def asyncSetUp(self):
+        self.cwd = Path(self.enterContext(TemporaryDirectory())).resolve()
+        self.store = BindingStore()
+        self.addCleanup(self.store.close)
+        self.projects = ProjectRegistry(store=self.store, project_root=self.cwd, projects={"test": self.cwd})
+        self.binding = self.new_binding()
+        self.outcomes = asyncio.Queue()
+        self.notices = asyncio.Queue()
 
-        for backend in ("codex", "claude"):
-            with self.subTest(backend=backend), TemporaryDirectory() as tmp:
-                store = BindingStore()
-                cwd = Path(tmp)
-                store.bootstrap_project(alias="test", cwd=str(cwd))
-                binding = store.create_channel_binding(scope=FeishuScope("app", "chat", ScopeKind.DIRECT),
-                                                       project_alias="test", creator_id="owner")
-                sink = AsyncMock()
-                if backend == "codex":
-                    sdk = FakeCodex()
-                    runtime = CodexRuntime(codex=sdk, bindings=store, terminal_cleanup=FakeTerminalCleanup(sdk.events),
-                                           automatic_thread_naming=False, poll_interval_seconds=0,
-                                           on_completion=codex_completion_handler(sink, AsyncMock(), AsyncMock()))
-                    ordinary = CodexOrdinarySessions(runtime)
-                else:
-                    now = 0.
-                    clients = FakeClaudeClients()
-                    ordinary = runtime = ClaudeOrdinarySessions(bindings=store, clients=clients, owner_id="owner",
-                                                                notice=AsyncMock(), on_completion=sink, clock=lambda: now)
-                    runtime.open_admission()
-                    now = 2.
+        if self.backend == "codex":
+            self.codex = FakeCodex()
+            self.runtime = CodexRuntime(
+                codex=self.codex, bindings=self.store, terminal_cleanup=FakeTerminalCleanup(self.codex.events),
+                automatic_thread_naming=False, poll_interval_seconds=0,
+                on_completion=codex_completion_handler(self.outcomes.put, AsyncMock(), AsyncMock()),
+            )
+            self.ordinary = CodexOrdinarySessions(self.runtime)
+            self.port = ManagementRuntimePort(self.runtime, ordinary=self.ordinary)
+        else:
+            async def notice(origin, text):
+                await self.notices.put((origin, text))
+
+            now = 0.
+            self.clients = FakeClaudeClients()
+            self.ordinary = self.runtime = ClaudeOrdinarySessions(
+                bindings=self.store, clients=self.clients, owner_id="owner", on_completion=self.outcomes.put,
+                notice=notice, clock=lambda: now,
+            )
+            self.port = ManagementRuntimePort(None, ordinary=self.ordinary, local=self.ordinary)
+            self.runtime.open_admission()
+            now = 2.
+
+        self.addAsyncCleanup(self.runtime.cancel_tasks)
+        self.addCleanup(self.runtime.close_admission)
+
+    def new_binding(self, chat="chat", *, kind=ScopeKind.DIRECT, **settings):
+        return self.store.create_channel_binding(
+            scope=FeishuScope("app", chat, kind), project_alias="test", creator_id="owner", **settings,
+        )
+
+    async def submit(self, binding, *, admission=None, origin="origin", context_commit=None):
+        current = self.store.get(binding.id)
+        if admission is None:
+            admission = await self.ordinary.capture_submission_admission(current.id)
+        return await self.ordinary.submit(
+            binding=current, cwd=None if current.native_thread_id else self.cwd, input=PreparedPrompt("input"),
+            owner_id="owner", origin=origin, admission=admission, context_commit=context_commit, skill_names=(),
+        )
+
+    def complete(self, turn_id, answer="answer"):
+        if self.backend == "codex":
+            handle = next(handle for handle in self.codex.handles if handle.id == turn_id)
+            handle.complete(response=answer)
+        else:
+            client = next(client for client in self.clients.calls if client.inputs[0]["uuid"] == turn_id)
+            client.init()
+            client.result(result=answer)
+
+    def assert_native_starts(self, count):
+        if self.backend == "codex":
+            self.assertEqual(len(self.codex.handles), count)
+        else:
+            self.assertEqual([len(client.inputs) for client in self.clients.calls], [1] * count)
+
+    async def conclusion(self):
+        # Interrupted Codex Turns take a second native read after a two-second confirmation interval.
+        event = await asyncio.wait_for(self.outcomes.get(), 10)
+        self.assertIsInstance(event, OrdinaryConclusion)
+        return event
+
+    async def finish(self, receipt):
+        receipt.release_receipt_attempt()
+        self.complete(receipt.turn_id)
+        self.assertTrue(await self.runtime.wait_idle(2))
+        event = await self.conclusion()
+        self.assertEqual((event.turn_id, event.status), (receipt.turn_id, "completed"))
+        self.assertTrue(self.outcomes.empty())
+        return event
+
+    async def test_start_busy_policy_completion_and_stale_admission(self):
+        binding = self.binding
+        admission = await self.ordinary.capture_submission_admission(binding.id)
+        first = await self.submit(binding, admission=admission)
+        self.assertEqual(first.disposition, SubmitDisposition.STARTED)
+        self.assertEqual(self.store.get(binding.id).native_thread_id, first.thread_id)
+        if self.backend == "codex":
+            follow = await self.submit(binding)
+            self.assertEqual((follow.disposition, follow.turn_id), (SubmitDisposition.STEERED, first.turn_id))
+            self.assertEqual(len(self.codex.handles[0].steers), 1)
+        else:
+            with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
+                await self.submit(binding)
+        event = await self.finish(first)
+        self.assertEqual((event.binding_id, event.thread_id, event.owner_id, event.origin, event.final_response),
+                         (binding.id, first.thread_id, "owner", "origin", "answer"))
+        with self.assertRaises(SteerRace if self.backend == "codex" else OrdinaryInputRejected):
+            await self.submit(binding, admission=admission)
+        self.assert_native_starts(1)
+
+    async def test_failed_catch_up_commit_keeps_exact_result_and_closes_instance_admission(self):
+        old = MessageContextAnchor("previous", 100)
+        binding = self.new_binding("group", kind=ScopeKind.GROUP,
+                                   message_context_mode=MentionContextMode.CATCH_UP, context_anchor=old)
+        cursor = ContextCursorCommit(binding.context_revision, MessageContextAnchor("upper", 200))
+        other = await self.ordinary.capture_submission_admission(self.binding.id)
+        with patch.object(self.store, "commit_context_anchor", side_effect=OSError("CAS failed")) as save:
+            if self.backend == "codex":
+                with self.assertRaisesRegex(ContextBoundaryCommitFailed, "上下文边界未能持久化"):
+                    await self.submit(binding, context_commit=cursor)
+                rejected = RuntimeClosed
+            else:
+                accepted = await self.submit(binding, context_commit=cursor)
+                self.clients.calls[0].init()
+                origin, notice = await asyncio.wait_for(self.notices.get(), 2)
+                self.assertEqual(origin, "origin")
+                self.assertIn("上下文边界未能持久化", notice)
+                accepted.release_receipt_attempt()
+                rejected = OrdinaryInputRejected
+            active = self.port.runtime_snapshot_exact(binding.id).turn
+            self.assertIsNotNone(active)
+            for target in (binding, self.binding):
+                with self.assertRaises(rejected):
+                    await self.ordinary.capture_submission_admission(target.id)
+            with self.assertRaises(rejected):
+                await self.submit(self.binding, admission=other)
+            if self.backend == "claude":
+                self.clients.calls[0].result()
+            else:
+                self.complete(active.turn_id)
+            self.assertTrue(await self.runtime.wait_idle(2))
+            save.assert_called_once_with(binding_id=binding.id, expected_context_revision=binding.context_revision,
+                                         anchor=cursor.anchor)
+        self.assertEqual(self.store.get(binding.id).context_anchor, old)
+        event = await self.conclusion()
+        self.assertEqual((event.binding_id, event.turn_id, event.status, event.final_response),
+                         (binding.id, active.turn_id, "completed", "answer"))
+        self.assertTrue(self.outcomes.empty())
+        self.assert_native_starts(1)
+
+    async def test_switch_away_and_back_invalidates_captured_input(self):
+        second = self.new_binding()
+        management = InstanceManagementService(
+            bindings=self.store, projects=self.projects, runtime=self.port, scope_coordinator=ScopeCoordinator(),
+        )
+        self.addAsyncCleanup(management.close)
+
+        async def activate(binding, previous):
+            target = ExactBindingTarget(binding.scope_key, binding.id, previous.id)
+            await management.activate_exact_binding(target=target)
+
+        await activate(self.binding, second)
+        captured = await self.ordinary.capture_submission_admission(self.binding.id)
+        await activate(second, self.binding)
+        await activate(self.binding, second)
+        self.assertEqual(self.store.active_binding(self.binding.scope_key).id, self.binding.id)
+        with self.assertRaises(SteerRace if self.backend == "codex" else OrdinaryInputRejected):
+            await self.submit(self.binding, admission=captured)
+        self.assert_native_starts(0)
+        self.assertIsNone(self.store.get(self.binding.id).native_thread_id)
+        await self.finish(await self.submit(self.binding))
+
+    async def test_cancelled_feishu_receipt_releases_one_attributed_conclusion(self):
+        message = FakeMessage("input", message_id="om_cancelled")
+        receipt = await self.submit(self.binding, origin=message)
+        started = asyncio.Event()
+
+        async def held_reaction(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        async with channel_fixture(ordinary=self.ordinary) as fixture:
+            with (patch.object(fixture.app, "_policy", BackendPolicy(self.backend, "owner")),
+                  patch.object(fixture.app._reactions, "start", side_effect=held_reaction)):
+                delivery = asyncio.create_task(fixture.app._present_ordinary_receipt(receipt, message))
                 try:
-                    async def submit(admission):
-                        current = store.get(binding.id)
-                        return await ordinary.submit(binding=current, cwd=None if current.native_thread_id else cwd,
-                                                     input=PreparedPrompt("input"), owner_id="owner", origin="origin",
-                                                     admission=admission, context_commit=None, skill_names=())
-
-                    stale = await ordinary.capture_submission_admission(binding.id)
-                    first = await submit(stale)
-                    self.assertEqual(first.disposition, SubmitDisposition.STARTED)
-                    self.assertEqual(store.get(binding.id).native_thread_id, first.thread_id)
-                    if backend == "codex":
-                        follow = await submit(await ordinary.capture_submission_admission(binding.id))
-                        self.assertEqual((follow.disposition, follow.turn_id), (SubmitDisposition.STEERED, first.turn_id))
-                        self.assertEqual(len(sdk.handles), 1)
-                        sdk.handles[0].complete(response="answer")
+                    await asyncio.wait_for(started.wait(), 2)
+                    self.complete(receipt.turn_id)
+                    if self.backend == "codex":
+                        async with asyncio.timeout(2):
+                            while self.runtime.active_turn(self.binding.id) is not None:
+                                await asyncio.sleep(0)
                     else:
-                        with self.assertRaises(OrdinaryInputRejected):
-                            await ordinary.capture_submission_admission(binding.id)
-                        self.assertEqual(len(clients.calls[0].inputs), 1)
-                        clients.calls[0].init()
-                        clients.calls[0].result()
-                    first.release_receipt_attempt()
-                    self.assertTrue(await runtime.wait_idle(2))
-                    event = sink.await_args.args[0]
-                    self.assertEqual((event.binding_id, event.thread_id, event.turn_id, event.owner_id, event.origin,
-                                      event.final_response, event.status),
-                                     (binding.id, first.thread_id, first.turn_id, "owner", "origin", "answer", "completed"))
-                    self.assertEqual(sink.await_count, 1)
-                    with self.assertRaises((SteerRace, OrdinaryInputRejected)):
-                        await submit(stale)
+                        await asyncio.wait_for(self.clients.calls[0].closing.wait(), 2)
+                    self.assertTrue(self.outcomes.empty())
                 finally:
-                    runtime.close_admission()
-                    await runtime.cancel_tasks()
-                    store.close()
+                    delivery.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await delivery
+        self.assertTrue(await self.runtime.wait_idle(2))
+        event = await self.conclusion()
+        self.assertEqual((event.origin, event.turn_id, event.final_response), (message, receipt.turn_id, "answer"))
+        self.assertTrue(self.outcomes.empty())
+        self.assert_native_starts(1)
+
+    async def test_old_exact_stop_cannot_interrupt_successor(self):
+        first = await self.submit(self.binding)
+        old = self.port.runtime_snapshot_exact(self.binding.id)
+        self.assertEqual(old.turn.turn_id, first.turn_id)
+        await self.finish(first)
+        successor = await self.submit(self.binding)
+        self.assertEqual(successor.thread_id, first.thread_id)
+        self.assertNotEqual(successor.turn_id, first.turn_id)
+        ack = AsyncMock()
+        with self.assertRaises(ThreadActivityChanged):
+            await self.ordinary.stop_exact(self.binding.id, acknowledge=ack,
+                expected_activity_revision=old.activity_revision, expected_turn_id=old.turn.turn_id)
+        ack.assert_not_awaited()
+        if self.backend == "codex":
+            self.assertEqual(self.codex.handles[-1].interrupt_count, 0)
+        else:
+            self.assertEqual(self.clients.calls[-1].interrupts, 0)
+        await self.finish(successor)
+
+    async def test_late_native_confirmation_allows_an_explicit_successor(self):
+        first = await self.submit(self.binding)
+        first.release_receipt_attempt()
+        if self.backend == "claude":
+            client = self.clients.calls[0]
+            client.close_gate.clear()
+            try:
+                with patch("netizen_cli.runtime.claude_ordinary._CLOSE_SECONDS", 0):
+                    self.complete(first.turn_id)
+                    event = await self.conclusion()
+                    self.assertEqual((event.turn_id, event.status), (first.turn_id, "completed"))
+                    _, notice = await asyncio.wait_for(self.notices.get(), 2)
+                    self.assertIn("无法确认 Claude 客户端已关闭", notice)
+                    with self.assertRaisesRegex(OrdinaryInputRejected, "无法确认 Claude 客户端已关闭"):
+                        await self.submit(self.binding)
+            finally:
+                client.close_gate.set()
+        else:
+            # Codex retains the shared client. Its stop receipt needs a later native Turn terminal.
+            handle = self.codex.handles[0]
+            handle.complete_on_interrupt = False
+            snapshot = self.port.runtime_snapshot_exact(self.binding.id)
+            disposition = await self.ordinary.stop_exact(self.binding.id, expected_activity_revision=snapshot.activity_revision,
+                                                         expected_turn_id=first.turn_id)
+            self.assertEqual(disposition, StopDisposition.REQUESTED)
+            with self.assertRaises(ThreadStopping):
+                await self.submit(self.binding)
+            self.assertTrue(self.outcomes.empty())
+            handle.complete(status="interrupted")
+            event = await self.conclusion()
+            self.assertEqual((event.turn_id, event.status), (first.turn_id, "interrupted"))
+        self.assertTrue(await self.runtime.wait_idle(2))
+        self.assert_native_starts(1)
+        self.assertTrue(self.outcomes.empty())
+        successor = await self.submit(self.binding)
+        self.assertEqual(successor.thread_id, first.thread_id)
+        self.assertNotEqual(successor.turn_id, first.turn_id)
+        await self.finish(successor)
+
+    async def test_two_bindings_run_in_the_same_directory_and_finish_independently(self):
+        other = self.new_binding("other")
+        async with asyncio.timeout(2):
+            first, second = await asyncio.gather(self.submit(self.binding, origin="first"), self.submit(other, origin="second"))
+        self.assertNotEqual(first.thread_id, second.thread_id)
+        self.assert_native_starts(2)
+        first.release_receipt_attempt()
+        second.release_receipt_attempt()
+        for binding, receipt, label in ((other, second, "second"), (self.binding, first, "first")):
+            self.assertEqual(self.port.runtime_snapshot_exact(binding.id).turn.turn_id, receipt.turn_id)
+            self.complete(receipt.turn_id, label)
+            event = await self.conclusion()
+            self.assertEqual((event.binding_id, event.thread_id, event.turn_id, event.cwd, event.origin, event.final_response),
+                             (binding.id, receipt.thread_id, receipt.turn_id, self.cwd, label, label))
+        self.assertTrue(await self.runtime.wait_idle(2))
+        self.assertTrue(self.outcomes.empty())
+
+
+class CodexOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyncioTestCase):
+    backend = "codex"
+
+
+class ClaudeOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyncioTestCase):
+    backend = "claude"
