@@ -45,7 +45,8 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) | 升级并重新认证 lark-channel-sdk 1.4.0 | 升级记录 | 有效 | 被 [0099](0099-project-original-card-content-with-bounded-component-adapter.md) 修订 |
 | [0077](0077-read-account-rate-limits-on-demand.md) | 按需读取共享 Codex 账号额度 | 架构决策 | 有效 |  |
 | [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) | 原生会话历史采用只读分页适配 | 架构决策 | 有效 | 被 [0096](0096-read-admin-conversations-through-summary-turn-pages.md)、[0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md) 修订 |
-| [0104](0104-host-native-agent-backends-per-instance.md) | 按实例接入多个原生 Agent 后端 | 架构决策 | 有效 | 修订 [0008](0008-use-python-sdk-for-native-turn-control.md)、[0060](0060-delete-projects-with-exact-session-inventory.md)、[0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0074](0074-deploy-independent-instances-by-root.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0080](0080-authenticate-admins-with-feishu-identities.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md) |
+| [0104](0104-host-native-agent-backends-per-instance.md) | 按实例接入多个原生 Agent 后端 | 架构决策 | 有效 | 修订 [0008](0008-use-python-sdk-for-native-turn-control.md)、[0060](0060-delete-projects-with-exact-session-inventory.md)、[0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0074](0074-deploy-independent-instances-by-root.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0080](0080-authenticate-admins-with-feishu-identities.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md)，[0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) 拟修订本条 |
+| [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) | 按能力接口与共用展示扩展多后端，并规划 Claude 原生能力 | 架构决策 | 草案 | 拟修订 [0104](0104-host-native-agent-backends-per-instance.md) |
 
 ## 会话身份、生命周期与并发
 
@@ -196,4 +197,4 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 ## 统计
 
-共 104 个 ADR：架构决策 71 个，功能契约 31 个，升级记录 2 个；其中 96 个有效，8 个已被取代，0 个草案。
+共 105 个 ADR：架构决策 72 个，功能契约 31 个，升级记录 2 个；其中 96 个有效，8 个已被取代，1 个草案。
