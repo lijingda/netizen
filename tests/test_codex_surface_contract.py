@@ -4,13 +4,14 @@ import asyncio
 import base64
 import itertools
 import json
+from types import SimpleNamespace
 import unittest
 from contextlib import ExitStack
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
-from lark_channel import OutboundCard, OutboundPost
 
 from netizen_cli.admin.auth import AdminAuth
 from netizen_cli.admin.transport import Request
@@ -19,7 +20,7 @@ from netizen_cli.admin.web import AdminWebApplication
 from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings
 from netizen_cli.codex_runtime import CodexRuntime
 from netizen_cli.domain import FeishuScope, NativeCapability, ScopeKind
-from netizen_cli.management import CurrentBindingTarget, InstanceManagementService, ManagementRuntimePort
+from netizen_cli.management import SessionQuery, SessionInventoryState, CurrentBindingTarget, InstanceManagementService, ManagementRuntimePort
 from netizen_cli.ordinary_sessions import OrdinaryConclusion
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.contracts import NativeThreadMetadata
@@ -33,23 +34,43 @@ FIXTURE = Path(__file__).parent / "fixtures" / "codex_surfaces_30a9e8c.json"
 DIRECT = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
 
 
-def wire(content):
-    if isinstance(content, OutboundCard):
-        return {"card": content.card}
-    if isinstance(content, OutboundPost):
-        return {"post": content.markdown, "mentions": [user.open_id for user in content.mentions]}
-    return {"text": content}
+def delivery_value(value):
+    if hasattr(value, "id") and hasattr(value, "conversation"):
+        return {"messageId": value.id, "chatId": getattr(value, "chat_id", None) or getattr(value.conversation, "chat_id", None),
+                "threadId": getattr(value.conversation, "thread_id", None)}
+    if is_dataclass(value):
+        return asdict(value)
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    return value
 
 
-async def channel_surfaces(fx):
+def delivery_recorder(channel, stack):
+    events = []
+
+    def capture(method):
+        async def call(*args, **kwargs):
+            events.append([method.__name__, [delivery_value(v) for v in args],
+                           {k: delivery_value(v) for k, v in kwargs.items()}])
+            return await method(*args, **kwargs)
+        return call
+
+    for name in ("reply", "send", "update_card", "upload_media", "add_reaction", "remove_reaction"):
+        stack.enter_context(patch.object(channel, name, capture(getattr(channel, name))))
+    return events
+
+
+async def channel_surfaces(fx, events):
     seen = {}
+
+    def captured(label):
+        seen[label] = events[:]
+        events.clear()
 
     async def command(label, text, **kwargs):
         await fx.app.handle_message(FakeMessage(text, message_id="om-" + label, **kwargs))
-        message_id, content = fx.channel.replies[-1]
-        assert message_id == "om-" + label
-        seen[label] = wire(content)
-        return content
+        captured(label)
+        return fx.channel.replies[-1][1]
 
     await command("degraded_help", "/help")
     fx.runtime.available_capabilities = frozenset(NativeCapability)
@@ -74,7 +95,7 @@ async def channel_surfaces(fx):
     await fx.app.handle_card_action(direct_button_event(_card_button_value(form, "自动生成"), message_id=prompt.message_id))
     task = fx.app._rename_name_generations[prompt.message_id].task
     await asyncio.wait_for(task, 2)
-    seen["candidate_updates"] = list(fx.channel.updates)
+    captured("candidate_updates")
     await command("manual_receipt", "/rename saved")
     for status, answer in (("completed", "reference answer"), ("failed", None), ("interrupted", None)):
         origin = FakeMessage("request", message_id="om-" + status)
@@ -82,15 +103,14 @@ async def channel_surfaces(fx):
             binding.id, "thread-a", "turn-" + status, "ou_user", origin, status, answer,
             task_feedback=BindingTaskFeedback(progress_card_enabled=False), cwd=fx.project,
         ))
-        seen["result_" + status] = wire(fx.channel.replies[-1][1])
+        captured("result_" + status)
     fx.store.create_channel_binding(scope=DIRECT, project_alias="test", creator_id="ou_user",
                                     turn_settings=BindingTurnSettings("future-model", "ultra", "priority-v2"))
     await command("explicit_status", "/status")
     field = _elements(form.card, "input")[0]["name"]
     await fx.app.handle_card_action(direct_card_event(fx.channel, {field: "stale"}, message_id="om-name-card"))
-    seen["stale_rename"] = fx.channel.updates[-1]
-    assert seen["stale_rename"][0] == "om-name-card"
-    assert "切换" in str(seen["stale_rename"][1])
+    captured("stale_rename")
+    assert "切换" in str(seen["stale_rename"])
     seen["name_effects"] = {"generate": list(fx.runtime.generate_name_calls), "write": list(fx.runtime.rename_binding_calls)}
     return seen
 
@@ -115,8 +135,16 @@ async def admin_surfaces(fx):
 
     try:
         result = {}
-        for state in ("active", "lazy", "archived"):
+        for state in ("active", "lazy"):
             result[state] = await request("sessions?inventoryState=" + state)
+        native_id = "thread-a"
+        fx.runtime.archived_thread_metadata_values[native_id] = fx.runtime.thread_metadata_values.pop(native_id)
+        result["archived"] = await request("sessions?inventoryState=archived")
+        assert result["archived"][1]["items"][0]["catalogState"] == "archived"
+        fx.runtime.thread_metadata_values[native_id] = fx.runtime.archived_thread_metadata_values.pop(native_id)
+        binding_id = result["active"][1]["items"][0]["bindingId"]
+        result["poll"] = await request("runtime-snapshots?resolvePrimary=true&bindingIds=" + binding_id)
+        assert result["poll"][0] == 200
         actions = result["active"][1]["items"][0]["actions"]
         for key, route in (("generateName", "generate-name"), ("rename", "rename")):
             data = actions[key]
@@ -130,7 +158,7 @@ async def admin_surfaces(fx):
         admin.close_auth()
 
 
-async def sdk_name_requests(fx):
+async def sdk_requests(fx):
     codex = NamingCodex()
     calls = []
     runtime = CodexRuntime(codex=codex, bindings=fx.store, terminal_cleanup=FakeTerminalCleanup(codex.events),
@@ -155,7 +183,25 @@ async def sdk_name_requests(fx):
                                (NamingThread, ("set_name", "read", "turn"))):
                 for name in names:
                     stack.enter_context(patch.object(cls, name, trace(getattr(cls, name))))
+            entries = {}
+
+            def recorded(label):
+                entries[label] = calls[:]
+                calls.clear()
+
+            deadline = asyncio.get_running_loop().time() + 3
+            for state in (SessionInventoryState.ACTIVE, SessionInventoryState.ARCHIVED):
+                codex.thread_list_pages = [SimpleNamespace(data=[], next_cursor=None)]
+                await management.query_sessions(query=SessionQuery(inventory_state=state), limit=10, deadline=deadline)
+                recorded("list_" + state.value)
+            with patch("netizen_cli.runtime.state.AsyncThread", side_effect=lambda client, tid: NamingThread(tid, client)):
+                summary = await management.binding_metadata_exact(binding.id, deadline=deadline)
+                assert summary.thread_id == "thread-sdk"
+            recorded("status_metadata")
+            await management.binding_status_exact(binding.id)
+            recorded("poll")
             await management.rename_current_binding(target=target, name=" sdk   name ")
+            recorded("rename")
             pending = asyncio.create_task(management.generate_current_binding_name(target=target))
             try:
                 await eventually(lambda: bool(codex.handles) or pending.done())
@@ -166,7 +212,8 @@ async def sdk_name_requests(fx):
             finally:
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
-        return calls
+            recorded("generate")
+        return entries
     finally:
         await runtime.cancel_tasks()
         await management.close()
@@ -180,9 +227,10 @@ async def reference():
                   next(grants).to_bytes(n, "big")).decode().rstrip("=")),
               patch("netizen_cli.cards.defaults.uuid4", return_value=UUID(int=1)),
               patch("netizen_cli.bindings._now", return_value="2026-01-01T00:00:00.000000+00:00")):
-            channel = await channel_surfaces(fx)
+            with ExitStack() as stack:
+                channel = await channel_surfaces(fx, delivery_recorder(fx.channel, stack))
             admin = await admin_surfaces(fx)
-            sdk = await sdk_name_requests(fx)
+            sdk = await sdk_requests(fx)
             return json.loads(json.dumps({"channel": channel, "admin": admin, "sdk": sdk},
                                          ensure_ascii=False).replace(str(fx.project_root), "<root>"))
 
