@@ -28,7 +28,7 @@ class BackendFactoryTest(unittest.IsolatedAsyncioTestCase):
         users.restrict_to_owner.return_value.open_id = "ou_owner"
         with patch("netizen_cli.runtime.claude_client.BundledClaudeClients"):
             assembly = await core._backend_factory(users)(None, Mock())
-        self.assertEqual(assembly.display_name, "Claude Code")
+        self.assertEqual(assembly.policy.display_name, "Claude Code")
         self.assertIs(assembly.ordinary, assembly.shutdown)
         self.assertIs(assembly.management.local, assembly.ordinary)
         self.assertEqual(assembly.policy.owner_id, "ou_owner")
