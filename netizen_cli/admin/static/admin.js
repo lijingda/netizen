@@ -2,6 +2,8 @@
 
 const claudeBackend = document.body.dataset.backend === "claude";
 if (claudeBackend) {
+  for (const node of document.querySelectorAll("[data-codex-only]")) node.hidden = true;
+  for (const node of document.querySelectorAll("[data-claude-text]")) node.textContent = node.dataset.claudeText;
   for (const id of ["nav-temporary", "nav-schedules", "nav-progress-card", "nav-question-notifications", "nav-session-tools",
                     "session-search-help", "admin-user-add"]) {
     document.getElementById(id).hidden = true;
@@ -363,8 +365,7 @@ async function restartService() {
   if (!envelope || !state.updates.restartSupported || !state.updates.restartAvailable) return;
   if (!(await window.NetizenConfirm.ask({ title: "重启服务", body: "确认重启服务？将使用绑定环境中当前安装的程序，不更新软件包。\n\n"
       + `实例：${document.querySelector("#instance-root")?.textContent || "当前实例"}\n\n`
-      + "重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。"
-      + "重启后不会自动续跑，管理页需要重新登录。",
+      + document.querySelector("#restart-warning").textContent,
   }))) return;
   if (state.authExpired) return;
   updateSubmitting = true;
@@ -693,6 +694,7 @@ async function refreshProjectDeletePreview() {
   projectDeleteInput("confirm").disabled = true;
   projectDeleteInput("worktrees").disabled = true;
   projectDeleteInput("scope").hidden = true;
+  if (claudeBackend) projectDeleteInput("warning").textContent = "";
   projectDeleteInput("paths").hidden = true;
   projectDeleteInput("note").classList.toggle("error", false);
   projectDeleteInput("note").textContent = "正在读取本次删除范围…";
@@ -704,6 +706,9 @@ async function refreshProjectDeletePreview() {
     if (projectDeleteDialog !== view || state.authExpired) return;
     view.preview = preview;
     view.envelope = preview.actions.previewDelete;
+    if (claudeBackend) {
+      projectDeleteInput("warning").textContent = `将永久删除此 Project 登记及其 ${preview.lazySessionCount} 个未开始的 Claude Code 会话登记，无法恢复。`;
+    }
     projectDeleteInput("sessions").textContent = `${preview.sessionCount}（未开始 ${preview.lazySessionCount}，已创建 ${preview.materializedSessionCount}）`;
     projectDeleteInput("sides").textContent = String(preview.sideCount);
     projectDeleteInput("plans").textContent = String(preview.scheduledPlanCount || 0);
@@ -2034,7 +2039,7 @@ function renderSessionSettingsEditor() {
     ? "补齐未读上下文会在下次 @ 时带入同一位置未 @ 机器人的成员消息。关闭后，请到飞书 /config 重新开启。"
     : "开启补齐未读上下文，请到飞书 /config 设置。";
   const notes = [editor.loading ? "正在读取模型目录…" : "", editor.catalogError, editor.error];
-  if (editor.settings.turn_settings && !editor.models.some((model) => model.id === editor.settings.turn_settings.model_id)) {
+  if (!claudeBackend && editor.settings.turn_settings && !editor.models.some((model) => model.id === editor.settings.turn_settings.model_id)) {
     notes.push("已保存的模型当前不可用，原选择保持不变；可调整其他配置，或显式选择继承 Codex。");
   }
   sessionSettingsInput("note").textContent = notes.filter(Boolean).join(" ");

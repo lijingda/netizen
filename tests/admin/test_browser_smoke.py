@@ -14,7 +14,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 _DRIVER = Path(__file__).with_name("browser_smoke.js")
 _BROWSER_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
@@ -165,7 +165,11 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
         policy = BackendPolicy("codex")
         if owner_only:
             from netizen_cli.domain import FeishuScope, ScopeKind
-            await fixture.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            lazy_project = fixture.project_root / "pending"
+            lazy_project.mkdir()
+            fixture.store.bootstrap_project(alias="pending", cwd=str(lazy_project))
+            fixture.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                                                project_alias="pending", creator_id="ou_admin")
             owner = users.restrict_to_owner()
             policy = BackendPolicy("claude", owner.open_id)
             local = ClaudeOrdinarySessions(bindings=fixture.store, owner_id=owner.open_id, clients=FakeClaudeClients(),
@@ -174,6 +178,10 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
                 scope_coordinator=ScopeCoordinator(), runtime=ManagementRuntimePort(None, ordinary=local, local=local))
             management.enable_defaults(app_id="cli_test", chat_info=fixture.channel)
             self.addAsyncCleanup(management.close)
+        else:
+            from netizen_cli.domain import NativeCapability
+            fixture.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
+            fixture.runtime.project_side_snapshots = Mock(return_value=())
         runner.attach_management(management, group_access=GroupAccessService(), backend_policy=policy,
                                  session_policy=SessionPolicyService())
         with patch("netizen_cli.admin.web.accepted_authorities",
@@ -198,7 +206,7 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
             "browser": browser, "profile": str(directory / "chrome"),
             "origin": f"http://127.0.0.1:{runner.addresses[0][1]}",
             "cookie": {"name": runner.application._session_cookie, "value": token},
-            "paths": ["/admins", "/sessions/ordinary", "/defaults"] if owner_only else sorted(_ADMIN_PAGE_PATHS),
+            "paths": ["/admins", "/sessions/ordinary", "/defaults", "/projects", "/maintenance"] if owner_only else sorted(_ADMIN_PAGE_PATHS),
             "ownerOnly": owner_only,
         })
         output = report(result)
