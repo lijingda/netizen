@@ -493,6 +493,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((options.session_id, options.resume), (None, "identity") if resume else ("identity", None))
                 self.assertEqual((options.permission_mode, options.cli_path, options.cwd), ("auto", self.cwd/"bundled", self.cwd))
                 self.assertEqual((options.setting_sources, options.env, options.allowed_tools), (None, {}, []))
+                self.assertEqual(options.system_prompt, {"type": "preset", "preset": "claude_code"})
                 self.assertTrue(options.verbatim_prompts)
 
     async def test_cancelled_handler_during_connect_closes_without_assigning_or_submitting(self):

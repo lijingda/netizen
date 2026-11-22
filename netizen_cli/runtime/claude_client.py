@@ -33,6 +33,7 @@ class BundledClaudeClients:
         return ClaudeSDKClient(options=ClaudeAgentOptions(
             cli_path=self._cli, cwd=cwd, session_id=None if resume else session_id,
             resume=session_id if resume else None, permission_mode="auto", verbatim_prompts=True,
+            system_prompt={"type": "preset", "preset": "claude_code"},
         ))
 
     async def session_cwd(self, session_id: str, candidates: tuple[Path, ...] = ()) -> Path | None:
