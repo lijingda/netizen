@@ -15,7 +15,7 @@ from lark_channel import (
 )
 from openai_codex import ExternalMessage, InvalidRequestError
 
-from ..backends import BackendPolicy, OperationId
+from ..backends import OperationId
 from ..bindings import (
     BindingNotFound,
     BindingTurnSettings,
@@ -117,7 +117,7 @@ class SessionToolChannel(ForkChannel):
 
     async def suppress_reply(self, *, source_thread_id: str, source_turn_id: str) -> dict[str, Any]:
         """Record a caller's exact physical Turn choice without changing execution."""
-        if not getattr(self, "_policy", BackendPolicy("codex")).allows(OperationId.COLLABORATION):
+        if not self._policy.allows(OperationId.COLLABORATION):
             return {"error": {"code": "backend_unsupported", "message": self._policy.refusal("会话协作")}}
         source = resolve_session_source(
             self._bindings, self._runtime, self._app_id, source_thread_id,

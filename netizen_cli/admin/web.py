@@ -347,7 +347,7 @@ class AdminWebApplication:
         *,
         auth: AdminAuth,
         management: InstanceManagementService,
-        backend_policy: BackendPolicy = BackendPolicy("codex"),
+        backend_policy: BackendPolicy | None = None,
         instance_root: Path | None = None,
         credentials: AdminCredentials | None = None,
         login: AdminLogin | None = None,
@@ -356,10 +356,7 @@ class AdminWebApplication:
     ) -> None:
         self._auth = auth
         self._management = management
-        self._backend_policy = (
-            management.operation_policy(backend_policy)
-            if isinstance(management, InstanceManagementService) else backend_policy
-        )
+        self._backend_policy = management.operation_policy(backend_policy)
         self._instance_root = instance_root
         self._users = auth.users
         self._credentials = credentials
@@ -681,15 +678,17 @@ class AdminWebApplication:
             disabled = [operation.value for operation in OperationId if not self._backend_policy.allows(operation)]
             if disabled:
                 attributes.append('data-unavailable="' + " ".join(disabled) + '"')
+            if not self._backend_policy.allows(OperationId.MODEL):
+                attributes.append(f'data-inherited-model="{html.escape(self._backend_policy.inherited_model_label)}"')
             if attributes:
                 page = page.replace(b"<body>", ("<body " + " ".join(attributes) + ">").encode(), 1)
             can_generate = self._backend_policy.allows(OperationId.GENERATE_NAME)
             page = page.replace(b"__NETIZEN_RENAME_HINT__", (
                 "自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。" if can_generate else
-                "保存后才会改名，新名称将同步到原生会话。"
+                html.escape(self._management.names.sync_hint)
             ).encode()).replace(
                 b" data-netizen-generate-name-visibility",
-                b"" if can_generate else b" hidden",
+                b"" if can_generate else b" hidden data-provider-hidden",
             ).replace(b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(self._instance_root)).encode())
             return Response(
                 200,
@@ -3046,7 +3045,7 @@ class AdminWebRunner:
             raise
 
     def attach_management(self, management: InstanceManagementService, *,
-                          backend_policy: BackendPolicy = BackendPolicy("codex"),
+                          backend_policy: BackendPolicy | None = None,
                           session_policy: SessionPolicyService | None = None,
                           group_access: GroupAccessService | None = None) -> None:
         """Attach the sole application service after the closed listener binds."""

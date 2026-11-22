@@ -125,7 +125,10 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
     async def test_owner_admin_pages(self):
         await self._admin_pages(owner_only=True)
 
-    async def _admin_pages(self, *, owner_only):
+    async def test_manual_rename_without_generator(self):
+        await self._admin_pages(owner_only=False, manual_only=True)
+
+    async def _admin_pages(self, *, owner_only, manual_only=False):
         from netizen_cli.backends import BackendPolicy
         from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
         from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
@@ -182,6 +185,9 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
             from netizen_cli.domain import NativeCapability
             fixture.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
             fixture.runtime.project_side_snapshots = Mock(return_value=())
+        if manual_only:
+            from netizen_cli.session_providers import SessionNames
+            management.names = SessionNames(writer=management.names.writer)
         runner.attach_management(management, group_access=GroupAccessService(), backend_policy=policy,
                                  session_policy=SessionPolicyService())
         with patch("netizen_cli.admin.web.accepted_authorities",
@@ -206,8 +212,9 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
             "browser": browser, "profile": str(directory / "chrome"),
             "origin": f"http://127.0.0.1:{runner.addresses[0][1]}",
             "cookie": {"name": runner.application._session_cookie, "value": token},
-            "paths": ["/admins", "/sessions/ordinary", "/defaults", "/projects", "/maintenance"] if owner_only else sorted(_ADMIN_PAGE_PATHS),
-            "ownerOnly": owner_only,
+            "paths": ["/admins", "/sessions/ordinary", "/defaults", "/projects", "/maintenance"] if owner_only else
+                     ["/sessions/ordinary"] if manual_only else sorted(_ADMIN_PAGE_PATHS),
+            "ownerOnly": owner_only, "manualOnly": manual_only,
         })
         output = report(result)
         self.assertEqual(status, 0, output)

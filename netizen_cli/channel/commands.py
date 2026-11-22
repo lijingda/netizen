@@ -475,13 +475,14 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if binding.native_thread_id is None:
+        if binding.native_thread_id is None and self._local_sessions is None:
             raise ThreadNotMaterialized(
                 "当前会话尚未在 Codex 中创建；"
                 "请先发送一条真实任务，再使用 /rename。"
             )
         if not intent.arguments:
             metadata = await self._read_thread_metadata((binding,)) if self._policy.allows(OperationId.HISTORY) else {}
+            self._management.title_writer_for(binding)
             await self._reply(
                 message,
                 rename_binding_card(
@@ -489,6 +490,7 @@ class CommandChannel(CardControlChannel):
                     binding_id=binding.id,
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
+                    sync_hint=self._management.names.sync_hint,
                     can_generate=self._policy.allows(OperationId.GENERATE_NAME),
                     current_title=_session_title(
                         binding,
@@ -605,7 +607,8 @@ class CommandChannel(CardControlChannel):
             return
         status = await self._management.binding_status_exact(binding.id)
         if self._local_sessions is not None:
-            await self._reply(message, local_status_card(intent.scope, binding, status, allow_stop=self._policy.allows(OperationId.STOP)))
+            card = local_status_card(intent.scope, binding, status, self._local_sessions.observation_defaults)
+            await self._reply(message, card)
             return
         state = status.primary_status
         assert state is not None
@@ -662,13 +665,9 @@ class CommandChannel(CardControlChannel):
 
     def _context_usage_field(self, binding: ThreadBinding, *, active_turn: bool) -> ContextUsageField:
         source = "Codex token usage"
-        try:
-            usage = self._runtime.context_window_usage(binding.id)
-        except Exception as error:
-            logger.warning("context usage read failed", extra={"error_type": type(error).__name__})
-            return ContextUsageField(Availability.UNAVAILABLE, source, time.time())
         if binding.native_thread_id is None:
             return ContextUsageField(Availability.NOT_APPLICABLE, source, time.time())
+        usage = self._runtime.context_window_usage(binding.id)
         if usage is None:
             failed_at = self._runtime.context_window_read_failed_at(binding.id, binding.native_thread_id)
             if failed_at is not None:

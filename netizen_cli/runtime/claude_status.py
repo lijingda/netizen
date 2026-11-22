@@ -11,7 +11,7 @@ import time
 
 from claude_agent_sdk import RateLimitInfo, ResultMessage
 
-from ..session_views import Availability, SessionField, SessionObservations
+from ..session_views import Availability, ObservationPresentation, SessionField, SessionObservations
 
 
 _DEFAULTS = tuple(
@@ -23,9 +23,23 @@ _DEFAULTS = tuple(
     )
     for key in keys
 ) + (
+    ("effort", SessionField(Availability.UNOBSERVED, "native settings")),
+    ("speed", SessionField(Availability.NOT_APPLICABLE, "native settings")),
+    ("configuration", SessionField(Availability.OBSERVED, "native settings", "原生 Claude 设置")),
     ("context", SessionField(Availability.UNAVAILABLE, "Claude context")),
     ("subscription", SessionField(Availability.NOT_APPLICABLE, "ordinary session")),
 )
+
+_USAGE = (("input_tokens", "输入 token"), ("output_tokens", "输出 token"),
+          ("totalCostUsd", "SDK 累计费用（USD）"), ("limitStatus", "额度状态"))
+_PRESENTATION = ObservationPresentation(
+    provider="Claude Code", identity_label="Claude 会话 ID",
+    workspace=(("cwd", "上次观测的工作目录"),),
+    model=(("model", "Model"), ("effort", "Effort"), ("speed", "Speed"), ("configuration", "配置来源")),
+    usage=(("context", "上下文窗口"), *_USAGE), details=(("subscription", "订阅"),),
+    row=(("model", "上次观测的模型"),), admin=(("model", "模型"), *_USAGE, ("context", "上下文窗口")),
+)
+DEFAULT_OBSERVATIONS = SessionObservations(defaults=_DEFAULTS, presentation=_PRESENTATION)
 
 
 @contextmanager
@@ -104,8 +118,8 @@ class ClaudeObservations:
     def read(self, binding: str, session: str | None, execution: str | None = None) -> SessionObservations:
         sample = self._sessions.get(binding)
         if sample and sample.session == session and (execution is None or sample.execution == execution):
-            return SessionObservations(tuple(sample.fields.items()), _DEFAULTS)
-        return SessionObservations(defaults=_DEFAULTS)
+            return SessionObservations(tuple(sample.fields.items()), _DEFAULTS, _PRESENTATION)
+        return DEFAULT_OBSERVATIONS
 
 
 def _count(value: object) -> int | None:

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from lark_channel import OutboundCard
 
 from ..backends import BackendPolicy, OperationId
-from ..session_views import ContextUsageField, ModelStatusFields, Availability, SessionField, SessionObservations, SessionStatusView
+from ..session_views import SessionObservations
 from .status import render_observed_status
 if TYPE_CHECKING:
     from ..management.service import BindingStatusProjection
@@ -1158,13 +1158,13 @@ def rename_binding_card(
     generated_name: str = "",
     generating: bool = False,
     can_generate: bool = True,
+    sync_hint: str,
     notice: str | None = None,
 ) -> OutboundCard:
     builder = _builder("重命名当前会话", f"Netizen 会话编号：{short_id} · {project_alias}")
     if current_title is not None:
         builder.markdown(f"当前名称：`{_md_code(current_title)}`")
-    builder.markdown("保存后名称同步显示在 Codex App/CLI。自动生成会清空当前输入，生成后可修改再保存。"
-                     if can_generate else "保存后才会改名，新名称将同步到原生会话。")
+    builder.markdown(sync_hint + ("自动生成会清空当前输入，生成后可修改再保存。" if can_generate else ""))
     if notice:
         builder.raw(_notice(notice, error=True))
     if generating:
@@ -1456,35 +1456,15 @@ def _local_stop_button(
 
 
 def local_status_card(
-    scope: FeishuScope, binding: ThreadBinding, status: BindingStatusProjection, *, allow_stop: bool,
+    scope: FeishuScope, binding: ThreadBinding, status: BindingStatusProjection, defaults: SessionObservations,
 ) -> OutboundCard:
-    observed = status.observations or SessionObservations()
-    context = observed.get("context")
-    subscription = observed.get("subscription")
+    observed = status.observations or defaults
     label = status.local_label or "状态待确认"
-    view = SessionStatusView(
-        short_id=binding.short_id, project_alias=binding.project_alias, native_thread_id=binding.native_thread_id,
-        state=status.primary_status or "unknown", state_label=label, metadata_lines=("Claude Code", f"本地任务：{label}"),
-        workspace_lines=("上次观测的工作目录：" + observed.get("cwd").display(),),
-        context=ContextUsageField(context.availability, context.source, context.sampled_at),
-        message_scope_lines=(), usage_lines=tuple(
-            title + observed.get(key).display() for key, title in (
-                ("input_tokens", "输入 token："), ("output_tokens", "输出 token："),
-                ("totalCostUsd", "SDK 累计费用（USD）："), ("limitStatus", "额度状态："),
-            )
-        ),
-        model=ModelStatusFields(observed.get("model"), SessionField(Availability.UNOBSERVED, "native settings"),
-                                SessionField(Availability.NOT_APPLICABLE, "native settings"),
-                                SessionField(Availability.OBSERVED, "native settings", "原生 Claude 设置")),
-        progress_lines=(), subscription_line="订阅：" + subscription.display(),
-    )
     turn = status.snapshot.turn
     controls = ((_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, turn.turn_id,
                                     SessionCardPage("lazy"), from_status=True),)
-                if turn is not None and allow_stop and status.can_stop else ())
-    return render_observed_status(view, exact_controls=controls, identity=(
-        f"Netizen 会话编号（/resume）：{binding.short_id}", f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}",
-    ))
+                if turn is not None and status.can_stop else ())
+    return render_observed_status(binding, status.primary_status or "unknown", label, observed, exact_controls=controls)
 
 
 def sessions_card(
@@ -1503,10 +1483,9 @@ def sessions_card(
     lazy: bool = False,
     has_lazy: bool = False,
     local_directory: bool = False,
-    policy: BackendPolicy = BackendPolicy("codex"),
+    policy: BackendPolicy,
 ) -> OutboundCard:
-    if not local_directory:
-        session_cursor = _session_action_cursor(scope, session_cursor)
+    session_cursor = _session_action_cursor(scope, session_cursor, keep_previous=local_directory)
     subtitle = "尚未开始对话的会话" if lazy else "按 Codex 更新时间排序"
     builder = _builder("会话", "按本地登记时间排序" if local_directory else subtitle)
     if notice:
@@ -1554,14 +1533,14 @@ def sessions_card(
     return _session_list_card(builder.to_dict())
 
 
-def _session_action_cursor(scope: FeishuScope, token: str | None) -> str | None:
+def _session_action_cursor(scope: FeishuScope, token: str | None, *, keep_previous: bool = False) -> str | None:
     if token is None:
         return None
     navigation = SessionCardPage.decode(token, scope)
     # Row actions need the exact return position, not a copy of the entire
     # back stack in every button. Navigation buttons retain that history.
     return SessionCardPage(
-        navigation.state, navigation.page, (navigation.cursor,),
+        navigation.state, navigation.page, navigation.positions[-2:] if keep_previous else (navigation.cursor,),
     ).encode(scope)
 
 
@@ -1591,11 +1570,11 @@ def _session_row(
     )
     marker_text = "● 当前" if session.active else "○"
     if local_directory:
-        observed = session.observations or SessionObservations()
-        model = observed.get("model", "Claude init").display()
+        observed = session.observations
+        assert observed is not None
         text = (f"{marker_text} {session.short_id}\nProject：{session.project_alias} · 状态：{session.state_label or '状态待确认'}\n"
-                f"Claude 会话 ID：{session.native_thread_id or '尚未建立'}\n登记时间：{session.registered_at}\n"
-                f"上次观测的模型：{model}")
+                f"{observed.presentation.identity_label}：{session.native_thread_id or '尚未建立'}\n登记时间：{session.registered_at}")
+        text = "\n".join((text, *observed.lines(observed.presentation.row)))
     else:
         text = (
             f"{marker_text} {session.title}\n"

@@ -45,9 +45,26 @@ class SessionField:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservationPresentation:
+    provider: str = ""
+    identity_label: str = "原生会话 ID"
+    workspace: tuple[tuple[str, str], ...] = ()
+    model: tuple[tuple[str, str], ...] = ()
+    usage: tuple[tuple[str, str], ...] = ()
+    details: tuple[tuple[str, str], ...] = ()
+    row: tuple[tuple[str, str], ...] = ()
+    admin: tuple[tuple[str, str], ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SessionObservations:
     fields: tuple[tuple[str, SessionField], ...] = ()
     defaults: tuple[tuple[str, SessionField], ...] = ()
+    presentation: ObservationPresentation = ObservationPresentation()
+
+    def lines(self, labels: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
+        fields = dict((*self.defaults, *self.fields))
+        return tuple(f"{label}：{fields[key].display()}" for key, label in labels if key in fields)
 
     def get(self, name: str, source: str = "") -> SessionField:
         for key, value in (*self.fields, *self.defaults):
@@ -56,7 +73,9 @@ class SessionObservations:
         return SessionField(Availability.UNOBSERVED, source)
 
     def json(self) -> dict[str, object]:
-        return {key: value.json() for key, value in (*self.defaults, *self.fields)}
+        labels = dict(self.presentation.admin) if self.presentation.admin is not None else None
+        return {key: {**value.json(), "label": key if labels is None else labels.get(key)}
+                for key, value in (*self.defaults, *self.fields)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +108,6 @@ class SessionStatusView:
     model: ModelStatusFields
     progress_lines: tuple[str, ...]
     subscription_line: str
-    usage_lines: tuple[str, ...] = ()
-    state_label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

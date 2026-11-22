@@ -654,7 +654,7 @@ class ManagementRuntimePort:
 
     def runtime_snapshot_exact(self, binding_id: str) -> BindingRuntimeSnapshot:
         if self.local is not None:
-            return self.local.local_snapshot(binding_id).runtime_snapshot(binding_id)
+            return self.local.capture_status(binding_id)
         return self.__runtime.binding_runtime_snapshot(binding_id)
 
     async def goal_snapshot_exact(
@@ -934,20 +934,25 @@ class InstanceManagementService:
             case Provider.NAME_GENERATOR:
                 return self.names.generate is not None
 
-    def operation_policy(self, identity: BackendPolicy) -> BackendPolicy:
-        return identity.bind(self.has_provider)
+    def operation_policy(self, identity: BackendPolicy | None = None) -> BackendPolicy:
+        if identity is not None and (identity.backend, identity.owner_id) != (self.policy.backend, self.policy.owner_id):
+            raise ValueError("Backend policy identity conflicts with assembled management")
+        return self.policy
 
     @property
     def session_form(self) -> SessionFormView:
         return SessionFormView.from_operations(
             self.policy.allows,
-            inherited_source="原生 Claude 设置" if self.local is not None else "继承 Codex",
+            inherited_source=self.policy.inherited_model_label,
         )
 
-    def _title_writer(self) -> ManualTitleWriter:
+    def title_writer_for(self, binding: ThreadBinding) -> ManualTitleWriter:
         self.policy.require(OperationId.MANUAL_RENAME)
         writer = self.names.writer
         assert writer is not None
+        # Native Codex validates materialization and lifecycle in rename_exact.
+        if self.local is not None and not writer.eligible(binding, None):
+            raise BackendUnsupported("重命名", detail="此会话当前不支持重命名。")
         return writer
 
     def _name_generator(self) -> Callable[[str], Awaitable[str]]:
@@ -1715,12 +1720,13 @@ class InstanceManagementService:
             except (GoalControlError, ThreadLifecycleError, TimeoutError):
                 binding = self._bindings.get(binding_id)
                 snapshot = self._runtime.runtime_snapshot_exact(binding_id)
-                return _project_binding_status(
+                status = _project_binding_status(
                     binding=binding,
                     snapshot=snapshot,
                     primary_status_unavailable=True,
                     catalog_state=catalog_state,
                 )
+                return replace(status, observations=self.local.observation_defaults) if self.local is not None else status
 
         return tuple(await asyncio.gather(*(resolve(item) for item in binding_ids)))
 
@@ -2024,9 +2030,10 @@ class InstanceManagementService:
         target: CurrentBindingTarget,
         name: str,
     ) -> RenamedBinding:
+        self.policy.require(OperationId.MANUAL_RENAME)
         async with self._scope_coordinator.hold(target.scope_key):
-            writer = self._title_writer()
             binding = self._require_current(target)
+            writer = self.title_writer_for(binding)
         # Capture the exact target under Scope coordination, but never hold
         # that lock while waiting for a previous name writer to finish.
         normalized = await writer.rename_exact(binding.id, name)
@@ -2190,9 +2197,10 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         name: str,
     ) -> RenamedBinding:
+        self.policy.require(OperationId.MANUAL_RENAME)
         async with self._scope_coordinator.hold(target.scope_key):
-            writer = self._title_writer()
             binding, _ = self._require_exact(target)
+            writer = self.title_writer_for(binding)
         normalized = await writer.rename_exact(binding.id, name)
         return RenamedBinding(binding=binding, name=normalized)
 

@@ -105,9 +105,6 @@ class LocalExecutionSnapshot:
     turn: ActiveTurnSnapshot | None
     unavailable: bool
 
-    def runtime_snapshot(self, binding_id: str) -> BindingRuntimeSnapshot:
-        return BindingRuntimeSnapshot(binding_id, self.revision, self.turn, None, False, None, None, None, self.unavailable)
-
     @property
     def label(self) -> str:
         if self.unavailable:
@@ -118,10 +115,19 @@ class LocalExecutionSnapshot:
                 ActiveState.OBSERVATION_UNAVAILABLE: "状态待确认"}[self.turn.state]
 
 
+@dataclass(frozen=True, slots=True)
+class LocalStatusSnapshot(BindingRuntimeSnapshot):
+    local: LocalExecutionSnapshot
+    session_id: str | None
+    observations: SessionObservations
+
+
 class LocalSessionManagement(Protocol):
     @property
     def backend_policy(self) -> BackendPolicy: ...
-    def session_observations(self, binding_id: str, session: str | None, execution: str | None) -> SessionObservations: ...
+    @property
+    def observation_defaults(self) -> SessionObservations: ...
+    def capture_status(self, binding_id: str) -> LocalStatusSnapshot: ...
     def occupying_bindings(self, directory: Path) -> frozenset[str]: ...
     async def resource_usage(self, binding_id: str) -> dict[str, str | None]: ...
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding: ...

@@ -5,23 +5,27 @@ const localDirectory = unavailableOperations.has("history");
 const inheritedModel = unavailableOperations.has("model");
 const progressUnavailable = unavailableOperations.has("progress");
 const ownerOnly = document.body.dataset.ownerOnly === "true";
+function hideProviderElement(node) {
+  node.dataset.providerHidden = "";
+  node.hidden = true;
+}
 for (const [operation, id] of [
   ["side", "nav-temporary"], ["schedule", "nav-schedules"], ["progress", "nav-progress-card"],
   ["questions", "nav-question-notifications"], ["collaboration", "nav-session-tools"],
 ]) {
-  if (unavailableOperations.has(operation)) document.getElementById(id).hidden = true;
+  if (unavailableOperations.has(operation)) hideProviderElement(document.getElementById(id));
 }
 if (ownerOnly) {
-  document.getElementById("admin-user-add").hidden = true;
-  for (const node of document.querySelectorAll("[data-codex-only]")) node.hidden = true;
+  hideProviderElement(document.getElementById("admin-user-add"));
+  for (const node of document.querySelectorAll("[data-codex-only]")) hideProviderElement(node);
   for (const node of document.querySelectorAll("[data-claude-text]")) node.textContent = node.dataset.claudeText;
 }
 if (localDirectory) {
-  document.getElementById("session-search-help").hidden = true;
-  document.querySelector("#session-search").closest("label").hidden = true;
+  hideProviderElement(document.getElementById("session-search-help"));
+  hideProviderElement(document.querySelector("#session-search").closest("label"));
   document.querySelector("#session-inventory-state option[value=archived]").remove();
   document.querySelector("#session-inventory-state option[value=active]").textContent = "全部本地会话";
-  document.querySelector("[data-time-range-id=session-updated]").hidden = true;
+  hideProviderElement(document.querySelector("[data-time-range-id=session-updated]"));
   for (const header of document.querySelectorAll("[data-session-sort=session][data-sort-by=updatedAt]")) header.disabled = true;
 }
 
@@ -717,7 +721,7 @@ async function refreshProjectDeletePreview() {
     view.preview = preview;
     view.envelope = preview.actions.previewDelete;
     if (unavailableOperations.has("delete")) {
-      projectDeleteInput("warning").textContent = `将永久删除此 Project 登记及其 ${preview.lazySessionCount} 个未开始的 Claude Code 会话登记，无法恢复。`;
+      projectDeleteInput("warning").textContent = `将永久删除此 Project 登记及其 ${preview.lazySessionCount} 个未开始的 ${document.body.dataset.backendName} 会话登记，无法恢复。`;
     }
     projectDeleteInput("sessions").textContent = `${preview.sessionCount}（未开始 ${preview.lazySessionCount}，已创建 ${preview.materializedSessionCount}）`;
     projectDeleteInput("sides").textContent = String(preview.sideCount);
@@ -1473,12 +1477,13 @@ function updateRuntimeCell(target, runtime) {
   const archived = runtime.primaryStatusResolution === "archived";
   const label = runtimeLabel(runtime);
   const samples = runtime.observations;
-  const details = samples ? [
-    ["模型", samples.model], ["输入 token", samples.input_tokens], ["输出 token", samples.output_tokens],
-    ["SDK 累计费用（USD）", samples.totalCostUsd], ["额度状态", samples.limitStatus], ["上下文窗口", samples.context],
-  ].map(([name, field]) => field.availability === "observed"
-    ? `${name}：${field.value}（${field.source} · ${sessionDateLabel(new Date(field.sampledAt * 1000).toISOString())}）`
-    : `${name}：${field.availability}`).join(" · ") : "";
+  const details = Object.entries(samples || {}).filter(([, field]) => field && field.label !== null)
+    .map(([key, field]) => {
+      const label = field.label ?? key;
+      if (field.availability !== "observed") return `${label}：${field.availability}`;
+      const stamp = field.sampledAt == null ? "" : `（${field.source} · ${sessionDateLabel(new Date(field.sampledAt * 1000).toISOString())}）`;
+      return `${label}：${field.value}${stamp}`;
+    }).join(" · ");
   const title = archived ? "已归档，不查询运行态" : label;
   const subscriptionLabel = !archived && runtime.subscriptionState
     ? `订阅：${subscriptionStateLabel(runtime.subscriptionState)}` : "";
@@ -3476,7 +3481,7 @@ function messageContextLabel(value) {
 function sessionConfigurationSummary(settings, models = []) {
   const turn = settings.turn_settings;
   const context = messageContextLabel(settings.message_context_mode);
-  if (inheritedModel) return `${context} · 原生 Claude 设置`;
+  if (inheritedModel) return `${context} · ${document.body.dataset.inheritedModel}`;
   if (!turn) return `${context} · 继承 Codex`;
   const model = models.find((item) => item.id === turn.model_id);
   const effort = model?.efforts?.find((item) => item.id === turn.effort_id);
@@ -3539,7 +3544,7 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   const turn = settings.turn_settings;
   const model = models.find((item) => item.id === turn?.model_id);
   if (inheritedModel) {
-    for (const field of ["model", "effort", "tier"]) input(field).closest("label").hidden = true;
+    for (const field of ["model", "effort", "tier"]) hideProviderElement(input(field).closest("label"));
   } else {
     scheduleSelectOptions(input("model"), [["", "继承 Codex"],
       ...models.map((item) => [item.id, item.display_name])], turn?.model_id);
@@ -3551,9 +3556,9 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   input("reactions").checked = settings.reaction_pulse_enabled;
   input("completion-mention").checked = settings.completion_mention_enabled;
   if (progressUnavailable) {
-    input("progress").closest("label").hidden = true;
-    input("progress-settings").hidden = true;
-    input("progress-reset").hidden = true;
+    hideProviderElement(input("progress").closest("label"));
+    hideProviderElement(input("progress-settings"));
+    hideProviderElement(input("progress-reset"));
   } else {
     input("progress").checked = settings.progress_card_enabled;
     renderProgressCardSettings(input, settings);

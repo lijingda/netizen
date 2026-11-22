@@ -771,4 +771,4 @@ body.navigation-open { overflow: hidden; }
   #schedule-detail table { min-width: 0; }
 }
 
-[hidden] { display: none !important; }
+[data-provider-hidden][hidden] { display: none !important; }

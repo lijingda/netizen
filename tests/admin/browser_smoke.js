@@ -251,6 +251,31 @@ async function run() {
         }
         if (path === "/sessions/ordinary") {
           await until("session identity details", () => evaluate('document.querySelector("#sessions-body .session-identities") !== null'));
+          const visibility = await evaluate(`(() => {
+            const unrelated = document.createElement("div");
+            unrelated.className = "section-head";
+            unrelated.hidden = true;
+            document.body.append(unrelated);
+            const displays = [getComputedStyle(unrelated).display, getComputedStyle(document.querySelector("#session-rename-generate")).display];
+            unrelated.remove();
+            return displays;
+          })()`);
+          assert.equal(visibility[0], "flex");
+          if (config.manualOnly || config.ownerOnly) assert.equal(visibility[1], "none");
+          else assert.notEqual(visibility[1], "none");
+          if (config.ownerOnly) {
+            const details = await evaluate(`(() => {
+              const cell = document.querySelector("#sessions-body .runtime-state").cloneNode(false);
+              const runtime = {primaryStatus: "idle", primaryStatusResolution: "local"};
+              const text = observations => {
+                updateRuntimeCell(cell, {...runtime, observations});
+                return cell.querySelector(".runtime-observations")?.textContent || "";
+              };
+              return [text({}), text({model: {label: "模型", availability: "observed", value: "sample"}}), text({})];
+            })()`);
+            assert.deepEqual(details, ["", "模型：sample", ""]);
+          }
+          result.interactions.push(step + " · provider fields and computed visibility");
           const identities = await evaluate('[...document.querySelectorAll("#sessions-body .session-identities")].map(el => el.textContent)');
           for (const identity of identities) {
             if (config.ownerOnly) {

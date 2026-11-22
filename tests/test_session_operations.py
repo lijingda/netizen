@@ -110,6 +110,20 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
         await self.fx.app.handle_message(FakeMessage(text, message_id="om_command"))
         return self.fx.channel.replies[-1][1]
 
+    async def test_channel_and_admin_inherit_the_bound_policy(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            self.open_admin(fx.project_root, app._management, "ou_user")
+            self.assertIs(self.admin._backend_policy, app._management.policy)
+            self.assertIs(app._policy, self.admin._backend_policy)
+            self.assertIs(app._management.operation_policy(ordinary.backend_policy), app._policy)
+            for identity in (BackendPolicy("codex"), BackendPolicy("claude", "other")):
+                with self.assertRaisesRegex(ValueError, "identity conflicts"):
+                    AdminWebApplication(auth=self.admin._auth, management=app._management, backend_policy=identity)
+            page = await self.request("/sessions/ordinary")
+            self.assertIn(b'data-owner-only="true"', page.body)
+            denied = await self.request("/api/v1/admin-users/selector-config")
+            self.assertEqual(denied.status, 403)
+
     async def test_owner_forms_and_authenticated_post_reject_unsupported_fields(self):
         async with owner_channel() as (app, fx, clients, clock, _):
             clock[0] = 2
@@ -159,6 +173,7 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/rename", await self.command("/"))
             form = await self.command("/rename")
             self.assertNotIn("自动生成", str(form.card))
+            self.assertIn("保存后名称同步显示在 Codex App/CLI。", str(form.card))
             field = _elements(form.card, "input")[0]["name"]
             await self.fx.app.handle_card_action(
                 direct_card_event(
@@ -177,6 +192,7 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("generateName", actions)
             page = await self.request("/sessions/ordinary")
             controls = RenameControls(page.body).hidden
+            self.assertIn("保存后名称同步显示在 Codex App/CLI。".encode(), page.body)
             self.assertTrue(controls["session-rename-generate"])
             self.assertFalse(controls["save-hint"])
             denied = await self.request(
@@ -285,7 +301,7 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
             clock[0] = 2
             row = await fx.create_binding(self.scope)
             fx.store.assign_native_thread_id(row.binding.id, "sample")
-            writer = Mock()
+            writer = Mock(sync_hint=None)
             writer.rename_exact = AsyncMock(return_value="allowed")
             writer.eligible.side_effect = lambda binding, state: binding.native_thread_id is not None
             self.open_admin(fx.project_root, app._management, "ou_user", backend_policy=app._policy)
@@ -306,6 +322,18 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
                 )
                 writer.rename_exact.assert_awaited_once_with(row.binding.id, "allowed")
                 field = _elements(form.card, "input")[0]["name"]
+                grant = (await self.actions())["rename"]
+                writer.eligible.side_effect = None
+                writer.eligible.return_value = False
+                for command in ("/rename", "/rename revoked"):
+                    await app.handle_message(FakeMessage(command, message_id="om_revoked"))
+                    self.assertIn("不支持重命名", str(fx.channel.replies[-1][1]))
+                await app.handle_card_action(direct_card_event(fx.channel, {field: "revoked"}, message_id="om_form"))
+                denied = await self.request("/api/v1/sessions/rename", self.payload(grant, name="revoked"))
+                self.assertEqual((denied.status, json.loads(denied.body)["code"]), (409, "backend_unsupported"))
+                self.assertNotIn("rename", await self.actions())
+                writer.rename_exact.assert_awaited_once()
+                writer.eligible.side_effect = lambda binding, state: binding.native_thread_id is not None
                 await fx.create_binding(self.scope)
                 await app.handle_card_action(
                     direct_card_event(fx.channel, {field: "stale"}, message_id="om_old")

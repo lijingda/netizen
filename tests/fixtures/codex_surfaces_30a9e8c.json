@@ -4340,7 +4340,7 @@
         "requestId": "r1"
       }
     ],
-    "archived": [
+    "archived_with_row": [
       200,
       {
         "items": [
@@ -4496,6 +4496,15 @@
         "requestId": "r1"
       }
     ],
+    "archived": [
+      200,
+      {
+        "items": [],
+        "nextCursor": null,
+        "pageSize": 20,
+        "requestId": "r1"
+      }
+    ],
     "nativeAccess": [
       [
         "sessions?inventoryState=active",
@@ -4592,6 +4601,23 @@
       [
         "sessions/rename",
         []
+      ],
+      [
+        "sessions?inventoryState=archived",
+        [
+          [
+            "thread_catalog_page",
+            [],
+            {
+              "archived": true,
+              "cursor": null,
+              "limit": 100,
+              "sort_key": "updated_at",
+              "sort_direction": "desc",
+              "deadline": "bounded"
+            }
+          ]
+        ]
       ]
     ]
   },

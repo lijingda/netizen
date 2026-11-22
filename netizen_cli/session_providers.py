@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from .bindings import BindingCursor, ThreadBinding
-from .ordinary_sessions import LocalExecutionSnapshot, LocalSessionManagement
+from .ordinary_sessions import LocalExecutionSnapshot, LocalSessionManagement, LocalStatusSnapshot
 from .runtime.codex_contracts import BindingRuntimeSnapshot
 from .session_views import SessionInventoryPage, SessionObservations, SessionQuery
 from .session_inventory import NativeSessionCursor
@@ -20,11 +20,15 @@ class _NativeTitleWrite(Protocol):
 
 
 class ManualTitleWriter(_NativeTitleWrite, Protocol):
+    @property
+    def sync_hint(self) -> str | None: ...
+
     def eligible(self, binding: ThreadBinding, catalog_state: NativeThreadCatalogState | None) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
 class _ExactTitleWriter:
+    sync_hint = "保存后名称同步显示在 Codex App/CLI。"
     write: Callable[[str, str], Awaitable[str]]
 
     def eligible(self, binding: ThreadBinding, catalog_state: NativeThreadCatalogState | None) -> bool:
@@ -45,6 +49,11 @@ class SessionNames:
     writer: ManualTitleWriter | None = None
     generate: Callable[[str], Awaitable[str]] | None = None
 
+    @property
+    def sync_hint(self) -> str:
+        hint = self.writer.sync_hint if self.writer is not None else None
+        return hint or "保存后才会改名，新名称将同步到原生会话。"
+
     @classmethod
     def from_runtime(cls, runtime: object) -> "SessionNames":
         # Keep the native methods responsible for their exact identity and locking.
@@ -61,7 +70,7 @@ class SessionNames:
 class StatusCapture:
     snapshot: BindingRuntimeSnapshot
     local: LocalExecutionSnapshot | None = None
-    observations: SessionObservations = SessionObservations()
+    observations: SessionObservations | None = None
 
 
 class StatusSource(Protocol):
@@ -82,12 +91,12 @@ class LocalStatusSource:
 
     def capture(self, binding: ThreadBinding, snapshot: BindingRuntimeSnapshot | None = None) -> StatusCapture:
         if snapshot is None:
-            local = self.runtime.local_snapshot(binding.id)
-            snapshot = local.runtime_snapshot(binding.id)
-        else:
-            local = LocalExecutionSnapshot(snapshot.activity_revision, snapshot.turn, snapshot.local_unavailable)
-        execution = local.turn.turn_id if local.turn is not None else None
-        return StatusCapture(snapshot, local, self.runtime.session_observations(binding.id, binding.native_thread_id, execution))
+            snapshot = self.runtime.capture_status(binding.id)
+        if (isinstance(snapshot, LocalStatusSnapshot) and snapshot.session_id == binding.native_thread_id
+                and snapshot.activity_revision == snapshot.local.revision and snapshot.turn == snapshot.local.turn):
+            return StatusCapture(snapshot, snapshot.local, snapshot.observations)
+        local = LocalExecutionSnapshot(snapshot.activity_revision, snapshot.turn, unavailable=False)
+        return StatusCapture(snapshot, local, self.runtime.observation_defaults)
 
 
 @dataclass(frozen=True, slots=True)

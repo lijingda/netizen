@@ -173,6 +173,9 @@ class SessionCardChannel(QuestionChannel):
         for item, projection in zip(items, projections, strict=True):
             binding = item.record.binding
             snapshot = projection.snapshot
+            observations = projection.observations
+            if observations is None and self._local_sessions is not None:
+                observations = self._local_sessions.observation_defaults
             sessions.append(SessionCardItem(
                 binding_id=binding.id,
                 short_id=binding.short_id,
@@ -180,7 +183,7 @@ class SessionCardChannel(QuestionChannel):
                 native_thread_id=binding.native_thread_id,
                 title=_session_title(binding, item.native.metadata if item.native else None),
                 state=projection.primary_status or "暂不可用",
-                state_label=projection.local_label, observations=projection.observations,
+                state_label=projection.local_label, observations=observations,
                 registered_at=binding.created_at,
                 catalog_unconfirmed=item.inventory_state is SessionInventoryState.UNKNOWN,
                 active=binding.active,

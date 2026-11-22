@@ -33,6 +33,11 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             for label in ("未观测", "取不到", "不适用"):
                 self.assertIn(label, cold)
             self.assertEqual(clients.calls, [])
+            projection = await app._management.binding_status_exact(binding)
+            with patch.object(app._management, "binding_status_exact", return_value=replace(projection, observations=None)):
+                fallback = await status()
+                self.assertIn("上下文窗口：取不到", fallback)
+                self.assertIn("订阅：不适用", fallback)
             await app.handle_message(FakeMessage("work", message_id="work"))
             client = clients.calls[-1]
             client.init(model="claude-test")
@@ -140,6 +145,12 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
                 captured = await app._management.binding_status_exact(binding.id, snapshot=idle)
                 self.assertIs(captured.snapshot, idle)
                 self.assertEqual(captured.local_label, "空闲")
+                historical = captured.observations.json()
+                self.assertEqual(historical["input_tokens"], first_field)
+                self.assertNotEqual(historical["model"]["value"], live["model"]["value"])
+                unattributed = replace(idle, activity_revision=idle.activity_revision + 1)
+                missing = await app._management.binding_status_exact(binding.id, snapshot=unattributed)
+                self.assertEqual(missing.observations.json()["model"]["availability"], "未观测")
             direct_card_event(fx.channel, {}, message_id="alias")
             event = direct_button_event(alias, message_id="alias")
             with patch.object(ordinary, "preview_stop", new_callable=AsyncMock) as preview:
@@ -147,8 +158,11 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
                 await app._handle_status_command(event)
                 preview.assert_not_awaited()
             self.assertEqual(second.interrupts, 0)
-            second.result()
+            second.result(usage={"input_tokens": 31})
             self.assertTrue(await ordinary.wait_idle(2))
+            self.assertEqual((await fields())["input_tokens"]["value"], 31)
+            again = await app._management.binding_status_exact(binding.id, snapshot=idle)
+            self.assertEqual(again.observations.json(), historical)
 
     async def test_sampling_failures_leave_native_result_and_delivery_intact(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
@@ -195,7 +209,8 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
                 card = await click(await click(card, "下一页"), "下一页")
                 card = await click(card, "设为当前")
                 self.assertEqual(fx.store.active_binding(scope.key).id, records[0].id)
-                self.assertIsNotNone(_card_button_value(card, "上一页"))
+                previous = await click(card, "上一页")
+                self.assertIn("第 2 页", str(previous.card))
                 with patch.object(app._management, "binding_status_exact", side_effect=TimeoutError):
                     fallback = (await app._sessions_card(scope=scope)).card
                 buttons = [button["text"]["content"] for button in _elements(fallback, "button")]
@@ -213,16 +228,20 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
         async with channel_fixture() as fx:
             scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
             binding = (await fx.create_binding(scope)).binding
-            self.assertIs(fx.app._context_usage_field(binding, active_turn=False).availability, Availability.NOT_APPLICABLE)
+            with patch.object(fx.runtime, "context_window_usage", side_effect=AssertionError("lazy read")):
+                self.assertIs(fx.app._context_usage_field(binding, active_turn=False).availability, Availability.NOT_APPLICABLE)
             fx.runtime.materialize(binding.id, "native", cwd=fx.project)
             binding = fx.store.get(binding.id)
             self.assertIs(fx.app._context_usage_field(binding, active_turn=False).availability, Availability.UNOBSERVED)
+            with patch.object(fx.runtime, "context_window_read_failed_at", return_value=12.5):
+                failed = fx.app._context_usage_field(binding, active_turn=False)
+                self.assertEqual((failed.availability, failed.sampled_at), (Availability.UNAVAILABLE, 12.5))
             fx.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(7, 100, 123)
             for active in (True, False):
                 field = fx.app._context_usage_field(binding, active_turn=active)
                 self.assertEqual((field.sampled_at, field.source, field.usage.used_tokens), (123, "Codex token usage", 7))
-            with patch.object(fx.runtime, "context_window_usage", side_effect=OSError):
-                self.assertIs(fx.app._context_usage_field(binding, active_turn=False).availability, Availability.UNAVAILABLE)
+            with patch.object(fx.runtime, "context_window_usage", side_effect=OSError), self.assertRaises(OSError):
+                fx.app._context_usage_field(binding, active_turn=False)
             model = await fx.app._binding_model_status(binding)
             for field in (model.model, model.effort, model.speed, model.configuration):
                 self.assertIsNotNone(field.sampled_at)

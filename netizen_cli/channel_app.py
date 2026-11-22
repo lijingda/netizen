@@ -118,7 +118,7 @@ class ChannelApplication(ChannelEntry):
         app_id: str,
         channel: ReplyChannel,
         runtime: CodexRuntime | None,
-        policy: BackendPolicy = BackendPolicy("codex"),
+        policy: BackendPolicy | None = None,
         ordinary: OrdinarySessionPort | None = None,
         bindings: BindingStore,
         projects: ProjectRegistry,

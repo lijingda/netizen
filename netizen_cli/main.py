@@ -60,7 +60,7 @@ from .worktrees.settings import WorktreeSettingsService
 from .admin.users import AdminIdentity, AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
 from .cli_setup import require_admin_binding, SetupError
-from .backends import BackendPolicy, instance_backend
+from .backends import instance_backend
 from .bindings import BindingStore, SideTopicRecord
 from .builtin_skills import builtin_skill_root
 from .cli_data import (
@@ -188,7 +188,6 @@ def build_channel(settings: Settings, store: BindingStore) -> FeishuChannel:
 
 @dataclass(frozen=True, slots=True)
 class BackendAssembly:
-    policy: BackendPolicy
     ordinary: OrdinarySessionPort
     shutdown: SessionShutdownPort
     management: ManagementRuntimePort
@@ -277,7 +276,7 @@ class ServiceCore:
             on_completion=completed, notice=notice,
         )
         return BackendAssembly(
-            self._claude.backend_policy, self._claude, self._claude,
+            self._claude, self._claude,
             ManagementRuntimePort(None, ordinary=self._claude, local=self._claude),
         )
 
@@ -378,7 +377,7 @@ class ServiceCore:
         )
         ordinary = CodexOrdinarySessions(self._runtime)
         return BackendAssembly(
-            BackendPolicy("codex"), ordinary, self._runtime,
+            ordinary, self._runtime,
             ManagementRuntimePort(self._runtime, ordinary=ordinary), expired_sides, recovery_started_at,
         )
 
@@ -458,12 +457,11 @@ class ServiceCore:
             if self._admin is not None:
                 self._admin.attach_management(
                     self._management, session_policy=self._session_policy, group_access=group_access,
-                    **({"backend_policy": backend.policy} if backend.policy.owner_id is not None else {}),
                 )
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
                 channel=self._channel,
-                runtime=self._runtime, ordinary=backend.ordinary, policy=backend.policy,
+                runtime=self._runtime, ordinary=backend.ordinary,
                 bindings=self._store,
                 projects=self._projects,
                 message_history=FeishuMessageHistoryReader(

@@ -19,11 +19,10 @@ from ..bindings import BindingTaskFeedback, BindingTurnSettings
 from ..domain import ActiveState, MessageContextAnchor, MentionContextMode
 from ..session_settings import require_local_settings
 from ..ordinary_sessions import (
-    LocalExecutionSnapshot, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
+    LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
     PreparedPrompt, SessionShutdownPort, StopPreview,
 )
-from ..session_views import SessionObservations
-from .claude_status import ClaudeObservations, record_observation
+from .claude_status import ClaudeObservations, DEFAULT_OBSERVATIONS, record_observation
 from .claude_client import ClaudeClient, ClaudeClients, single_message, user_message
 from .contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
@@ -138,6 +137,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self.observations = ClaudeObservations()
         self._clients = clients
         self._owner = owner_id
+        self.backend_policy = BackendPolicy("claude", owner_id)
         self._completion = on_completion
         self._notice = notice
         self._clock = clock
@@ -539,12 +539,18 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             self._advance(binding_id)
             return removed
 
-    @property
-    def backend_policy(self) -> BackendPolicy:
-        return BackendPolicy("claude", self._owner)
+    observation_defaults = DEFAULT_OBSERVATIONS
 
-    def session_observations(self, binding_id: str, session: str | None, execution: str | None) -> SessionObservations:
-        return self.observations.read(binding_id, session, execution)
+    def capture_status(self, binding_id: str) -> LocalStatusSnapshot:
+        local = self.local_snapshot(binding_id)
+        session = self._bindings.get(binding_id).native_thread_id
+        execution = local.turn.turn_id if local.turn is not None else None
+        samples = self.observations.read(binding_id, session, execution)
+        return LocalStatusSnapshot(
+            binding_id=binding_id, activity_revision=local.revision, turn=local.turn, goal=None,
+            compacting=False, lifecycle=None, subscription=None, context_window_usage=None,
+            local=local, session_id=session, observations=samples,
+        )
 
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot:
         execution = self._active.get(binding_id)

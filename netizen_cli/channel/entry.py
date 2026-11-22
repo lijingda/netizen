@@ -173,8 +173,6 @@ class ChannelEntry(CommandChannel):
             if is_status_command(value):
                 if value.get("target_kind") == "side":
                     raise CardActionError("Claude 试点暂不支持【Side】。")
-                if value.get("command") == "stop":
-                    raise CardActionError("停止操作需要原执行标识，请重新发送 /status。")
                 require_command(self._policy, str(value.get("command", "")))
             elif value.get("intent"):
                 try:

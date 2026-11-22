@@ -147,6 +147,7 @@ class CardControlChannel(TurnFileChannel):
             async with generation.update_lock:
                 if generation.invalidated:
                     return True
+                self._management.title_writer_for(binding)
                 async with asyncio.timeout(5):
                     return await self._safe_update_card(
                         intent.source_id,
@@ -154,6 +155,7 @@ class CardControlChannel(TurnFileChannel):
                             scope=intent.scope, binding_id=binding.id,
                             short_id=binding.short_id, project_alias=binding.project_alias,
                             generating=generating, generated_name=name, notice=notice,
+                            sync_hint=self._management.names.sync_hint,
                             can_generate=self._policy.allows(OperationId.GENERATE_NAME),
                         ),
                     )
@@ -896,7 +898,7 @@ class CardControlChannel(TurnFileChannel):
         try:
             if self._local_sessions is not None and intent.from_status:
                 card = local_status_card(intent.scope, binding, await self._management.binding_status_exact(binding.id),
-                                         allow_stop=self._policy.allows(OperationId.STOP))
+                                         self._local_sessions.observation_defaults)
             else:
                 card = await self._sessions_card(scope=intent.scope, page=intent.page,
                                                  session_cursor=intent.session_cursor, notice=notice)

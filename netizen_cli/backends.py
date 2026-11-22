@@ -332,6 +332,10 @@ class BackendPolicy:
     def display_name(self) -> str:
         return "Claude Code" if self.backend == "claude" else "Codex"
 
+    @property
+    def inherited_model_label(self) -> str:
+        return "原生 Claude 设置" if self.owner_only else "继承 Codex"
+
     def has_provider(self, provider: Provider) -> bool:
         if self.providers is not None:
             return self.providers(provider)

@@ -57,6 +57,7 @@ class RenameNameChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_card_button_value(self.card, "自动生成")["binding_id"],
                          f"binding:v1:{self.binding.id}")
         loading = rename_binding_card(
+            sync_hint="保存后名称同步显示在 Codex App/CLI。",
             scope=self.scope, binding_id=self.binding.id, short_id=self.binding.short_id,
             project_alias=self.binding.project_alias, generating=True,
         )

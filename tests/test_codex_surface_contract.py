@@ -167,8 +167,8 @@ async def admin_surfaces(fx, calls):
             result[state] = await request("sessions?inventoryState=" + state)
         native_id = "thread-a"
         fx.runtime.archived_thread_metadata_values[native_id] = fx.runtime.thread_metadata_values.pop(native_id)
-        result["archived"] = await request("sessions?inventoryState=archived")
-        assert result["archived"][1]["items"][0]["catalogState"] == "archived"
+        result["archived_with_row"] = await request("sessions?inventoryState=archived")
+        assert result["archived_with_row"][1]["items"][0]["catalogState"] == "archived"
         fx.runtime.thread_metadata_values[native_id] = fx.runtime.archived_thread_metadata_values.pop(native_id)
         binding_id = result["active"][1]["items"][0]["bindingId"]
         result["poll"] = await request("runtime-snapshots?resolvePrimary=true&bindingIds=" + binding_id)
@@ -181,6 +181,9 @@ async def admin_surfaces(fx, calls):
                 payload["name"] = "from admin"
             result[key] = await request("sessions/" + route, payload)
             result[key + "_replay"] = await request("sessions/" + route, payload)
+        result["archived"] = await request("sessions?inventoryState=archived")
+        status, empty = result["archived"]
+        assert status == 200 and empty["items"] == [] and empty["nextCursor"] is None
         result["nativeAccess"] = traces
         return result
     finally:
