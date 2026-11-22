@@ -576,7 +576,7 @@ class ChannelState:
             message_id=_message_id(message),
             sender_id=_sender_id(message),
             text=_body_text(message, bot_open_id=_channel_bot_open_id(self._channel)),
-            available_capabilities=() if self._policy.backend == "claude" else self._runtime.available_capabilities,
+            available_capabilities=self._codex.available_capabilities if self._codex is not None else (),
             policy=self._policy,
         )
 
@@ -975,6 +975,5 @@ class ChannelState:
         return "\n\n".join(lines)
 
     def _help(self) -> str:
-        if self._policy.backend == "claude":
-            return "Claude 会话：/new 新建 · /sessions 列表 · /resume 切换 · /status 状态 · /stop 停止 · /config 会话设置 · /defaults 默认设置 · /projects 项目 · /admin 管理。"
-        return command_help(self._runtime.available_capabilities)
+        capabilities = self._codex.available_capabilities if self._codex is not None else ()
+        return command_help(capabilities, policy=self._policy)

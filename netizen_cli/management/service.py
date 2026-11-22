@@ -12,7 +12,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
-from ..backends import BackendUnsupported as BackendUnsupported
+from ..backends import BackendPolicy, BackendUnsupported as BackendUnsupported, OperationId, OPERATIONS, Provider
+from ..session_providers import ManualTitleWriter, SessionNames
 from ..session_settings import require_local_settings
 from ..management_errors import ConversationReadError as ConversationReadError, ManagementError
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
@@ -523,10 +524,11 @@ class ManagementRuntimePort:
     it.
     """
 
-    __slots__ = ("__codex", "__ordinary", "local")
+    __slots__ = ("__codex", "__ordinary", "local", "names")
 
     def __init__(self, runtime: CodexRuntime | None, *, ordinary: OrdinarySessionPort,
-                 local: LocalSessionManagement | None = None) -> None:
+                 local: LocalSessionManagement | None = None, names: SessionNames | None = None) -> None:
+        self.names = names if names is not None else SessionNames.from_runtime(runtime)
         self.__codex = runtime
         self.local = local
         self.__ordinary: OrdinarySessionPort = ordinary
@@ -601,11 +603,9 @@ class ManagementRuntimePort:
             service_tier_id=resolved.service_tier_id,
         )
 
-    async def generate_name_exact(self, binding_id: str) -> str:
-        return await self.__runtime.generate_name_exact(binding_id)
-
-    async def rename_exact(self, binding_id: str, name: str) -> str:
-        return await self.__runtime.rename_exact(binding_id, name)
+    @property
+    def has_codex_runtime(self) -> bool:
+        return self.__codex is not None
 
     async def archive_exact(self, binding_id: str) -> ThreadBinding:
         return await self.__runtime.archive_exact(binding_id)
@@ -848,6 +848,7 @@ class InstanceManagementService:
         self._projects = projects
         self._runtime = runtime
         self.local = runtime.local if isinstance(runtime, ManagementRuntimePort) else None
+        self.names = runtime.names if isinstance(runtime, ManagementRuntimePort) else SessionNames.from_runtime(runtime)
         self._scope_coordinator = scope_coordinator
         self._updates = updates or UpdateService(root=root)
         self._progress_card_config = progress_card_config or ProgressCardConfigService()
@@ -898,20 +899,20 @@ class InstanceManagementService:
         )
 
     def progress_card_settings(self) -> dict[str, Any]:
-        self._require_codex_feature("过程卡")
+        self._require_operation(OperationId.PROGRESS)
         return self._progress_card_config.view()
 
     async def update_progress_card_settings(
         self, settings: ProgressCardSettings, *, expected_revision: str,
     ) -> dict[str, Any]:
-        self._require_codex_feature("过程卡")
+        self._require_operation(OperationId.PROGRESS)
         await self.submit_config_write(
             self._progress_card_config.update, settings, expected_revision=expected_revision,
         )
         return self.progress_card_settings()
 
     def question_notification_settings(self) -> dict[str, Any]:
-        self._require_codex_feature("原生提问通知")
+        self._require_operation(OperationId.QUESTIONS)
         return self._question_notification_config.view()
 
     @property
@@ -921,7 +922,7 @@ class InstanceManagementService:
     async def update_question_notification_settings(
         self, settings: QuestionNotificationSettings, *, expected_revision: str,
     ) -> dict[str, Any]:
-        self._require_codex_feature("原生提问通知")
+        self._require_operation(OperationId.QUESTIONS)
         await self.submit_config_write(
             self._question_notification_config.update, settings, expected_revision=expected_revision,
         )
@@ -941,7 +942,7 @@ class InstanceManagementService:
     async def update_session_tool_access(
         self, service: SessionPolicyService, policy: SessionAccessPolicy, *, expected_revision: str,
     ) -> None:
-        self._require_codex_feature("会话协作权限")
+        self._require_operation(OperationId.COLLABORATION)
         await self.submit_config_write(
             service.update, policy, expected_revision=expected_revision,
         )
@@ -970,8 +971,45 @@ class InstanceManagementService:
             "chats": [{"chatId": chat_id, "name": labels[chat_id].display_name} for chat_id in chat_ids],
         }
 
+    def has_provider(self, provider: Provider) -> bool:
+        match provider:
+            case Provider.HOST | Provider.ORDINARY:
+                return True
+            case Provider.CODEX_RUNTIME:
+                return self._runtime.has_codex_runtime if isinstance(self._runtime, ManagementRuntimePort) else self.local is None
+            case Provider.SCHEDULER:
+                return self.schedules is not None
+            case Provider.TITLE_WRITER:
+                return self.names.writer is not None
+            case Provider.NAME_GENERATOR:
+                return self.names.generate is not None
+
+    def operation_policy(self, identity: BackendPolicy) -> BackendPolicy:
+        return identity.bind(self.has_provider)
+
+    def _unavailable(self, operation: OperationId) -> BackendUnsupported:
+        label = OPERATIONS[operation].label
+        detail = None if self.local is not None else f"当前实例不支持【{label}】。"
+        return BackendUnsupported(label, detail=detail)
+
+    def _require_operation(self, operation: OperationId) -> None:
+        if not self.has_provider(OPERATIONS[operation].provider):
+            raise self._unavailable(operation)
+
+    def _title_writer(self) -> ManualTitleWriter:
+        writer = self.names.writer
+        if writer is None:
+            raise self._unavailable(OperationId.MANUAL_RENAME)
+        return writer
+
+    def _name_generator(self) -> Callable[[str], Awaitable[str]]:
+        generate = self.names.generate
+        if generate is None:
+            raise self._unavailable(OperationId.GENERATE_NAME)
+        return generate
+
     def _require_codex_feature(self, label: str) -> None:
-        if self.local is not None:
+        if not self.has_provider(Provider.CODEX_RUNTIME):
             raise BackendUnsupported(label)
 
     def enable_schedules(self, *, app_id: str, chat_info: Any = None) -> ScheduleService:
@@ -1484,7 +1522,7 @@ class InstanceManagementService:
         deadline: float,
     ) -> ScopeSessionPage:
         """Read one Scope page, with an independent exact current-session entry."""
-        self._require_codex_feature("原生会话目录或历史")
+        self._require_operation(OperationId.HISTORY)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("page size must be between 1 and 100")
         if archived and lazy:
@@ -1542,7 +1580,7 @@ class InstanceManagementService:
         cursor: str | None = None, limit: int = 10,
         previous_page: NativeConversationPage | None = None,
     ) -> NativeConversationPage:
-        self._require_codex_feature("原生会话目录或历史")
+        self._require_operation(OperationId.HISTORY)
         binding = self._bindings.get(binding_id)
         if binding.native_thread_id is None or binding.native_thread_id != thread_id:
             raise NativeThreadMissing("Exact native Thread identity is no longer available")
@@ -1573,7 +1611,7 @@ class InstanceManagementService:
         A missing summary says nothing about native archive/existence state.
         Timed-out SDK workers remain counted until their requests finish.
         """
-        self._require_codex_feature("原生会话目录或历史")
+        self._require_operation(OperationId.HISTORY)
         binding = self._bindings.get(binding_id)
         views = await self._session_native_views((binding,), native=None, deadline=deadline)
         view = views.get(binding.native_thread_id)
@@ -1587,7 +1625,7 @@ class InstanceManagementService:
         limit: int = 25,
         deadline: float,
     ) -> SideTopicInventoryPage:
-        self._require_codex_feature("Side")
+        self._require_operation(OperationId.SIDE)
         projects = (query.project_alias,) if query.project_alias is not None else query.project_aliases
         page = await self._bindings.query_side_topics(
             query=query,
@@ -1749,7 +1787,7 @@ class InstanceManagementService:
         if len(binding_ids) + len(side_ids) > 50:
             raise ValueError("runtime snapshot request accepts at most 50 IDs")
         if side_ids:
-            self._require_codex_feature("Side")
+            self._require_operation(OperationId.SIDE)
         binding_snapshots = []
         for binding_id in binding_ids:
             binding = self._bindings.get(binding_id)
@@ -1976,7 +2014,7 @@ class InstanceManagementService:
         reference: str,
         context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话恢复")
+        self._require_operation(OperationId.UNARCHIVE)
         async with self._scope_coordinator.hold(scope_key):
             previous_id = self._active_id(scope_key)
             binding = self._bindings.resolve_reference(
@@ -2021,10 +2059,10 @@ class InstanceManagementService:
     async def generate_current_binding_name(
         self, *, target: CurrentBindingTarget,
     ) -> GeneratedBindingName:
-        self._require_codex_feature("会话命名")
         async with self._scope_coordinator.hold(target.scope_key):
+            generate = self._name_generator()
             binding = self._require_current(target)
-        name = await self._runtime.generate_name_exact(binding.id)
+        name = await generate(binding.id)
         async with self._scope_coordinator.hold(target.scope_key):
             current = self._require_current(target)
             if current.native_thread_id != binding.native_thread_id:
@@ -2037,12 +2075,12 @@ class InstanceManagementService:
         target: CurrentBindingTarget,
         name: str,
     ) -> RenamedBinding:
-        self._require_codex_feature("会话命名")
         async with self._scope_coordinator.hold(target.scope_key):
+            writer = self._title_writer()
             binding = self._require_current(target)
         # Capture the exact target under Scope coordination, but never hold
         # that lock while waiting for a previous name writer to finish.
-        normalized = await self._runtime.rename_exact(binding.id, name)
+        normalized = await writer.rename_exact(binding.id, name)
         return RenamedBinding(binding=binding, name=normalized)
 
     async def archive_current_binding(
@@ -2050,7 +2088,7 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话归档")
+        self._require_operation(OperationId.ARCHIVE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             previous_id = binding.id
@@ -2067,7 +2105,7 @@ class InstanceManagementService:
         target: CurrentBindingTarget,
         expected_native_thread_id: str | None,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话删除")
+        self._require_operation(OperationId.DELETE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             if binding.native_thread_id != expected_native_thread_id:
@@ -2093,7 +2131,7 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
     ) -> ReleasedBinding:
-        self._require_codex_feature("释放会话订阅")
+        self._require_operation(OperationId.RELEASE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             disposition = await self._runtime.release_exact(binding.id)
@@ -2187,10 +2225,10 @@ class InstanceManagementService:
     async def generate_exact_binding_name(
         self, *, target: ExactBindingTarget,
     ) -> GeneratedBindingName:
-        self._require_codex_feature("会话命名")
         async with self._scope_coordinator.hold(target.scope_key):
+            generate = self._name_generator()
             binding, _ = self._require_exact(target)
-        name = await self._runtime.generate_name_exact(binding.id)
+        name = await generate(binding.id)
         async with self._scope_coordinator.hold(target.scope_key):
             current, _ = self._require_exact(target)
             if current.native_thread_id != binding.native_thread_id:
@@ -2203,10 +2241,10 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         name: str,
     ) -> RenamedBinding:
-        self._require_codex_feature("会话命名")
         async with self._scope_coordinator.hold(target.scope_key):
+            writer = self._title_writer()
             binding, _ = self._require_exact(target)
-        normalized = await self._runtime.rename_exact(binding.id, name)
+        normalized = await writer.rename_exact(binding.id, name)
         return RenamedBinding(binding=binding, name=normalized)
 
     async def archive_exact_binding(
@@ -2214,7 +2252,7 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话归档")
+        self._require_operation(OperationId.ARCHIVE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact_lifecycle_target(target)
         archived = await self._runtime.archive_exact(binding.id)
@@ -2229,7 +2267,7 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话恢复")
+        self._require_operation(OperationId.UNARCHIVE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             return await self._runtime.restore_exact(binding.id)
@@ -2239,7 +2277,7 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话恢复")
+        self._require_operation(OperationId.UNARCHIVE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact(target)
             restored = await self._runtime.restore_as_current_exact(binding.id)
@@ -2251,7 +2289,7 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话删除")
+        self._require_operation(OperationId.DELETE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact(target)
             deleted = await self._runtime.delete_lazy_exact(binding.id)
@@ -2265,7 +2303,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         expected_native_thread_id: str | None,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话删除")
+        self._require_operation(OperationId.DELETE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
@@ -2288,7 +2326,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         expected_native_thread_id: str,
     ) -> ThreadBinding:
-        self._require_codex_feature("会话删除")
+        self._require_operation(OperationId.DELETE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
@@ -2311,7 +2349,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> ReleasedBinding:
-        self._require_codex_feature("释放会话订阅")
+        self._require_operation(OperationId.RELEASE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             self._require_runtime_precondition(binding.id, runtime_precondition)
@@ -2363,7 +2401,7 @@ class InstanceManagementService:
         acknowledge: StopAcknowledger | None = None,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> StopDisposition:
-        self._require_codex_feature("Side")
+        self._require_operation(OperationId.SIDE)
         record = self._bindings.get_side_topic(target.side_id)
         self._require_side_identity(record, target)
         if record.state is not SideTopicState.OPEN:
@@ -2381,7 +2419,7 @@ class InstanceManagementService:
         *,
         target: CurrentSideTarget,
     ) -> ClosedSide:
-        self._require_codex_feature("Side")
+        self._require_operation(OperationId.SIDE)
         record = self._bindings.get_side_topic(target.side_id)
         self._require_side_identity(record, target)
         if record.state.terminal and self._runtime.side_snapshot_exact(record.id) is None:

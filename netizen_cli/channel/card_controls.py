@@ -18,7 +18,7 @@ from ..bindings import (
     SideTopicState,
     ThreadBinding,
 )
-from ..backends import BackendUnsupported
+from ..backends import BackendUnsupported, OperationId
 from ..session_settings import require_local_settings
 from ..cards import (
     CardActionError,
@@ -155,6 +155,7 @@ class CardControlChannel(TurnFileChannel):
                             scope=intent.scope, binding_id=binding.id,
                             short_id=binding.short_id, project_alias=binding.project_alias,
                             generating=generating, generated_name=name, notice=notice,
+                            can_generate=self._policy.allows(OperationId.GENERATE_NAME),
                         ),
                     )
 
@@ -209,8 +210,8 @@ class CardControlChannel(TurnFileChannel):
                 self._rename_name_generations.pop(intent.source_id)
 
     async def _card_control(self, intent: CardControlIntent) -> None:
+        self._policy.require_card(intent.name.value)
         if self._policy.backend == "claude":
-            self._policy.require_card(intent.name.value)
             require_local_settings(bool(intent.model_id or intent.effort_id or intent.service_tier_id),
                                    BindingTaskFeedback(progress_card_enabled=bool(intent.progress_card_enabled),
                                                        progress_card_settings=intent.progress_card_settings))

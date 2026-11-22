@@ -89,7 +89,7 @@ from .queries import (
 )
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
-from ..backends import BackendPolicy
+from ..backends import BackendPolicy, OperationId, OPERATIONS
 from ..ordinary_sessions import OrdinaryInputRejected
 from ..backends import BackendUnsupported
 from .users import OwnerOnly
@@ -356,7 +356,10 @@ class AdminWebApplication:
     ) -> None:
         self._auth = auth
         self._management = management
-        self._backend_policy = backend_policy
+        self._backend_policy = (
+            management.operation_policy(backend_policy)
+            if isinstance(management, InstanceManagementService) else backend_policy
+        )
         self._instance_root = instance_root
         self._users = auth.users
         self._credentials = credentials
@@ -371,9 +374,6 @@ class AdminWebApplication:
         self._origins: frozenset[str] = frozenset()
         self._mutation_tasks: set[asyncio.Task[object]] = set()
         self._assets = _load_assets()
-        self._assets["index.html"] = self._assets["index.html"].replace(
-            b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(instance_root)).encode("utf-8")
-        )
 
     @property
     def ready(self) -> bool:
@@ -640,13 +640,14 @@ class AdminWebApplication:
         path = context.path.removeprefix("/api/v1")
         if path in {"/admin-users/add", "/admin-users/selector-config"}:
             raise OwnerOnly()
-        self._backend_policy.require_api(path)
-        if path == "/runtime-snapshots" and context.query.get("sideIds"):
-            raise BackendUnsupported("Side")
 
     async def _dispatch_authenticated(self, context: _RequestContext) -> Response:
         if self._backend_policy.backend == "claude":
             self._check_owner_route(context)
+        if context.path.startswith("/api/v1/"):
+            self._backend_policy.require_api(context.method, context.path.removeprefix("/api/v1"))
+            if context.method == "GET" and context.path == "/api/v1/runtime-snapshots" and context.query.get("sideIds"):
+                self._backend_policy.require(OperationId.SIDE)
         route = (context.method, context.path)
         if context.method == "GET" and context.path.removeprefix("/static/") in _CONTENT_VIEWER_ASSETS and context.path.startswith("/static/"):
             name = context.path.removeprefix("/static/")
@@ -672,11 +673,17 @@ class AdminWebApplication:
         }:
             return await self._project_files(context)
         if context.method == "GET" and context.path in _ADMIN_PAGE_PATHS:
+            page = self._assets["index.html"]
+            if self._backend_policy.backend == "claude":
+                page = page.replace(b"<body>", b'<body data-backend="claude">', 1)
+            page = page.replace(
+                b" data-netizen-generate-name-visibility",
+                b"" if self._backend_policy.allows(OperationId.GENERATE_NAME) else b" hidden",
+            ).replace(b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(self._instance_root)).encode())
             return Response(
                 200,
                 ((b"Content-Type", b"text/html; charset=utf-8"), (b"Content-Security-Policy", _SELECTOR_CSP)),
-                (self._assets["index.html"].replace(b"<body>", b'<body data-backend="claude">', 1)
-                 if self._backend_policy.backend == "claude" else self._assets["index.html"]),
+                page,
             )
         if route == ("GET", "/static/admin.js"):
             return Response(
@@ -1727,7 +1734,7 @@ class AdminWebApplication:
         _require_query_keys(context.query, allowed)
         page_size = _session_page_size(context.query)
         sort_by, sort_direction = _session_order_query(context.query)
-        local_only = self._backend_policy.backend == "claude"
+        local_only = not self._backend_policy.allows(OperationId.HISTORY)
         if local_only:
             if "sortBy" not in context.query:
                 sort_by = "created_at"
@@ -1870,23 +1877,23 @@ class AdminWebApplication:
             actions["activate"] = grants.add(
                 "sessions.activate", target, preconditions
             )
-        local_only = self._backend_policy.backend == "claude"
-        if binding.native_thread_id is None and not local_only:
+        if binding.native_thread_id is None and self._backend_policy.allows(OperationId.DELETE):
             actions["deleteLazy"] = grants.add(
                 "sessions.delete-lazy", target, preconditions
             )
-        elif native_state is NativeThreadCatalogState.ACTIVE:
-            actions["rename"] = grants.add(
-                "sessions.rename", target, preconditions
-            )
-            actions["generateName"] = grants.add(
-                "sessions.generate-name", target, preconditions
-            )
-            if status.can_release:
+        for operation in (OperationId.MANUAL_RENAME, OperationId.GENERATE_NAME):
+            definition = OPERATIONS[operation]
+            if self._backend_policy.allows(operation) and definition.offers_name_action(
+                materialized=binding.native_thread_id is not None,
+                active_catalog_row=native_state is NativeThreadCatalogState.ACTIVE,
+            ):
+                actions[definition.action_key] = grants.add(definition.grant, target, preconditions)
+        if native_state is NativeThreadCatalogState.ACTIVE:
+            if status.can_release and self._backend_policy.allows(OperationId.RELEASE):
                 actions["release"] = grants.add(
                     "sessions.release", target, preconditions
                 )
-        elif native_state is NativeThreadCatalogState.ARCHIVED:
+        elif native_state is NativeThreadCatalogState.ARCHIVED and self._backend_policy.allows(OperationId.UNARCHIVE):
             actions["unarchive"] = grants.add(
                 "sessions.unarchive", target, preconditions
             )
@@ -1896,7 +1903,8 @@ class AdminWebApplication:
                 )
         # A persistent fork may exist before it appears in native catalogs.
         # Keep exact lifecycle controls available and let the native call decide.
-        if not local_only and binding.native_thread_id is not None and native_state is not NativeThreadCatalogState.ARCHIVED:
+        if (self._backend_policy.allows(OperationId.ARCHIVE) and binding.native_thread_id is not None
+                and native_state is not NativeThreadCatalogState.ARCHIVED):
             actions["archive"] = grants.add(
                 "sessions.archive",
                 target,
@@ -1946,7 +1954,7 @@ class AdminWebApplication:
             "sessionSettings": SessionSettings.from_binding(binding).to_dict(),
             "runtime": _runtime_binding_json(status),
             "actions": actions,
-            **({"nativeDetailsAvailable": False} if local_only else {}),
+            **({} if self._backend_policy.allows(OperationId.HISTORY) else {"nativeDetailsAvailable": False}),
         }
 
     async def _runtime_snapshots(self, context: _RequestContext) -> Response:
@@ -2360,10 +2368,10 @@ class AdminWebApplication:
 
     async def _session_generate_name(self, context: _RequestContext) -> Response:
         _payload, grant = self._redeem(
-            context, "sessions.generate-name", expected_resource="binding",
+            context, OPERATIONS[OperationId.GENERATE_NAME].grant, expected_resource="binding",
         )
         generated = await self._mutation(
-            context, "sessions.generate-name", grant.target.target_id,
+            context, OPERATIONS[OperationId.GENERATE_NAME].grant, grant.target.target_id,
             self._management.generate_exact_binding_name(target=_binding_target(grant)),
         )
         return _json_response(200, {
@@ -2375,14 +2383,14 @@ class AdminWebApplication:
     async def _session_rename(self, context: _RequestContext) -> Response:
         payload, grant = self._redeem(
             context,
-            "sessions.rename",
+            OPERATIONS[OperationId.MANUAL_RENAME].grant,
             expected_resource="binding",
             allowed_extra={"name"},
         )
         name = _required_text(payload, "name", maximum=120)
         renamed = await self._mutation(
             context,
-            "sessions.rename",
+            OPERATIONS[OperationId.MANUAL_RENAME].grant,
             grant.target.target_id,
             self._management.rename_exact_binding(
                 target=_binding_target(grant),

@@ -26,7 +26,7 @@ from ..cards.scheduled import (
 from ..cards.questions import (
     is_question_card_action,
 )
-from ..backends import BackendUnsupported
+from ..backends import BackendUnsupported, OperationId
 from ..cards.controls import local_form_fields
 from ..cards.defaults import is_defaults_card_action
 from ..cards.status import (
@@ -192,33 +192,35 @@ class ChannelEntry(CommandChannel):
     async def handle_card_action(self, event: Any) -> None:
         group_rule, _ = self._group_access.snapshot()
         chat_id = str(getattr(event, "chat_id", "") or "")
-        if self._policy.backend == "claude":
-            sender = authenticated_sender(event, self._app_id, card=True)
-            refusal = self._policy.sender_refusal(sender)
-            if not refusal:
-                action = getattr(event, "action", None)
-                value = getattr(action, "value", None)
-                form = getattr(action, "form_value", None)
-                if is_fork_card_action(value, form):
-                    refusal = self._policy.operation_refusal("fork", "会话分支")
-                elif is_schedule_card_action(value, form):
-                    refusal = self._policy.operation_refusal("schedule", "定时任务")
-                elif is_question_card_action(value, form):
-                    refusal = self._policy.operation_refusal("questions", "原生提问")
-                elif is_turn_file_action(value):
-                    refusal = self._policy.operation_refusal("files", "本轮文件")
-                else:
+        local = self._policy.backend == "claude"
+        refusal = self._policy.sender_refusal(authenticated_sender(event, self._app_id, card=True)) if local else None
+        action = getattr(event, "action", None)
+        value = getattr(action, "value", None)
+        form = getattr(action, "form_value", None)
+        special = None
+        if not refusal:
+            if is_fork_card_action(value, form):
+                special = OperationId.FORK
+            elif is_schedule_card_action(value, form):
+                special = OperationId.SCHEDULE
+            elif is_question_card_action(value, form):
+                special = OperationId.QUESTIONS
+            elif is_turn_file_action(value):
+                special = OperationId.FILES
+            try:
+                if special is not None:
+                    self._policy.require(special)
+                elif local:
                     assert self._management.local is not None
-                    try:
-                        self._check_local_card(value, form)
-                        self._management.local.require_admission()
-                    except (BackendUnsupported, CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
-                        refusal = str(error)
-            if refusal:
-                message_id = getattr(event, "message_id", "")
-                if message_id and chat_id:
-                    await self._reply(_CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(None)), refusal)
-                return
+                    self._check_local_card(value, form)
+                    self._management.local.require_admission()
+            except (BackendUnsupported, CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
+                refusal = str(error)
+        if refusal:
+            message_id = getattr(event, "message_id", "")
+            if message_id and chat_id:
+                await self._reply(_CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(None)), refusal)
+            return
         known_direct = False
         if not group_rule.allows(chat_id, None):
             try:
@@ -255,31 +257,22 @@ class ChannelEntry(CommandChannel):
                         reply_in_thread=getattr(chat_info, "chat_mode", None) == "topic",
                     )
                 return
-        action = getattr(event, "action", None)
-        if is_status_command(getattr(action, "value", None)):
+        if is_status_command(value):
             await self._handle_status_command(event)
             return
-        if is_fork_card_action(
-            getattr(action, "value", None), getattr(action, "form_value", None),
-        ):
+        if special is OperationId.FORK:
             await self._handle_fork_card_action(event)
             return
-        if is_defaults_card_action(
-            getattr(action, "value", None), getattr(action, "form_value", None),
-        ):
+        if is_defaults_card_action(value, form):
             await self._handle_defaults_card_action(event)
             return
-        if is_question_card_action(
-            getattr(action, "value", None), getattr(action, "form_value", None),
-        ):
+        if special is OperationId.QUESTIONS:
             await self._handle_question_card_action(event)
             return
-        if is_schedule_card_action(
-            getattr(action, "value", None), getattr(action, "form_value", None),
-        ):
+        if special is OperationId.SCHEDULE:
             await self._handle_schedule_card_action(event)
             return
-        if is_turn_file_action(getattr(action, "value", None)):
+        if special is OperationId.FILES:
             await self._handle_turn_file_card_action(event)
             return
         intent: CardControlIntent | None = None

@@ -60,6 +60,7 @@ from .worktrees.settings import WorktreeSettingsService
 from .admin.users import AdminIdentity, AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
 from .cli_setup import require_admin_binding, SetupError
+from .session_providers import SessionNames
 from .backends import BackendPolicy, instance_backend
 from .bindings import BindingStore, SideTopicRecord
 from .builtin_skills import builtin_skill_root
@@ -278,7 +279,7 @@ class ServiceCore:
         )
         return BackendAssembly(
             "Claude Code", BackendPolicy("claude", owner_id=owner.open_id), self._claude, self._claude,
-            ManagementRuntimePort(None, ordinary=self._claude, local=self._claude),
+            ManagementRuntimePort(None, ordinary=self._claude, local=self._claude, names=SessionNames()),
         )
 
     async def _assemble_codex(
@@ -379,7 +380,7 @@ class ServiceCore:
         ordinary = CodexOrdinarySessions(self._runtime)
         return BackendAssembly(
             "Codex", BackendPolicy("codex"), ordinary, self._runtime,
-            ManagementRuntimePort(self._runtime, ordinary=ordinary), expired_sides,
+            ManagementRuntimePort(self._runtime, ordinary=ordinary, names=SessionNames.from_runtime(self._runtime)), expired_sides,
         )
 
     async def start(self) -> None:

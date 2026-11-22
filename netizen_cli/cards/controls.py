@@ -1160,25 +1160,28 @@ def rename_binding_card(
     current_title: str | None = None,
     generated_name: str = "",
     generating: bool = False,
+    can_generate: bool = True,
     notice: str | None = None,
 ) -> OutboundCard:
     builder = _builder("重命名当前会话", f"Netizen 会话编号：{short_id} · {project_alias}")
     if current_title is not None:
         builder.markdown(f"当前名称：`{_md_code(current_title)}`")
-    builder.markdown("保存后名称同步显示在 Codex App/CLI。自动生成会清空当前输入，生成后可修改再保存。")
+    if can_generate:
+        builder.markdown("保存后名称同步显示在 Codex App/CLI。自动生成会清空当前输入，生成后可修改再保存。")
     if notice:
         builder.raw(_notice(notice, error=True))
     if generating:
         builder.raw(_notice("正在生成中…"))
         return OutboundCard(card=builder.to_dict())
-    # Keep this outside the form so an empty required name cannot block it.
-    builder.raw(_repeatable_callback_button(
-        label="自动生成",
-        value=_envelope(
-            scope, CardControlName.GENERATE_BINDING_NAME,
-            binding_id=_binding_reference(binding_id),
-        ),
-    ))
+    if can_generate:
+        # Keep this outside the form so an empty required name cannot block it.
+        builder.raw(_repeatable_callback_button(
+            label="自动生成",
+            value=_envelope(
+                scope, CardControlName.GENERATE_BINDING_NAME,
+                binding_id=_binding_reference(binding_id),
+            ),
+        ))
     builder.raw(
         {
             "tag": "form",

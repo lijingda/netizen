@@ -12,6 +12,7 @@ from lark_channel import (
     OutboundCard,
 )
 
+from ..backends import OperationId
 from ..bindings import (
     SideTopicState,
 )
@@ -156,6 +157,9 @@ class CommandChannel(CardControlChannel):
             if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.DEFAULTS}:
                 assert self._management.local is not None
                 self._management.local.require_admission()
+        refusal = self._policy.command_refusal(intent.name.value, archived=bool(intent.arguments))
+        if refusal:
+            raise InvalidInteraction(refusal)
         if expected_binding_id is not None:
             # No await before the selected command captures its Binding. The
             # ordinary command's existing exact-target checks protect mutations
@@ -478,7 +482,7 @@ class CommandChannel(CardControlChannel):
                 "请先发送一条真实任务，再使用 /rename。"
             )
         if not intent.arguments:
-            metadata = await self._read_thread_metadata((binding,))
+            metadata = await self._read_thread_metadata((binding,)) if self._policy.allows(OperationId.HISTORY) else {}
             await self._reply(
                 message,
                 rename_binding_card(
@@ -486,6 +490,7 @@ class CommandChannel(CardControlChannel):
                     binding_id=binding.id,
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
+                    can_generate=self._policy.allows(OperationId.GENERATE_NAME),
                     current_title=_session_title(
                         binding,
                         metadata.get(binding.native_thread_id),
