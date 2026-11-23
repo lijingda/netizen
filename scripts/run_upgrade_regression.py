@@ -28,6 +28,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from scripts.git_test_environment import clear_git_repository_environment
 from scripts.source_evidence import source_evidence  # noqa: E402
 
 FOOTER = "此结果只覆盖已知回归集，本次版本的新增行为仍须按升级审查第 2–4 步判断并补针对性验证。"
@@ -448,6 +449,7 @@ def write_summary(output_dir: Path, report: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    clear_git_repository_environment()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--group", action="append", choices=sorted({step.group for step in REGISTRY}))

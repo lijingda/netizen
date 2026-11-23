@@ -49,6 +49,7 @@ from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # no
 from netizen_cli.turn_patch_children import _has_parent  # noqa: E402
 from scripts.probe_child_files import _events  # noqa: E402
 from scripts.probe_persistent_fork import _config_digest  # noqa: E402
+from scripts.git_test_environment import clear_git_repository_environment
 from scripts.probe_python_sdk import (  # noqa: E402
     _final_response_from_turn, _public_terminal_turn, _status_value,
 )
@@ -426,4 +427,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    clear_git_repository_environment()
     main()

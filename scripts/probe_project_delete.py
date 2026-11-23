@@ -47,6 +47,7 @@ from netizen_cli.sdk_gap_adapter import (  # noqa: E402
     AppServerThreadSubscriptionControl,
 )
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup, SUPPORTED_SDK_VERSION  # noqa: E402
+from scripts.git_test_environment import clear_git_repository_environment
 from scripts.probe_python_sdk import (  # noqa: E402
     _prove_thread_absent_from_all_catalogs,
     _public_final_response,
@@ -314,6 +315,7 @@ async def probe(*, model: str | None = None) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
+    clear_git_repository_environment()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model", help="optional model intent on disposable Threads and Bindings only",

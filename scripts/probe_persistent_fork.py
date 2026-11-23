@@ -48,6 +48,7 @@ from netizen_cli.sdk_gap_adapter import (  # noqa: E402
     AppServerThreadSubscriptionControl, ThreadDeleteRejected,
 )
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
+from scripts.git_test_environment import clear_git_repository_environment
 from scripts.probe_python_sdk import (  # noqa: E402
     _final_response_from_turn, _public_terminal_turn, _status_value,
 )
@@ -286,4 +287,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    clear_git_repository_environment()
     main()

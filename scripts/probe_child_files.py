@@ -39,6 +39,7 @@ from netizen_cli.turn_patch_children import (  # noqa: E402
     collect_turn_patch_children,
 )
 from netizen_cli.sdk_gap_adapter import facade_migration_requirements  # noqa: E402
+from scripts.git_test_environment import clear_git_repository_environment
 from scripts.probe_python_sdk import (  # noqa: E402
     _public_terminal_turn,
     _status_value,
@@ -337,4 +338,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    clear_git_repository_environment()
     main()
