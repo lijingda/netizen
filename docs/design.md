@@ -1280,6 +1280,8 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0101](adr/0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页。Admin 按页内顺序在期限内读取每轮首项（升序、`limit=1`、最多十轮），首项为 `functionCallOutput` 时替换 Summary 输入 | shape/synthetic 与原生 paginated/legacy 探针。首项读取失败按 [Admin 对话记录规则](#管理查询与操作) 降级，legacy `-32601` 不告警。运行终态与 Files 仍有各自的证据读取。 | 公开等价历史分页 facade。 |
 | `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
 
+Claude 后台归属适配（ADR 0105）固定在 SDK 0.2.186／CLI 2.1.329。读取公开的 `SystemMessage.data`、Result 的 `origin`、任务和 run 标识；通过每客户端 `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS` 订阅状态，主会话 Stop 回调取得任务与会话 cron 清单。工作证据未齐时有界核实，冲突或核实失败按本轮降级处理。改动任一固定版本须重跑原生兼容组。带类型的公共 API 覆盖任务归属、成员清单与可关闭状态并通过同一行为门禁后移除此适配器。[ADR 0105 接受记录](adr/0105-extend-backends-through-capabilities-and-shared-presentation.md#接受记录)
+
 Channel SDK 的卡片原始结构适配见 [ADR 0099](adr/0099-project-original-card-content-with-bounded-component-adapter.md)
 及[引用读取与 SDK 内容适配](#引用读取与-sdk-内容适配)：仅用公开 SDK 取得原始卡片，
 按公开组件结构做有界正文投影，以实际读取契约与行为测试为门禁；不进入私有 API，
