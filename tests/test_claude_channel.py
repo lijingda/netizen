@@ -1011,35 +1011,175 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await ordinary.wait_idle(10))
             self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
                              ["answer"])
+    async def test_explore_owned_answers_on_the_channel(self):
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.ordinary_sessions import PhysicalAnswer
+        for cards in (False, True):
+            for order in ("BC", "CB"):
+                with self.subTest(cards=cards, departures=order):
+                    async with owner_channel() as (app, fx, clients, clock, ordinary):
+                        from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
+                        clock[0] = 2.
+                        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                        binding = fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                            task_feedback=BindingTaskFeedback(progress_card_enabled=cards, completion_mention_enabled=True))
+                        held, release = asyncio.Event(), asyncio.Event()
+                        confirmed = {}
+                        wire = {"H1": [], "H2": []}
+                        last_version = {}
+                        versions = {}
+                        bodies = ("launch-AB", "launch-C", "wake-A", "wake-B", "wake-C")
+                        original_reply, original_update = fx.channel.reply, fx.channel.update_card
+                        def observe(mid, content):
+                            last_version[mid] = str(content)
+                            for body in bodies:
+                                if body in str(content) and body not in versions.setdefault(mid, set()):
+                                    versions[mid].add(body)
+                                    wire[confirmed[mid]].append(body)
+                        async def reply(source, content, opts=None):
+                            await original_reply(source, content, opts)
+                            mid = "reply-" + str(len(confirmed))
+                            confirmed[mid] = source.id
+                            observe(mid, content)
+                            return SendResult.ok(message_id=mid)
+                        fallback = cards and order == "CB"
+                        async def update(mid, card):
+                            if fallback and "launch-AB" in str(card):
+                                return SendResult(success=False)
+                            observe(mid, card)
+                            return await original_update(mid, card)
+                        deliver = ordinary._completion
+                        async def handoff(event):
+                            if isinstance(event, PhysicalAnswer) and event.final_response == "wake-A":
+                                held.set()
+                                await release.wait()
+                            await deliver(event)
+                        with (patch.object(fx.channel, "reply", side_effect=reply),
+                              patch.object(fx.channel, "update_card", side_effect=update),
+                              patch.object(ordinary, "_completion", side_effect=handoff)):
+                            await app.handle_message(FakeMessage("first", message_id="H1"))
+                            cli = clients.calls[-1]
+                            tasks = set()
+                            def system(kind, **fields):
+                                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **fields}))
+                            def membership():
+                                system("background_tasks_changed", tasks=[{"task_id": k, "run_id": "r"+k} for k in sorted(tasks)])
+                            def assistant(block, message_id, parent=None):
+                                cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session,
+                                    uuid=message_id+type(block).__name__, message_id=message_id, parent_tool_use_id=parent))
+                            def launch(keys):
+                                for k in keys:
+                                    assistant(ToolUseBlock("tool"+k, "Bash", {}), "launch"+k)
+                                    system("task_started", task_id=k, run_id="r"+k, tool_use_id="tool"+k)
+                                    tasks.add(k)
+                                membership()
+                            def result(k):
+                                cli.result(result="wake-"+k, user_message_uuid=None, idle=False,
+                                    origin={"kind": "task-notification", "producer": "session-task", "runId": "r"+k})
+                            cli.init()
+                            h1 = cli.inputs[0]["uuid"]
+                            def activity():
+                                return ordinary.turn_activity(binding.id, thread_id=cli.session, turn_id=h1)
+                            await self.until(lambda: activity() and (not cards or bool(confirmed)))
+                            revision = activity().revision
+                            assistant(TextBlock("initial-fragment"), "initial")
+                            assistant(ToolUseBlock("read", "Read", {}), "initial")
+                            await self.until(lambda: bool(activity().partial_answers))
+                            self.assertGreater(activity().revision, revision)
+                            launch("AB")
+                            cli.result(result="launch-AB")
+                            await self.until(lambda: ordinary._active[binding.id].admissible
+                                             and not ordinary._active[binding.id].delivery.queues)
+                            self.assertEqual(wire["H1"], [] if fallback else ["launch-AB"])
+                            if cards and not fallback:
+                                self.assertTrue(any("空闲，后台任务 2 个" in s for s in last_version.values()))
+                            elif fallback:
+                                self.assertEqual(fx.channel.replies.count(("H1", INCOMPLETE)), 1)
+                            else:
+                                self.assertIn("后台任务 2 个运行中，可继续发送消息", str(fx.channel.replies))
+                            await app.handle_message(FakeMessage("second", message_id="H2"))
+                            tasks.remove("A")
+                            membership()
+                            cli.init(user_message_uuids=[])
+                            assistant(TextBlock("child-secret"), "child", "toolA")
+                            assistant(ToolUseBlock("nested-child", "Read", {}), "child", "toolA")
+                            assistant(TextBlock("wake-fragment"), "answer")
+                            assistant(ToolUseBlock("more", "Read", {}), "answer")
+                            await self.until(lambda: bool(cli.live.partials))
+                            self.assertIsNone(ordinary.turn_activity(binding.id, thread_id=cli.session, turn_id=cli.inputs[-1]["uuid"]))
+                            self.assertFalse(any(anchor == "H2" for anchor, _ in fx.channel.reactions + fx.channel.replies))
+                            stop_wake = order == "CB"
+                            if stop_wake:
+                                await app.handle_message(FakeMessage("/stop", message_id="esc"))
+                                self.assertEqual(cli.interrupts, 1)
+                            result("A")
+                            await asyncio.wait_for(held.wait(), 10)
+                            try:
+                                cli.init()
+                                launch("C")
+                                cli.result(result="launch-C")
+                                await self.until(lambda: "launch-C" in wire["H2"])
+                                if not cards:
+                                    self.assertIn(("H2", "launch-C\n\n后台任务 1 个运行中，可继续发送消息"), fx.channel.replies)
+                                for k in order:
+                                    tasks.remove(k)
+                                    membership()
+                                    cli.init(user_message_uuids=[])
+                                    result(k)
+                                    system("session_state_changed", state="idle")
+                                await self.until(lambda: cli.closes == 1)
+                            finally:
+                                release.set()
+                            self.assertTrue(await ordinary.wait_idle(10))
+                        self.assertEqual(wire, {"H1": ([] if fallback else ["launch-AB"]) + ["wake-A", "wake-B"], "H2": ["launch-C", "wake-C"]})
+                        self.assertFalse(any("child-secret" in s for s in last_version.values()))
+                        self.assertTrue(any("wake-fragment" in s and confirmed[mid] == "H1" for mid, s in last_version.items()))
+                        reminders = [opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())]
+                        self.assertCountEqual([confirmed[mid] for mid in reminders], ["H2"] if stop_wake else ["H1", "H2"])
+                        self.assertCountEqual([next(b for b in bodies if b in last_version[mid]) for mid in reminders],
+                                              ["wake-C"] if stop_wake else ["wake-B", "wake-C"])
+                        if cards:
+                            for mid, text in last_version.items():
+                                if any(body in text for body in ("launch-AB", "launch-C", "wake-A")):
+                                    self.assertNotIn("Claude：", text)
+                                    self.assertNotIn("全部完成", text)
+                        self.assertEqual((cli.consumers, len(cli.inputs), cli.closes), (1, 2, 1))
 
     @requires_claude_sdk
-    async def test_stop_all_consumes_the_public_ack_before_healthy_disconnect(self):
+    async def test_explore_stop_acknowledgment_and_final_membership(self):
         from claude_agent_sdk import SystemMessage
 
-        async with owner_channel() as (app, fx, clients, clock, ordinary):
-            clock[0] = 2.
-            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
-            await app.handle_message(FakeMessage("run", message_id="H"))
-            cli = clients.calls[-1]
-            execution = ordinary._active[binding.id]
-            def system(kind, **data):
-                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
-            cli.init()
-            system("background_tasks_changed", tasks=[{"task_id": "A", "run_id": "R"}])
-            cli.result()
-            await self.until(lambda: execution.admissible)
-            before_ack = []
-            async def stop(task):
-                system("task_notification", task_id=task, status="stopped")
-                system("background_tasks_changed", tasks=[])
-                await self.until(lambda: not cli.live.tasks)
-                before_ack.append((execution.close is None, cli.closes))
-            with patch.object(cli, "stop_task", side_effect=stop):
-                await app.handle_message(FakeMessage("/stop all", message_id="esc"))
-            self.assertEqual(before_ack, [(True, 0)])
-            self.assertTrue(any(mid == "esc" and "1 个后台任务发送停止请求" in body for mid, body in fx.channel.replies))
-            self.assertTrue(await ordinary.wait_idle(10))
-            self.assertEqual(cli.closes, 1)
+        for removed_before_ack in (True, False):
+            with self.subTest(removed_before_ack=removed_before_ack):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+                    await app.handle_message(FakeMessage("run", message_id="H"))
+                    cli = clients.calls[-1]
+                    execution = ordinary._active[binding.id]
+                    def system(kind, **data):
+                        cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+                    cli.init()
+                    system("background_tasks_changed", tasks=[{"task_id": "A", "run_id": "R"}])
+                    cli.result()
+                    await self.until(lambda: execution.admissible)
+                    before_ack = []
+                    def remove(task):
+                        system("task_notification", task_id=task, status="stopped")
+                        system("background_tasks_changed", tasks=[])
+                    async def stop(task):
+                        if removed_before_ack:
+                            remove(task)
+                            await self.until(lambda: not cli.live.tasks)
+                        before_ack.append((execution.close is None, cli.closes))
+                    with patch.object(cli, "stop_task", side_effect=stop):
+                        await app.handle_message(FakeMessage("/stop all", message_id="esc"))
+                    self.assertEqual(before_ack, [(True, 0)])
+                    self.assertTrue(any(mid == "esc" and "1 个后台任务发送停止请求" in body for mid, body in fx.channel.replies))
+                    if not removed_before_ack:
+                        remove("A")
+                    self.assertTrue(await ordinary.wait_idle(10))
+                    self.assertEqual(cli.closes, 1)
 
     async def test_preinit_stop_deduplicates_only_the_same_physical_target(self):
         for named_stop in ("/stop", "/stop all"):
@@ -1485,9 +1625,11 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(event, PhysicalAnswer) and event.final_response == "first cron":
                     first.set()
                     await release.wait()
-                await complete(event)
-                if isinstance(event, PhysicalAnswer) and event.final_response == "second cron":
-                    second.set()
+                try:
+                    await complete(event)
+                finally:
+                    if isinstance(event, PhysicalAnswer) and event.final_response == "second cron":
+                        second.set()
             with patch.object(ordinary, "_completion", side_effect=handoff):
                 for body in ("first cron", "second cron"):
                     cli.init(user_message_uuids=[])

@@ -609,6 +609,98 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([type(e) for e in self.all_events[-2:]], [LogicalTerminal, LogicalTerminal])
         self.assertEqual((cli.consumers, cli.closes), (1, 1))
 
+    async def test_explore_ordered_task_cuts(self):
+        from itertools import permutations
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+
+        # Enumerate task departure orders and native grouping. The observations
+        # below use only emitted frames, SDK calls and delivered typed events.
+        for order in permutations("ABC"):
+            for grouped in (False, True):
+                for during_h2 in (False, True):
+                    with self.subTest(order=order, grouped=grouped, during_h2=during_h2):
+                        start = len(self.all_events)
+                        h = await self.submit(origin="H1")
+                        h.release_receipt_attempt()
+                        cli = self.clients.calls[-1]
+                        def frame(kind, **data):
+                            cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+                        def membership(ids):
+                            frame("background_tasks_changed", tasks=[{"task_id": k, "run_id": "r" + k} for k in ids])
+                        def result(key, **fields):
+                            cli.result(uuid=key, idle=False, **fields)
+                        def events(kind):
+                            return [e for e in self.all_events[start:] if isinstance(e, kind)]
+                        def wake(key, *, receipt=False, opened=False):
+                            if not opened:
+                                cli.init(user_message_uuids=[])
+                            args = dict(user_message_uuid=None, result=None if receipt else key,
+                                        reason=None if receipt else "completed",
+                                        origin={"kind": "task-notification", "producer": "session-task", "runId": "r" + key})
+                            result(key, **args)
+                            result(key, **args)  # Repeated native Result UUID.
+                        cli.init()
+                        ids = set("ABC")
+                        for k in sorted(ids):
+                            cli.stream.put_nowait(AssistantMessage([ToolUseBlock(k, "Bash", {})], "model",
+                                                                   session_id=cli.session))
+                            frame("task_started", task_id=k, run_id="r" + k, tool_use_id=k)
+                        membership(sorted(ids))
+                        result("human1", result="first")
+                        frame("session_state_changed", state="idle")
+                        await self.wait_until(lambda: cli.live.ordered_idle)
+                        self.assertFalse(events(LogicalTerminal))
+                        h2 = await self.submit(origin="H2")
+                        h2.release_receipt_attempt()
+                        cli.init()
+                        frame("session_state_changed", state="running")
+                        if during_h2:
+                            ids.remove(order[0])
+                            membership(sorted(ids))
+                        result("human2", result="second")
+                        if not during_h2:
+                            frame("session_state_changed", state="idle")
+                            await self.wait_until(lambda: any(e.origin == "H2" for e in events(LogicalTerminal)))
+                            self.assertFalse(any(e.origin == "H1" for e in events(LogicalTerminal)))
+                            ids.remove(order[0])
+                            membership(sorted(ids))
+                        # A second natural removal can occur during a first wake or before its init.
+                        if not grouped:
+                            cli.init(user_message_uuids=[])
+                            frame("session_state_changed", state="running")
+                        ids.remove(order[1])
+                        membership(sorted(ids))
+                        wake(order[0], opened=not grouped)
+                        wake(order[1], receipt=grouped)
+                        ids.clear()
+                        membership([])
+                        await self.wait_until(lambda: not cli.live.tasks and order[1] in cli.live.seen)
+                        self.assertFalse(cli.closing.is_set())
+                        self.assertFalse(any(e.origin == "H1" for e in events(LogicalTerminal)))
+                        wake(order[2])
+                        cli.close_gate.clear()
+                        frame("session_state_changed", state="idle")
+                        try:
+                            await asyncio.wait_for(cli.closing.wait(), 5)
+                            with self.assertRaises(OrdinaryInputRejected):
+                                await self.runtime.capture_submission_admission(self.binding.id)
+                        finally:
+                            cli.close_gate.set()
+                        self.assertTrue(await self.runtime.wait_idle(5))
+                        expected = [("H1", "first"), ("H2", "second"), ("H1", order[0])]
+                        if not grouped:
+                            expected.append(("H1", order[1]))
+                        expected.append(("H1", order[2]))
+                        for anchor in ("H1", "H2"):
+                            self.assertEqual([e.final_response for e in events(PhysicalAnswer) if e.origin == anchor],
+                                             [body for owner, body in expected if owner == anchor])
+                        self.assertCountEqual([(e.origin, e.turn_id) for e in events(LogicalTerminal)],
+                                              [("H1", h.turn_id), ("H2", h2.turn_id)])
+                        self.assertTrue(all(e.thread_id == cli.session and e.binding_id == self.binding.id
+                                            for e in self.all_events[start:]))
+                        self.assertFalse(events(DegradedTurn))
+                        self.assertEqual((cli.consumers, len(cli.inputs), cli.closes), (1, 2, 1))
+
     async def test_timer_only_bounds_empty_unconfirmed_native_transition(self):
         from claude_agent_sdk import SystemMessage
         receipt = await self.submit()

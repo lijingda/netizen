@@ -262,7 +262,16 @@ async def reference():
             with ExitStack() as stack:
                 calls = native_access_recorder(fx.runtime, stack)
                 channel = await channel_surfaces(fx, delivery_recorder(fx.channel, stack), calls)
-                admin = await admin_surfaces(fx, calls)
+                # Both the HTTP route and each SQLite worker have a deadline.
+                # Keep the real worker, SQL, and wire comparison on slow CI hosts.
+                query_seconds = 60
+                submit_query = fx.store._submit_query
+                async def fixture_query(operation, *, deadline_seconds):
+                    return await submit_query(operation, deadline_seconds=query_seconds)
+                with (patch("netizen_cli.admin.web._QUERY_DEADLINE_SECONDS", query_seconds),
+                      patch("netizen_cli.admin.web._SESSION_QUERY_DEADLINE_SECONDS", query_seconds),
+                      patch.object(fx.store, "_submit_query", fixture_query)):
+                    admin = await admin_surfaces(fx, calls)
             sdk = await sdk_requests(fx)
             recorded = json.dumps({"channel": channel, "admin": admin, "sdk": sdk}, ensure_ascii=False)
             # macOS may resolve /var/... to /private/var/... before a path reaches a card.
