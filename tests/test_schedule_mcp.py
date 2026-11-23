@@ -380,22 +380,31 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 408)
 
     async def test_callback_timeout_is_stable_and_drain_is_bounded(self):
-        started = asyncio.Event()
+        cancelling = asyncio.Event()
         finish = asyncio.Event()
 
         async def manage(request, native_thread_id):
-            started.set()
-            await finish.wait()
+            try:
+                await finish.wait()
+            except asyncio.CancelledError:
+                # Keep the timed-out callback in flight until its drain has been checked.
+                cancelling.set()
+                await finish.wait()
+                raise
             return {"ok": True}
 
         self.runner._callback = manage
         self.runner.open_admission()
-        with patch("netizen_cli.schedules.mcp.CALL_TIMEOUT_SECONDS", 0.05):
+        with patch("netizen_cli.schedules.mcp.CALL_TIMEOUT_SECONDS", 0):
             pending = asyncio.create_task(self.call({"mode": "list"}))
-            await started.wait()
-            self.runner.close_admission()
-            self.assertFalse(await self.runner.drain(asyncio.get_running_loop().time()))
-            result = await pending
+            try:
+                async with asyncio.timeout(5):
+                    await cancelling.wait()
+                    self.runner.close_admission()
+                    self.assertFalse(await self.runner.drain(asyncio.get_running_loop().time()))
+            finally:
+                finish.set()
+                result = await pending
         self.assertEqual(result["structuredContent"]["error"]["code"], "timeout")
         self.assertTrue(await self.runner.drain(asyncio.get_running_loop().time() + 1))
 
