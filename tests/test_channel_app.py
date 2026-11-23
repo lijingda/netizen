@@ -2911,6 +2911,30 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_close_takes_over_cancelled_reaction_removal_without_repeating_the_other_id(self) -> None:
+        controller = self.app._reactions
+        self.assertTrue(await controller.start("turn", "om", pulse_enabled=True))
+        pulse = controller._pulses["turn"]
+        thinking, typing = pulse.thinking_reaction_id, pulse.typing_reaction_id
+        started = asyncio.Event()
+        attempts = []
+        async def remove(message_id, reaction_id):
+            attempts.append((message_id, reaction_id))
+            if len(attempts) == 1:
+                started.set()
+                await asyncio.Future()
+            return SendResult.ok()
+        with patch.object(self.channel, "remove_reaction", side_effect=remove):
+            stop = asyncio.create_task(controller.stop("turn"))
+            await asyncio.wait_for(started.wait(), 5)
+            close = asyncio.create_task(self.app.close())
+            stop.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await stop
+            await asyncio.wait_for(close, 5)
+        self.assertEqual(attempts, [("om", thinking), ("om", typing), ("om", thinking)])
+        self.assertFalse(controller._pulses)
+
     async def test_application_close_removes_both_visible_turn_reactions(self) -> None:
         controller = reactions._ReactionController(
             self.channel,

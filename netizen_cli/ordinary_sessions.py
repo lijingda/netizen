@@ -7,7 +7,7 @@ from typing import Protocol
 
 from .backends import BackendPolicy
 from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
-from .domain import ActiveState, MessageContextAnchor, MentionContextMode
+from .domain import ActiveState, FeishuScope, MessageContextAnchor, MentionContextMode
 from .runtime.codex_contracts import BindingRuntimeSnapshot
 from .session_views import SessionObservations
 from .file_evidence import FileEvidence
@@ -15,7 +15,7 @@ from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
 from .runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
-    TurnActivitySnapshot, TurnObservationUnavailableOutcome,
+    TerminalStateUnknown, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
 
 
@@ -49,7 +49,62 @@ class OrdinaryConclusion:
             raise ValueError("Turn outcome activity belongs to another Turn")
 
 
-OrdinaryEvent = OrdinaryConclusion | TurnObservationUnavailableOutcome
+@dataclass(slots=True)
+class ClaudeInputAnchor:
+    scope: FeishuScope
+    source: object
+    topic_root_id: str | None
+    stop_reactions: Callable[[str], Awaitable[None]]
+    retired: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationTarget:
+    scope: FeishuScope
+    source: object
+    delivery_id: str
+
+
+@dataclass(slots=True)
+class LogicalReply:
+    attempted: bool = False
+    message_id: str | None = None
+
+    def confirmed(self, message_id: str) -> None:
+        self.message_id = message_id
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalAnswer(OrdinaryConclusion):
+    logical_id: str | None = None
+    wake: bool = False
+    reply: LogicalReply | None = None
+    publishable: Callable[[], bool] = lambda: True
+
+
+@dataclass(frozen=True, slots=True)
+class LogicalTerminal:
+    binding_id: str
+    thread_id: str
+    turn_id: str
+    owner_id: str
+    origin: object
+    status: str
+    reply: LogicalReply
+    mention_user_id: str | None
+    publishable: Callable[[], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class DegradedTurn(TurnObservationUnavailableOutcome):
+    affected_inputs: tuple[str, ...] = ()
+
+
+class LiveSubmissionUnknown(TerminalStateUnknown):
+    """The runtime sends the uncertainty notice to the Binding conversation."""
+
+
+OrdinaryEvent = OrdinaryConclusion | LogicalTerminal | TurnObservationUnavailableOutcome
 OrdinaryCompletionHandler = Callable[[OrdinaryEvent], Awaitable[None]]
 
 
@@ -155,7 +210,7 @@ class LocalSessionManagement(Protocol):
 class SessionShutdownPort(Protocol):
     def close_admission(self) -> None: ...
 
-    async def interrupt_all(self) -> None: ...
+    async def interrupt_all(self, *, deadline: float | None = None) -> None: ...
 
     async def wait_idle(self, timeout: float) -> bool: ...
 

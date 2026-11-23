@@ -66,15 +66,19 @@ class FakeClaudeClient:
             yield msg
 
     def init(self, mode="auto", **kwargs):
-        data = {"session_id": self.session, "cwd": str(self.cwd)}
+        data = {"uuid": str(uuid4()), "session_id": self.session, "cwd": str(self.cwd)}
+        if self.inputs:
+            data["user_message_uuids"] = [self.inputs[-1]["uuid"]]
         if mode is not None:
             data["permissionMode"] = mode
         self.stream.put_nowait(SystemMessage("init", data | kwargs))
 
-    def result(self, subtype="success", reason="completed", is_error=False, **kwargs):
-        values = dict(uuid=str(uuid4()), session_id=self.session, result="answer", user_message_uuid=self.inputs[0]["uuid"])
+    def result(self, subtype="success", reason="completed", is_error=False, *, idle=True, **kwargs):
+        values = dict(uuid=str(uuid4()), session_id=self.session, result="answer", user_message_uuid=self.inputs[-1]["uuid"])
         self.stream.put_nowait(ResultMessage(subtype=subtype, terminal_reason=reason, is_error=is_error,
                                              duration_ms=1, duration_api_ms=1, num_turns=1, **(values | kwargs)))
+        if idle and kwargs.get("user_message_uuid", self.inputs[-1]["uuid"]) == self.inputs[-1]["uuid"]:
+            self.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": self.session, "state": "idle"}))
 
 
 class FakeClaudeClients:
@@ -85,8 +89,9 @@ class FakeClaudeClients:
         self.configure = None
         self.created = asyncio.Event()
 
-    def create(self, session_id, cwd, *, resume):
+    def create(self, session_id, cwd, *, resume, live=None):
         client = FakeClaudeClient(session_id, cwd, resume)
+        client.live = live
         client.release()
         if self.configure:
             self.configure(client)

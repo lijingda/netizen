@@ -1,6 +1,6 @@
 """Drive the registered Feishu handlers and observe the bundled CLI through its public SDK."""
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import json
 import os
@@ -9,7 +9,7 @@ import time
 from unittest.mock import AsyncMock, Mock, patch
 
 from claude_agent_sdk import ResultMessage, SystemMessage
-from lark_channel import OutboundCard, OutboundPost, SendResult
+from lark_channel import OutboundCard, SendResult
 import psutil
 
 from netizen_cli.admin.users import AdminUsers
@@ -52,7 +52,12 @@ class RecordingChannel(FakeChannel):
             self.fetched_messages[card_id] = {"data": {"items": [{"chat_id": message.conversation.chat_id,
                                                                   "thread_id": message.conversation.thread_id}]}}
             return SendResult.ok(message_id=card_id)
-        return result
+        return SendResult.ok(message_id=f"reply-{message.id}-{len(self.replies)}") if result.success else result
+
+    async def send(self, to, content, opts=None):
+        self.send_calls.append((to, content, opts))
+        return SendResult.ok(message_id="sent", raw={"code": 0, "data": {"message_id": "sent", "chat_id": to,
+                                                             "parent_id": opts.reply_to, "root_id": opts.reply_to}})
 
     async def add_reaction(self, message_id, emoji_type):
         self.events.append(("add", message_id, emoji_type))
@@ -96,6 +101,7 @@ class NativeExecution:
     def __init__(self, client, session, close_gate):
         self.client, self.session, self.close_gate = client, session, close_gate
         self.inputs = []
+        self.state = None
         self.attributed = False
         self.answer = None
         self.reported_turns = 0
@@ -120,10 +126,13 @@ class NativeExecution:
 
     async def receive_messages(self):
         async for msg in self.client.receive_messages():
+            if isinstance(msg, SystemMessage) and msg.subtype == "session_state_changed":
+                self.state = msg.data["state"]
             if isinstance(msg, SystemMessage) and msg.subtype == "init":
                 self.init_sessions.append(msg.data.get("session_id"))
             if isinstance(msg, ResultMessage):
                 assert msg.session_id == self.session
+                self.reported_turns += msg.num_turns
                 if (isinstance(msg.origin, dict) and msg.origin.get("kind") == "task-notification"
                         and not msg.user_message_uuid and not msg.user_message_uuids and msg.terminal_reason is None):
                     self.notification.set()
@@ -132,7 +141,6 @@ class NativeExecution:
                     self.bash_denials = sum(isinstance(item, dict) and item.get("tool_name") == "Bash"
                                             for item in msg.permission_denials or [])
                     self.answer = msg.result
-                    self.reported_turns = msg.num_turns
             yield msg
 
     async def disconnect(self):
@@ -152,12 +160,14 @@ class NativeClients(BundledClaudeClients):
         self.calls = []
         self.live = live
         self.turn_limit = 1
+        self.expected_turns = 1
         self.close_gate = None
 
-    def create(self, session_id, cwd, *, resume):
-        public_client = super().create(session_id, cwd, resume=resume)
+    def create(self, session_id, cwd, *, resume, live=None):
+        public_client = super().create(session_id, cwd, resume=resume, live=live)
         if self.live:
-            public_client.options.max_turns = self.live.budget.reserve(self.turn_limit)
+            self.live.budget.reserve(self.turn_limit * self.expected_turns)
+            public_client.options.max_turns = self.turn_limit
         observed = NativeExecution(public_client, session_id, self.close_gate)
         self.calls.append(observed)
         return observed
@@ -167,7 +177,7 @@ def install_tools(cwd):
     for mode in ("foreground", "background"):
         script = cwd / ("fixture-" + mode)
         # exec preserves this PID, so the harness can follow the tool even if it is reparented.
-        body = ("exec sleep 90" if mode == "background" else
+        body = ('i=0; while [ ! -e background-release ] && [ "$i" -lt 900 ]; do sleep .1; i=$((i+1)); done' if mode == "background" else
                 'i=0; while [ ! -e fixture-release ] && [ "$i" -lt 900 ]; do sleep .1; i=$((i+1)); done')
         script.write_text(f'#!/bin/sh\necho "$$" > fixture-{mode}.pid\n{body}\n')
         script.chmod(0o700)
@@ -226,10 +236,13 @@ class Driver:
     async def submit(self, label, scenario="text"):
         before = len(self.clients.calls)
         self.clients.turn_limit = 3 if scenario in ("foreground", "background", "denied-touch") else 1
+        if scenario == "background":
+            # One tool round and one answer per turn. Reserve H1, H2 and the wake.
+            self.clients.turn_limit, self.clients.expected_turns = 2, 3
         try:
             await self.send(label, self.prompt(label, scenario))
         finally:
-            self.clients.turn_limit = 1
+            self.clients.turn_limit = self.clients.expected_turns = 1
         assert len(self.clients.calls) == before + 1, "message did not start one execution"
         call = self.clients.calls[-1]
         binding = self.store.active_binding(SCOPE.key)
@@ -253,22 +266,26 @@ class Driver:
         assert UNKNOWN not in replies, "channel delivered unknown"
         assert set(call.init_sessions) == {self.session} and len(call.inputs) == 1
         assert call.finished.is_set() and call.attributed, "missing attributed native Result or disconnect"
-        post, = replies
+        events = self.channel.events
+        terminal = "CrossMark" if interrupted else "DONE"
+        typing = events.index(("add", label, "Typing"))
+        finished = events.index(("add", label, terminal))
+        assert typing < finished
+        reminders = [content for _, content, opts in self.channel.send_calls if opts.reply_to.startswith("reply-" + label + "-")]
         if interrupted:
-            assert post == STOPPED, "incorrect interrupted terminal"
+            assert replies == ([STOPPED] if call.answer else []) and not reminders
         else:
-            assert isinstance(post, OutboundPost) and [m.open_id for m in post.mentions] == [OWNER]
+            post, = replies
+            assert isinstance(post, str) and typing < events.index(("reply", label, post)) < finished
+            assert [[m.open_id for m in r.mentions] for r in reminders] == [[OWNER]]
             if self.provider and label == "ordinary":
                 assert call.answer == "fixture-reply-ordinary ![pixel](result.png)"
-                assert post.markdown.strip() == "fixture-reply-ordinary ![pixel](img_uploaded_1)"
+                assert post.strip() == "fixture-reply-ordinary ![pixel](img_uploaded_1)"
                 (source, kind), = self.channel.upload_calls
                 assert kind == "image" and source.buffer == PNG
             else:
-                assert call.answer and post.markdown == call.answer, "terminal did not deliver the attributed answer"
-                self.check_answer(label, post.markdown)
-        events = self.channel.events
-        terminal = "CrossMark" if interrupted else "DONE"
-        assert events.index(("add", label, "Typing")) < events.index(("add", label, terminal)) < events.index(("reply", label, post))
+                assert call.answer and post == call.answer, "terminal did not deliver the attributed answer"
+                self.check_answer(label, post)
         await self.reaped()
 
     async def reaped(self):
@@ -370,7 +387,7 @@ class Driver:
         ack, = self.replies("card-status")
         assert ack == "正在请求停止当前 Claude 执行。"
         assert self.channel.events.index(("reply", "card-status", ack)) < self.channel.events.index(
-            ("reply", "stop-a", self.replies("stop-a")[-1]))
+            ("add", "stop-a", "CrossMark"))
         assert not running(tool)
         await self.submit("stop-b", "foreground")
         await self.ready_tool("foreground")
@@ -381,36 +398,30 @@ class Driver:
         (self.cwd / "fixture-release").unlink()
 
     async def background(self):
-        # Stop A at its real disconnect so the harness can witness the tool before it is killed.
-        gate = self.clients.close_gate = asyncio.Event()
+        first = await self.submit("bg-a", "background")
         try:
-            first = await self.submit("bg-a", "background")
-            await asyncio.wait_for(first.closing.wait(), 30)
             tool = await self.ready_tool("background")
+            await wait_for(lambda: first.state == "idle" and self.replies("bg-a"))
+            await self.send("bg-b", self.prompt("bg-b"))
+            await wait_for(lambda: first.state == "idle" and self.replies("bg-b"))
+            assert self.clients.calls[-1] is first and len(first.inputs) == 2 and running(tool)
         finally:
-            gate.set()
-            self.clients.close_gate = None
-        await self.terminal("bg-a")
-        await wait_for(lambda: not running(tool))
-        second = await self.submit("bg-b", "hold-stream")
-        try:
-            await asyncio.wait_for(second.notification.wait(), 20)
-            # Keep the real model response pending for the documented reconciliation window.
-            # A spurious unknown closes the client during that window on the old runtime.
-            if self.provider:
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(second.closing.wait(), timeout=3.5)
-        finally:
-            if self.provider:
-                self.provider.release("bg-b")
-        await self.terminal("bg-b")
+            (self.cwd / "background-release").touch()
+        assert await self.core._claude.wait_idle(45)
+        assert not running(tool) and first.finished.is_set()
+        bodies = [r for r in self.replies("bg-a") if r != DEFAULT_MODE]
+        assert len(bodies) == 2 and len([r for r in self.replies("bg-b") if r != DEFAULT_MODE]) == 1
+        for label in ("bg-a", "bg-b"):
+            last_reply = max(i for i, (target, _) in enumerate(self.channel.replies, 1) if target == label)
+            reminders = [opts.reply_to for _, _, opts in self.channel.send_calls if opts.reply_to.startswith(f"reply-{label}-")]
+            assert reminders == [f"reply-{label}-{last_reply}"]
 
     async def stop_during_close(self):
         gate = self.clients.close_gate = asyncio.Event()
         try:
             call = await self.submit("close")
             await asyncio.wait_for(call.closing.wait(), 30)
-            await wait_for(lambda: any(isinstance(reply, OutboundPost) for reply in self.replies("close")))
+            await wait_for(lambda: any(reply != DEFAULT_MODE for reply in self.replies("close")))
             await self.send("closing-stop", "/stop")
             assert self.replies("closing-stop") == ["这次 Claude 执行已经结束，客户端正在收尾。"]
             await self.send("close-busy", "more")
@@ -504,7 +515,7 @@ async def channel_driver(cwd, provider, live):
 
 EXPECTED_REQUESTS = {
     "startup_grace": 1, "ordinary": 1, "resume": 1, "handoff": 2, "busy": 3, "exact_stop": 3,
-    "background": 3, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2, "shutdown": 1,
+    "background": 4, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2, "shutdown": 1,
 }
 CASES = tuple(EXPECTED_REQUESTS)
 

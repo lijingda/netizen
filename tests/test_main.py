@@ -969,13 +969,18 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 await core._management.create_current_binding(scope=scope, project_alias="test", creator_id="ou_admin")
                 await send("hello", "om_first")
                 first, = clients.calls
+                from lark_channel import SendResult
+                channel.reply_results.extend([SendResult.ok(), SendResult.ok(message_id="om_answer")])
+                channel.send_results.append(SendResult.ok(message_id="om_mention"))
                 first.init("default")
                 first.result(result="native answer")
                 self.assertTrue(await core._claude.wait_idle(2))
                 self.assertIn(DEFAULT_MODE, [reply for _, reply in channel.replies])
                 reply = channel.replies[-1][1]
-                self.assertEqual(reply.markdown, "native answer")
-                self.assertEqual([mention.open_id for mention in reply.mentions], ["ou_admin"])
+                self.assertEqual(reply, "native answer")
+                _, reminder, opts = channel.send_calls[-1]
+                self.assertEqual(opts.reply_to, "om_answer")
+                self.assertEqual([mention.open_id for mention in reminder.mentions], ["ou_admin"])
                 await send("second", "om_second")
                 second = clients.calls[-1]
                 second.init()
@@ -1490,7 +1495,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             def close_admission(self) -> None:
                 events.append("runtime:admission")
 
-            async def interrupt_all(self) -> None:
+            async def interrupt_all(self, *, deadline: float | None = None) -> None:
                 events.append("runtime:interrupt")
 
             async def wait_idle(self, timeout: float | None = None) -> bool:
@@ -1591,7 +1596,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 order.append(name)
             return record
 
-        async def hung():
+        async def hung(*, deadline):
+            assert deadline > asyncio.get_running_loop().time()
             order.append("claude:close")
             await asyncio.Future()
 
@@ -1955,7 +1961,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             def close_admission(self) -> None:
                 return None
 
-            async def interrupt_all(self) -> None:
+            async def interrupt_all(self, *, deadline: float | None = None) -> None:
                 raise asyncio.CancelledError
 
             async def wait_idle(self, timeout: float | None = None) -> bool:

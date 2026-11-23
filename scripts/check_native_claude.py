@@ -123,8 +123,8 @@ class ObservedClients:
         self.calls = []
         self.drop_receipt = False
 
-    def create(self, session_id, cwd, *, resume):
-        client = ObservedClient(self.bundled.create(session_id, cwd, resume=resume), self)
+    def create(self, session_id, cwd, *, resume, live=None):
+        client = ObservedClient(self.bundled.create(session_id, cwd, resume=resume, live=live), self)
         self.calls.append(client)
         return client
 
@@ -199,7 +199,11 @@ async def main_cases(cwd, provider, evidence):
                        not {"--system-prompt", "--system-prompt-file", "--append-system-prompt"}.intersection(commands[0]))
         return result
     async def done(label):
+        from netizen_cli.ordinary_sessions import PhysicalAnswer
         event = await asyncio.wait_for(completions.get(), 45)
+        if isinstance(event, PhysicalAnswer):
+            terminal = await asyncio.wait_for(completions.get(), 45)
+            assert terminal.turn_id == event.logical_id and terminal.origin == label
         if event.origin != label:
             raise AssertionError("different execution produced the Result")
         if not await runtime.wait_idle(20):

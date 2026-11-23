@@ -74,6 +74,8 @@ from ..domain import (
     SettingsSection,
     ScopeKind,
 )
+from ..ordinary_sessions import ClaudeInputAnchor, ConversationTarget
+from .topics import send_conversation_message
 from ..backends import BackendPolicy, BackendUnsupported
 from ..experience import (
     command_help,
@@ -389,6 +391,18 @@ class ChannelState:
         return self._projects.resolve_for_binding(binding.project_alias).cwd
 
     async def _reply_to_origin(self, message: Any, content: Any) -> SendResult:
+        if isinstance(message, ConversationTarget):
+            scope = message.scope
+            if scope.app_id != self._app_id:
+                raise ValueError("Claude conversation belongs to another app")
+            root = None
+            if scope.kind is ScopeKind.TOPIC:
+                if not isinstance(message.source, ClaudeInputAnchor) or message.source.scope != scope:
+                    raise ValueError("Claude topic destination is unconfirmed")
+                root = message.source.topic_root_id
+                if not root:
+                    raise ValueError("Claude topic has no confirmed root")
+            return await send_conversation_message(self._channel, scope, root, content, message.delivery_id)
         if isinstance(message, (ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin, _CardReplyTarget)):
             return await self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,

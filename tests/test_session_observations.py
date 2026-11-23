@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 import unittest
 
-from lark_channel import OutboundCard
+from lark_channel import OutboundCard, SendResult
 
 from tests.support import has_claude_sdk, requires_claude_sdk
 
@@ -45,10 +45,10 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("订阅：不适用", fallback)
             await app.handle_message(FakeMessage("work", message_id="work"))
             client = clients.calls[-1]
-            client.init(model="claude-test")
             private_value = "excluded-native-payload"
             client.stream.put_nowait(RateLimitEvent(RateLimitInfo("rejected", raw={"secret": private_value}), "wrong", "other"))
             client.result(user_message_uuid="other", total_cost_usd=999)
+            client.init(model="claude-test")
             client.stream.put_nowait(RateLimitEvent(RateLimitInfo("allowed", utilization=0.0), "rate", client.session))
             client.result(total_cost_usd=0, usage={"input_tokens": 0, "output_tokens": True, "ignored": private_value})
             self.assertTrue(await ordinary.wait_idle(3))
@@ -97,7 +97,7 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             clock[0] = 2
             await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
             cases = (
-                ({"result": ""}, "Claude 已完成本次执行。", True),
+                ({"result": ""}, None, True),
                 ({"reason": "api_error", "is_error": True, "api_error_status": 503,
                   "result": "unfiltered native error"}, "Claude 请求失败（HTTP 503）。", True),
                 ({"subtype": "error_during_execution", "reason": "aborted_tools", "is_error": True},
@@ -108,13 +108,16 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
                 await app.handle_message(FakeMessage("work", message_id=origin))
                 client = clients.calls[-1]
                 client.init()
+                if expected:
+                    fx.channel.reply_results.append(SendResult.ok(message_id="answer-" + origin))
+                if mention:
+                    fx.channel.send_results.append(SendResult.ok(message_id="reminder"))
                 client.result(**native)
                 self.assertTrue(await ordinary.wait_idle(2))
-                message_id, reply = fx.channel.replies[-1]
-                self.assertEqual(message_id, origin)
-                self.assertEqual(getattr(reply, "markdown", reply), expected)
-                self.assertEqual([item.open_id for item in getattr(reply, "mentions", ())],
-                                 ["ou_user"] if mention else [])
+                self.assertEqual([r for target, r in fx.channel.replies if target == origin],
+                                 [expected] if expected else [])
+                reminders = [r for _, r, opts in fx.channel.send_calls if opts.reply_to in (origin, "answer-" + origin)]
+                self.assertEqual([[m.open_id for m in r.mentions] for r in reminders], [["ou_user"]] if mention else [])
                 self.assertEqual(client.consumers, 1)
 
     async def test_execution_change_never_exposes_previous_result_or_stops_successor(self):
@@ -219,7 +222,7 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(warnings.output), 3)
             self.assertNotIn("private", str(warnings.output))
             origin, answer = fx.channel.replies[-1]
-            self.assertEqual((origin, answer.markdown, client.interrupts), ("source", "native conclusion", 0))
+            self.assertEqual((origin, answer, client.interrupts), ("source", "native conclusion", 0))
 
     async def test_group_refusal_precedes_capabilities_and_question_precedes_schedule(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):

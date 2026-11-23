@@ -18,7 +18,7 @@ from ..bindings import (
 from .question_inputs import CardAnswerOrigin
 from ..cards.defaults import defaults_card
 from ..defaults import DefaultConfigurationError
-from ..ordinary_sessions import OrdinaryInputRejected
+from ..ordinary_sessions import ClaudeInputAnchor, LiveSubmissionUnknown, OrdinaryInputRejected
 from ..runtime.contracts import (
     ModelProviderRejected,
     ContextCursorCommit,
@@ -71,6 +71,7 @@ from ..sdk_gap_adapter import SkillCatalogError
 
 from . import constants
 from .app_values import (
+    _CardReplyConversation, _CardReplyTarget, _inbound_root_message_id,
     _message_chat_type,
     _message_id,
 )
@@ -284,13 +285,26 @@ class PromptChannel(CompletionPresentationChannel):
             if prepared.context_stats is not None:
                 await self._send_context_receipt(message, prepared.context_stats)
             attempted = True
+            origin = message
+            if self._local_sessions is not None:
+                # A retained Claude client needs only the verified Feishu address.
+                location = self._scope(message)
+                if location != scope:
+                    raise OrdinaryInputRejected("本条消息的会话位置已变化，请重新发送。")
+                source_id = _message_id(message)
+                source = _CardReplyTarget(source_id, source_id, location.chat_id,
+                                          _CardReplyConversation(location.topic_id, _message_chat_type(message)))
+                root = _inbound_root_message_id(message) if location.topic_id else None
+                origin = ClaudeInputAnchor(location, source, root, self._reactions.stop)
             submission = await self._ordinary.submit(
-                binding=binding, cwd=cwd, input=prepared.prompt, owner_id=owner_id, origin=message,
+                binding=binding, cwd=cwd, input=prepared.prompt, owner_id=owner_id, origin=origin,
                 admission=admission, context_commit=context_commit, skill_names=skill_names,
             )
             accepted = True
             if on_accepted is not None:
                 on_accepted()
+        except LiveSubmissionUnknown:
+            return  # Possible intake keeps attachments; the reader owns the one notice.
         except BaseException as error:
             if not accepted:
                 await self._discard_unsubmitted_attachments(prepared, error, attempted=attempted)
@@ -327,7 +341,7 @@ class PromptChannel(CompletionPresentationChannel):
                     )
             return
 
-        await self._present_ordinary_receipt(submission, message)
+        await self._present_ordinary_receipt(submission, origin)
 
     async def _discard_unsubmitted_attachments(self, prepared, error: BaseException,
                                                *, attempted: bool = True) -> None:
@@ -351,6 +365,11 @@ class PromptChannel(CompletionPresentationChannel):
         release = submission.release_receipt_attempt
         assert release is not None
         try:
+            if isinstance(origin, ClaudeInputAnchor):
+                if not origin.retired:
+                    await self._reactions.start(submission.turn_id, _message_id(origin.source),
+                                                pulse_enabled=submission.task_feedback.reaction_pulse_enabled)
+                return
             presenters: list[Awaitable[bool]] = [
                 self._reactions.start(
                     submission.turn_id,

@@ -542,11 +542,11 @@ class ServiceCore:
             remaining = max(0.0, deadline - asyncio.get_running_loop().time())
             # Leave time to close presentation, Auth and the Binding Store after an unconfirmed native close.
             reserve = min(9.0, remaining / 2)
-            await _cleanup_with_budget(
-                "Claude client shutdown", shutdown.interrupt_all, deadline=deadline - reserve,
-                cap=_CLAUDE_SHUTDOWN_CAP_SECONDS,
-            )
-
+            budget = min(_CLAUDE_SHUTDOWN_CAP_SECONDS, remaining - reserve)
+            native_deadline = asyncio.get_running_loop().time() + budget
+            # Even with an exhausted budget the runtime must join cancelled Channel sends.
+            await _cleanup_step("Claude client shutdown", shutdown.interrupt_all(deadline=native_deadline),
+                                timeout=max(budget, 0.001))
             return
         if partial_start:
             shutdown.close_admission()
@@ -556,7 +556,7 @@ class ServiceCore:
             return
         interrupted = await _cleanup_with_budget(
             "native Turn interrupt",
-            shutdown.interrupt_all,
+            lambda: shutdown.interrupt_all(deadline=deadline),
             deadline=deadline,
             cap=15,
         )
@@ -577,8 +577,8 @@ class ServiceCore:
 
     async def _close_partial_start(self) -> None:
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
-        if self._claude is not None:
-            self._claude.close_admission()
+        if self._claude is not None and (shutdown := self._session_shutdown) is not None:
+            shutdown.close_admission()
         if self._scheduler is not None:
             self._scheduler.close_admission()
             await _cleanup_with_budget(

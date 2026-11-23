@@ -15,7 +15,7 @@ from netizen_cli.management import (
     ExactBindingTarget, InstanceManagementService, ManagementRuntimePort, RuntimePrecondition, ScopeCoordinator,
 )
 from netizen_cli.ordinary_sessions import (
-    OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, StopPreview,
+    LogicalTerminal, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryInputRejected, PhysicalAnswer, PreparedPrompt, StopPreview,
 )
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
@@ -514,3 +514,12 @@ class CodexOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyn
 @requires_claude_sdk
 class ClaudeOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyncioTestCase):
     backend = "claude"
+
+    async def conclusion(self):
+        answer = await super().conclusion()
+        self.assertIsInstance(answer, PhysicalAnswer)
+        terminal = await asyncio.wait_for(self.outcomes.get(), 10)
+        self.assertIsInstance(terminal, LogicalTerminal)
+        self.assertEqual((terminal.binding_id, terminal.thread_id, terminal.turn_id, terminal.origin, terminal.status),
+                         (answer.binding_id, answer.thread_id, answer.logical_id, answer.origin, answer.status))
+        return answer

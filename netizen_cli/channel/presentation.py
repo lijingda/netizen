@@ -28,7 +28,7 @@ from .reply_presenter import (
     _CardUpdateAttempt,
     _PartialAnswerDelivery,
 )
-from ..ordinary_sessions import OrdinaryConclusion, OrdinaryEvent
+from ..ordinary_sessions import DegradedTurn, LogicalTerminal, OrdinaryConclusion, OrdinaryEvent, PhysicalAnswer
 from ..file_evidence import FileEvidence
 from ..runtime.codex_replies import CodexFeatureEvent, outcome_file_evidence
 from ..runtime.codex_contracts import GoalOutcome
@@ -96,15 +96,29 @@ class CompletionPresentationChannel(ChannelReplies):
     """Completion handling: Result, Files, Goal receipts and reminders."""
 
     async def handle_ordinary_completion(self, outcome: OrdinaryEvent) -> None:
-        local = self._local_sessions is not None
-        if isinstance(outcome, TurnObservationUnavailableOutcome):
-            if local:
-                await self._reactions.stop(outcome.turn_id)
-                await self._reply(outcome.origin, str(outcome.error))
-            else:
-                await self._park_observation(outcome)
+        if isinstance(outcome, LogicalTerminal):
+            if not outcome.publishable():
+                return
+            reaction = {"interrupted": constants.INTERRUPTED_REACTION, "failed": constants.ERROR_REACTION}.get(
+                outcome.status, constants.DONE_REACTION)
+            await self._reactions.freeze(outcome.turn_id)
+            await self._safe_add_reaction(outcome.origin, reaction)
+            if outcome.mention_user_id and outcome.publishable():
+                await send_completion_mention(
+                    self._channel, scope=self._scope(outcome.origin), card_message_id=outcome.reply.message_id,
+                    user_id=outcome.mention_user_id, operation_id=outcome.turn_id,
+                    source_message_id=None if outcome.reply.attempted else _message_id(outcome.origin),
+                )
             return
-        if local:
+        if isinstance(outcome, DegradedTurn):
+            await self._reply(outcome.origin, str(outcome.error))
+            return
+        if isinstance(outcome, TurnObservationUnavailableOutcome):
+            await self._park_observation(outcome)
+            return
+        if isinstance(outcome, PhysicalAnswer):
+            if not outcome.publishable():
+                return
             result = self._result_view(
                 outcome, failure=lambda: outcome.error_detail or "Claude 本次执行失败。",
                 interruption=lambda: "Claude 本次执行已停止。", empty_answer="Claude 已完成本次执行。",
@@ -112,8 +126,11 @@ class CompletionPresentationChannel(ChannelReplies):
             content = result.content
             if result.status == "completed":
                 content = await self._prepare_task_result_images(result) or content
-            await self._finish_result_reactions(result)
-            await self._reply_task_result(result, content)
+            if not outcome.publishable():
+                return
+            if outcome.reply:
+                outcome.reply.attempted = True
+            await self._reply(outcome.origin, content, on_sent=outcome.reply.confirmed if outcome.reply else None)
             return
         scheduled = outcome.origin if isinstance(outcome.origin, ScheduledOrigin) else None
         completion = _ScheduledCompletion()
