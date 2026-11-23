@@ -92,7 +92,8 @@ The usage guides are not implementation guides.
   must never execute repository-configured programs.
 - Preserve exact Scope/Binding-to-native-session identity. Never queue an input
   or convert it into a later Turn. On Codex, running input steers the exact Turn.
-  On Claude, refuse busy input before submission and stop only the exact execution.
+  On Claude, admit new inputs on a confirmed idle client, including during background work.
+  Stop the exact current turn, or its verified task list on an explicit stop-all request.
   Only the verified session-tool entry uses native ExternalMessage start/join
   (ADR 0081); it does not change ordinary input admission. Human messages,
   question-card answers and scheduled inputs retain their exact-Turn admission.
