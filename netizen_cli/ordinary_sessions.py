@@ -210,6 +210,9 @@ class LocalExecutionSnapshot:
     turn: ActiveTurnSnapshot | None
     unavailable: bool
     cli: ClaudeCliState | None = None
+    control_turn_id: str | None = None
+    can_stop: bool = False
+    can_stop_all: bool = False
 
     def capture(self, binding_id: str, session_id: str | None, observations: SessionObservations) -> "LocalStatusSnapshot":
         return LocalStatusSnapshot(
@@ -250,6 +253,8 @@ class LocalSessionManagement(Protocol):
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding: ...
 
     def require_admission(self) -> None: ...
+    async def stop_control(self, binding_id: str, *, sender_id: str, revision: int | None, turn_id: str | None,
+                           all_tasks: bool, acknowledge: Callable[[str], Awaitable[None]]) -> StopDisposition: ...
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot: ...
     async def binding_pointer_changed(self, previous_binding_id: str | None, current_binding_id: str | None) -> None: ...
     async def activate_exact(

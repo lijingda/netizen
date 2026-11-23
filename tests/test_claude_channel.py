@@ -997,6 +997,169 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 client.result()
                 self.assertTrue(await ordinary.wait_idle(2))
 
+    async def test_stop_before_physical_init_cannot_suppress_a_later_success(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            await app.handle_message(FakeMessage("work", message_id="H1"))
+            await app.handle_message(FakeMessage("/stop", message_id="control"))
+            cli = clients.calls[-1]
+            self.assertEqual(cli.interrupts, 1)
+            cli.init()
+            fx.channel.reply_results.append(SendResult.ok(message_id="answer"))
+            cli.result()
+            self.assertTrue(await ordinary.wait_idle(10))
+            self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
+                             ["answer"])
+
+    @requires_claude_sdk
+    async def test_stop_all_consumes_the_public_ack_before_healthy_disconnect(self):
+        from claude_agent_sdk import SystemMessage
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+            await app.handle_message(FakeMessage("run", message_id="H"))
+            cli = clients.calls[-1]
+            execution = ordinary._active[binding.id]
+            def system(kind, **data):
+                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+            cli.init()
+            system("background_tasks_changed", tasks=[{"task_id": "A", "run_id": "R"}])
+            cli.result()
+            await self.until(lambda: execution.admissible)
+            before_ack = []
+            async def stop(task):
+                system("task_notification", task_id=task, status="stopped")
+                system("background_tasks_changed", tasks=[])
+                await self.until(lambda: not cli.live.tasks)
+                before_ack.append((execution.close is None, cli.closes))
+            with patch.object(cli, "stop_task", side_effect=stop):
+                await app.handle_message(FakeMessage("/stop all", message_id="esc"))
+            self.assertEqual(before_ack, [(True, 0)])
+            self.assertTrue(any(mid == "esc" and "1 个后台任务发送停止请求" in body for mid, body in fx.channel.replies))
+            self.assertTrue(await ordinary.wait_idle(10))
+            self.assertEqual(cli.closes, 1)
+
+    async def test_preinit_stop_deduplicates_only_the_same_physical_target(self):
+        for named_stop in ("/stop", "/stop all"):
+            with self.subTest(named_stop=named_stop):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                    await fx.create_binding(scope)
+                    await app.handle_message(FakeMessage("run", message_id="H"))
+                    cli = clients.calls[-1]
+                    await app.handle_message(FakeMessage("/stop", message_id="before"))
+                    self.assertEqual(cli.interrupts, 1)
+                    cli.init()
+                    await self.until(lambda: cli.live.physical is not None)
+                    await app.handle_message(FakeMessage(named_stop, message_id="named"))
+                    await app.handle_message(FakeMessage("/stop", message_id="duplicate"))
+                    self.assertEqual(cli.interrupts, 2)
+                    fx.channel.reply_results.append(SendResult.ok(message_id="body"))
+                    cli.result(result="finished")
+                    self.assertTrue(await ordinary.wait_idle(10))
+                    self.assertIn(("H", "finished"), fx.channel.replies)
+                    self.assertFalse([body for _, body, _ in fx.channel.send_calls if body.mentions])
+
+    async def test_stop_during_anonymous_wake_targets_its_result_owner(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            binding = (await fx.create_binding(scope)).binding
+            await app.handle_message(FakeMessage("launch", message_id="H1"))
+            cli = clients.calls[-1]
+            def system(kind, **data):
+                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+            cli.init()
+            cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
+            system("task_started", task_id="A", run_id="R", tool_use_id="tool")
+            system("background_tasks_changed", tasks=[{"task_id": "A", "run_id": "R"}])
+            cli.result(result="first")
+            await self.until(lambda: ordinary._active[binding.id].admissible)
+            await app.handle_message(FakeMessage("second", message_id="H2"))
+            system("background_tasks_changed", tasks=[])
+            cli.init(user_message_uuids=[])
+            await self.until(lambda: cli.live.physical is not None)
+            for failure in (OSError(), asyncio.CancelledError()):
+                with patch.object(cli, "interrupt", side_effect=failure):
+                    await app.handle_message(FakeMessage("/stop", message_id="control"))
+                    self.assertIn("停止结果未知", fx.channel.replies[-1][1])
+                    self.assertIsNotNone(cli.live.physical)
+            await app.handle_message(FakeMessage("/stop", message_id="control"))
+            self.assertEqual(cli.interrupts, 1)
+            fx.channel.reply_results.append(SendResult.ok(message_id="wake-card"))
+            cli.result(result="wake", idle=False, user_message_uuid=None,
+                       origin={"kind": "task-notification", "producer": "session-task", "runId": "R"})
+            await self.until(lambda: ("H1", "wake") in fx.channel.replies)
+            cli.init()
+            fx.channel.reply_results.append(SendResult.ok(message_id="h2-answer"))
+            cli.result(result="second")
+            self.assertTrue(await ordinary.wait_idle(10))
+            self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
+                             ["h2-answer"])
+
+    async def test_stop_all_uses_only_verified_membership_and_status_buttons_recheck_revision(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            from claude_agent_sdk import SystemMessage
+            clock[0] = 2.
+            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+            await app.handle_message(FakeMessage("launch", message_id="H1"))
+            cli = clients.calls[-1]
+            def frame(kind, **data):
+                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+            def membership(*ids):
+                frame("background_tasks_changed", tasks=[{"task_id": k, "run_id": "run-" + k} for k in ids])
+            async def until(predicate):
+                async with asyncio.timeout(5):
+                    while not predicate():
+                        await asyncio.sleep(.005)
+            async def send(text):
+                await app.handle_message(FakeMessage(text, message_id="view"))
+                return fx.channel.replies[-1][1]
+            cli.init()
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+            membership("A", "B")
+            cli.result()
+            await until(lambda: cli.live.ordered_idle and not ordinary._active[binding.id].delivery.queues)
+            self.assertIn("/stop all", await send("/stop"))
+            self.assertEqual(cli.interrupts, 0)
+            action = _card_button_value(await send("/status"), "全部停止")
+            stale = _card_button_value(await send("/sessions"), "全部停止")
+            membership("A", "C")
+            frame("session_state_changed", state="idle")
+            await until(lambda: set(cli.live.tasks) == {"A", "C"})
+            direct_card_event(fx.channel, {}, message_id="view")
+            for button in (action, stale):
+                await app.handle_card_action(direct_button_event(button, message_id="view"))
+                self.assertIn("变化", str(fx.channel.replies[-1][1]))
+            self.assertFalse(cli.stopped_tasks)
+            cli.init(user_message_uuids=[])
+            await until(lambda: cli.live.physical is not None)
+            self.assertIn("当前观测到 2 个后台任务", await send("/stop"))
+            self.assertEqual((cli.interrupts, cli.stopped_tasks), (1, []))
+            old = _card_button_value(await send("/status"), "全部停止")
+            await app.handle_card_action(direct_button_event(old, message_id="view"))
+            self.assertEqual(cli.stopped_tasks, ["A", "C"])
+            self.assertEqual(set(cli.live.tasks), {"A", "C"})
+            self.assertEqual(cli.closes, 0)
+            cli.result(user_message_uuid=None, result=None, reason=None)
+            frame("session_state_changed", state="idle")
+            await until(lambda: cli.live.ordered_idle)
+            async def changed(task):
+                cli.stopped_tasks.append(task)
+                membership("A", "D")
+                frame("session_state_changed", state="idle")
+                await until(lambda: set(cli.live.tasks) == {"A", "D"})
+                raise OSError()
+            with patch.object(cli, "stop_task", side_effect=changed):
+                self.assertIn("部分停止结果未知", await send("/stop all"))
+            self.assertEqual(cli.stopped_tasks, ["A", "C", "A"])
+            self.assertTrue(cli.live.crons)
+            self.assertEqual((len(cli.inputs), cli.closes), (1, 0))
+
     async def test_local_commands_never_read_codex_accessors(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2.

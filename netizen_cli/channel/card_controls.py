@@ -861,14 +861,16 @@ class CardControlChannel(TurnFileChannel):
         precondition = self._runtime_precondition(intent)
         try:
             if self._local_sessions is not None:
-                async def acknowledge() -> None:
-                    await self._safe_reply_to_card(intent, "正在请求停止当前 Claude 执行。")
-
-                stopped = await self._management.stop_exact_binding(
-                    target=target, runtime_precondition=precondition, acknowledge=acknowledge,
-                )
+                if precondition is None or precondition.physical_turn_id is None:
+                    raise CardActionError("请刷新会话状态后再停止。")
+                disposition = await self._management.stop_claude_control(
+                    target, sender_id=intent.sender_id, revision=precondition.activity_revision,
+                    turn_id=precondition.physical_turn_id, all_tasks=intent.all_tasks,
+                    acknowledge=lambda text: self._safe_reply_to_card(intent, text))
             else:
-                stopped = await self._management.stop_exact_binding(target=target, runtime_precondition=precondition)
+                if intent.all_tasks:
+                    raise CardActionError("当前实例不支持全部停止。")
+                disposition = (await self._management.stop_exact_binding(target=target, runtime_precondition=precondition)).disposition
         except ActivePointerChanged as error:
             raise CardActionError(
                 "会话列表已变化，本次停止未执行；请刷新 /sessions。"
@@ -892,9 +894,9 @@ class CardControlChannel(TurnFileChannel):
                 "这是外部 active Goal，当前无法安全重挂并暂停。"
             ),
         }
-        notice = notices[stopped.disposition]
+        notice = notices[disposition]
         if self._local_sessions is not None:
-            notice = "已请求停止本次 Claude 执行。" if stopped.disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
+            notice = "已请求停止本次 Claude 执行。" if disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
         try:
             if self._local_sessions is not None and intent.from_status:
                 card = local_status_card(intent.scope, binding, await self._management.binding_status_exact(binding.id),

@@ -331,6 +331,10 @@ class BackendPolicy:
     def owner_only(self) -> bool:
         return self.backend == "claude"
 
+    @property
+    def can_stop_background_tasks(self) -> bool:
+        return self.owner_only and self.allows(OperationId.STOP)
+
     def bind(self, providers: Callable[[Provider], bool]) -> "BackendPolicy":
         return replace(self, providers=providers)
 

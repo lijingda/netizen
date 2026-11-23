@@ -95,7 +95,7 @@ class Provider:
         if not tool_result:
             if scenario == "tool-barrier":
                 tool = ("Bash", {"command": "./wait-for-fixture", "timeout": 30000, "description": "Wait for fixture gate"})
-            elif scenario in ("foreground", "background"):
+            elif scenario in ("foreground", "foreground-b", "background"):
                 command = "./fixture-" + scenario
                 tool = ("Bash", {"command": command, "run_in_background": scenario == "background",
                                  "description": "Run disposable fixture task"})

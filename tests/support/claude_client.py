@@ -23,6 +23,7 @@ class FakeClaudeClient:
     consumers: int = 0
     closes: int = 0
     interrupts: int = 0
+    stopped_tasks: list[str] = field(default_factory=list)
     failure: str | None = None
 
     def release(self):
@@ -53,6 +54,9 @@ class FakeClaudeClient:
 
     async def interrupt(self):
         self.interrupts += 1
+
+    async def stop_task(self, task_id):
+        self.stopped_tasks.append(task_id)
 
     async def receive_messages(self):
         self.consumers += 1

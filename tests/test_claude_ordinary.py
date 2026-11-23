@@ -1106,7 +1106,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             client.result()
             await client.closing.wait()
             raise asyncio.CancelledError()
-        with patch.object(client, "interrupt", side_effect=cancel_on_terminal), self.assertRaises(asyncio.CancelledError):
+        with patch.object(client, "interrupt", side_effect=cancel_on_terminal), self.assertRaisesRegex(TerminalStateUnknown, "停止结果未知"):
             await self.runtime.stop_exact(self.binding.id, **fields)
         self.assertTrue(await self.runtime.wait_idle(1))
 
@@ -1496,7 +1496,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         preview = await self.runtime.preview_stop(self.binding)
         fields = dict(expected_activity_revision=preview.activity_revision, expected_turn_id=preview.turn_id)
         with patch.object(client, "interrupt", new=AsyncMock(side_effect=OSError("private"))):
-            with self.assertRaisesRegex(TerminalStateUnknown, "无法确认"):
+            with self.assertRaisesRegex(TerminalStateUnknown, "停止结果未知"):
                 await self.runtime.stop_exact(self.binding.id, **fields)
         with self.assertRaises(OrdinaryInputRejected):
             await self.submit()

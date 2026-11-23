@@ -54,7 +54,7 @@ from ..experience import (
     InvalidInteraction,
 )
 from ..management import (
-    CurrentBindingChanged,
+    ExactBindingTarget, CurrentBindingChanged,
     CurrentBindingTarget,
     NoCurrentBinding,
     RuntimePrecondition,
@@ -681,6 +681,16 @@ class CommandChannel(CardControlChannel):
         binding = self._bindings.active_binding(intent.scope.key)
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
+            return
+        if self._local_sessions is not None:
+            disposition = await self._management.stop_claude_control(
+                ExactBindingTarget(intent.scope.key, binding.id, binding.id), sender_id=intent.sender_id,
+                revision=None, turn_id=None, all_tasks=intent.arguments == ("all",),
+                acknowledge=lambda text: self._reply(message, text))
+            if disposition is StopDisposition.STOPPING:
+                await self._reply(message, "已在等待上一次停止请求的结果。")
+            elif disposition is StopDisposition.NOT_RUNNING:
+                await self._reply(message, "当前任务恰好已经结束。")
             return
         preview = await self._ordinary.preview_stop(binding)
         if preview is None:

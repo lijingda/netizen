@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import MutableMapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 import json
@@ -13,11 +14,42 @@ import subprocess
 import sys
 import tempfile
 import time
+from traceback import walk_tb
 from uuid import uuid4
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+@contextmanager
+def checking(condition):
+    """Attach only harness-defined condition names, including on an outer deadline's cancellation."""
+    try:
+        yield
+    except (Exception, asyncio.CancelledError) as error:
+        if not hasattr(error, "_claude_probe_condition"):
+            error._claude_probe_condition = condition
+        raise
+
+
+def failure_details(error):
+    # asyncio.timeout raises in the stdlib. Its cancellation traceback still
+    # identifies the operation in the probe that was waiting at the deadline.
+    cause = error.__cause__ or error.__context__
+    cancelled = isinstance(error, TimeoutError) and isinstance(cause, asyncio.CancelledError)
+    sources = (ROOT / "scripts", ROOT / "tests", ROOT / "netizen_cli")
+    details = {"error": type(error).__name__}
+    condition = None
+    for origin in ((error, cause) if cancelled else (error,)):
+        condition = getattr(origin, "_claude_probe_condition", None) or condition
+        for frame, line in walk_tb(origin.__traceback__):
+            code = frame.f_code
+            if any(Path(code.co_filename).is_relative_to(source) for source in sources):
+                details.update(file=Path(code.co_filename).name, line=line, condition=code.co_name)
+    if condition:
+        details["condition"] = condition
+    return details
 
 
 def fixture_environment(home: Path) -> dict[str, str]:
@@ -426,8 +458,9 @@ def live_worker():
             install_tools(cwd)
             asyncio.run(run_cases(cwd, live=live, report=emit))
             return 0
-        except Exception:
-            emit(json.dumps({"scenario": "live_run", "status": "fail", "seconds": round(time.monotonic()-started, 3)}),
+        except Exception as error:
+            emit(json.dumps({"scenario": "live_run", "status": "fail", **failure_details(error),
+                             "seconds": round(time.monotonic()-started, 3)}),
                  flush=True)
             return 1
 
@@ -452,14 +485,15 @@ def live_smoke():
                               start_new_session=True) as child:
             try:
                 return child.wait(timeout=900)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
                 os.killpg(child.pid, signal.SIGTERM)
                 try:
                     child.wait(timeout=8)
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
-                print(json.dumps({"scenario": "live_run", "status": "interrupted"}))
+                print(json.dumps({"scenario": "live_run", "status": "interrupted", **failure_details(error),
+                                  "condition": "live_worker_exit"}))
                 return 1
 
 
@@ -467,8 +501,8 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--live"]:
         try:
             raise SystemExit(live_smoke())
-        except Exception:
-            print(json.dumps({"scenario": "live_setup", "status": "fail"}))
+        except Exception as error:
+            print(json.dumps({"scenario": "live_setup", "status": "fail", **failure_details(error)}))
             raise SystemExit(1) from None
     if sys.argv[1:] == ["--worker"]:
         asyncio.run(worker())

@@ -12,6 +12,7 @@ from claude_agent_sdk import ResultMessage, SystemMessage
 from lark_channel import OutboundCard, SendResult
 import psutil
 
+from scripts.check_native_claude import checking, failure_details
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.bindings import BindingStore
 from netizen_cli.claude_installation import verified_claude_cli
@@ -72,10 +73,11 @@ class RecordingChannel(FakeChannel):
         return await super().update_card(message_id, card)
 
 
-async def wait_for(predicate, seconds=25):
-    async with asyncio.timeout(seconds):
-        while not predicate():
-            await asyncio.sleep(.05)
+async def wait_for(condition, predicate, seconds=25):
+    with checking(condition):
+        async with asyncio.timeout(seconds):
+            while not predicate():
+                await asyncio.sleep(.05)
 
 
 def running(process):
@@ -153,6 +155,9 @@ class NativeExecution:
     async def interrupt(self):
         await self.client.interrupt()
 
+    async def stop_task(self, task_id):
+        await self.client.stop_task(task_id)
+
 
 class NativeClients(BundledClaudeClients):
     def __init__(self, live):
@@ -174,11 +179,11 @@ class NativeClients(BundledClaudeClients):
 
 
 def install_tools(cwd):
-    for mode in ("foreground", "background"):
+    for mode, release in (("foreground", "fixture-release"), ("background", "background-release"),
+                          ("foreground-b", "foreground-b-release")):
         script = cwd / ("fixture-" + mode)
         # exec preserves this PID, so the harness can follow the tool even if it is reparented.
-        body = ('i=0; while [ ! -e background-release ] && [ "$i" -lt 900 ]; do sleep .1; i=$((i+1)); done' if mode == "background" else
-                'i=0; while [ ! -e fixture-release ] && [ "$i" -lt 900 ]; do sleep .1; i=$((i+1)); done')
+        body = f'i=0; while [ ! -e {release} ] && [ "$i" -lt 900 ]; do sleep .1; i=$((i+1)); done'
         script.write_text(f'#!/bin/sh\necho "$$" > fixture-{mode}.pid\n{body}\n')
         script.chmod(0o700)
 
@@ -235,7 +240,7 @@ class Driver:
 
     async def submit(self, label, scenario="text"):
         before = len(self.clients.calls)
-        self.clients.turn_limit = 3 if scenario in ("foreground", "background", "denied-touch") else 1
+        self.clients.turn_limit = 3 if scenario in ("foreground", "foreground-b", "background", "denied-touch") else 1
         if scenario == "background":
             # One tool round and one answer per turn. Reserve H1, H2 and the wake.
             self.clients.turn_limit, self.clients.expected_turns = 2, 3
@@ -253,7 +258,7 @@ class Driver:
         return call
 
     async def terminal(self, label, *, interrupted=False, denied_bash=False):
-        assert await self.core._claude.wait_idle(45), "execution did not finish"
+        assert await self.core._claude.wait_idle(60 if self.live else 45), "execution did not finish"
         call = self.clients.calls[-1]
         replies = self.replies(label)
         if denied_bash:
@@ -289,12 +294,23 @@ class Driver:
         await self.reaped()
 
     async def reaped(self):
-        await wait_for(lambda: all(not running(p) for c in self.clients.calls for p in c.processes)
+        await wait_for("children_reaped", lambda: all(not running(p) for c in self.clients.calls for p in c.processes)
                        and all(not running(p) for p in self.tools) and not cli_children(), 8)
 
-    async def ready_tool(self, mode):
+    async def ready_tool(self, mode, *, initialized_turn=None, condition="fixture_tool_ready"):
         path = self.cwd / f"fixture-{mode}.pid"
-        await wait_for(lambda: path.exists() and path.read_text().strip().isdigit())
+        def ready():
+            if initialized_turn is not None:
+                # A model that already returned without running this held tool
+                # cannot satisfy the fixture, regardless of the remaining time.
+                assert not initialized_turn.attributed and not initialized_turn.finished.is_set()
+                binding = self.store.active_binding(SCOPE.key)
+                if not initialized_turn.inputs or self.core._claude.turn_activity(
+                    binding.id, thread_id=initialized_turn.session, turn_id=initialized_turn.inputs[0]
+                ) is None:
+                    return False
+            return path.exists() and path.read_text().strip().isdigit()
+        await wait_for(condition, ready, 60 if self.live else 25)
         proc = psutil.Process(int(path.read_text()))
         # Require our disposable CLI to own the tool while it is active.
         assert any(parent in self.clients.calls[-1].processes for parent in proc.parents())
@@ -344,7 +360,8 @@ class Driver:
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         try:
             self.cli_submissions += 1
-            output, _ = await asyncio.wait_for(child.communicate(), timeout=45)
+            with checking("handoff_cli_exit"):
+                output, _ = await asyncio.wait_for(child.communicate(), timeout=45)
             assert child.returncode == 0
             result = json.loads(output)
             assert result["session_id"] == self.session and not result["is_error"]
@@ -373,37 +390,55 @@ class Driver:
         await self.terminal("after-busy")
 
     async def exact_stop(self):
-        await self.submit("stop-a", "foreground")
-        tool = await self.ready_tool("foreground")
+        first = await self.submit("stop-a", "foreground")
+        tool = await self.ready_tool("foreground", initialized_turn=first, condition="stop_a_foreground_ready")
         await self.send("sessions", "/sessions")
         card, = self.replies("sessions")
         stop = _card_button_value(card, "停止")
         await self.send("status", "/status")
         status_card, = self.replies("status")
-        await self.click(direct_button_event(_card_button_value(status_card, "停止"), message_id="card-status"))
-        assert "当前会话" in json.dumps(self.channel.updates[-1], ensure_ascii=False)
-        assert self.channel.updates[-1][0] == "card-status"
-        await self.terminal("stop-a", interrupted=True)
-        ack, = self.replies("card-status")
-        assert ack == "正在请求停止当前 Claude 执行。"
-        assert self.channel.events.index(("reply", "card-status", ack)) < self.channel.events.index(
-            ("add", "stop-a", "CrossMark"))
+        with checking("status_card_stop"):
+            await self.click(direct_button_event(_card_button_value(status_card, "停止"), message_id="card-status"))
+            assert "当前会话" in json.dumps(self.channel.updates[-1], ensure_ascii=False)
+            assert self.channel.updates[-1][0] == "card-status"
+            ack, = self.replies("card-status")
+            assert ack == "已请求中断；当前观测到 0 个后台任务。/stop all 可停止剩余任务。"
+        with checking("stop_a_interrupted_terminal"):
+            await self.terminal("stop-a", interrupted=True)
+            assert self.channel.events.index(("reply", "card-status", ack)) < self.channel.events.index(
+                ("add", "stop-a", "CrossMark"))
         assert not running(tool)
-        await self.submit("stop-b", "foreground")
-        await self.ready_tool("foreground")
-        await self.click(direct_button_event(stop, message_id="card-sessions"))
-        assert any("变化" in str(text) for text in self.replies("card-sessions")), "stale stop was not rejected"
-        self.release()
-        await self.terminal("stop-b")
-        (self.cwd / "fixture-release").unlink()
+        second = await self.submit("stop-b", "foreground-b")
+        release = self.cwd / "foreground-b-release"
+        try:
+            held = await self.ready_tool("foreground-b", initialized_turn=second, condition="stop_b_foreground_ready")
+            with checking("stale_sessions_card_rejected"):
+                await self.click(direct_button_event(stop, message_id="card-sessions"))
+                assert any("变化" in str(text) for text in self.replies("card-sessions")), "stale stop was not rejected"
+                assert running(held)
+        finally:
+            release.touch()
+        with checking("stop_b_released_terminal"):
+            await self.terminal("stop-b")
+        release.unlink()
+
+    async def background_idle_reply(self, cli, label, submissions):
+        binding = self.store.active_binding(SCOPE.key)
+        def delivered_and_idle():
+            state = self.core._claude.local_snapshot(binding.id).cli
+            # The native wrapper sees idle before the runtime applies it. A policy
+            # notice or a busy refusal is also a reply, but neither is this answer.
+            return (state and state.idle and state.tasks == 1 and len(cli.inputs) == submissions
+                    and cli.answer and any(isinstance(reply, str) and cli.answer in reply for reply in self.replies(label)))
+        await wait_for(label + "_runtime_idle_reply", delivered_and_idle, 60 if self.live else 25)
 
     async def background(self):
         first = await self.submit("bg-a", "background")
         try:
             tool = await self.ready_tool("background")
-            await wait_for(lambda: first.state == "idle" and self.replies("bg-a"))
+            await self.background_idle_reply(first, "bg-a", 1)
             await self.send("bg-b", self.prompt("bg-b"))
-            await wait_for(lambda: first.state == "idle" and self.replies("bg-b"))
+            await self.background_idle_reply(first, "bg-b", 2)
             assert self.clients.calls[-1] is first and len(first.inputs) == 2 and running(tool)
         finally:
             (self.cwd / "background-release").touch()
@@ -416,12 +451,36 @@ class Driver:
             reminders = [opts.reply_to for _, _, opts in self.channel.send_calls if opts.reply_to.startswith(f"reply-{label}-")]
             assert reminders == [f"reply-{label}-{last_reply}"]
 
+    async def stop_listed_work(self):
+        (self.cwd / "background-release").unlink(missing_ok=True)
+        cli = await self.submit("stop-list", "background")
+        shell = await self.ready_tool("background")
+        await self.background_idle_reply(cli, "stop-list", 1)
+        await self.send("second-foreground", self.prompt("second-foreground", "foreground"))
+        await self.ready_tool("foreground")
+        await self.send("esc", "/stop")
+        assert "当前观测到 1 个后台任务" in self.replies("esc")[0]
+        binding = self.store.active_binding(SCOPE.key)
+        assert binding is not None
+        # The fixture sees the raw CLI frame just before the application consumes it.
+        await wait_for("listed_work_runtime_idle",
+                       lambda: cli.state == "idle" and self.core._claude.local_snapshot(binding.id).cli.idle)
+        assert running(shell) and not cli.finished.is_set()
+        await self.send("all-status", "/status")
+        button = _card_button_value(self.replies("all-status")[0], "全部停止")
+        await self.click(direct_button_event(button, message_id="card-all-status"))
+        reply = self.replies("card-all-status")
+        assert reply and "1 个后台任务发送停止请求" in reply[0], reply
+        assert await self.core._claude.wait_idle(45)
+        assert not running(shell) and len(cli.inputs) == 2 and cli.finished.is_set()
+
     async def stop_during_close(self):
         gate = self.clients.close_gate = asyncio.Event()
         try:
             call = await self.submit("close")
-            await asyncio.wait_for(call.closing.wait(), 30)
-            await wait_for(lambda: any(reply != DEFAULT_MODE for reply in self.replies("close")))
+            with checking("client_closing"):
+                await asyncio.wait_for(call.closing.wait(), 30)
+            await wait_for("close_answer", lambda: any(reply != DEFAULT_MODE for reply in self.replies("close")))
             await self.send("closing-stop", "/stop")
             assert self.replies("closing-stop") == ["这次 Claude 执行已经结束，客户端正在收尾。"]
             await self.send("close-busy", "more")
@@ -479,7 +538,7 @@ class Driver:
         async with asyncio.timeout(_SHUTDOWN_BUDGET_SECONDS):
             await self.core.close()
             await self.reaped()
-            await wait_for(lambda: not running(tool))
+            await wait_for("shutdown_tool_exit", lambda: not running(tool))
         await self.terminal("shutdown", interrupted=True)
 
 
@@ -515,7 +574,7 @@ async def channel_driver(cwd, provider, live):
 
 EXPECTED_REQUESTS = {
     "startup_grace": 1, "ordinary": 1, "resume": 1, "handoff": 2, "busy": 3, "exact_stop": 3,
-    "background": 4, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2, "shutdown": 1,
+    "background": 4, "stop_listed_work": 3, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2, "shutdown": 1,
 }
 CASES = tuple(EXPECTED_REQUESTS)
 
@@ -526,7 +585,8 @@ async def channel_cases(cwd, provider):
     (cwd / "CLAUDE.md").write_text(f"The project sentinel is {PROJECT_SENTINEL}.\n")
     install_tools(cwd)
     (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json").write_text(json.dumps({
-        "model": "claude-sonnet-4-6", "permissions": {"allow": ["Bash(./fixture-foreground)", "Bash(./fixture-background)"]},
+        "model": "claude-sonnet-4-6", "permissions": {"allow": ["Bash(./fixture-foreground)", "Bash(./fixture-foreground-b)",
+                                                               "Bash(./fixture-background)"]},
     }))
     await run_cases(cwd, provider=provider)
 
@@ -541,10 +601,12 @@ async def run_cases(cwd, *, provider=None, live=None, report=print):
             location = {}
             status = "fail"
             try:
-                if live and name == "fallback":
+                if live and name in {"fallback", "stop_listed_work"}:
                     status = "skipped_mock_only"
                     continue
-                async with asyncio.timeout(150 if live else 65):
+                # exact_stop waits for two independent live tool launches and terminals.
+                seconds = (240 if name == "exact_stop" else 150) if live else 65
+                async with asyncio.timeout(seconds):
                     await getattr(driver, name)()
                     await driver.reaped()
                     if live:
@@ -552,11 +614,8 @@ async def run_cases(cwd, *, provider=None, live=None, report=print):
                     if provider:
                         assert len(driver.rows()) - requests == EXPECTED_REQUESTS[name], "unexpected model request count"
                 status = "pass"
-            except AssertionError as error:
-                frame = error.__traceback__
-                while frame.tb_next is not None:
-                    frame = frame.tb_next
-                location = {"file": Path(frame.tb_frame.f_code.co_filename).name, "line": frame.tb_lineno}
+            except Exception as error:
+                location = failure_details(error)
                 raise
             finally:
                 report(json.dumps({"scenario": name, "status": status, **location, "seconds": round(time.monotonic()-started, 3),

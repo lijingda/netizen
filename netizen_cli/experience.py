@@ -419,7 +419,8 @@ def parse_message(
     elif name is ControlName.RENAME and len(tokens) > 1:
         arguments = (" ".join(tokens[1:]),)
     try:
-        _validate_arguments(name, arguments)
+        if not (policy.can_stop_background_tasks and name is ControlName.STOP and arguments == ("all",)):
+            _validate_arguments(name, arguments)
     except InvalidInteraction as error:
         if name is ControlName.NEW:
             raise

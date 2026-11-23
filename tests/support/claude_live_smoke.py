@@ -25,8 +25,8 @@ class LiveSmoke:
         self.handoff_token = uuid4().hex
 
     def prompt(self, label, scenario):
-        if scenario == "foreground":
-            return ("Use Bash now to run exactly ./fixture-foreground in the foreground. Wait for its exit "
+        if scenario in ("foreground", "foreground-b"):
+            return (f"Use Bash now to run exactly ./fixture-{scenario} in the foreground. Wait for its exit "
                     "and then briefly acknowledge completion. Do not inspect or modify the helper.")
         if scenario == "background":
             return ("Use Bash now to run exactly ./fixture-background with run_in_background set to true. "

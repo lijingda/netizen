@@ -23,7 +23,7 @@ from ..progress_card_settings import ProgressCardSettings
 from ..completion_mention import valid_completion_mention_user_id
 from ..domain import ActiveState, FeishuScope, MessageContextAnchor, MentionContextMode
 from ..session_settings import require_local_settings
-from ..external_calls import external_call
+from ..external_calls import ExternalCallCancelled, external_call
 from ..ordinary_sessions import (
     ClaudeCliState, CliStateChanged, ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted,
     LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
@@ -138,6 +138,8 @@ class _Execution:
     ending: bool = False
     publication: _Publication = field(default_factory=_Publication)
     started: bool = False
+    stop_target: str | None = None
+    awaiting_task_stop: bool = False
     stopping: bool = False
     closing: bool = False
     close_finished: bool = False
@@ -174,7 +176,7 @@ class _Execution:
         return human
 
     def cli_state(self) -> ClaudeCliState:
-        return ClaudeCliState(self.admissible or (self.live.ordered_idle and not self.pending and not self.live.physical),
+        return ClaudeCliState(self.live.ordered_idle and self.pending is None and self.live.physical is None,
                              len(self.live.tasks), self.live.crons)
 
     def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, final: str | None = None) -> TurnActivitySnapshot:
@@ -192,6 +194,10 @@ class _Execution:
     @property
     def writing(self) -> bool:
         return self.human.written
+
+    @property
+    def stopping_current(self) -> bool:
+        return self.stopping and self.stop_target == self.live.physical
 
     @property
     def stoppable(self) -> bool:
@@ -631,7 +637,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
     async def _invalid_init(self, client: ClaudeClient) -> None:
         try:
             async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
-                await client.interrupt()
+                await external_call(client.interrupt())
         except Exception:
             pass
         raise TerminalStateUnknown(f"{MODE_UNKNOWN}\n{UNKNOWN}")
@@ -660,8 +666,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         live.seen.add(frame.uuid)
         if live.init_human and not input_id:
             raise ValueError("missing active input attribution")
+        physical = live.physical
         owner, wake = live.route(frame)
         human = explicit if input_id else execution.routable(owner)
+        if physical is not None and execution.stop_target == physical:
+            if human:
+                human.stop_requested = True
+            execution.stop_target = None
+            execution.stopping = False
         submitted = execution.submitted(input_id)
         bodyless = (frame.subtype, frame.terminal_reason, frame.is_error) == ("success", None, False) and not frame.result
         status, body, detail = ("completed", None, None) if bodyless else _terminal(frame)
@@ -713,7 +725,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         live = execution.live
         idle = live.ordered_idle and live.physical is None
         force = execution.ending or execution.broken
-        close = force or (idle and not live.tasks and not live.crons and execution.pending is None)
+        close = force or (idle and not live.tasks and not live.crons and execution.pending is None
+                          and not execution.awaiting_task_stop)
         if handoff and close:
             execution.closing = True
             live.changed.set()
@@ -881,10 +894,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if execution is not None and (execution.closing or execution.pending or execution.live.physical
                                       or not execution.live.ordered_idle):
             state = (ActiveState.CLOSING if execution.closing else
-                     ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING)
+                     ActiveState.STOPPING if execution.stopping_current else ActiveState.RUNNING)
             turn = ActiveTurnSnapshot(binding_id, execution.session, execution.input_id, self._owner, state)
         return LocalExecutionSnapshot(execution.revision if execution else self._activity.get(binding_id, _BindingActivity()).revision,
-                                      turn, binding_id in self._unavailable, execution.cli_state() if execution else None)
+                                      turn, binding_id in self._unavailable, execution.cli_state() if execution else None,
+                                      execution.input_id if execution else None,
+                                      bool(execution and execution.stoppable and not execution.finishing),
+                                      bool(execution and execution.live.tasks and not execution.finishing))
 
     async def activate_exact(self, binding_id: str, *, context_anchor: MessageContextAnchor | None = None) -> ThreadBinding:
         self.require_admission()
@@ -957,51 +973,108 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             raise ThreadActivityChanged("目标执行已结束。")
         return execution
 
+    async def stop_control(self, binding_id: str, *, sender_id: str, revision: int | None, turn_id: str | None,
+                           all_tasks: bool, acknowledge: Callable[[str], Awaitable[None]]) -> StopDisposition:
+        if sender_id != self._owner:
+            raise OrdinaryInputRejected("这个 Claude 实例仅限所有者使用。")
+        return await self._stop(binding_id, revision, turn_id, all_tasks=all_tasks, receipt=acknowledge)
+
     async def stop_exact(self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
                          expected_activity_revision: int | None = None,
                          expected_turn_id: str | None = None) -> StopDisposition:
-        async with self._lock(binding_id):
-            execution = self._exact(binding_id, expected_activity_revision, expected_turn_id)
-            if execution.stopping:
-                return StopDisposition.STOPPING
-            execution.stopping = True
-            if execution.pending is not None:
-                execution.pending.stop_requested = True
-            execution.live.stop_requested.update(execution.live.tasks)
-            if acknowledge is not None:
-                execution.stop_receipt = asyncio.Event()
-            client = execution.client if execution.writing else None
-            if not execution.writing:
-                self._cancel_opening(execution)
-        stop_receipt = execution.stop_receipt
-        acknowledge_success = False
-        # Keep the captured client pinned. Completion waits for this stop's receipt attempt.
+        return await self._stop(binding_id, expected_activity_revision, expected_turn_id, all_tasks=False,
+                                receipt=(lambda _: acknowledge()) if acknowledge else None)
+
+    async def _stop(self, binding_id: str, revision: int | None, turn_id: str | None, *, all_tasks: bool,
+                    receipt: Callable[[str], Awaitable[None]] | None) -> StopDisposition:
+        barrier = asyncio.Event() if receipt else None
+        opening: asyncio.Task[None] | None = None
         try:
-            if client is not None:
-                async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
-                    await client.interrupt()
-            acknowledge_success = True
-        except (Exception, asyncio.CancelledError) as exc:
             async with self._lock(binding_id):
-                if self._active.get(binding_id) is execution:
-                    execution.stopping = False
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            if execution.concluded:
-                return StopDisposition.NOT_RUNNING
-            raise TerminalStateUnknown("无法确认 Claude 停止请求的结果。") from None
-        finally:
-            if acknowledge is not None and stop_receipt is not None:
+                execution = self._active.get(binding_id)
+                if binding_id in self._unavailable:
+                    raise OrdinaryInputRejected(CLOSE_FAILED)
+                if (revision, turn_id) != (None, None) and (
+                        not execution or (revision, turn_id) != (execution.revision, execution.input_id)):
+                    raise ThreadActivityChanged("目标执行已变化，请刷新后重试。")
+                if execution is None:
+                    raise OrdinaryInputRejected("当前没有正在执行的任务。")
+                if execution.finishing:
+                    raise OrdinaryInputRejected(self._closing_notice(execution))
+                live = execution.live
+                tasks = dict(live.tasks) if all_tasks else {}
+                if not tasks and not execution.stoppable:
+                    if live.tasks:
+                        raise OrdinaryInputRejected(f"当前没有可中断的前台执行，仍有 {len(live.tasks)} 个后台任务。可发送 /stop all。")
+                    raise OrdinaryInputRejected("当前没有正在执行的任务。")
+                if not tasks and execution.stopping_current:
+                    return StopDisposition.STOPPING
+                if barrier:
+                    execution.stop_receipt = barrier
+                client = execution.client
+                unknown = False
+                if execution.stoppable and not execution.stopping_current:
+                    target = live.physical
+                    pending = execution.pending
+                    execution.stop_target = target
+                    execution.stopping = True
+                    live.stop_requested.update(live.tasks)
+                    if not execution.writing:
+                        self._cancel_opening(execution)
+                        opening = execution.task
+                    elif client is not None:
+                        try:
+                            async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
+                                await external_call(client.interrupt())
+                        except Exception as error:
+                            still_running = not execution.finishing and (
+                                live.physical == target if target is not None else execution.pending is pending
+                            )
+                            if still_running:
+                                execution.stopping = False
+                            if not all_tasks:
+                                if not still_running and not isinstance(error, ExternalCallCancelled):
+                                    return StopDisposition.NOT_RUNNING
+                                raise TerminalStateUnknown("Claude 停止结果未知，请刷新 /status 核对。") from None
+                            unknown = True
+                requested = 0
+                for task, run in tasks.items():
+                    if execution.finishing or execution.broken or self._active.get(binding_id) is not execution:
+                        break
+                    if live.tasks.get(task) != run:
+                        continue
+                    assert client is not None
+                    live.stop_requested.add(task)
+                    owner = live.tool_owner.get(live.run_tool.get(run, ""))
+                    if owner and owner.human and owner.human in execution.humans:
+                        execution.humans[owner.human].stop_requested = True
+                    # Membership can empty before the SDK acknowledges this control.
+                    execution.awaiting_task_stop = True
+                    try:
+                        async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
+                            await external_call(client.stop_task(task))
+                        requested += 1
+                    except Exception:
+                        unknown = True
+                    finally:
+                        execution.awaiting_task_stop = False
+                        self._reconcile(execution)
+                count = len(live.tasks)
+                text = (f"已请求停止当前工作，已向 {requested} 个后台任务发送停止请求。当前观测到 {count} 个后台任务。"
+                        if all_tasks else f"已请求中断；当前观测到 {count} 个后台任务。/stop all 可停止剩余任务。")
+                if unknown:
+                    text += "部分停止结果未知，请刷新 /status 核对。"
+            if receipt:
                 try:
                     async with asyncio.timeout(self._remaining(_CONTROL_SECONDS)):
-                        if acknowledge_success:
-                            await acknowledge()
+                        await external_call(receipt(text))
                 except Exception:
                     logger.warning("Claude stop receipt failed for Binding %s", binding_id)
-                finally:
-                    stop_receipt.set()
-        if not execution.writing and execution.task is not None:
-            await asyncio.wait([execution.task], timeout=self._remaining(_CLOSE_SECONDS))
+        finally:
+            if barrier:
+                barrier.set()
+        if opening:
+            await asyncio.wait([opening], timeout=self._remaining(_CLOSE_SECONDS))
         return StopDisposition.REQUESTED
 
     async def recheck_turn_exact(self, binding_id: str, *, expected_activity_revision: int,
@@ -1009,7 +1082,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         async with self._lock(binding_id):
             execution = self._exact(binding_id, expected_activity_revision, expected_turn_id)
             return ActiveTurnSnapshot(binding_id, execution.session, execution.input_id, self._owner,
-                                      ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING)
+                                      ActiveState.STOPPING if execution.stopping_current else ActiveState.RUNNING)
 
     def _remaining(self, seconds: float) -> float:
         if self._shutdown_deadline is None:
