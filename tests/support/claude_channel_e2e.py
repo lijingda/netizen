@@ -576,6 +576,7 @@ class Driver:
             await self.terminal("shutdown", interrupted=True)
             return
         await self.submit("shutdown-bg", "background")
+        pending_binding = self.store.active_binding(SCOPE.key)
         pending = await self.ready_tool("background")
         await wait_for(lambda: any(isinstance(r, OutboundPost) for r in self.replies("shutdown-bg")))
         await self.create("parallel-shutdown")
@@ -600,9 +601,17 @@ class Driver:
             await restarted.send("restart-grace", restarted.prompt("restart-grace"))
             assert restarted.replies("restart-grace") == [GRACE] and not restarted.clients.calls
             restarted.clock[0] = 2
-            restarted.session = self.session
-            await restarted.submit("restart-ready")
+            await restarted.core._claude.activate_exact(pending_binding.id)
+            restarted.session = pending_binding.native_thread_id
+            new_input = await restarted.submit("restart-ready", "hold-stream")
+            try:
+                await asyncio.wait_for(new_input.notification.wait(), 15)
+                assert not restarted.replies("shutdown-bg") and not restarted.replies("restart-ready")
+            finally:
+                self.provider.release("restart-ready")
             await restarted.terminal("restart-ready")
+            assert not restarted.replies("shutdown-bg")
+            assert len([r for r in restarted.replies("restart-ready") if isinstance(r, OutboundPost)]) == 1
             self.cli_submissions += restarted.submissions()
             self.cli_turns += restarted.reported_turns()
 

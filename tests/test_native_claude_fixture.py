@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,19 @@ from tests.support.claude_live_smoke import TurnBudget
 
 
 class ClaudeIsolationTests(unittest.TestCase):
+    def test_batch_gate_rejects_a_stop_on_the_receipt_and_swapped_body_owners(self):
+        from tests.support.claude_background import _check_stop_entries
+
+        results = [SimpleNamespace(subtype="success", terminal_reason=reason, is_error=False, result=text)
+                   for reason, text in (("completed", "human"), (None, ""), ("completed", "wake"))]
+        first = {"p1": "human"}
+        both = first | {"p2": "wake"}
+        self.assertEqual(_check_stop_entries(results, [first, first, both]), 2)
+        for wrong in ([first, both, both],
+                      [{"p1": "wake"}, {"p1": "wake"}, {"p1": "wake", "p2": "human"}]):
+            with self.subTest(entries=wrong), self.assertRaises(AssertionError):
+                _check_stop_entries(results, wrong)
+
     def test_live_requires_explicit_local_opt_in_and_only_passes_login_environment(self):
         env = {"NETIZEN_CLAUDE_LIVE": "1", "HOME": "/owner", "PATH": "/usr/bin", "EXTRA": "x",
                "ANTHROPIC_API_KEY": "fixture", "CLAUDE_CONFIG_DIR": "/elsewhere"}
