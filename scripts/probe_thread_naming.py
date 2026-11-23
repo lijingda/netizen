@@ -36,6 +36,7 @@ from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
 from netizen_cli.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID  # noqa: E402
 from netizen_cli.runtime.thread_naming import NAMING_OUTPUT_SCHEMA, NAMING_PROMPT  # noqa: E402
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
+from scripts.git_test_environment import clear_git_repository_environment
 from scripts.probe_python_sdk import (  # noqa: E402
     _prove_thread_absent_from_all_catalogs,
     _public_final_response,
@@ -390,4 +391,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    clear_git_repository_environment()
     main()

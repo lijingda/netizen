@@ -47,6 +47,7 @@ with log.open("a") as output:
         "cwd": str(Path.cwd()),
         "pid": os.getpid(),
         "parent": os.getppid(),
+        "git_dir": os.environ.get("GIT_DIR"),
     }) + "\\n")
 print(f"probe {index}")
 sys.exit(17 if index == int(os.environ["NETIZEN_TEST_PROBE_FAIL_AT"]) else 0)
@@ -59,7 +60,8 @@ sys.exit(17 if index == int(os.environ["NETIZEN_TEST_PROBE_FAIL_AT"]) else 0)
                 root = Path(directory).resolve()
                 scripts = root / "scripts"
                 scripts.mkdir()
-                shutil.copyfile(ROOT / "scripts/check_sdk.py", scripts / "check_sdk.py")
+                for filename in ("check_sdk.py", "git_test_environment.py"):
+                    shutil.copyfile(ROOT / "scripts" / filename, scripts / filename)
                 for script in {command[0] for command in expected}:
                     (scripts / script).write_text(probe, encoding="utf-8")
                 log = root / "probes.jsonl"
@@ -68,6 +70,7 @@ sys.exit(17 if index == int(os.environ["NETIZEN_TEST_PROBE_FAIL_AT"]) else 0)
                     cwd=root,
                     env={
                         **os.environ,
+                        "GIT_DIR": str(root / "caller.git"),
                         "NETIZEN_TEST_PROBE_LOG": str(log),
                         "NETIZEN_TEST_PROBE_FAIL_AT": str(fail_at),
                     },
@@ -87,6 +90,7 @@ sys.exit(17 if index == int(os.environ["NETIZEN_TEST_PROBE_FAIL_AT"]) else 0)
                 self.assertEqual({record["cwd"] for record in records}, {str(root)})
                 self.assertEqual(len({record["pid"] for record in records}), count)
                 self.assertEqual(len({record["parent"] for record in records}), 1)
+                self.assertTrue(all(record["git_dir"] is None for record in records))
                 self.assertEqual(
                     result.stdout.splitlines(),
                     [f"probe {i}" for i in range(1, count + 1)],

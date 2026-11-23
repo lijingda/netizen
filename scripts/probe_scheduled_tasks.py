@@ -66,6 +66,7 @@ from netizen_cli.sdk_gap_adapter import AppServerThreadSubscriptionControl  # no
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup, SUPPORTED_SDK_VERSION  # noqa: E402
 from scripts.source_evidence import source_evidence  # noqa: E402
 from scripts.probe_project_delete import _DeleteOnce  # noqa: E402
+from scripts.git_test_environment import clear_git_repository_environment
 from scripts.probe_python_sdk import (  # noqa: E402
     _confirm_interrupted_turn, _prove_thread_absent_from_all_catalogs,
     _status_value, _thread_status_type,
@@ -1343,4 +1344,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    clear_git_repository_environment()
     raise SystemExit(main())

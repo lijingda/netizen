@@ -9,8 +9,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.git_test_environment import clear_git_repository_environment
+
 
 def main() -> int:
+    clear_git_repository_environment()
     scripts = Path(__file__).resolve().parent
     probes = (
         ("probe_sdk_turn_plan.py", "--timeout", "5"),

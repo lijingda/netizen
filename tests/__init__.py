@@ -3,6 +3,10 @@
 import logging
 import sys
 
+from scripts.git_test_environment import clear_git_repository_environment
+
+clear_git_repository_environment()
+
 # Import both SDKs before replacing the streams they capture during import.
 from lark_channel.core.log import logger as channel_logger
 from lark_oapi.core.log import logger as oapi_logger
