@@ -174,17 +174,37 @@ async function run() {
     });
 
     async function evaluate(expression) {
-      const reply = await page("Runtime.evaluate", { expression, returnByValue: true });
+      const reply = await page("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
       if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description || reply.exceptionDetails.text);
       return reply.result.value;
     }
     const element = selector => `document.querySelector(${JSON.stringify(selector)})`;
     const visible = selector => `${element(selector)}?.checkVisibility()`;
+    const clickTarget = (selector, label) => label
+      ? `[...document.querySelectorAll(${JSON.stringify(selector)})].find(el => el.textContent === ${JSON.stringify(label)})`
+      : element(selector);
     async function click(selector, label) {
-      let target = element(selector);
-      if (label) target = `[...document.querySelectorAll(${JSON.stringify(selector)})].find(el => el.textContent === ${JSON.stringify(label)})`;
       await until("clickable " + (label || selector), () => evaluate(
-        `(() => { const el = ${target}; if (!el?.checkVisibility() || el.disabled) return false; el.click(); return true; })()`));
+        `(() => { const el = ${clickTarget(selector, label)}; if (!el?.checkVisibility() || el.disabled) return false; el.click(); return true; })()`));
+    }
+    async function clickInViewport(selector, label) {
+      let point;
+      await until("hittable " + (label || selector), async () => {
+        point = await evaluate(`(async () => {
+          const button = ${clickTarget(selector, label)};
+          if (!button?.checkVisibility() || button.disabled) return null;
+          button.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+          // Scroll events run before animation frames. A pending focus-restoration scroll closes row menus.
+          await new Promise(requestAnimationFrame);
+          const rect = button.getBoundingClientRect();
+          const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+          return button.contains(document.elementFromPoint(x, y)) ? { x, y } : null;
+        })()`);
+        return point;
+      });
+      for (const type of ["mousePressed", "mouseReleased"]) {
+        await page("Input.dispatchMouseEvent", { type, ...point, button: "left", clickCount: 1 });
+      }
     }
     async function settled(phoneWidth) {
       const start = performance.now();
@@ -330,7 +350,7 @@ async function run() {
                 row.textContent.includes("原生 Claude 设置") && row.textContent.includes("空闲")
                 && /[0-9]/.test(row.querySelector(".session-time")?.textContent))`);
             await until("local registration time, settings and status", verify);
-            await click('#sessions-body [aria-haspopup="menu"]');
+            await clickInViewport('#sessions-body [aria-haspopup="menu"]');
             await until("Claude row menu contains only available actions", () => evaluate(
               '[...document.querySelectorAll(\'[role="menuitem"]\')].some(el => el.textContent === "设为当前") && ![...document.querySelectorAll(\'[role="menuitem"]\')].some(el => el.textContent.includes("创建定时任务"))'));
             await evaluate('document.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape", bubbles:true}))');
@@ -341,8 +361,8 @@ async function run() {
           result.interactions.push(step);
         } else if (path === "/sessions/ordinary") {
           step += " · conversation";
-          await click('#sessions-body [aria-haspopup="menu"]');
-          await click('[role="menuitem"]', "查看对话记录");
+          await clickInViewport('#sessions-body [aria-haspopup="menu"]');
+          await clickInViewport('[role="menu"]:not([hidden]) [role="menuitem"]', "查看对话记录");
           await until("rendered Markdown and decoded answer blob", () => evaluate(
             `${element(".conversation-answer h1")}?.textContent === "Smoke answer" &&
              ${element('.conversation-answer img[src^="blob:"]')}?.naturalWidth === 1`));
