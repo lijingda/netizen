@@ -59,7 +59,7 @@ class SessionFormView:
 
     @classmethod
     def from_operations(cls, allows: Callable[[OperationId], bool], *, inherited_source: str) -> SessionFormView:
-        return cls(allows(OperationId.MODEL), allows(OperationId.PROGRESS), inherited_source)
+        return cls(allows(OperationId.MODEL), allows(OperationId.REPLY_CARD), inherited_source)
 
     def defaults(self, catalog: ModelCatalog | None) -> SessionSettings:
         settings = SessionSettings.new_defaults(catalog if self.model_editable else None)
@@ -74,7 +74,7 @@ class SessionFormView:
 
 def require_local_settings(has_model: bool, feedback: BindingTaskFeedback) -> None:
     # The native Claude write boundary also rejects unsupported intent.
-    SessionFormView(False, False, "原生 Claude 设置").validate(has_model, feedback)
+    SessionFormView(False, True, "原生 Claude 设置").validate(has_model, feedback)
 
 
 _FIELDS = frozenset({"turn_settings", "reaction_pulse_enabled", "progress_card_enabled", "completion_mention_enabled", "message_context_mode", "progress_card_settings"})

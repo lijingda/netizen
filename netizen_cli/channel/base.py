@@ -17,6 +17,7 @@ from lark_channel import (
     SendResult,
 )
 
+from ..external_calls import external_call
 from ..bindings import (
     BindingNotFound,
     BindingStore,
@@ -75,7 +76,7 @@ from ..domain import (
     ScopeKind,
 )
 from ..ordinary_sessions import ClaudeInputAnchor, ConversationTarget
-from .topics import send_conversation_message
+from .topics import CardReplyLocation, send_conversation_message
 from ..backends import BackendPolicy, BackendUnsupported
 from ..experience import (
     command_help,
@@ -390,7 +391,7 @@ class ChannelState:
             return Path(binding.working_cwd)
         return self._projects.resolve_for_binding(binding.project_alias).cwd
 
-    async def _reply_to_origin(self, message: Any, content: Any) -> SendResult:
+    async def _reply_to_origin(self, message: Any, content: Any, *, location: CardReplyLocation | None = None) -> SendResult:
         if isinstance(message, ConversationTarget):
             scope = message.scope
             if scope.app_id != self._app_id:
@@ -402,13 +403,14 @@ class ChannelState:
                 root = message.source.topic_root_id
                 if not root:
                     raise ValueError("Claude topic has no confirmed root")
-            return await send_conversation_message(self._channel, scope, root, content, message.delivery_id)
+            return await send_conversation_message(self._channel, scope, root, content, message.delivery_id, message.publishable,
+                                                   single_attempt=message.single_attempt, location=location)
         if isinstance(message, (ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin, _CardReplyTarget)):
-            return await self._channel.reply(message, content, SendOpts(
+            return await external_call(self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=message.conversation.thread_id is not None,
                 reply_target_gone="fail",
-            ))
+            )), isolate=self._local_sessions is not None)
         if isinstance(message, ScheduledOrigin):
             # A scheduled result belongs to this exact execution topic. The
             # SDK's default target-gone fallback would create a main-chat message.
@@ -416,7 +418,7 @@ class ChannelState:
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=True, reply_target_gone="fail",
             ))
-        return await self._channel.reply(message, content)
+        return await external_call(self._channel.reply(message, content), isolate=self._local_sessions is not None)
 
     @staticmethod
     def _scheduled_message_matches(message: ScheduledOrigin, data: object, message_id: str | None) -> bool:
@@ -888,7 +890,7 @@ class ChannelState:
             return False
         try:
             async with asyncio.timeout(_REACTION_OPERATION_TIMEOUT_SECONDS):
-                result = await self._channel.add_reaction(message_id, emoji_type)
+                result = await external_call(self._channel.add_reaction(message_id, emoji_type), isolate=self._local_sessions is not None)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -906,7 +908,7 @@ class ChannelState:
         return True
 
     async def _update_card(self, message_id: str, content: Any) -> SendResult:
-        return await self._channel.update_card(message_id, content.card)
+        return await external_call(self._channel.update_card(message_id, content.card), isolate=self._local_sessions is not None)
 
     async def _safe_update_card(self, message_id: str, content: Any) -> bool:
         if not message_id:

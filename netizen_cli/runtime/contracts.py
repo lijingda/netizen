@@ -433,6 +433,8 @@ class TurnActivitySnapshot:
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
+    state_line: str | None = None
+
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.turn_id:
             raise ValueError("Turn activity identity must not be empty")

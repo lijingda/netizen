@@ -43,7 +43,8 @@ class NativeSession:
         self.cron_fired |= any("cron-signal" in t for t in texts)
         held = {"early": 2, "foreground_interrupt": 2, "overlap": 3, "wake": 3, "stop_busy": 3,
                 "wake_interrupt": 4, "agent_esc": 2}
-        return tool, "hold-stream" if held.get(case) == n else "text", case + "-model"
+        return tool, ("tool-partial" if case == "reverse" and n == 1 else
+                      "hold-stream" if held.get(case) == n else "text"), case + "-model"
 
     async def hook(self, data, callback_id, context):
         self.stops.append((data["background_tasks"], data["session_crons"]))
@@ -131,7 +132,7 @@ class NativeSession:
         starts = self.system("task_started")
         uses = [(b.id, m.user_message_uuid) for m in self.frames if isinstance(m, AssistantMessage)
                 for b in m.content if isinstance(b, ToolUseBlock)]
-        assert uses == [(t.tool_use_id, self.h1 if i == 0 else None) for i, t in enumerate(starts)]
+        assert uses == [(t.tool_use_id, self.h1 if i == 0 and case != "reverse" else None) for i, t in enumerate(starts)]
         assert self.system("init")[0].data["user_message_uuids"] == [self.h1]
         assert [(t["task_id"], t["run_id"]) for t in self.system("background_tasks_changed")[-1].data["tasks"]] == [
             (t.task_id, t.data["run_id"]) for t in starts]
@@ -141,6 +142,12 @@ class NativeSession:
             await self.until(lambda: self.results)
         else:
             await self.idle_after(1)
+        if case == "reverse":
+            frames = [m for m in self.frames if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None]
+            partial = next(m for m in frames if any(getattr(b, "text", None) == "fixture-partial" for b in m.content))
+            tool_frame = next(m for m in frames if any(isinstance(b, ToolUseBlock) for b in m.content))
+            assert partial.uuid and partial.message_id == tool_frame.message_id
+            assert partial.user_message_uuid == self.h1 and frames.index(partial) <= frames.index(tool_frame)
         if case == "cold":
             return
         if case.startswith("agent"):

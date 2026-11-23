@@ -170,6 +170,17 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_presentation_joined_at_service_deadline(self):
         await self.exercise_shutdown_queue(cancel_send=False)
 
+    async def test_stream_ping_and_last_cron_removal_share_one_reader_wakeup(self):
+        from claude_agent_sdk import StreamEvent
+
+        _, cli = await self.retain()
+        # Queue the pump first. The Stop callback wakes the consumer behind it,
+        # so it reads both changes at the cut carrying the ping.
+        cli.stream.put_nowait(StreamEvent("ping", cli.session, {}))
+        await self.cron(cli, False)
+        self.assertTrue(await self.runtime.wait_idle(10))
+        self.assertEqual(cli.closes, 1)
+
     async def test_reservation_rollback_and_last_cron_removal_commute(self):
         for clear_first in (True, False):
             with self.subTest(clear_first=clear_first):
@@ -377,7 +388,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                     anchor.stop_reactions.side_effect = asyncio.CancelledError()
                 attempted = []
                 async def deliver(event):
-                    attempted.append(type(event))
+                    if isinstance(event, (DegradedTurn, PhysicalAnswer, LogicalTerminal)):
+                        attempted.append(type(event))
                     if exit_path == "delivery-error" and isinstance(event, LogicalTerminal):
                         raise OSError()
                     if ((exit_path == "cancel-physical" and isinstance(event, PhysicalAnswer)) or
@@ -811,7 +823,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.runtime.wait_idle(1))
         event = self.events.pop()
         self.assertEqual((event.thread_id, event.turn_id, event.final_response), (first.thread_id, first.turn_id, "answer"))
-        self.assertEqual((event.partial_answers, event.activity, event.file_evidence()), ((), None, FileEvidence()))
+        self.assertEqual((event.partial_answers, event.activity.turn_id, event.file_evidence()), ((), event.turn_id, FileEvidence()))
         with self.assertRaises(OrdinaryInputRejected):
             await self.submit(admission=stale)
         other = self.cwd / "native-cwd"

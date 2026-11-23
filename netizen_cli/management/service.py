@@ -923,7 +923,7 @@ class InstanceManagementService:
 
     def has_provider(self, provider: Provider) -> bool:
         match provider:
-            case Provider.HOST | Provider.ORDINARY:
+            case Provider.HOST | Provider.ORDINARY | Provider.REPLY_PROGRESS:
                 return True
             case Provider.CODEX_RUNTIME:
                 return self._runtime.has_codex_runtime if isinstance(self._runtime, ManagementRuntimePort) else self.local is None

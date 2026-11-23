@@ -229,7 +229,7 @@ class Driver:
         await self.send("new", "/new")
         card, = self.replies("new")
         assert isinstance(card, OutboundCard)
-        await self.click(direct_card_event(self.channel, new_form_values(card), message_id="card-new"))
+        await self.click(direct_card_event(self.channel, new_form_values(card) | {"new_progress_card": "progress-card:v1:[false,null]"}, message_id="card-new"))
         assert self.store.active_binding(SCOPE.key) is not None
         self.session = None
 
@@ -273,7 +273,7 @@ class Driver:
         assert typing < finished
         reminders = [content for _, content, opts in self.channel.send_calls if opts.reply_to.startswith("reply-" + label + "-")]
         if interrupted:
-            assert replies == ([STOPPED] if call.answer else []) and not reminders
+            assert [s.split("\n\n")[0] for s in replies] == ([STOPPED] if call.answer else []) and not reminders
         else:
             post, = replies
             assert isinstance(post, str) and typing < events.index(("reply", label, post)) < finished

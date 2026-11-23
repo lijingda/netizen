@@ -117,11 +117,12 @@ class Provider:
         msg = {"id": "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant",
                "model": data["model"], "content": [], "stop_reason": None, "stop_sequence": None,
                "usage": {"input_tokens": 12, "output_tokens": 0}}
+        partial = [{"type": "text", "text": "fixture-partial"}] if scenario == "tool-partial" else []
         if not data.get("stream"):
             if scenario == "disconnect-hard":
                 request.transport.abort()
                 return web.Response()
-            return web.json_response({**msg, "content": [content], "stop_reason": stop,
+            return web.json_response({**msg, "content": [*partial, content], "stop_reason": stop,
                                       "usage": {"input_tokens": 12, "output_tokens": 8}})
         stream = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
         await stream.prepare(request)
@@ -131,17 +132,21 @@ class Provider:
             await stream.write(f"event: {event}\ndata: {body}\n\n".encode())
 
         await emit("message_start", message=msg)
+        if partial:
+            await emit("content_block_start", index=0, content_block={"type": "text", "text": ""})
+            await emit("content_block_delta", index=0, delta={"type": "text_delta", "text": "fixture-partial"})
+            await emit("content_block_stop", index=0)
         initial = {**content, "input": {}} if tool else {"type": "text", "text": ""}
-        await emit("content_block_start", index=0, content_block=initial)
+        await emit("content_block_start", index=len(partial), content_block=initial)
         delta = ({"type": "input_json_delta", "partial_json": json.dumps(tool[1])}
                  if tool else {"type": "text_delta", "text": content["text"]})
-        await emit("content_block_delta", index=0, delta=delta)
+        await emit("content_block_delta", index=len(partial), delta=delta)
         if scenario in ("disconnect-mid-stream","disconnect-hard"):
             request.transport.abort()
             return stream
         if scenario == "hold-stream":
             await self.gate(label, "streaming")
-        await emit("content_block_stop", index=0)
+        await emit("content_block_stop", index=len(partial))
         await emit("message_delta", delta={"stop_reason": stop, "stop_sequence": None}, usage={"output_tokens": 8})
         await emit("message_stop")
         await stream.write_eof()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 from collections.abc import Awaitable, Callable
+from weakref import WeakValueDictionary
 from dataclasses import dataclass, field, replace
 import logging
 import os
@@ -17,12 +18,14 @@ from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, St
 from ..backends import BackendPolicy
 from ..bindings import BindingContextRevisionConflict, BindingNotFound, BindingStore, ProjectDeleting, ProjectNotFound, ScopeNotFound, ThreadBinding
 from ..bindings import BindingTaskFeedback, BindingTurnSettings
+from ..partial_answers import PartialAnswer
+from ..progress_card_settings import ProgressCardSettings
 from ..completion_mention import valid_completion_mention_user_id
 from ..domain import ActiveState, FeishuScope, MessageContextAnchor, MentionContextMode
 from ..session_settings import require_local_settings
 from ..external_calls import external_call
 from ..ordinary_sessions import (
-    ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, LogicalReply, LogicalTerminal, PhysicalAnswer,
+    ClaudeCliState, CliStateChanged, ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted,
     LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
     PreparedPrompt, SessionShutdownPort, StopPreview,
 )
@@ -72,6 +75,7 @@ class _Human:
     receipt: asyncio.Event = field(default_factory=asyncio.Event)
     proof: asyncio.Event = field(default_factory=asyncio.Event)
     reply: LogicalReply = field(default_factory=LogicalReply)
+    last_display: tuple[ClaudeCliState, bool] | None = None
     written: bool = False
     terminal_sent: bool = False
     stop_requested: bool = False
@@ -130,7 +134,7 @@ class _Execution:
     delivery: AnchorDelivery = field(default_factory=AnchorDelivery)
     close: asyncio.Task[None] | None = None
     timer: asyncio.TimerHandle | None = None
-    signature: tuple[str, str, bool, bool] | None = None
+    signature: tuple[object, ...] | None = None
     ending: bool = False
     publication: _Publication = field(default_factory=_Publication)
     started: bool = False
@@ -168,6 +172,18 @@ class _Execution:
         if owner in self.unwritten or (human and not human.written):
             raise ValueError("Claude attributed a Result to an unwritten input")
         return human
+
+    def cli_state(self) -> ClaudeCliState:
+        return ClaudeCliState(self.admissible or (self.live.ordered_idle and not self.pending and not self.live.physical),
+                             len(self.live.tasks), self.live.crons)
+
+    def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, final: str | None = None) -> TurnActivitySnapshot:
+        partials = tuple(PartialAnswer(self.session, turn_id, key, text) for key, text in self.live.partials.items()
+                         if text != final)
+        return TurnActivitySnapshot(self.binding.id, self.session, turn_id, self.revision,
+                                   ActiveState.RUNNING, 0, False, False, False, (), partial_answers=partials,
+                                   progress_card_settings=feedback.progress_card_settings or ProgressCardSettings(),
+                                   state_line=self.cli_state().line)
 
     @property
     def finishing(self) -> bool:
@@ -265,7 +281,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._opens_at: float | None = None
         self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self.on_binding_deleted: Callable[[str], None] | None = None
         self._activity: dict[str, _BindingActivity] = {}
         self._active: dict[str, _Execution] = {}
         self._tasks: dict[asyncio.Task[None], _Execution] = {}
@@ -288,9 +305,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             raise OrdinaryInputRejected(GRACE)
 
     def _lock(self, binding_id: str) -> asyncio.Lock:
-        if binding_id not in self._locks:
-            self._locks[binding_id] = asyncio.Lock()
-        return self._locks[binding_id]
+        return self._locks.setdefault(binding_id, asyncio.Lock())
 
     def _advance(self, binding_id: str, *, execution_id: str | None = None) -> int:
         activity = self._activity.setdefault(binding_id, _BindingActivity())
@@ -305,6 +320,10 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         for binding_id in (previous_binding_id, current_binding_id):
             if binding_id is not None:
                 async with self._lock(binding_id):
+                    try:
+                        self._bindings.get(binding_id)
+                    except BindingNotFound:
+                        continue
                     self._invalidate(binding_id)
 
     def _invalidate(self, binding_id: str) -> None:
@@ -565,6 +584,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         anchor = human.origin
         if isinstance(anchor, ClaudeInputAnchor):
             anchor.retired = True
+            anchor.release_cards()
             if human.written:
                 execution.delivery.retire(anchor, human.input_id, human.binding.id)
 
@@ -584,11 +604,17 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 return
             if notice and not isinstance(event, DegradedTurn):
                 await self._tell(human, notice)
-            async with asyncio.timeout(self._remaining(30.0)):
-                outcome = event
-                if conversation_id is not None:
-                    target = ConversationTarget(execution.scope, execution.conversation_source, conversation_id)
-                    outcome = replace(event, origin=target)
+            outcome = event
+            if conversation_id is not None:
+                target = ConversationTarget(execution.scope, execution.conversation_source, conversation_id,
+                                            event.publishable if isinstance(event, PhysicalAnswer) else lambda: True)
+                outcome = replace(event, origin=target)
+            budget = self._remaining(30.0)
+            if isinstance(outcome, PhysicalAnswer):
+                # The presenter settles incomplete content once after its content deadline.
+                outcome = replace(outcome, delivery_deadline=asyncio.get_running_loop().time() + budget)
+                budget = self._remaining(budget + _CONTROL_SECONDS)
+            async with asyncio.timeout(budget):
                 await external_call(self._completion(outcome))
 
         execution.delivery.enqueue(key, receipts, stop_receipt, present, binding_id=execution.binding.id,
@@ -650,15 +676,24 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             human.status = status
         direct = submitted is not None and submitted is human
         # Native error bodies only use the existing safe failure projection.
-        if frame.result or detail:
+        # Even without a Result body, finish the proven human's running presenter
+        # and transfer this physical turn's validated partials before clearing them.
+        finish_presentation = direct and isinstance(source.origin, ClaudeInputAnchor)
+        if frame.result or detail or live.partials or (status == "completed" and finish_presentation):
+            turn_id = source.input_id if direct else frame.uuid
+            snapshot = execution.activity(turn_id, source.binding.task_feedback, final=body)
             event = PhysicalAnswer(source.binding.id, execution.session,
-                                   source.input_id if direct else frame.uuid, self._owner,
+                                   turn_id, self._owner,
                                    human.source if human else execution.scope, status, body, detail,
                                    task_feedback=source.binding.task_feedback, feedback_revision=source.binding.feedback_revision,
                                    cwd=self._owned_cwds[source.binding.id], logical_id=human.input_id if human else None,
+                                   state=execution.cli_state, owned_tasks=(lambda: live.task_count(human.input_id) if human else 0),
+                                   activity=snapshot, partial_answers=snapshot.partial_answers,
                                    wake=wake, reply=human.reply if human else None,
                                    publishable=execution.publication.valid)
             self._queue(execution, source, event, conversation_id=None if human else frame.uuid)
+        live.partials.clear()
+        live.candidate = None
         if submitted:
             execution.pending = None
         execution.concluded = True
@@ -682,7 +717,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if handoff and close:
             execution.closing = True
             live.changed.set()
-        signature = (execution.input_id, execution.human.input_id, execution.admissible, execution.closing)
+        signature = (execution.input_id, execution.human.input_id, execution.admissible, execution.closing,
+                     live.physical, live.state, live.crons, frozenset(live.tasks.items()), tuple(live.partials))
         if signature != execution.signature or invalidate:
             execution.signature = signature
             execution.revision = self._advance(execution.binding.id, execution_id=execution.human.input_id)
@@ -694,6 +730,15 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         elif not waiting and execution.timer is not None:
             execution.timer.cancel()
             execution.timer = None
+        display = execution.cli_state()
+        for human in execution.humans.values():
+            if force or human.terminal_sent or human.status is None or not isinstance(human.origin, ClaudeInputAnchor):
+                continue
+            background = live.has_work(human.input_id)
+            if (display, background) != human.last_display:
+                human.last_display = (display, background)
+                self._queue(execution, human, CliStateChanged(human.source, human.input_id, background,
+                            human.reply, execution.cli_state, execution.publication.valid))
         if idle and not force and not execution.closing:
             self._complete_humans(execution)
         if close and execution.close is None:
@@ -712,7 +757,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if human.binding.task_feedback.completion_mention_enabled and not human.stop_requested and human.status != "interrupted":
                 mention = valid_completion_mention_user_id(self._owner)
             self._queue(execution, human, LogicalTerminal(human.binding.id, execution.session, human.input_id, self._owner,
-                        human.source, human.status, human.reply, mention, lambda: not execution.broken))
+                        human.source, human.status, human.reply, mention, lambda: not execution.broken, execution.cli_state))
         live.prune({key for key, human in execution.humans.items() if not human.terminal_sent})
 
     async def _observe(self, execution: _Execution, client: ClaudeClient, cwd: Path, confirmed_write: bool) -> None:
@@ -735,6 +780,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                             execution.fail()
                             await self._invalid_init(client)
                         if not live.initialized and data.get("user_message_uuids") != [pending]:
+                            self._reconcile(execution)
                             continue  # Cold notification init before the submitted input.
                         live.initialized = True
                         live.init(msg)
@@ -744,6 +790,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                             execution.stop_receipt = None
                         execution.publication = _Publication()
                         if human := execution.submitted(live.init_human):
+                            if isinstance(human.origin, ClaudeInputAnchor):
+                                physical = live.physical
+                                def active(physical=physical, anchor=human.origin) -> bool:
+                                    return live.physical == physical and not execution.broken and not anchor.retired
+                                self._queue(execution, human, PhysicalStarted(execution.binding.id, execution.session,
+                                    human.input_id, human.source, human.binding.task_feedback, active,
+                                    human.origin.retained, human.reply))
                             if confirmed_write and human.ready.done() and not human.ready.cancelled():
                                 await self._intake(execution, human)
                             if data["permissionMode"] == "default":
@@ -805,7 +858,10 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if self._bindings.get(binding_id).native_thread_id is not None:
                 raise OrdinaryInputRejected("Claude 试点暂不支持【已建立的会话删除】。")
             removed = self._bindings.delete_binding(binding_id)
-            self._advance(binding_id)
+            self._activity.pop(binding_id, None)
+            self.observations.discard(binding_id)
+            if self.on_binding_deleted:
+                self.on_binding_deleted(binding_id)
             return removed
 
     observation_defaults = DEFAULT_OBSERVATIONS
@@ -828,7 +884,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                      ActiveState.STOPPING if execution.stopping else ActiveState.RUNNING)
             turn = ActiveTurnSnapshot(binding_id, execution.session, execution.input_id, self._owner, state)
         return LocalExecutionSnapshot(execution.revision if execution else self._activity.get(binding_id, _BindingActivity()).revision,
-                                      turn, binding_id in self._unavailable)
+                                      turn, binding_id in self._unavailable, execution.cli_state() if execution else None)
 
     async def activate_exact(self, binding_id: str, *, context_anchor: MessageContextAnchor | None = None) -> ThreadBinding:
         self.require_admission()
@@ -859,6 +915,11 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             return binding
 
     def turn_activity(self, binding_id: str, *, thread_id: str, turn_id: str) -> TurnActivitySnapshot | None:
+        execution = self._active.get(binding_id)
+        if execution and execution.session == thread_id and not execution.broken:
+            human = execution.humans.get(turn_id)
+            if human and human.written and execution.live.init_human == turn_id:
+                return execution.activity(turn_id, human.binding.task_feedback)
         return None
 
     def reply_blocked_by_lifecycle(self, binding_id: str) -> bool:

@@ -389,6 +389,7 @@ class ReplyCardActivityModule:
     terminal_status: str | None = None
     collapsed: bool = False
     hidden_steps: int = 0
+    state_line: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

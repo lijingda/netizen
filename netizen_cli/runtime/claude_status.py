@@ -74,6 +74,9 @@ class ClaudeObservations:
         self._capacity = capacity
         self._clock = clock
 
+    def discard(self, binding: str) -> None:
+        self._sessions.pop(binding, None)
+
     def init(self, binding: str, session: str, execution: str, model: object, cwd: str) -> None:
         sample = self._sessions.get(binding)
         if sample is None or (sample.session, sample.execution) != (session, execution):

@@ -3,6 +3,7 @@
 const unavailableOperations = new Set((document.body.dataset.unavailable || "").split(" "));
 const localDirectory = unavailableOperations.has("history");
 const inheritedModel = unavailableOperations.has("model");
+const replyCardUnavailable = unavailableOperations.has("reply_card");
 const progressUnavailable = unavailableOperations.has("progress");
 const ownerOnly = document.body.dataset.ownerOnly === "true";
 function hideProviderElement(node) {
@@ -3415,7 +3416,7 @@ function resetScheduleEndOffset() {
 }
 
 function defaultScheduleSessionSettings() {
-  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: !progressUnavailable, completion_mention_enabled: true,
+  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: !replyCardUnavailable, completion_mention_enabled: true,
     message_context_mode: "current-only", progress_card_settings: null };
 }
 
@@ -3555,12 +3556,12 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   }
   input("reactions").checked = settings.reaction_pulse_enabled;
   input("completion-mention").checked = settings.completion_mention_enabled;
+  input("progress").checked = settings.progress_card_enabled;
+  if (replyCardUnavailable) hideProviderElement(input("progress").closest("label"));
   if (progressUnavailable) {
-    hideProviderElement(input("progress").closest("label"));
     hideProviderElement(input("progress-settings"));
     hideProviderElement(input("progress-reset"));
   } else {
-    input("progress").checked = settings.progress_card_enabled;
     renderProgressCardSettings(input, settings);
   }
   return model;

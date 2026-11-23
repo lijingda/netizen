@@ -10,7 +10,9 @@ class ExternalCallCancelled(RuntimeError):
     """The SDK call was cancelled independently of the task awaiting it."""
 
 
-async def external_call(operation: Awaitable[_T]) -> _T:
+async def external_call(operation: Awaitable[_T], *, isolate: bool = True) -> _T:
+    if not isolate:
+        return await operation
     try:
         return await operation
     except asyncio.CancelledError:

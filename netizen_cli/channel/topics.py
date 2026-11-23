@@ -5,16 +5,17 @@ from __future__ import annotations
 import logging
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from lark_channel import OutboundConfig, OutboundPost, SendOpts, SendResult
+from lark_channel import OutboundCard, OutboundConfig, OutboundPost, SendOpts, SendResult
 from lark_channel.channel.outbound import markdown_to_post_ast, split_with_code_fences
 
+from ..external_calls import external_call
 from ..domain import FeishuScope
 
-from .messages import _nonempty_field, _object_field
+from .messages import _confirmed_reply_id, _nonempty_field, _object_field, _send_result_error_code
 from .ports import ReplyChannel
 
 
@@ -39,6 +40,86 @@ class TopicMessage:
     @property
     def is_main_line(self) -> bool:
         return self.thread_id is None and self.parent_id is None and self.root_id in {None, self.last_chunk_id or self.message_id}
+
+    def matches_location(self, scope: FeishuScope, root: str | None, *, parent: str | None = None,
+                         partial: bool = False) -> bool:
+        if self.chat_id != scope.chat_id:
+            return False
+        if parent is None:
+            if scope.topic_id is None:
+                return self.is_main_line
+            return ((self.thread_id == scope.topic_id or (partial and not self.thread_id))
+                    and self.root_id in (None, root) and self.parent_id in (None, root))
+        # An anchored reply may have only partial location evidence.
+        return (self.thread_id in (None, scope.topic_id) and self.parent_id in (None, parent)
+                and (root is None or self.root_id in (None, root)))
+
+
+@dataclass(slots=True)
+class BindingCardLocation:
+    owners: dict[str, CardReplyLocation]
+    root: str | None = None
+    unusable: set[str] = field(default_factory=set)
+    retired: bool = False
+
+    def retire(self) -> None:
+        self.retired = True
+        for owner in set(self.owners.values()):
+            if owner.binding is self:
+                owner.retire()
+        self.root = None
+        self.unusable.clear()
+
+
+@dataclass(slots=True, eq=False)
+class CardReplyLocation:
+    """Receipt evidence and exclusive card writes for one Feishu reply anchor."""
+
+    scope: FeishuScope
+    parent: str | None
+    root: str | None
+    binding: BindingCardLocation
+    retired: bool = False
+    cards: set[str] = field(default_factory=set)
+
+    def retire(self) -> None:
+        self.retired = True
+        for mid in self.cards:
+            if self.binding.owners.get(mid) is self:
+                del self.binding.owners[mid]
+        self.cards.clear()
+
+    def usable(self, message_id: str) -> bool:
+        owner = self.binding.owners.get(message_id)
+        return (not self.retired and not self.binding.retired and message_id not in self.binding.unusable
+                and (owner is None or owner is self))
+
+    def can_write(self, message_id: str) -> bool:
+        return self.usable(message_id) and self.binding.owners.get(message_id) is self
+
+    def validate(self, result: SendResult, *, card: bool = False, updated_id: str | None = None,
+                 reply_to: str | None = None) -> SendResult:
+        if self.retired or self.binding.retired:
+            return SendResult(success=False)
+        data = _object_field(result.raw, "data")
+        nested = _nonempty_field(data, "message_id")
+        mid = updated_id or result.message_id or nested or ""
+        sent = TopicMessage(mid, _nonempty_field(data, "chat_id") or self.scope.chat_id,
+                            _nonempty_field(data, "thread_id"), _nonempty_field(data, "root_id"),
+                            _nonempty_field(data, "parent_id"))
+        ids = {value for value in (updated_id, result.message_id, nested, *(result.chunk_ids or ())) if value}
+        root = self.binding.root or self.root
+        if (not sent.matches_location(self.scope, root, parent=reply_to or self.parent, partial=True)
+                or (card and self.scope.topic_id and sent.root_id and not root)
+                or (card and len(ids) > 1)):
+            self.binding.unusable.update(ids)
+            return SendResult(success=False)
+        if any(not self.usable(value) for value in ids):
+            return SendResult(success=False)
+        if card and self.parent and (confirmed := _confirmed_reply_id(result)):
+            self.binding.owners[confirmed] = self
+            self.cards.add(confirmed)
+        return result
 
 
 async def complete_fresh_topic(
@@ -74,39 +155,48 @@ async def complete_fresh_topic(
 
 
 async def send_conversation_message(channel: ReplyChannel, scope: FeishuScope, root: str | None,
-                                    markdown: str, delivery_id: str) -> SendResult:
+                                    message: str | OutboundCard, delivery_id: str,
+                                    publishable: Callable[[], bool] = lambda: True, *, single_attempt: bool = False,
+                                    location: CardReplyLocation | None = None) -> SendResult:
     # The SDK assigns random UUIDs to trailing chunks in a single send. Use its
     # public Markdown splitter and give each Feishu request its own stable UUID.
     config = getattr(channel, "config", None)
     outbound = config.outbound if config is not None else OutboundConfig()
-    parts = split_with_code_fences(markdown, outbound.text_chunk_limit)
+    parts: list[str] | list[OutboundCard] = (split_with_code_fences(message, outbound.text_chunk_limit)
+                                              if isinstance(message, str) else [message])
     message_id = None
     for index, part in enumerate(parts):
-        content: str | OutboundPost = part
-        if len(parts) > 1 or len(part) > outbound.text_chunk_limit:
+        content: str | OutboundCard | OutboundPost = part
+        if isinstance(part, str) and (len(parts) > 1 or len(part) > outbound.text_chunk_limit):
             converter = outbound.markdown_converter
             content = OutboundPost(post=markdown_to_post_ast(
                 part, table_mode=converter.table_mode if converter.enabled else "off",
                 tag_md_mode=converter.tag_md_mode if converter.enabled else "structured"))
         opts = SendOpts(receive_id_type="chat_id", reply_to=root, reply_in_thread=bool(root), reply_target_gone="fail",
                         uuid=str(uuid5(NAMESPACE_URL, f"{scope.key}/{delivery_id}/{index}")))
-        sent = await send_topic_message(channel, scope.chat_id, content, opts, allow_chunks=True)
-        confirmed = (sent.thread_id == scope.topic_id and sent.root_id in {None, root}) if scope.topic_id else sent.is_main_line
-        if not confirmed:
+        sent = await send_topic_message(channel, scope.chat_id, content, opts, allow_chunks=True, publishable=publishable,
+                                        isolate_child_cancellation=True, single_attempt=single_attempt, location=location)
+        if not sent.matches_location(scope, root):
             raise TopicPublishError("Claude 会话消息的飞书目标未确认。", unknown=True)
         message_id = message_id or sent.message_id
     return SendResult.ok(message_id=message_id)
 
 
 async def send_topic_message(channel: ReplyChannel, chat_id: str, content: Any, opts: SendOpts, *,
-                             allow_chunks: bool = False) -> TopicMessage:
+                             allow_chunks: bool = False, isolate_child_cancellation: bool = False,
+                             single_attempt: bool = False, location: CardReplyLocation | None = None,
+                             publishable: Callable[[], bool] = lambda: True) -> TopicMessage:
     if not opts.uuid:
         raise TopicPublishError("话题消息缺少确定性发送 UUID。")
     uncertain = False
     for attempt in range(2):
+        if not publishable():
+            raise TopicPublishError("本轮投递已取消。")
         try:
-            result = await channel.send(chat_id, content, opts)
+            result = await external_call(channel.send(chat_id, content, opts), isolate=isolate_child_cancellation)
         except Exception as error:
+            if single_attempt:
+                raise TopicPublishError("飞书发送结果未确认。", unknown=True) from error
             logger.warning(
                 "topic message send failed",
                 extra={
@@ -120,11 +210,16 @@ async def send_topic_message(channel: ReplyChannel, chat_id: str, content: Any, 
             if attempt == 0:
                 continue
             raise TopicPublishError("话题发布结果未确认；同 UUID 有界对账也未成功。", unknown=True) from error
-        if not result.success and result.error is not None and result.error.retryable:
+        if location is not None:
+            result = location.validate(result, card=isinstance(content, OutboundCard))
+        if not single_attempt and not result.success and result.error is not None and result.error.retryable:
             uncertain = True
             if attempt == 0:
                 continue
             raise TopicPublishError("话题发布结果未确认；同 UUID 对账仍返回可重试失败。", unknown=True)
+        if single_attempt and not result.success:
+            code = _send_result_error_code(result)
+            raise TopicPublishError("飞书未确认内容送达。", unknown=code is None or code <= 0)
         try:
             return validate_topic_message(result, chat_id, allow_chunks=allow_chunks)
         except TopicPublishError as error:

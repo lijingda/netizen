@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, HookJSONOutput, HookMatcher, Message, ResultMessage,
-    StreamEvent, SystemMessage, ToolUseBlock, get_session_info,
+    StreamEvent, SystemMessage, TextBlock, ToolUseBlock, get_session_info,
 )
 
 from .. import claude_installation
@@ -75,7 +75,8 @@ CONSUMED_FIELDS: dict[str, dict[str, Callable[[Any], bool]]] = {
     "task_updated": _session | {"task_id": _identifier, "patch": lambda p: isinstance(p, dict)
                                 and ("status" not in p or _identifier(p["status"]))},
     "task_notification": _session | {"task_id": _identifier, "status": _identifier},
-    "assistant": _session | _human | {"parent_tool_use_id": _optional(_identifier), "content": _content},
+    "assistant": _session | _human | {"parent_tool_use_id": _optional(_identifier), "content": _content,
+        "uuid": _optional(_identifier), "message_id": _optional(_identifier)},
     "stream": _session | _human | {"parent_tool_use_id": _optional(_identifier)},
     "result": _session | _human | {"uuid": _identifier, "subtype": _identifier, "is_error": lambda x: type(x) is bool,
                                    "terminal_reason": _optional(_identifier), "result": _optional(lambda x: isinstance(x, str)),
@@ -146,6 +147,8 @@ class LiveSession:
     owner: _PhysicalOwner = field(default_factory=_PhysicalOwner)
     tool_owner: dict[str, _PhysicalOwner] = field(default_factory=dict)
     run_tool: dict[str, str] = field(default_factory=dict)
+    candidate: tuple[str, str, str] | None = None
+    partials: dict[str, str] = field(default_factory=dict)
     seen: set[str] = field(default_factory=set)
 
     async def stop_hook(self, data: Any, callback_id: Any, context: Any) -> HookJSONOutput:
@@ -187,6 +190,8 @@ class LiveSession:
                 raise ValueError("conflicting task tool")
 
     def init(self, frame: SystemMessage) -> None:
+        self.candidate = None
+        self.partials.clear()
         ids = frame.data.get("user_message_uuids")
         if ids and len(set(ids)) != 1:
             raise ValueError("conflicting init human UUIDs")
@@ -198,6 +203,19 @@ class LiveSession:
 
     def assistant(self, frame: AssistantMessage) -> str | None:
         parent = frame.parent_tool_use_id
+        # The CLI emits completed text and its following tool as separate top-level
+        # Assistant frames of the same model message. A final-only text never qualifies.
+        if parent is None and frame.message_id and not frame.error:
+            if self.candidate and self.candidate[0] != frame.message_id:
+                self.candidate = None
+            text = "\n".join(b.text for b in frame.content if isinstance(b, TextBlock))
+            if frame.uuid and text.strip() and len(text) <= 4096:
+                self.candidate = (frame.message_id, frame.uuid, text)
+            if self.candidate and any(isinstance(b, ToolUseBlock) for b in frame.content):
+                _, key, text = self.candidate
+                if len(self.partials) < 16:
+                    self.partials.setdefault(key, text)
+                self.candidate = None
         declared = native_human(frame) if parent is None else None
         if declared:
             if self.reported_human and declared != self.reported_human:
@@ -227,9 +245,12 @@ class LiveSession:
         self.awaiting_boundary = True
         return human or owner, wake
 
-    def has_work(self, owner: str) -> bool:
-        return any(link.human == owner for run in self.tasks.values()
+    def task_count(self, owner: str) -> int:
+        return sum(link.human == owner for run in self.tasks.values()
                    if (link := self.tool_owner.get(self.run_tool.get(run, ""))) is not None)
+
+    def has_work(self, owner: str) -> bool:
+        return bool(self.task_count(owner))
 
     def prune(self, humans: set[str]) -> None:
         self.tool_owner = {tool: h for tool, h in self.tool_owner.items() if h.human in humans}

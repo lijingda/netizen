@@ -40,6 +40,7 @@ class BackendUnsupported(ManagementError):
 
 
 class Provider(Enum):
+    REPLY_PROGRESS = "reply-progress"
     HOST = "host"
     ORDINARY = "ordinary"
     CODEX_RUNTIME = "codex-runtime"
@@ -78,6 +79,7 @@ class OperationId(str, Enum):
     ARCHIVED = "archived"
     HISTORY = "history"
     COLLABORATION = "collaboration"
+    REPLY_CARD = "reply_card"
     PROGRESS = "progress"
     QUESTIONS = "questions"
     SKILLS = "skills"
@@ -269,6 +271,7 @@ OPERATIONS = {
         Provider.CODEX_RUNTIME,
         routes=(("GET", "/session-tool-access"), ("POST", "/session-tool-access/save")),
     ),
+    OperationId.REPLY_CARD: Operation("执行回复卡", Provider.REPLY_PROGRESS),
     OperationId.PROGRESS: Operation(
         "过程卡",
         Provider.CODEX_RUNTIME,
@@ -352,7 +355,7 @@ class BackendPolicy:
             return self.providers(provider)
         # Standalone parser/identity compatibility. Application services bind the
         # concrete provider lookup before admission.
-        return self.backend == "codex" or provider in (Provider.HOST, Provider.ORDINARY)
+        return self.backend == "codex" or provider in (Provider.HOST, Provider.ORDINARY, Provider.REPLY_PROGRESS)
 
     def allows(self, operation: OperationId) -> bool:
         return self.has_provider(OPERATIONS[operation].provider)

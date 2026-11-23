@@ -322,6 +322,8 @@ def _normalize_activity_module(
     if activity is None:
         return None
     terminal_status = _terminal_progress_status(activity.terminal_status)
+    if activity.state_line is not None:
+        _bounded_card_text(activity.state_line, "activity.state_line", 128)
     progress = _sanitize_turn_progress_manifest(activity.progress)
     _bounded_nonnegative_int(activity.hidden_steps, "activity.hidden_steps")
     return replace(
@@ -597,6 +599,7 @@ def turn_progress_card(
 
     activity = ReplyCardActivityModule(
         progress=_turn_progress_manifest(snapshot),
+        state_line=getattr(snapshot, "state_line", None),
         terminal_status=normalized_terminal_status,
         collapsed=collapsed,
         # v4 file callbacks freeze only the already-bounded progress manifest.
@@ -619,7 +622,7 @@ def turn_progress_card(
             turn_id=turn_id,
             items=tuple(_reply_file_item(item) for item in files),
             action_version=(
-                REPLY_CARD_ACTION_VERSION if partial_answer is not None
+                REPLY_CARD_ACTION_VERSION if partial_answer is not None or activity.state_line
                 else TURN_FILE_ACTION_VERSION
             ),
             additions=additions,
@@ -752,6 +755,7 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
                 terminal_status=activity.terminal_status,
                 expanded=not activity.collapsed,
                 hidden_steps=activity.hidden_steps,
+                state_line=activity.state_line,
                 goal=projection.goal is not None,
             )
         )
@@ -1073,6 +1077,7 @@ def _turn_progress_panel(
     expanded: bool,
     hidden_steps: int = 0,
     goal: bool = False,
+    state_line: str | None = None,
 ) -> dict[str, Any]:
     status_label = _progress_status_label(snapshot, terminal_status)
     return {
@@ -1085,7 +1090,7 @@ def _turn_progress_panel(
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": f"执行过程 · {status_label}",
+                "content": f"执行过程 · {status_label}" + (f" · {state_line}" if state_line else ""),
             },
             "vertical_align": "center",
             "icon": {
@@ -1885,7 +1890,7 @@ def _decode_reply_goal_module(
 def _decode_reply_activity_module(value: Any) -> ReplyCardActivityModule | None:
     if value is None:
         return None
-    if not isinstance(value, Mapping) or set(value) != {
+    if not isinstance(value, Mapping) or set(value) - {"state_line"} != {
         "progress",
         "terminal_status",
         "collapsed",
@@ -1910,8 +1915,11 @@ def _decode_reply_activity_module(value: Any) -> ReplyCardActivityModule | None:
     hidden_steps = _decode_nonnegative_int(
         value["hidden_steps"], "activity.hidden_steps"
     )
+    state_line = value.get("state_line")
+    if state_line is not None and (not isinstance(state_line, str) or not 0 < len(state_line) <= 128):
+        raise CardActionError("Activity 状态文字无效。")
     return ReplyCardActivityModule(
-        progress=progress,
+        state_line=state_line, progress=progress,
         terminal_status=terminal_status,
         collapsed=collapsed,
         hidden_steps=hidden_steps,
@@ -2387,6 +2395,7 @@ def _encode_reply_activity_module(
         "terminal_status": activity.terminal_status,
         "collapsed": activity.collapsed,
         "hidden_steps": activity.hidden_steps,
+        **({"state_line": activity.state_line} if activity.state_line else {}),
     }
 
 

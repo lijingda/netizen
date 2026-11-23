@@ -179,20 +179,23 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
             for command, prefix in (("/new", "new"), ("/config", "config"), ("/defaults", "defaults_session")):
                 await app.handle_message(FakeMessage(command, message_id=prefix))
                 values = form_values(fx.channel.replies[-1][1])
-                for field, value, notice in (("effort", "high", "模型"), ("speed", "fast", "模型"),
-                                             ("progress_card", "progress-card:v1:[true,null]", "过程卡")):
+                for field, value, notice in (("effort", "high", "模型"), ("speed", "fast", "模型")):
                     with self.subTest(command=command, field=field):
                         await app.handle_card_action(direct_card_event(fx.channel, {**values, prefix + "_" + field: value}))
                         self.assertIn(notice, fx.channel.replies[-1][1])
-            for override in ({"progress_card_enabled": True}, {"turn_settings": {
+            for override in ({"turn_settings": {
                 "model_id": "invented", "effort_id": "high", "service_tier_id": "fast",
-            }}):
+            }},):
                 action = (await self.actions())["configure"]
                 denied = await self.request("/api/v1/sessions/configure", self.payload(
                     action, sessionSettings=SessionSettings().to_dict() | override,
                 ))
                 self.assertEqual((denied.status, json.loads(denied.body)["code"]), (409, "backend_unsupported"))
-            self.assertEqual(fx.store.list_bindings(self.scope.key), [binding])
+            action = (await self.actions())["configure"]
+            permitted = await self.request("/api/v1/sessions/configure", self.payload(
+                action, sessionSettings=SessionSettings().to_dict() | {"progress_card_enabled": True}))
+            self.assertEqual(permitted.status, 200)
+            self.assertTrue(fx.store.get(binding.id).task_feedback.progress_card_enabled)
             self.assertEqual(clients.calls, [])
 
     def test_model_and_progress_authority_are_independent(self):

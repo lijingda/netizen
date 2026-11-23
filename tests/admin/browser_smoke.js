@@ -313,6 +313,7 @@ async function run() {
           const settings = await evaluate(element("#session-settings-drawer") + ".innerText");
           if (config.ownerOnly) {
             assert.match(settings, /模型沿用 Claude Code 的原生配置/);
+            assert.ok(await evaluate(visible("#session-settings-progress")));
             assert.doesNotMatch(settings, /Codex/);
           } else {
             assert.match(settings, /选择继承 Codex 时，沿用 Codex 的原生配置/);

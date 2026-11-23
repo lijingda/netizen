@@ -56,6 +56,10 @@ class ClaudeInputAnchor:
     topic_root_id: str | None
     stop_reactions: Callable[[str], Awaitable[None]]
     retired: bool = False
+    release_cards: Callable[[], None] = lambda: None
+
+    def retained(self) -> bool:
+        return not self.retired
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +67,30 @@ class ConversationTarget:
     scope: FeishuScope
     source: object
     delivery_id: str
+    publishable: Callable[[], bool] = lambda: True
+    single_attempt: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeCliState:
+    idle: bool = False
+    tasks: int = 0
+    crons: bool = False
+
+    @property
+    def line(self) -> str:
+        if not self.idle:
+            return "Claude：执行中"
+        if self.tasks:
+            return f"Claude：空闲，后台任务 {self.tasks} 个运行中，可以发送新消息"
+        if self.crons:
+            return "Claude：空闲，定时任务已登记，可以发送新消息"
+        return "全部完成"
 
 
 @dataclass(slots=True)
 class LogicalReply:
+    refresh: Callable[[ClaudeCliState | None], Awaitable[None]] | None = None
     attempted: bool = False
     message_id: str | None = None
 
@@ -75,11 +99,36 @@ class LogicalReply:
 
 
 @dataclass(frozen=True, slots=True)
+class PhysicalStarted:
+    binding_id: str
+    thread_id: str
+    turn_id: str
+    origin: object
+    feedback: BindingTaskFeedback
+    active: Callable[[], bool]
+    retained: Callable[[], bool]
+    reply: LogicalReply
+
+
+@dataclass(frozen=True, slots=True)
 class PhysicalAnswer(OrdinaryConclusion):
+    owned_tasks: Callable[[], int] = lambda: 0
     logical_id: str | None = None
+    state: Callable[[], ClaudeCliState] = ClaudeCliState
     wake: bool = False
     reply: LogicalReply | None = None
     publishable: Callable[[], bool] = lambda: True
+    delivery_deadline: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CliStateChanged:
+    origin: object
+    turn_id: str
+    background: bool
+    reply: LogicalReply
+    current: Callable[[], ClaudeCliState]
+    publishable: Callable[[], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +142,7 @@ class LogicalTerminal:
     reply: LogicalReply
     mention_user_id: str | None
     publishable: Callable[[], bool]
+    state: Callable[[], ClaudeCliState] = ClaudeCliState
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +154,7 @@ class LiveSubmissionUnknown(TerminalStateUnknown):
     """The runtime sends the uncertainty notice to the Binding conversation."""
 
 
-OrdinaryEvent = OrdinaryConclusion | LogicalTerminal | TurnObservationUnavailableOutcome
+OrdinaryEvent = PhysicalStarted | CliStateChanged | OrdinaryConclusion | LogicalTerminal | TurnObservationUnavailableOutcome
 OrdinaryCompletionHandler = Callable[[OrdinaryEvent], Awaitable[None]]
 
 
@@ -159,6 +209,7 @@ class LocalExecutionSnapshot:
     revision: int
     turn: ActiveTurnSnapshot | None
     unavailable: bool
+    cli: ClaudeCliState | None = None
 
     def capture(self, binding_id: str, session_id: str | None, observations: SessionObservations) -> "LocalStatusSnapshot":
         return LocalStatusSnapshot(
@@ -171,6 +222,8 @@ class LocalExecutionSnapshot:
     def label(self) -> str:
         if self.unavailable:
             return "无法确认 Claude 客户端已关闭"
+        if self.cli and (self.turn is None or self.turn.state is ActiveState.RUNNING):
+            return self.cli.line
         if self.turn is None:
             return "空闲"
         return {ActiveState.CLOSING: "正在收尾", ActiveState.RUNNING: "执行中", ActiveState.STOPPING: "正在停止",
@@ -185,6 +238,8 @@ class LocalStatusSnapshot(BindingRuntimeSnapshot):
 
 
 class LocalSessionManagement(Protocol):
+    on_binding_deleted: Callable[[str], None] | None
+
     @property
     def backend_policy(self) -> BackendPolicy: ...
     @property

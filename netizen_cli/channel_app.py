@@ -162,9 +162,11 @@ class ChannelApplication(ChannelEntry):
         self._scheduled_completions: dict[str, _ScheduledCompletion] = {}
         self._open_new_cards: dict[str, str] = {}
         self._rename_name_generations: dict[str, _RenameNameGeneration] = {}
-        self._reactions = _ReactionController(channel)
+        self._reactions = _ReactionController(channel, isolate_child_cancellation=self._local_sessions is not None)
         self._reply_suppression = ReplySuppression()
         self._progress_cards = _ReplyCardPresenter(channel, runtime, ordinary=self._ordinary)
+        if self._local_sessions is not None:
+            self._local_sessions.on_binding_deleted = self._progress_cards.retire_binding
         self.handle_completion = codex_completion_handler(
             self.handle_ordinary_completion, self.handle_codex_completion, self._projection_failed,
         )
