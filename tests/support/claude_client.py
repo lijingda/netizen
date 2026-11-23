@@ -2,6 +2,7 @@
 import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 from claude_agent_sdk import ResultMessage, SystemMessage
 
@@ -71,7 +72,7 @@ class FakeClaudeClient:
         self.stream.put_nowait(SystemMessage("init", data | kwargs))
 
     def result(self, subtype="success", reason="completed", is_error=False, **kwargs):
-        values = dict(session_id=self.session, result="answer", user_message_uuid=self.inputs[0]["uuid"])
+        values = dict(uuid=str(uuid4()), session_id=self.session, result="answer", user_message_uuid=self.inputs[0]["uuid"])
         self.stream.put_nowait(ResultMessage(subtype=subtype, terminal_reason=reason, is_error=is_error,
                                              duration_ms=1, duration_api_ms=1, num_turns=1, **(values | kwargs)))
 

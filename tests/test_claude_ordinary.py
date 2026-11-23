@@ -77,6 +77,21 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         client.result()
         self.assertTrue(await self.runtime.wait_idle(1))
 
+    async def test_foreign_or_malformed_task_inventory_cannot_complete_the_turn(self):
+        from claude_agent_sdk import SystemMessage
+        for data in ({"session_id": "foreign", "tasks": []}, {"tasks": [None]},
+                     {"tasks": [{"task_id": "a", "run_id": "same"}, {"task_id": "b", "run_id": "same"}]}):
+            receipt = await self.submit()
+            client = self.clients.calls[-1]
+            client.init()
+            client.stream.put_nowait(SystemMessage("background_tasks_changed", {"session_id": client.session} | data))
+            client.result(result="wrong answer")
+            receipt.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(2))
+            self.assertNotIsInstance(self.events[-1], OrdinaryConclusion)
+            self.assertEqual(client.consumers, 1)
+            self.assertEqual(client.closes, 1)
+
     async def test_closed_grace_and_owner_gate_precede_native_calls(self):
         for self.now in (9., 11.999):
             with self.assertRaisesRegex(OrdinaryInputRejected, GRACE):

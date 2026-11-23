@@ -23,7 +23,7 @@ from ..ordinary_sessions import (
     PreparedPrompt, SessionShutdownPort, StopPreview,
 )
 from .claude_status import ClaudeObservations, DEFAULT_OBSERVATIONS, record_observation
-from .claude_client import ClaudeClient, ClaudeClients, single_message, user_message
+from .claude_client import ClaudeClient, ClaudeClients, ordered_messages, single_message, user_message
 from .contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     SubmitDisposition, TerminalStateUnknown, ThreadActivityChanged, TurnActivitySnapshot,
@@ -322,19 +322,18 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                         raise OrdinaryInputRejected(STALE)
                     self._bindings.assign_native_thread_id(binding.id, execution.session)
                 execution.writing = True
+            confirmed_write = True
             try:
                 async with asyncio.timeout(_WRITE_SECONDS):
                     await execution.client.query(single_message(message))
             except Exception:
-                # The write may have succeeded. This is still the only consumer.
-                async with asyncio.timeout(self._remaining(_RECONCILE_SECONDS)):
-                    event = await self._observe(execution, execution.client, actual, commit, confirmed_write=False)
+                # A lost receipt may already have written H1. Its one reader reconciles it.
+                confirmed_write = False
             del message
-            if not execution.ready.done():
-                execution.ready.set_result(Submission(SubmitDisposition.STARTED, binding.id, execution.session, execution.input_id,
-                                               execution.receipt.set, binding.task_feedback, binding.feedback_revision))
-            if event is None:
-                event = await self._observe(execution, execution.client, actual, commit)
+            if confirmed_write:
+                self._accepted(execution)
+            event = await self._observe(execution, execution.client, actual, commit, confirmed_write=confirmed_write)
+            self._accepted(execution)
         except OrdinaryInputRejected as exc:
             # Never send a traceback holding the still-running owner's frame to another task.
             failure = OrdinaryInputRejected(str(exc))
@@ -345,6 +344,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 failure = OrdinaryInputRejected(START_CANCELLED if execution.stopping else START_FAILED)
         finally:
             await self._finish(execution, event, failure)
+
+    @staticmethod
+    def _accepted(execution: _Execution) -> None:
+        if not execution.ready.done():
+            binding = execution.binding
+            execution.ready.set_result(Submission(SubmitDisposition.STARTED, binding.id, execution.session,
+                                                  execution.input_id, execution.receipt.set,
+                                                  binding.task_feedback, binding.feedback_revision))
 
     async def _disconnect(self, execution: _Execution, client: ClaudeClient) -> None:
         binding_id = execution.binding.id
@@ -458,8 +465,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     await self._tell(execution, f"Claude 已接收本次任务，但{CURSOR_FAILURE}")
 
         initialized = False
-        async with asyncio.timeout(None) as reconciliation:
-            async for msg in client.receive_messages():
+        async with asyncio.timeout(None if confirmed_write else self._remaining(_RECONCILE_SECONDS)) as reconciliation:
+            async for msg in ordered_messages(client, execution.session):
                 if not initialized and isinstance(msg, AssistantMessage):
                     await self._invalid_init(client)
                 if isinstance(msg, SystemMessage) and msg.subtype == "init":
