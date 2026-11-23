@@ -51,9 +51,9 @@ from .reply_presenter import (
 )
 from .reply_suppression import ReplySuppression
 from ..codex_runtime import CodexRuntime
-from ..ordinary_sessions import OrdinarySessionPort
+from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort
+from ..session_settings import SessionFormView
 from ..runtime.contracts import (
-    ContextWindowUsage,
     NativeThreadMetadata,
     SideSessionConflict,
     SideSessionNotFound,
@@ -232,32 +232,6 @@ async def _git_branch_status_lines(cwd: Path) -> tuple[str, ...]:
     return (f"Git Branch：{status}",)
 
 
-def _context_window_status_line(
-    binding: ThreadBinding,
-    usage: ContextWindowUsage | None,
-    *,
-    active_turn: bool,
-) -> str:
-    if binding.native_thread_id is None:
-        return "上下文窗口：暂无（首条消息后生成）"
-    if usage is None:
-        return "上下文窗口：暂不可用（下次可观测 Turn 完成后更新）"
-    label = "上下文窗口（上一轮完成时）" if active_turn else "上下文窗口"
-    if usage.context_window_tokens is None:
-        return (
-            f"{label}：已用 {usage.used_tokens:,} tokens"
-            "（窗口大小暂不可用）"
-        )
-    percent_used = min(
-        100.0,
-        usage.used_tokens * 100 / usage.context_window_tokens,
-    )
-    return (
-        f"{label}：{usage.used_tokens:,} / "
-        f"{usage.context_window_tokens:,} tokens（{percent_used:.1f}% 已用）"
-    )
-
-
 def _thread_subscription_status_line(
     binding: ThreadBinding,
     snapshot: ThreadSubscriptionSnapshot | None,
@@ -351,6 +325,8 @@ class ChannelState:
             raise BackendUnsupported("原生 Codex 操作")
         return self._codex
 
+    _local_sessions: LocalSessionManagement | None
+    _session_form: SessionFormView
     _ordinary: OrdinarySessionPort
     _bindings: BindingStore
     _projects: ProjectRegistry
@@ -576,7 +552,7 @@ class ChannelState:
             message_id=_message_id(message),
             sender_id=_sender_id(message),
             text=_body_text(message, bot_open_id=_channel_bot_open_id(self._channel)),
-            available_capabilities=() if self._policy.backend == "claude" else self._runtime.available_capabilities,
+            available_capabilities=self._codex.available_capabilities if self._codex is not None else (),
             policy=self._policy,
         )
 
@@ -826,7 +802,7 @@ class ChannelState:
                 sender_id=sender_id,
                 tag=tag,
                 form_value=form_value,
-                local_only=self._policy.backend == "claude",
+                form_view=self._session_form,
                 value=getattr(action, "value", None),
             )
             if (
@@ -975,6 +951,5 @@ class ChannelState:
         return "\n\n".join(lines)
 
     def _help(self) -> str:
-        if self._policy.backend == "claude":
-            return "Claude 会话：/new 新建 · /sessions 列表 · /resume 切换 · /status 状态 · /stop 停止 · /config 会话设置 · /defaults 默认设置 · /projects 项目 · /admin 管理。"
-        return command_help(self._runtime.available_capabilities)
+        capabilities = self._codex.available_capabilities if self._codex is not None else ()
+        return command_help(capabilities, policy=self._policy)

@@ -29,7 +29,7 @@ This module remains the import location for the runtime and its contracts.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 
 from .account_rate_limits import (
@@ -254,6 +254,8 @@ __all__ = [
 class CodexRuntime(ShutdownRuntime):
     """Own live native operations and apply Binding-scoped Turn intent."""
 
+    name_generator: Callable[[str], Awaitable[str]] | None = None
+
     def __init__(
         self,
         *,
@@ -322,13 +324,12 @@ class CodexRuntime(ShutdownRuntime):
         self._init_side_state(side_idle_seconds=side_idle_seconds)
         self._name_generation_requests: dict[str, asyncio.Event] = {}
         self._accepting = True
-        self._thread_namer = (
-            ThreadNamer(
+        self._thread_namer = None
+        if thread_subscription_control is not None:
+            self._thread_namer = ThreadNamer(
                 codex=codex,
                 terminal_cleanup=terminal_cleanup,
                 subscription_control=thread_subscription_control,
                 commit=self._commit_automatic_thread_name,
             )
-            if thread_subscription_control is not None
-            else None
-        )
+            self.name_generator = self.generate_name_exact

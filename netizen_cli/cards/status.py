@@ -14,6 +14,7 @@ from .callbacks import (
     CardActionError, _builder, _button_row, _repeatable_callback_button, _plain,
     _plain_text, _required_string,
 )
+from ..session_views import Availability, ContextUsageField, ModelStatusFields, SessionField, SessionStatusView
 from .session_ids import session_identity_lines
 
 
@@ -150,46 +151,75 @@ def session_status_card(
     progress_lines: tuple[str, ...],
     subscription_line: str,
 ) -> OutboundCard:
-    builder = _builder("当前会话", metadata_lines[0], template=_state_template(state))
-    builder.raw(_columns(f"Project：{project_alias}", f"状态：{state}"))
-    builder.raw(_plain(metadata_lines[1]))
-    for line in git_branch_lines:
-        builder.raw(_plain(line))
+    # Callback renewal retains the originally rendered v1 strings.
+    snapshot = dict(short_id=short_id, project_alias=project_alias, native_thread_id=native_thread_id, state=state,
+                    metadata_lines=metadata_lines, git_branch_lines=git_branch_lines, context_window_line=context_window_line,
+                    context_mode_lines=context_mode_lines, model_lines=model_lines, progress_lines=progress_lines,
+                    subscription_line=subscription_line)
+    view = SessionStatusView(
+        project_alias=project_alias, state=state, state_label=state, metadata_lines=metadata_lines,
+        workspace_lines=git_branch_lines, model_rows=((model_lines[0],), (model_lines[1], model_lines[2]), (model_lines[3],)),
+        context_lines=(context_window_line, *context_mode_lines), progress_lines=progress_lines,
+        identity_lines=session_identity_lines(short_id=short_id, native_thread_id=native_thread_id),
+        subscription_lines=(subscription_line,),
+    )
+    return render_session_status(view, (_command_buttons(scope, "binding", binding_id, snapshot),))
 
-    builder.raw({"tag": "hr"})
-    builder.markdown("**模型配置**")
-    builder.raw(_plain(model_lines[0]))
-    builder.raw(_columns(model_lines[1], model_lines[2]))
-    builder.raw(_plain(model_lines[3]))
 
-    builder.raw({"tag": "hr"})
-    builder.raw(_plain(context_window_line))
-    for line in context_mode_lines:
+def codex_context_line(field: ContextUsageField) -> str:
+    if field.usage is None:
+        if field.availability is Availability.NOT_APPLICABLE:
+            return "上下文窗口：暂无（首条消息后生成）"
+        return "上下文窗口：暂不可用（下次可观测 Turn 完成后更新）"
+    usage = field.usage
+    label = "上下文窗口（上一轮完成时）" if field.previous_turn else "上下文窗口"
+    if usage.context_window_tokens is None:
+        return f"{label}：已用 {usage.used_tokens:,} tokens（窗口大小暂不可用）"
+    percent = min(100.0, usage.used_tokens * 100 / usage.context_window_tokens)
+    return f"{label}：{usage.used_tokens:,} / {usage.context_window_tokens:,} tokens（{percent:.1f}% 已用）"
+
+
+def codex_model_lines(model: ModelStatusFields) -> tuple[str, str, str, str]:
+    def value(field: SessionField) -> str:
+        return str(field.value) if field.availability is Availability.OBSERVED else field.availability.value
+
+    configuration = value(model.configuration)
+
+    def selection(field: SessionField) -> str:
+        return "继承 Codex" if configuration == "inherited" else value(field)
+
+    config_label = {"inherited": "Codex", "catalog-unavailable": "Netizen 会话配置（模型目录暂不可用）",
+                    "selection-invalid": "Netizen 会话配置（已失效，请使用 /config 更新）",
+                    "configured": "Netizen 会话配置"}.get(configuration, configuration)
+    return (f"Model：{selection(model.model)}", f"Effort：{selection(model.effort)}",
+            f"Speed：{selection(model.speed)}", f"配置来源：{config_label}")
+
+
+def render_session_status(view: SessionStatusView, controls: tuple[dict[str, Any], ...]) -> OutboundCard:
+    builder = _builder("当前会话", view.metadata_lines[0], template=_state_template(view.state))
+    builder.raw(_columns(f"Project：{view.project_alias}", f"状态：{view.state_label}"))
+    builder.raw(_plain(view.metadata_lines[1]))
+    for line in view.workspace_lines:
         builder.raw(_plain(line))
-    if progress_lines:
+    if view.model_rows:
+        builder.raw({"tag": "hr"})
+        builder.markdown("**模型配置**")
+        for row in view.model_rows:
+            builder.raw(_plain(row[0]) if len(row) == 1 else _columns(*row))
+    builder.raw({"tag": "hr"})
+    for line in view.context_lines:
+        builder.raw(_plain(line))
+    if view.progress_lines:
         builder.raw({"tag": "hr"})
         builder.markdown("**任务进展**")
-        builder.raw(_plain("\n".join(progress_lines[1:])))
+        builder.raw(_plain("\n".join(view.progress_lines[1:])))
 
     builder.raw({
-        "tag": "collapsible_panel",
-        "expanded": False,
-        "header": {"title": _plain_text("会话详情与订阅")},
-        "elements": [_plain("\n".join((
-            *session_identity_lines(
-                short_id=short_id, native_thread_id=native_thread_id,
-            ),
-            subscription_line,
-        )))],
+        "tag": "collapsible_panel", "expanded": False, "header": {"title": _plain_text("会话详情与订阅")},
+        "elements": [_plain("\n".join((*view.identity_lines, *view.subscription_lines)))],
     })
-    builder.raw(_command_buttons(scope, "binding", binding_id, {
-        "short_id": short_id, "project_alias": project_alias,
-        "native_thread_id": native_thread_id, "state": state,
-        "metadata_lines": metadata_lines, "git_branch_lines": git_branch_lines,
-        "context_window_line": context_window_line, "context_mode_lines": context_mode_lines,
-        "model_lines": model_lines, "progress_lines": progress_lines,
-        "subscription_line": subscription_line,
-    }))
+    for button in controls:
+        builder.raw(button)
     builder.markdown("<font color='grey'>本次查询快照 · 按钮与对应命令的处理方式相同</font>")
     return _status_card(builder.to_dict())
 

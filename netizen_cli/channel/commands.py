@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 import asyncio
 import logging
+import time
 from dataclasses import replace
 from typing import Any
 
@@ -12,8 +13,9 @@ from lark_channel import (
     OutboundCard,
 )
 
+from ..backends import OperationId
 from ..bindings import (
-    SideTopicState,
+    SideTopicState, ThreadBinding,
 )
 from ..cards import (
     CardActionError,
@@ -26,9 +28,9 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
-from ..cards.controls import local_status_card, local_status_text
+from ..cards.controls import local_status_card
 from ..cards.status import (
-    decode_status_command, session_status_card,
+    codex_context_line, codex_model_lines, decode_status_command, session_status_card,
 )
 from ..runtime.contracts import (
     ReleaseDisposition,
@@ -42,7 +44,6 @@ from ..runtime.contracts import (
 from ..domain import (
     ACTIVE_STATE_VALUES,
     ActiveState,
-    session_stop_available,
     ControlIntent,
     ControlName,
     GoalStatus,
@@ -71,11 +72,11 @@ from .base import (
     _session_title,
     _thread_metadata_status_lines,
     _git_branch_status_lines,
-    _context_window_status_line,
     _thread_subscription_status_line,
     _turn_progress_status_lines,
 )
 from .card_controls import CardControlChannel
+from ..session_views import Availability, ContextUsageField
 
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
@@ -118,9 +119,8 @@ class CommandChannel(CardControlChannel):
                 app_id=self._app_id, chat_id=chat_id, topic_id=scope.topic_id,
                 root_message_id=None,
             )
-            if self._policy.backend == "claude":
-                if decoded.target_kind == "side" or side is not None:
-                    raise InvalidInteraction("Claude 试点暂不支持【Side】。")
+            if decoded.target_kind == "side" or side is not None:
+                self._policy.require(OperationId.SIDE)
             if decoded.target_kind == "side":
                 if side is None or side.id != decoded.target_id:
                     raise CardActionError("状态卡对应的 Side 已变化或不可用，本次未执行。")
@@ -133,8 +133,10 @@ class CommandChannel(CardControlChannel):
             else:
                 if side is not None:
                     raise CardActionError("状态卡与当前 Side 话题不一致，本次未执行。")
-                if self._policy.backend == "codex":
+                if self._local_sessions is None:
                     renewed_card = decoded.card()
+                elif decoded.command.name is ControlName.STOP:
+                    raise CardActionError("停止操作需要原执行标识，请重新发送 /status。")
                 await self._control(origin, decoded.command, expected_binding_id=decoded.target_id)
         except CardActionError as error:
             await self._report_input_error(origin, InvalidInteraction(str(error)))
@@ -152,10 +154,12 @@ class CommandChannel(CardControlChannel):
     async def _control(
         self, message: Any, intent: ControlIntent, *, expected_binding_id: str | None = None,
     ) -> None:
-        if self._policy.backend == "claude":
+        if self._local_sessions is not None:
             if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.DEFAULTS}:
-                assert self._management.local is not None
-                self._management.local.require_admission()
+                self._local_sessions.require_admission()
+        refusal = self._policy.command_refusal(intent.name.value, archived=bool(intent.arguments))
+        if refusal:
+            raise InvalidInteraction(refusal)
         if expected_binding_id is not None:
             # No await before the selected command captures its Binding. The
             # ordinary command's existing exact-target checks protect mutations
@@ -278,9 +282,8 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if self._policy.backend == "claude":
-            assert self._management.local is not None
-            snapshot = self._management.local.local_snapshot(binding.id)
+        if self._local_sessions is not None:
+            snapshot = self._local_sessions.local_snapshot(binding.id)
             if snapshot.turn is not None or snapshot.unavailable:
                 await self._reply(message, "当前会话不允许修改配置。")
                 return
@@ -333,7 +336,7 @@ class CommandChannel(CardControlChannel):
         await self._reply(
             message,
             config_card(
-                local_only=self._policy.backend == "claude",
+                form_view=self._session_form,
                 scope=intent.scope,
                 binding_id=binding.id,
                 short_id=binding.short_id,
@@ -396,7 +399,7 @@ class CommandChannel(CardControlChannel):
             await self._reply(
                 message,
                 card,
-                **({"on_sent": remember_card} if self._policy.backend == "claude" else {}),
+                **({"on_sent": remember_card} if self._local_sessions is not None else {}),
             )
         except asyncio.CancelledError:
             raise
@@ -442,7 +445,7 @@ class CommandChannel(CardControlChannel):
         )
         await self._reply(
             message,
-            f"{'已恢复并切换' if binding.native_thread_id and self._policy.backend == 'codex' else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
+            f"{'已恢复并切换' if binding.native_thread_id and self._management.session_reads.native_catalog else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
         )
 
     async def _command_unarchive(self, message: Any, intent: ControlIntent) -> None:
@@ -472,13 +475,14 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if binding.native_thread_id is None:
+        if binding.native_thread_id is None and self._local_sessions is None:
             raise ThreadNotMaterialized(
                 "当前会话尚未在 Codex 中创建；"
                 "请先发送一条真实任务，再使用 /rename。"
             )
         if not intent.arguments:
-            metadata = await self._read_thread_metadata((binding,))
+            metadata = await self._read_thread_metadata((binding,)) if self._policy.allows(OperationId.HISTORY) else {}
+            self._management.title_writer_for(binding)
             await self._reply(
                 message,
                 rename_binding_card(
@@ -486,6 +490,8 @@ class CommandChannel(CardControlChannel):
                     binding_id=binding.id,
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
+                    sync_hint=self._management.names.sync_hint,
+                    can_generate=self._policy.allows(OperationId.GENERATE_NAME),
                     current_title=_session_title(
                         binding,
                         metadata.get(binding.native_thread_id),
@@ -599,16 +605,13 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if self._policy.backend == "claude":
-            assert self._management.local is not None
-            snapshot = self._management.local.local_snapshot(binding.id)
-            turn = snapshot.turn
-            if turn is not None and session_stop_available(turn.state.value):
-                await self._reply(message, local_status_card(intent.scope, binding, snapshot))
-            else:
-                await self._reply(message, local_status_text(binding, snapshot))
+        status = await self._management.binding_status_exact(binding.id)
+        if self._local_sessions is not None:
+            card = local_status_card(intent.scope, binding, status, self._local_sessions.observation_defaults)
+            await self._reply(message, card)
             return
-        state = await self._binding_state(binding)
+        state = status.primary_status
+        assert state is not None
         try:
             metadata = await self._management.binding_metadata_exact(
                 binding.id,
@@ -634,15 +637,11 @@ class CommandChannel(CardControlChannel):
             git_branch_lines = (f"工作目录：{cwd}", *await _git_branch_status_lines(cwd))
             if not cwd.is_dir():
                 git_branch_lines += ("工作目录当前不可用；保留原目录，执行结果以 Codex 返回为准。",)
-        context_window_line = _context_window_status_line(
-            binding,
-            self._runtime.context_window_usage(binding.id),
-            active_turn=state in ACTIVE_STATE_VALUES,
-        )
+        context = self._context_usage_field(binding, active_turn=state in ACTIVE_STATE_VALUES)
         progress_lines = _turn_progress_status_lines(
             self._runtime.turn_progress(binding.id)
         )
-        model_lines = await self._binding_model_status_lines(binding)
+        model = await self._binding_model_status(binding)
         subscription_line = _thread_subscription_status_line(
             binding,
             self._runtime.thread_subscription_snapshot(binding.id),
@@ -658,21 +657,25 @@ class CommandChannel(CardControlChannel):
         await self._reply(
             message,
             session_status_card(
-                scope=intent.scope,
-                binding_id=binding.id,
-                short_id=binding.short_id,
-                project_alias=binding.project_alias,
-                native_thread_id=binding.native_thread_id,
-                state=state,
-                metadata_lines=thread_metadata_lines,
-                git_branch_lines=git_branch_lines,
-                context_window_line=context_window_line,
-                context_mode_lines=context_mode_lines,
-                model_lines=model_lines,
-                progress_lines=progress_lines,
-                subscription_line=subscription_line,
+                scope=intent.scope, binding_id=binding.id, short_id=binding.short_id, project_alias=binding.project_alias,
+                native_thread_id=binding.native_thread_id, state=state, metadata_lines=thread_metadata_lines,
+                git_branch_lines=git_branch_lines, context_window_line=codex_context_line(context),
+                context_mode_lines=context_mode_lines, model_lines=codex_model_lines(model),
+                progress_lines=progress_lines, subscription_line=subscription_line,
             ),
         )
+
+    def _context_usage_field(self, binding: ThreadBinding, *, active_turn: bool) -> ContextUsageField:
+        source = "Codex token usage"
+        if binding.native_thread_id is None:
+            return ContextUsageField(Availability.NOT_APPLICABLE, source, time.time())
+        usage = self._runtime.context_window_usage(binding.id)
+        if usage is None:
+            failed_at = self._runtime.context_window_read_failed_at(binding.id, binding.native_thread_id)
+            if failed_at is not None:
+                return ContextUsageField(Availability.UNAVAILABLE, source, failed_at)
+            return ContextUsageField(Availability.UNOBSERVED, source, time.time())
+        return ContextUsageField(Availability.OBSERVED, source, usage.observed_at, usage, active_turn)
 
     async def _command_stop(self, message: Any, intent: ControlIntent) -> None:
         binding = self._bindings.active_binding(intent.scope.key)
@@ -708,7 +711,7 @@ class CommandChannel(CardControlChannel):
         result = stopped.disposition
         if result is StopDisposition.NOT_RUNNING and not acknowledged:
             await self._reply(message, "当前任务恰好已经结束。")
-        elif result is StopDisposition.STOPPING and self._policy.backend == "claude":
+        elif result is StopDisposition.STOPPING and self._local_sessions is not None:
             await self._reply(message, "已在等待上一次停止请求的结果。")
         elif result is StopDisposition.COMPACTING:
             await self._reply(

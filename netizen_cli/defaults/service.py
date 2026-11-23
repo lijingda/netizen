@@ -14,8 +14,7 @@ from ..domain import MentionContextMode
 from ..model_settings import ModelCatalogError, STANDARD_SERVICE_TIER_ID
 from ..projects import Project, ProjectError, ProjectRegistry
 from ..worktrees.policy import WorkspacePolicy, WorkspacePolicyError
-from ..session_settings import require_local_settings
-from ..session_settings import SessionSettings, SessionSettingsError
+from ..session_settings import SessionFormView, SessionSettings, SessionSettingsError
 from ..worktrees.errors import WorktreeError
 from .models import DefaultConfigurationError, DefaultRule
 from .store import MAX_GROUP_RULES
@@ -40,7 +39,7 @@ _FIELDS = {
 class SessionDefaultsService:
     def __init__(
         self, *, bindings: BindingStore, projects: ProjectRegistry,
-        runtime: Any, app_id: str, local_only: bool = False, chat_info: Any = None, blocking_io: Any = None,
+        runtime: Any, app_id: str, form_view: SessionFormView = SessionFormView(), chat_info: Any = None, blocking_io: Any = None,
         chat_target_validator: ChatTargetValidator | None = None,
         worktrees: Callable[[], WorktreeService | None] | None = None,
     ) -> None:
@@ -48,7 +47,7 @@ class SessionDefaultsService:
         self._store = bindings.defaults
         self._projects = projects
         self._runtime = runtime
-        self._local_only = local_only
+        self._form = form_view
         self._chat_info = chat_info
         self._chat_target_validator = chat_target_validator
         self._blocking_io = blocking_io
@@ -95,9 +94,8 @@ class SessionDefaultsService:
 
     async def validate(self, rule: DefaultRule, *, expected_project_revision: int | None = None) -> Project:
         """Validate at use time; no Project revision or effective config is saved."""
-        if self._local_only:
-            settings = rule.session_settings
-            require_local_settings(settings.turn_settings is not None, settings.task_feedback)
+        settings = rule.session_settings
+        self._form.validate(settings.turn_settings is not None, settings.task_feedback)
         if rule.app_id != self.app_id:
             raise DefaultConfigurationError("当前应用下没有这个默认配置。", code="not_found")
         try:
@@ -273,7 +271,7 @@ class SessionDefaultsService:
         error = None
         try:
             async with asyncio.timeout(5):
-                if not self._local_only:
+                if self._form.model_editable:
                     catalog = await self._runtime.model_catalog()
         except Exception:
             error = "Codex 模型目录暂不可用；可以选择继承 Codex，稍后再选择模型。"
@@ -288,7 +286,7 @@ class SessionDefaultsService:
                 workspace_error = str(failure)
             except Exception:
                 workspace_error = "worktree 选项暂不可用，请稍后刷新。"
-        return {"models": _models(catalog), "session_settings": (SessionSettings() if self._local_only else SessionSettings.new_defaults(catalog)).to_dict(),
+        return {"models": _models(catalog), "session_settings": self._form.defaults(catalog).to_dict(),
                 "context_mode_available": kind != "p2p", "model_catalog_error": error,
                 "workspace_options": workspace_options, "workspace_options_error": workspace_error}
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from .backends import BackendUnsupported
+from .backends import BackendUnsupported, OperationId
 from .domain import MentionContextMode
 from .progress_card_settings import ProgressCardSettings
 
@@ -49,11 +50,31 @@ class BindingTaskFeedback:
             raise ValueError("Binding progress card settings must be ProgressCardSettings or None")
 
 
+@dataclass(frozen=True, slots=True)
+class SessionFormView:
+    """Authority for the model triple and progress fields on ordinary forms."""
+    model_editable: bool = True
+    progress_editable: bool = True
+    inherited_source: str = "继承 Codex"
+
+    @classmethod
+    def from_operations(cls, allows: Callable[[OperationId], bool], *, inherited_source: str) -> SessionFormView:
+        return cls(allows(OperationId.MODEL), allows(OperationId.PROGRESS), inherited_source)
+
+    def defaults(self, catalog: ModelCatalog | None) -> SessionSettings:
+        settings = SessionSettings.new_defaults(catalog if self.model_editable else None)
+        return replace(settings, task_feedback=replace(settings.task_feedback, progress_card_enabled=self.progress_editable))
+
+    def validate(self, has_model: bool, feedback: BindingTaskFeedback) -> None:
+        if has_model and not self.model_editable:
+            raise BackendUnsupported("模型、思考强度或速度设置")
+        if not self.progress_editable and (feedback.progress_card_enabled or feedback.progress_card_settings is not None):
+            raise BackendUnsupported("过程卡")
+
+
 def require_local_settings(has_model: bool, feedback: BindingTaskFeedback) -> None:
-    if has_model:
-        raise BackendUnsupported("模型、思考强度或速度设置")
-    if feedback.progress_card_enabled or feedback.progress_card_settings is not None:
-        raise BackendUnsupported("过程卡")
+    # The native Claude write boundary also rejects unsupported intent.
+    SessionFormView(False, False, "原生 Claude 设置").validate(has_model, feedback)
 
 
 _FIELDS = frozenset({"turn_settings", "reaction_pulse_enabled", "progress_card_enabled", "completion_mention_enabled", "message_context_mode", "progress_card_settings"})

@@ -153,10 +153,16 @@ class FakeFeishuClient:
 
 
 class FakeManagement:
+    policy = BackendPolicy("codex")
+    operation_policy = InstanceManagementService.operation_policy
+
     async def resolve_chat_labels(self, chat_ids, *, deadline, lookup_budget_seconds=None):
         return {chat_id: ChatLabelResolver.fallback(chat_id) for chat_id in chat_ids}
 
     def __init__(self, root: Path) -> None:
+        self.names = SimpleNamespace(sync_hint="保存后名称同步显示在 Codex App/CLI。", writer=SimpleNamespace(eligible=lambda binding, state: (
+            binding.native_thread_id is not None and state is NativeThreadCatalogState.ACTIVE
+        )))
         self.native_delete_available = True
         self.defaults = None
         self.calls: list[tuple[str, object]] = []

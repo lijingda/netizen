@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .backends import BackendPolicy
 from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
 from .domain import ActiveState, MessageContextAnchor, MentionContextMode
+from .runtime.codex_contracts import BindingRuntimeSnapshot
+from .session_views import SessionObservations
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
@@ -102,6 +105,13 @@ class LocalExecutionSnapshot:
     turn: ActiveTurnSnapshot | None
     unavailable: bool
 
+    def capture(self, binding_id: str, session_id: str | None, observations: SessionObservations) -> "LocalStatusSnapshot":
+        return LocalStatusSnapshot(
+            binding_id=binding_id, activity_revision=self.revision, turn=self.turn, goal=None,
+            compacting=False, lifecycle=None, subscription=None, context_window_usage=None,
+            local=self, session_id=session_id, observations=observations,
+        )
+
     @property
     def label(self) -> str:
         if self.unavailable:
@@ -112,7 +122,19 @@ class LocalExecutionSnapshot:
                 ActiveState.OBSERVATION_UNAVAILABLE: "状态待确认"}[self.turn.state]
 
 
+@dataclass(frozen=True, slots=True)
+class LocalStatusSnapshot(BindingRuntimeSnapshot):
+    local: LocalExecutionSnapshot
+    session_id: str | None
+    observations: SessionObservations
+
+
 class LocalSessionManagement(Protocol):
+    @property
+    def backend_policy(self) -> BackendPolicy: ...
+    @property
+    def observation_defaults(self) -> SessionObservations: ...
+    def capture_status(self, binding_id: str) -> LocalStatusSnapshot: ...
     def occupying_bindings(self, directory: Path) -> frozenset[str]: ...
     async def resource_usage(self, binding_id: str) -> dict[str, str | None]: ...
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding: ...

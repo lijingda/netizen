@@ -81,7 +81,7 @@ from .channel.app_values import (
     _goal_reply_activity,
     _outcome_completion_mention_user_id,
 )
-from .backends import BackendPolicy
+from .backends import BackendPolicy, Provider
 from .channel.entry import ChannelEntry
 
 
@@ -118,7 +118,7 @@ class ChannelApplication(ChannelEntry):
         app_id: str,
         channel: ReplyChannel,
         runtime: CodexRuntime | None,
-        policy: BackendPolicy = BackendPolicy("codex"),
+        policy: BackendPolicy | None = None,
         ordinary: OrdinarySessionPort | None = None,
         bindings: BindingStore,
         projects: ProjectRegistry,
@@ -136,7 +136,9 @@ class ChannelApplication(ChannelEntry):
         self._app_id = app_id
         self._channel = channel
         self._chat_avatars = ChatAvatarImages(channel)
-        self._policy = policy
+        self._policy = management.operation_policy(policy)
+        self._local_sessions = management.local
+        self._session_form = management.session_form
         self._codex = runtime
         if ordinary is None:
             if runtime is None:
@@ -151,7 +153,7 @@ class ChannelApplication(ChannelEntry):
         self._instance_root = instance_root
         self._input_preparer = MessageInputPreparer(channel=channel, attachment_store=attachment_store)
         self._management = management
-        if policy.backend == "codex":
+        if management.has_provider(Provider.CODEX_RUNTIME):
             self._management.enable_schedules(app_id=app_id, chat_info=channel)
         self._management.enable_defaults(app_id=app_id, chat_info=channel)
         self._scope_coordinator = management.scope_coordinator

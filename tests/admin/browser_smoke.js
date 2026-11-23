@@ -217,11 +217,14 @@ async function run() {
         await settled(phoneWidth);
         result.visits.push(step);
         if (path === "/projects") {
-          const alias = config.ownerOnly ? "pending" : "test";
+          const alias = config.ownerOnly ? "pending" : config.deleteLimited ? "empty" : "test";
           await click(`[data-project-alias="${alias}"] .project-delete-trigger`);
           await until("verified deletion scope", () => evaluate(visible("#project-delete-confirm:enabled")));
           const summary = await evaluate(element("#project-delete-dialog") + ".innerText");
-          if (config.ownerOnly) {
+          if (config.deleteLimited) {
+            assert.match(summary, /0 个未开始的 Codex 会话登记/);
+            assert.doesNotMatch(summary, /undefined/);
+          } else if (config.ownerOnly) {
             assert.match(summary, /1 个未开始的 Claude Code 会话登记/);
             assert.doesNotMatch(summary, /Codex|Goal|Side|App\/CLI|归档|定时/);
           } else {
@@ -250,6 +253,41 @@ async function run() {
           result.interactions.push(step + " · restart and directories");
         }
         if (path === "/sessions/ordinary") {
+          await until("session identity details", () => evaluate('document.querySelector("#sessions-body .session-identities") !== null'));
+          const visibility = await evaluate(`(() => {
+            const unrelated = document.createElement("div");
+            unrelated.className = "section-head";
+            unrelated.hidden = true;
+            document.body.append(unrelated);
+            const displays = [getComputedStyle(unrelated).display, getComputedStyle(document.querySelector("#session-rename-generate")).display];
+            unrelated.remove();
+            return displays;
+          })()`);
+          assert.equal(visibility[0], "flex");
+          if (config.manualOnly || config.ownerOnly) assert.equal(visibility[1], "none");
+          else assert.notEqual(visibility[1], "none");
+          if (config.ownerOnly) {
+            const details = await evaluate(`(() => {
+              const cell = document.querySelector("#sessions-body .runtime-state").cloneNode(false);
+              const runtime = {primaryStatus: "idle", primaryStatusResolution: "local"};
+              const text = observations => {
+                updateRuntimeCell(cell, {...runtime, observations});
+                return cell.querySelector(".runtime-observations")?.textContent || "";
+              };
+              return [text({}), text({model: {label: "模型", availability: "observed", value: "sample"}}), text({})];
+            })()`);
+            assert.deepEqual(details, ["", "模型：sample", ""]);
+          }
+          result.interactions.push(step + " · provider fields and computed visibility");
+          const identities = await evaluate('[...document.querySelectorAll("#sessions-body .session-identities")].map(el => el.textContent)');
+          for (const identity of identities) {
+            if (config.ownerOnly) {
+              assert.match(identity, /Claude Code 会话 ID/);
+              assert.doesNotMatch(identity, /Codex|跨会话工具/);
+            } else {
+              assert.match(identity, /完整 Codex 会话 ID/);
+            }
+          }
           await click("#sessions-body button", "配置");
           await until("session configuration loaded", () => evaluate(visible("#session-settings-save:enabled")));
           const settings = await evaluate(element("#session-settings-drawer") + ".innerText");
@@ -265,7 +303,7 @@ async function run() {
         if (path === "/login") {
           const cookie = await page("Network.setCookie", { ...config.cookie, url: config.origin, httpOnly: true });
           if (!cookie.success) throw new Error("Could not install fixture session cookie");
-        } else if (path === "/projects" && !config.ownerOnly) {
+        } else if (path === "/projects" && !config.ownerOnly && !config.deleteLimited) {
           step += " · Project Markdown preview";
           await click("#projects-body button", "查看文件");
           await click('#file-browser-entries button[data-path="readme.md"]');

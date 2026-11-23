@@ -7,7 +7,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
 
-from .backends import BackendPolicy
+from .backends import BackendPolicy, OperationId, OPERATIONS, command_operation
 from .domain import (
     ChannelInteraction,
     ControlIntent,
@@ -44,9 +44,13 @@ class CommandSpec:
     usage: str
     summary: str
     aliases: tuple[str, ...] = ()
-    requires: NativeCapability | None = None
     unavailable_reason: str | None = None
     group: CommandGroup = CommandGroup.TASK
+
+    @property
+    def requires(self) -> NativeCapability | None:
+        operation = command_operation(self.name)
+        return OPERATIONS[operation].command_probe if operation is not None else None
 
 
 COMMAND_SPECS = (
@@ -114,7 +118,6 @@ COMMAND_SPECS = (
         CommandOwner.HYBRID,
         "/usage",
         "查看共享 Codex 账号的剩余额度和重置时间；无需创建会话",
-        requires=NativeCapability.ACCOUNT_RATE_LIMITS,
         unavailable_reason="当前 SDK/App Server 的账号额度查询兼容契约未通过",
         group=CommandGroup.START,
     ),
@@ -138,7 +141,6 @@ COMMAND_SPECS = (
         CommandOwner.HYBRID,
         "/side [首轮问题]",
         "从当前会话另开临时分支话题；话题内用 `/side close` 结束",
-        requires=NativeCapability.SIDE,
         unavailable_reason=(
             "当前 SDK/App Server 的 Side Thread 兼容契约未通过"
         ),
@@ -149,7 +151,6 @@ COMMAND_SPECS = (
         CommandOwner.NATIVE_THREAD,
         "/goal [目标|pause|resume|clear]",
         "不带参数查看当前目标；输入目标启动持续执行，或用子命令暂停、恢复、清除",
-        requires=NativeCapability.GOAL,
         unavailable_reason=(
             "当前 SDK/App Server 的 Goal 兼容契约未通过"
         ),
@@ -200,7 +201,6 @@ COMMAND_SPECS = (
         CommandOwner.NATIVE_THREAD,
         "/release",
         "释放当前空闲会话的连接；会话和历史保留，之后仍可继续",
-        requires=NativeCapability.RELEASE,
         unavailable_reason="当前 SDK/App Server 的 Thread 订阅释放契约未通过",
         group=CommandGroup.SESSION,
     ),
@@ -331,22 +331,21 @@ def parse_message(
             skill_names = parse_skill_references(body)
         except InvalidSkillReference as error:
             raise InvalidInteraction(str(error)) from error
-        if skill_names and (refusal := policy.operation_refusal("skills", "显式 Skill 调用")):
-            raise InvalidInteraction(refusal)
+        if skill_names and not policy.allows(OperationId.SKILLS):
+            raise InvalidInteraction(policy.refusal(OPERATIONS[OperationId.SKILLS].label))
         if skill_names and NativeCapability.SKILLS not in capabilities:
             raise InvalidInteraction(
                 "当前 Codex Skills 发现功能不可用，$skill 引用未执行。"
             )
         return PromptInput(scope, message_id, sender_id, body, skill_names)
     if body == "/":
-        if policy.backend == "claude":
-            require_command(policy, "menu")
+        require_command(policy, "menu")
         return ControlIntent(scope, message_id, sender_id, ControlName.MENU)
 
     raw_parts = body[1:].lstrip().split(maxsplit=1)
     raw_spec = _COMMANDS.get(raw_parts[0].lower()) if raw_parts else None
     checked_command = False
-    if policy.backend == "claude" and raw_parts:
+    if raw_parts:
         name = raw_spec.name if raw_spec else raw_parts[0].lower()
         if raw_spec is not None or name in {*_CONFIG_ALIASES, "speed"}:
             require_command(policy, name, archived=len(raw_parts) > 1)
@@ -379,11 +378,10 @@ def parse_message(
                 spec=raw_spec,
             ) from error
     if not tokens:
-        if policy.backend == "claude":
-            require_command(policy, "menu")
+        require_command(policy, "menu")
         return ControlIntent(scope, message_id, sender_id, ControlName.MENU)
     spec = _COMMANDS.get(tokens[0].lower())
-    if policy.backend == "claude" and not checked_command:
+    if not checked_command:
         head = tokens[0].lower()
         if spec is not None or head in {*_CONFIG_ALIASES, "speed"}:
             require_command(policy, spec.name if spec else head, archived=len(tokens) > 1)
@@ -508,15 +506,21 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
 
 
 def command_help(
-    available_capabilities: Collection[NativeCapability] = (),
+    available_capabilities: Collection[NativeCapability] = (), *, policy: BackendPolicy = BackendPolicy("codex"),
 ) -> str:
     capabilities = frozenset(available_capabilities)
     available = tuple(
         spec
         for spec in COMMAND_SPECS
-        if spec.intent is not None
+        if spec.intent is not None and policy.command_refusal(spec.name) is None
         and (spec.requires is None or spec.requires in capabilities)
     )
+    if policy.backend == "claude":
+        return "Claude 会话：" + " · ".join(
+            f"/{spec.name} {OPERATIONS[operation].label}"
+            for spec in available
+            if (operation := command_operation(spec.name)) is not None and operation is not OperationId.HELP
+        ) + "。"
     lines = [
         "### 快速开始",
         "",

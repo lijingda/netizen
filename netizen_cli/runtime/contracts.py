@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+import time
 from typing import Any, Protocol
 
 from ..bindings import BindingTaskFeedback, SideTopicState
@@ -567,6 +568,7 @@ class NativeThreadCatalog:
 class ContextWindowUsage:
     used_tokens: int
     context_window_tokens: int | None
+    observed_at: float = field(default_factory=time.time, compare=False)
 
     def __post_init__(self) -> None:
         if (

@@ -84,6 +84,7 @@ def _runtime_binding_json(status: BindingStatusProjection) -> dict[str, object]:
     return {
         "bindingId": snapshot.binding_id,
         "activityRevision": snapshot.activity_revision,
+        **({"observations": status.observations.json()} if status.observations is not None else {}),
         **({"localLabel": status.local_label} if status.local_label is not None else {}),
         "primaryStatus": status.primary_status,
         "primaryStatusResolution": status.primary_status_resolution.value,

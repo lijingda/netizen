@@ -155,11 +155,13 @@ _STREAM_END = object()
 
 
 def reply_suppression_app(runtime, store, app_id):
+    from netizen_cli.backends import BackendPolicy
+
     suppression = ReplySuppression()
     runtime.set_input_received_handler(suppression.discard_physical_turn)
     return SimpleNamespace(
         _runtime=runtime, _bindings=store, _app_id=app_id,
-        _reply_suppression=suppression,
+        _reply_suppression=suppression, _policy=BackendPolicy("codex"),
     )
 
 
@@ -6374,6 +6376,27 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.outcomes[0].turn_diff, latest)
         self.assertEqual(handle.stream_calls, 1)
 
+    async def test_drain_timeout_retains_the_exact_turn_usage_and_timestamp(self) -> None:
+        binding = self.binding()
+        submission = await self.submit(binding)
+        handle = self.codex.handles[0]
+        captured = []
+
+        async def stalled_stream():
+            yield token_usage_notification(used_tokens=57)
+            captured.append(self.runtime.context_window_usage(binding.id))
+            await asyncio.Event().wait()
+
+        with (patch.object(handle, "stream", stalled_stream),
+              patch("netizen_cli.runtime.limits.TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS", 0.02),
+              self.assertLogs("netizen_cli.codex_runtime", level="WARNING")):
+            await self.finish(handle, submission)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].used_tokens, 57)
+        self.assertIs(self.runtime.context_window_usage(binding.id), captured[0])
+        self.assertIsNone(self.runtime.context_window_read_failed_at(binding.id, submission.thread_id))
+        self.assertEqual([outcome.turn_id for outcome in self.outcomes], [submission.turn_id])
+
     async def test_usage_stream_failure_does_not_override_persisted_terminal(
         self,
     ) -> None:
@@ -6394,6 +6417,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(handle.stream_calls, 1)
         self.assertIsNone(self.runtime.context_window_usage(binding.id))
+        failed_at = self.runtime.context_window_read_failed_at(binding.id, submission.thread_id)
+        self.assertIsNotNone(failed_at)
+        self.assertEqual(self.runtime.context_window_read_failed_at(binding.id, submission.thread_id), failed_at)
+        self.assertIsNone(self.runtime.context_window_read_failed_at(binding.id, "other"))
         self.assertEqual(len(self.outcomes), 1)
         self.assertIsNone(self.outcomes[0].error)
         self.assertEqual(self.outcomes[0].final_response, "done:turn-1")

@@ -11,6 +11,7 @@ from netizen_cli.cards import (
     archived_sessions_card,
     sessions_card,
 )
+from netizen_cli.backends import BackendPolicy
 from netizen_cli.channel.session_pages import SessionCardPage
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.session_inventory import NativeSessionCursor
@@ -24,6 +25,7 @@ class SessionIdentityCardTest(unittest.TestCase):
 
     def test_background_list_exposes_complete_native_id_without_an_id_action(self):
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=(SessionCardItem(
                 binding_id=self.binding_id,
@@ -90,6 +92,7 @@ class SessionIdentityCardTest(unittest.TestCase):
 
     def test_lazy_list_displays_absent_native_id_without_substituting_binding(self):
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=(SessionCardItem(
                 binding_id=self.binding_id,
@@ -126,6 +129,7 @@ class SessionIdentityCardTest(unittest.TestCase):
             turn_id="019ab839-0001-733c-93ad-d2946375446c",
         ) for index in range(10))
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=sessions,
             page=1,
@@ -140,10 +144,12 @@ class SessionIdentityCardTest(unittest.TestCase):
     def test_session_lists_always_offer_admin_without_an_error(self):
         cards = (
             sessions_card(
+                policy=BackendPolicy("codex"),
                 scope=self.scope, sessions=(), native_delete_available=True,
                 active_binding_id=None,
             ),
             sessions_card(
+                policy=BackendPolicy("codex"),
                 scope=self.scope, sessions=(), native_delete_available=True,
                 active_binding_id=None, lazy=True,
             ),
@@ -155,6 +161,37 @@ class SessionIdentityCardTest(unittest.TestCase):
             visible = "\n".join(item["content"] for item in _elements(card.card, "markdown"))
             self.assertIn("Admin 会话列表", visible)
             self.assertIn("`/admin`", visible)
+
+    def test_deep_local_page_keeps_two_positions_per_action_and_fits_the_card(self):
+        from netizen_cli.bindings import BindingCursor
+
+        navigation = SessionCardPage("lazy")
+        items = []
+        stamp = "2026-11-22T12:00:00.123456+00:00"
+        for index in range(11):
+            identity = f"{index:08d}-1111-4111-8111-111111111111"
+            navigation = navigation.next(BindingCursor(stamp, identity))
+            items.append(SessionCardItem(
+                identity, identity[:8], "project" * 8, self.native_id, "", "running", False,
+                turn_id=self.native_id, registered_at=stamp,
+            ))
+        token = navigation.encode(self.scope)
+        self.assertGreater(len(token), 650)
+        card = sessions_card(
+            policy=BackendPolicy("claude", "owner"), scope=self.scope, sessions=tuple(items[:-1]),
+            current=replace(items[-1], active=True), local_directory=True, lazy=True,
+            active_binding_id=items[-1].binding_id, native_delete_available=False, page=navigation.page,
+            session_cursor=token, previous_cursor=navigation.previous().encode(self.scope),
+            next_cursor=navigation.next(BindingCursor(stamp, self.binding_id)).encode(self.scope),
+        ).card
+        self.assertLess(len(json.dumps(card, ensure_ascii=False).encode()), 40_000)
+        actions = [button["behaviors"][0]["value"] for button in _elements(card, "button")
+                   if "binding_id" in button["behaviors"][0]["value"]]
+        self.assertEqual(len(actions), 21)
+        self.assertEqual(str(card).count("上次观测的模型：未观测"), 11)
+        for action in actions:
+            reference = SessionCardPage.decode(action["session_cursor"], self.scope)
+            self.assertEqual(reference.positions, navigation.positions[-2:])
 
     def test_deep_page_retains_exact_row_positions_without_repeating_back_history(self):
         # Match production's 48-character title projection, with every control
@@ -183,6 +220,7 @@ class SessionIdentityCardTest(unittest.TestCase):
         previous = navigation.previous().encode(scope)
         following = navigation.next(NativeSessionCursor("next" + "x" * 64)).encode(scope)
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=scope, sessions=sessions, current=current,
             active_binding_id=self.binding_id, native_delete_available=True,
             page=navigation.page, session_cursor=token,
@@ -208,6 +246,7 @@ class SessionIdentityCardTest(unittest.TestCase):
         oversized = SessionCardPage("active", 1, (NativeSessionCursor("x" * 450),))
         with self.assertRaisesRegex(CardActionError, "卡片内容过长"):
             sessions_card(
+                policy=BackendPolicy("codex"),
                 scope=scope, sessions=sessions, current=current,
                 active_binding_id=self.binding_id, native_delete_available=True,
                 page=1, session_cursor=oversized.encode(scope),

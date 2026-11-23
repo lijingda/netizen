@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from lark_channel import OutboundCard
 
+from netizen_cli.backends import BackendPolicy
 from netizen_cli.channel.session_pages import SessionCardPage
 from netizen_cli.management import SessionNativeCursor
 from netizen_cli.cards import callbacks
@@ -3920,6 +3921,7 @@ class CardRendererTest(unittest.TestCase):
     def test_lifecycle_cards_encode_exact_binding_and_destructive_confirmation(self) -> None:
         binding_id = "11111111-0000-0000-0000-000000000001"
         rename = rename_binding_card(
+            sync_hint="保存后名称同步显示在 Codex App/CLI。",
             scope=self.scope,
             binding_id=binding_id,
             short_id="11111111",
@@ -4014,6 +4016,7 @@ class CardRendererTest(unittest.TestCase):
             active=False,
         )
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=(active, other, lazy),
             active_binding_id=active.binding_id,
@@ -4134,6 +4137,7 @@ class CardRendererTest(unittest.TestCase):
         )
 
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=sessions,
             active_binding_id=sessions[0].binding_id,
@@ -4190,6 +4194,7 @@ class CardRendererTest(unittest.TestCase):
         self,
     ) -> None:
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             active_binding_id="11111111-0000-0000-0000-000000000001",
             sessions=(
@@ -4243,6 +4248,7 @@ class CardRendererTest(unittest.TestCase):
         )
 
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=sessions,
             active_binding_id=sessions[0].binding_id,
@@ -4373,6 +4379,7 @@ class CardRendererTest(unittest.TestCase):
         second = first.next(SessionNativeCursor("native-page-2"))
         third = second.next(SessionNativeCursor("native-page-3"))
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=sessions[:10],
             active_binding_id=sessions[0].binding_id,
@@ -4387,6 +4394,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("上一页", text)
 
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=sessions[10:20],
             active_binding_id=sessions[0].binding_id,
@@ -4403,6 +4411,7 @@ class CardRendererTest(unittest.TestCase):
 
         # The last page has no continuation cursor.
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=sessions[20:],
             active_binding_id=sessions[0].binding_id,
@@ -4418,6 +4427,7 @@ class CardRendererTest(unittest.TestCase):
 
     def test_sessions_card_empty_state(self) -> None:
         card = sessions_card(
+            policy=BackendPolicy("codex"),
             scope=self.scope,
             sessions=(),
             active_binding_id=None,

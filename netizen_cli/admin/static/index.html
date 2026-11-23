@@ -373,10 +373,10 @@
         <div class="drawer-body">
           <p id="session-rename-identity" class="hint"></p>
           <label>会话名称<input id="session-rename-name" name="name" maxlength="120" required autocomplete="off"></label>
-          <p class="hint">自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。</p>
+          <p class="hint">__NETIZEN_RENAME_HINT__</p>
           <p id="session-rename-status" class="status" role="status" aria-live="polite"></p>
         </div>
-        <div class="drawer-footer"><button id="session-rename-cancel" class="drawer-cancel" type="button">取消</button><button id="session-rename-generate" class="drawer-cancel" type="button">自动生成</button><button id="session-rename-save" type="submit">保存新名称</button></div>
+        <div class="drawer-footer"><button id="session-rename-cancel" class="drawer-cancel" type="button">取消</button><button id="session-rename-generate" data-netizen-generate-name-visibility class="drawer-cancel" type="button">自动生成</button><button id="session-rename-save" type="submit">保存新名称</button></div>
       </form>
     </dialog>
 

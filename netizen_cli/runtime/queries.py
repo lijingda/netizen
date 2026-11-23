@@ -740,6 +740,10 @@ class NativeQueryRuntime(ForkRuntime):
             return NativeThreadCatalogState.ARCHIVED
         return NativeThreadCatalogState.MISSING
 
+    def context_window_read_failed_at(self, binding_id: str, thread_id: str) -> float | None:
+        snapshot = self._context_window_usage.get(binding_id)
+        return snapshot.failed_at if snapshot is not None and snapshot.thread_id == thread_id else None
+
     def context_window_usage(
         self,
         binding_id: str,

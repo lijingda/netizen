@@ -22,7 +22,7 @@ window.NetizenSessionLists = (() => {
   }
 
   function create(kind, options) {
-    const localSessions = kind === "session" && document.body.dataset.backend === "claude";
+    const localSessions = kind === "session" && (document.body.dataset.unavailable || "").split(" ").includes("history");
     const name = kind === "side" ? "sides" : "sessions";
     let appliedPage = dependencies.firstSessionPage();
     let currentData = null;

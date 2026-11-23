@@ -7,11 +7,15 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lark_channel import OutboundCard
 
-from ..ordinary_sessions import LocalExecutionSnapshot
+from ..backends import BackendPolicy, OperationId
+from ..session_views import SessionObservations, SessionStatusView
+from .status import render_session_status
+if TYPE_CHECKING:
+    from ..management.service import BindingStatusProjection
 from ..bindings import (
     ThreadBinding,
     BindingTaskFeedback,
@@ -37,7 +41,7 @@ from ..domain import (
 from ..model_settings import ModelCatalog, TurnModelSettings
 from ..projects import Project
 from ..progress_card_settings import ProgressCardSettings
-from ..session_settings import SessionSettings, require_local_settings
+from ..session_settings import SessionFormView, SessionSettings
 from ..sdk_gap_adapter import GoalSnapshot
 from .callbacks import (
     ACTION_VERSION,
@@ -119,6 +123,8 @@ class SessionCardItem:
     turn_id: str | None = None
     catalog_unconfirmed: bool = False
     state_label: str | None = None
+    observations: SessionObservations | None = None
+    registered_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,7 +347,7 @@ def _new_binding_form(
     projects: tuple[Project, ...],
     catalog: ModelCatalog | None,
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     initial_project_alias: str | None,
     allow_context_mode: bool,
     message_context_mode: MentionContextMode,
@@ -409,7 +415,7 @@ def _new_binding_form(
     feedback = _task_feedback_form_elements(prefix="new", initial=task_feedback)
     _restore_settings_draft([*model_fields, *context, *feedback], settings_draft)
     elements.extend(_session_settings_sections(
-        local_only=local_only,
+        form_view=form_view,
         model_fields=model_fields, context_fields=context, feedback_fields=feedback,
     ))
     if allow_workspace_selection:
@@ -495,47 +501,38 @@ def _form_section(title: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _session_settings_sections(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     model_fields: list[dict[str, Any]],
     context_fields: list[dict[str, Any]],
     feedback_fields: list[dict[str, Any]],
     model_notices: Sequence[dict[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Share presentation while each caller owns field values and validation."""
-    if local_only:
-        def field(elements: list[dict[str, Any]], suffix: str) -> dict[str, Any]:
-            return next(item for item in elements if item.get("name", "").endswith("_" + suffix))
-
-        selector = field(model_fields, "model")
-        selector["placeholder"] = _plain_text("原生 Claude 设置")
+    if not form_view.model_editable:
+        selector = model_fields[1]
+        selector["placeholder"] = _plain_text(form_view.inherited_source)
         def inherited(value: str) -> bool:
             if selector["name"] == "config_model":
                 return _decode_config_model_reference(value)[-1] is None
             return _decode_new_model_reference(value) is None
 
         inherit = next(option["value"] for option in selector["options"] if inherited(option["value"]))
-        selector["options"] = [{"text": _plain_text("原生 Claude 设置"), "value": inherit}]
+        selector["options"] = [{"text": _plain_text(form_view.inherited_source), "value": inherit}]
         selector["initial_option"] = inherit
         sections = [_form_section("模型来源", [selector])]
-        if context_fields:
-            sections.append(_form_section("消息上下文", context_fields))
-        sections.append(_form_section("执行中表情闪烁", [field(feedback_fields, "task_reactions")]))
-        sections.append(_form_section("结束时 @ 提醒", [field(feedback_fields, "completion_mention")]))
-        return sections
-    model_elements = [*model_notices, model_fields[1]]
-    if len(model_fields) > 2:
-        # These are fixed form labels, not submitted text. Markdown avoids a
-        # separate div/plain_text pair in cards that also contain search pages.
-        model_elements.append(_form_columns(*(
-            (1, [{"tag": "markdown", "content": label["text"]["content"]}, select])
-            for label, select in zip(model_fields[2::2], model_fields[3::2], strict=True)
-        )))
-    sections = [_form_section("模型配置", model_elements)]
+    else:
+        model_elements = [*model_notices, model_fields[1]]
+        if len(model_fields) > 2:
+            model_elements.append(_form_columns(*(
+                (1, [{"tag": "markdown", "content": label["text"]["content"]}, select])
+                for label, select in zip(model_fields[2::2], model_fields[3::2], strict=True)
+            )))
+        sections = [_form_section("模型配置", model_elements)]
     if context_fields:
-        sections.append(_form_section("消息上下文", [
-            context_fields[1],
-            _form_hint("机器人始终只响应 @。选择“自动带上”会把两次 @ 之间未 @ 机器人的群聊消息交给 Codex。"),
-        ]))
+        context = context_fields
+        if form_view.model_editable:
+            context = [context_fields[1], _form_hint("机器人始终只响应 @。选择“自动带上”会把两次 @ 之间未 @ 机器人的群聊消息交给 Codex。")]
+        sections.append(_form_section("消息上下文", context))
     feedback_hints = (
         "执行时闪烁；关闭仍保留状态表情。部分移动端会显示为消息。",
         "展示执行状态与清单，结束后自动折叠。",
@@ -546,7 +543,7 @@ def _session_settings_sections(
             "content": label["text"]["content"] + "\n<font color='grey'>" + hint + "</font>"}]), (1, [select]))
         for label, select, hint in zip(
             feedback_fields[::3], feedback_fields[1::3], feedback_hints, strict=True,
-        )
+        ) if form_view.progress_editable or not select["name"].endswith("_progress_card")
     ]))
     return sections
 
@@ -606,7 +603,7 @@ def _new_workspace_load_button() -> dict[str, Any]:
 
 def _binding_config_form(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     binding_id: str,
     settings_revision: int,
     context_revision: int,
@@ -645,7 +642,7 @@ def _binding_config_form(
             inherit_initial_when_unset=True,
         )
     elements = _session_settings_sections(
-        local_only=local_only,
+        form_view=form_view,
         model_fields=model_fields,
         context_fields=(
             _context_mode_form_elements(prefix="config", initial_mode=message_context_mode)
@@ -865,7 +862,7 @@ def _decode_task_feedback_fields(payload: Mapping[str, Any], *, prefix: str) -> 
 
 def session_settings_form_elements(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     prefix: str,
     settings: SessionSettings,
     catalog: ModelCatalog | None,
@@ -925,7 +922,7 @@ def session_settings_form_elements(
     _restore_settings_draft(fields, settings_draft)
     if grouped:
         return _session_settings_sections(
-        local_only=local_only,
+            form_view=form_view,
             model_fields=model_fields, context_fields=context, feedback_fields=feedback,
             model_notices=model_notices,
         )
@@ -1025,7 +1022,7 @@ def _form_submit_button(*, name: str, label: str) -> dict[str, Any]:
 
 def new_binding_card(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     scope: FeishuScope,
     projects: tuple[Project, ...],
     initial_project_alias: str | None = None,
@@ -1050,15 +1047,15 @@ def new_binding_card(
             "再发送 `/new`。发送 `/help` 查看快速开始。"
         )
     else:
-        if local_only:
-            builder.markdown("使用原生 Claude 设置；可调整消息范围和执行中表情。")
+        if not form_view.model_editable:
+            builder.markdown(f"使用{form_view.inherited_source}；可调整消息范围和执行中表情。")
         else:
             builder.markdown(
                 "不确定模型配置时，可选择“继承 Codex”；"
                 "也可选择 Model（模型）、Effort（思考强度）和 Speed（速度），"
                 "应用于这个会话后续的新任务。空闲时可通过 `/config` 调整。"
             )
-        if catalog is None and not local_only:
+        if catalog is None and form_view.model_editable:
             builder.raw(
                 _notice(
                     (catalog_error or "Model / Effort / Speed 暂不可用。")
@@ -1070,12 +1067,12 @@ def new_binding_card(
             _new_binding_form(
                 projects,
                 catalog,
-                local_only=local_only,
+                form_view=form_view,
                 initial_project_alias=initial_project_alias,
                 allow_context_mode=allow_context_mode,
                 message_context_mode=message_context_mode,
                 task_feedback=(
-                    task_feedback or SessionSettings.new_defaults(catalog).task_feedback
+                    task_feedback or form_view.defaults(catalog).task_feedback
                 ),
                 workspace_options=workspace_options,
                 allow_workspace_selection=allow_workspace_selection,
@@ -1088,7 +1085,7 @@ def new_binding_card(
 
 def config_card(
     *,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     scope: FeishuScope,
     binding_id: str,
     short_id: str,
@@ -1104,14 +1101,14 @@ def config_card(
     catalog_error: str | None = None,
 ) -> OutboundCard:
     builder = _builder("当前会话配置", f"Netizen 会话编号：{short_id} · {project_alias}")
-    if local_only:
-        builder.markdown("使用原生 Claude 设置；可调整消息范围和执行中表情。")
+    if not form_view.model_editable:
+        builder.markdown(f"使用{form_view.inherited_source}；可调整消息范围和执行中表情。")
     else:
         builder.markdown(
             "Model 可继承 Codex，也可显式选择 Model / Effort / Speed；"
             "保存不会启动任务。Model 是模型，Effort 是思考强度，Speed 是速度。"
         )
-    if catalog is None and not local_only:
+    if catalog is None and form_view.model_editable:
         builder.raw(
             _notice(
                 (catalog_error or "Model / Effort / Speed 暂不可用。")
@@ -1136,7 +1133,7 @@ def config_card(
             )
     builder.raw(
         _binding_config_form(
-            local_only=local_only,
+            form_view=form_view,
             binding_id=binding_id,
             settings_revision=settings_revision,
             context_revision=context_revision,
@@ -1160,25 +1157,28 @@ def rename_binding_card(
     current_title: str | None = None,
     generated_name: str = "",
     generating: bool = False,
+    can_generate: bool = True,
+    sync_hint: str,
     notice: str | None = None,
 ) -> OutboundCard:
     builder = _builder("重命名当前会话", f"Netizen 会话编号：{short_id} · {project_alias}")
     if current_title is not None:
         builder.markdown(f"当前名称：`{_md_code(current_title)}`")
-    builder.markdown("保存后名称同步显示在 Codex App/CLI。自动生成会清空当前输入，生成后可修改再保存。")
+    builder.markdown(sync_hint + ("自动生成会清空当前输入，生成后可修改再保存。" if can_generate else ""))
     if notice:
         builder.raw(_notice(notice, error=True))
     if generating:
         builder.raw(_notice("正在生成中…"))
         return OutboundCard(card=builder.to_dict())
-    # Keep this outside the form so an empty required name cannot block it.
-    builder.raw(_repeatable_callback_button(
-        label="自动生成",
-        value=_envelope(
-            scope, CardControlName.GENERATE_BINDING_NAME,
-            binding_id=_binding_reference(binding_id),
-        ),
-    ))
+    if can_generate:
+        # Keep this outside the form so an empty required name cannot block it.
+        builder.raw(_repeatable_callback_button(
+            label="自动生成",
+            value=_envelope(
+                scope, CardControlName.GENERATE_BINDING_NAME,
+                binding_id=_binding_reference(binding_id),
+            ),
+        ))
     builder.raw(
         {
             "tag": "form",
@@ -1455,50 +1455,17 @@ def _local_stop_button(
     ))
 
 
-def local_status_text(binding: ThreadBinding, snapshot: LocalExecutionSnapshot) -> str:
-    return (f"Project：{binding.project_alias}\n会话：{binding.short_id}\n"
-            f"Claude 会话 ID：{binding.native_thread_id or '尚未建立'}\n本地任务：{snapshot.label}\n"
-            "模型用量及执行详情在 Claude 试点中不可用。")
-
-
 def local_status_card(
-    scope: FeishuScope, binding: ThreadBinding, snapshot: LocalExecutionSnapshot,
+    scope: FeishuScope, binding: ThreadBinding, status: BindingStatusProjection, defaults: SessionObservations,
 ) -> OutboundCard:
-    builder = _builder("当前会话", "Claude 本地任务")
-    builder.raw(_plain(local_status_text(binding, snapshot)))
-    if snapshot.turn is not None and session_stop_available(snapshot.turn.state.value):
-        builder.raw(_local_stop_button(scope, binding.id, binding.id, snapshot.revision,
-                                      snapshot.turn.turn_id, SessionCardPage("lazy"), from_status=True))
-    return OutboundCard(card=builder.to_dict())
-
-
-def local_sessions_card(
-    scope: FeishuScope, items: tuple[SessionCardItem, ...], *, navigation: SessionCardPage,
-    next_cursor: str | None, notice: str | None, active_binding_id: str | None,
-) -> OutboundCard:
-    builder = _builder("普通会话", "按本地创建时间排序")
-    if notice:
-        builder.raw(_notice(notice))
-    if not items:
-        builder.markdown("当前聊天或话题还没有会话。")
-    for item in items:
-        builder.markdown(f"{_md_code(item.project_alias)} · {_md_code(item.short_id)}"
-                         + (" · 当前会话" if item.active else "") + " · " + (item.state_label or item.state))
-        if not item.active:
-            builder.raw(_repeatable_callback_button(
-                label="设为当前", value=_envelope(scope, CardControlName.ACTIVATE_BINDING,
-                    binding_id=_binding_reference(item.binding_id), session_cursor=navigation.encode(scope)),
-            ))
-        if item.turn_id is not None and session_stop_available(item.state):
-            builder.raw(_local_stop_button(scope, item.binding_id, active_binding_id,
-                                           item.activity_revision, item.turn_id, navigation))
-    previous = navigation.previous()
-    builder.raw(_sessions_pagination(
-        scope=scope, local_only=True, page=navigation.page,
-        previous_cursor=previous.encode(scope) if previous else None, next_cursor=next_cursor,
-        state=navigation.state, has_lazy=False,
-    ))
-    return _session_list_card(builder.to_dict())
+    observed = status.observations or defaults
+    label = status.local_label or "状态待确认"
+    turn = status.snapshot.turn
+    controls = ((_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, turn.turn_id,
+                                    SessionCardPage("lazy"), from_status=True),)
+                if turn is not None and status.can_stop else ())
+    view = SessionStatusView.from_observations(binding, status.primary_status or "unknown", label, observed)
+    return render_session_status(view, controls)
 
 
 def sessions_card(
@@ -1516,13 +1483,16 @@ def sessions_card(
     current: SessionCardItem | None = None,
     lazy: bool = False,
     has_lazy: bool = False,
+    local_directory: bool = False,
+    policy: BackendPolicy,
 ) -> OutboundCard:
-    session_cursor = _session_action_cursor(scope, session_cursor)
+    session_cursor = _session_action_cursor(scope, session_cursor, keep_previous=local_directory)
     subtitle = "尚未开始对话的会话" if lazy else "按 Codex 更新时间排序"
-    builder = _builder("会话", subtitle)
+    builder = _builder("会话", "按本地登记时间排序" if local_directory else subtitle)
     if notice:
         builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
+        "切换不会停止其他会话正在运行的任务。" if local_directory else
         "切换不会停止其他会话正在运行的任务。"
         "归档保留历史，可恢复；删除需红色确认，并级联删除派生会话。\n"
         "更多管理请使用 Admin 会话列表，发送 `/admin` 打开。"
@@ -1532,12 +1502,14 @@ def sessions_card(
         builder.raw(_session_row(
             scope=scope, session=current, page=page,
             expected_active_binding_id=active_binding_id,
-            native_delete_available=native_delete_available,
+            native_delete_available=native_delete_available, local_directory=local_directory,
+            policy=policy,
             session_cursor=session_cursor,
         ))
         builder.markdown("**本页会话**")
     if not sessions:
         builder.markdown(
+            "本页没有会话。发送 `/new` 新建会话。" if local_directory else
             ("本页没有未开始的会话。" if lazy else "本页没有普通会话。")
             + "发送 `/new` 新建会话，"
             "或发送 `/sessions archived` 查找已归档会话。"
@@ -1549,26 +1521,27 @@ def sessions_card(
                 session=session,
                 page=page,
                 expected_active_binding_id=active_binding_id,
-                native_delete_available=native_delete_available,
+                native_delete_available=native_delete_available, local_directory=local_directory,
+                policy=policy,
                 session_cursor=session_cursor,
             )
         )
 
     builder.raw(_sessions_pagination(
         scope=scope, page=page, previous_cursor=previous_cursor, next_cursor=next_cursor,
-        state="lazy" if lazy else "active", has_lazy=has_lazy,
+        state="lazy" if lazy else "active", has_lazy=has_lazy, local_only=local_directory,
     ))
     return _session_list_card(builder.to_dict())
 
 
-def _session_action_cursor(scope: FeishuScope, token: str | None) -> str | None:
+def _session_action_cursor(scope: FeishuScope, token: str | None, *, keep_previous: bool = False) -> str | None:
     if token is None:
         return None
     navigation = SessionCardPage.decode(token, scope)
     # Row actions need the exact return position, not a copy of the entire
     # back stack in every button. Navigation buttons retain that history.
     return SessionCardPage(
-        navigation.state, navigation.page, (navigation.cursor,),
+        navigation.state, navigation.page, navigation.positions[-2:] if keep_previous else (navigation.cursor,),
     ).encode(scope)
 
 
@@ -1588,6 +1561,8 @@ def _session_row(
     page: int,
     expected_active_binding_id: str | None,
     native_delete_available: bool,
+    local_directory: bool,
+    policy: BackendPolicy,
     session_cursor: str | None = None,
 ) -> dict[str, Any]:
     navigation = {"session_cursor": session_cursor} if session_cursor else {}
@@ -1595,17 +1570,23 @@ def _session_row(
         _turn_reference(session.turn_id) if session.turn_id is not None else None
     )
     marker_text = "● 当前" if session.active else "○"
-    text = (
-        f"{marker_text} {session.title}\n"
-        f"Project：{session.project_alias} · 状态：{session.state}"
-    )
-    if session.catalog_unconfirmed:
-        text += " · 归档状态：未确认"
-    text += "\n" + "\n".join(session_identity_lines(
-        short_id=session.short_id, native_thread_id=session.native_thread_id,
-    ))
+    if local_directory:
+        observed = session.observations or policy.observation_defaults
+        text = (f"{marker_text} {session.short_id}\nProject：{session.project_alias} · 状态：{session.state_label or '状态待确认'}\n"
+                f"{observed.presentation.identity_label}：{session.native_thread_id or '尚未建立'}\n登记时间：{session.registered_at}")
+        text = "\n".join((text, *observed.lines(observed.presentation.row)))
+    else:
+        text = (
+            f"{marker_text} {session.title}\n"
+            f"Project：{session.project_alias} · 状态：{session.state}"
+        )
+        if session.catalog_unconfirmed:
+            text += " · 归档状态：未确认"
+        text += "\n" + "\n".join(session_identity_lines(
+            short_id=session.short_id, native_thread_id=session.native_thread_id,
+        ))
     controls: list[dict[str, Any]] = []
-    if not session.active:
+    if not session.active and policy.allows(OperationId.ACTIVATE):
         controls.append(
             _repeatable_callback_button(
                 label="设为当前",
@@ -1618,7 +1599,7 @@ def _session_row(
                 style="primary_filled",
             )
         )
-    if session.native_thread_id is not None:
+    if policy.allows(OperationId.ARCHIVE) and session.native_thread_id is not None:
         controls.append(
             _callback_button(
                 label="归档",
@@ -1638,7 +1619,7 @@ def _session_row(
                 ),
             )
         )
-    if (
+    if policy.allows(OperationId.DELETE) and (
         (
             session.native_thread_id is None
             and session.state == SESSION_IDLE_STATE
@@ -1666,7 +1647,7 @@ def _session_row(
                 style="danger",
             )
         )
-    if session_stop_available(session.state):
+    if policy.allows(OperationId.STOP) and session_stop_available(session.state) and (not local_directory or session.turn_id is not None):
         controls.append(
             _callback_button(
                 label="停止",
@@ -1687,7 +1668,7 @@ def _session_row(
             )
         )
     if (
-        session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
+        not local_directory and policy.allows(OperationId.RECHECK) and session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
         and session.turn_id is not None
     ):
         controls.append(
@@ -1985,7 +1966,7 @@ def binding_created_card(
     settings: TurnModelSettings | None = None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
     workspace_cwd: str | None = None,
 ) -> OutboundCard:
     builder = _builder(
@@ -2004,7 +1985,7 @@ def binding_created_card(
         "如果刚才的任务因没有会话而未执行，请重新发送。\n"
         "在群聊和群话题中，每条消息都需要 @机器人。"
     )
-    builder.markdown("模型来源：原生 Claude 设置。" if local_only else _model_source_summary(settings))
+    builder.markdown(f"模型来源：{form_view.inherited_source}。" if not form_view.model_editable else _model_source_summary(settings))
     builder.markdown(_context_mode_summary(message_context_mode))
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
@@ -2357,7 +2338,7 @@ def decode_button_action(
     )
 
 
-def local_form_fields(payload: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+def permitted_form_fields(payload: Mapping[str, Any], prefix: str, form_view: SessionFormView) -> dict[str, Any]:
     fields = dict(payload)
     has_model = any(f"{prefix}_{key}" in fields for key in ("effort", "speed"))
     model = fields.get(f"{prefix}_model")
@@ -2367,8 +2348,9 @@ def local_form_fields(payload: Mapping[str, Any], prefix: str) -> dict[str, Any]
         has_model = has_model or model_id is not None
     progress = f"{prefix}_progress_card"
     enabled, settings = _decode_progress_card_reference(fields[progress], progress) if progress in fields else (False, None)
-    require_local_settings(has_model, BindingTaskFeedback(progress_card_enabled=enabled, progress_card_settings=settings))
-    fields.setdefault(progress, _progress_card_reference(False, None))
+    form_view.validate(has_model, BindingTaskFeedback(progress_card_enabled=enabled, progress_card_settings=settings))
+    if not form_view.progress_editable:
+        fields.setdefault(progress, _progress_card_reference(False, None))
     _require_completion_mention_field(fields, prefix=prefix)
     return fields
 
@@ -2381,7 +2363,7 @@ def decode_card_form(
     tag: str,
     form_value: Any,
     value: Any = None,
-    local_only: bool = False,
+    form_view: SessionFormView = SessionFormView(),
 ) -> CardControlIntent:
     if not isinstance(form_value, Mapping):
         raise CardActionError("卡片表单值必须是对象。")
@@ -2393,8 +2375,8 @@ def decode_card_form(
         raise CardActionError("卡片表单混合了不同操作的字段。")
     if value is not None and value != {} and not has_new:
         raise CardActionError("卡片表单操作与字段不匹配。")
-    if local_only and (has_new or has_config):
-        form_value = local_form_fields(form_value, "new" if has_new else "config")
+    if (has_new or has_config) and not (form_view.model_editable and form_view.progress_editable):
+        form_value = permitted_form_fields(form_value, "new" if has_new else "config", form_view)
     if has_new:
         return _decode_new_binding_form(
             scope=scope,
