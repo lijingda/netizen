@@ -18,7 +18,6 @@ from netizen_cli.ordinary_sessions import (
     OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, StopPreview,
 )
 from netizen_cli.projects import ProjectRegistry
-from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.codex_replies import codex_completion_handler
 from netizen_cli.runtime.contracts import (
@@ -29,7 +28,7 @@ from netizen_cli.runtime.contracts import (
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from tests.support.channel_results import sent_result
-from tests.support.claude_client import FakeClaudeClients
+from tests.support import requires_claude_sdk
 from tests.test_codex_runtime import FakeCodex, FakeTerminalCleanup
 
 
@@ -254,6 +253,9 @@ class OrdinaryPortContract:
             self.ordinary = CodexOrdinarySessions(self.runtime)
             self.port = ManagementRuntimePort(self.runtime, ordinary=self.ordinary)
         else:
+            from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
+            from tests.support.claude_client import FakeClaudeClients
+
             async def notice(origin, text):
                 await self.notices.put((origin, text))
 
@@ -509,5 +511,6 @@ class CodexOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyn
     backend = "codex"
 
 
+@requires_claude_sdk
 class ClaudeOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyncioTestCase):
     backend = "claude"

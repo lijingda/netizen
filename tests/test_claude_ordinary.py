@@ -10,14 +10,18 @@ from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.file_evidence import FileEvidence
 from netizen_cli.ordinary_sessions import OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, PromptImage
-from netizen_cli.runtime.claude_client import BundledClaudeClients
-from netizen_cli.runtime.claude_ordinary import (
-    CLOSE_FAILED, DEFAULT_MODE, GRACE, MODE_UNKNOWN, START_FAILED, UNKNOWN, ClaudeOrdinarySessions,
-)
 from netizen_cli.runtime.contracts import ContextCursorCommit, StopDisposition, TerminalStateUnknown, ThreadActivityChanged
-from tests.support.claude_client import FakeClaudeClients
+from tests.support import has_claude_sdk, requires_claude_sdk
+
+if has_claude_sdk:
+    from netizen_cli.runtime.claude_client import BundledClaudeClients
+    from netizen_cli.runtime.claude_ordinary import (
+        CLOSE_FAILED, DEFAULT_MODE, GRACE, MODE_UNKNOWN, START_FAILED, UNKNOWN, ClaudeOrdinarySessions,
+    )
+    from tests.support.claude_client import FakeClaudeClients
 
 
+@requires_claude_sdk
 class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

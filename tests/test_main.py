@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from lark_channel import DedupStore, FeishuChannelError, FeishuChannelErrorCode, SendResult
 from openai_codex import CodexConfig
 
+from tests.support import requires_claude_sdk
+
 from netizen_cli.admin.port_config import ConfigFileSnapshot
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.bindings import BindingStore, SideTopicState
@@ -926,6 +928,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             await _start_channel_input(channel, object(), ready_file=Path("/unused/service.ready"))
         self.assertEqual(events, ["handlers", "transport"])
 
+    @requires_claude_sdk
     async def test_claude_service_ready_message_stop_and_shutdown(self) -> None:
         from netizen_cli.runtime.claude_ordinary import DEFAULT_MODE, GRACE
         from tests.support.channel_messages import FakeChannel, FakeMessage
@@ -994,6 +997,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len({item.session for item in clients.calls}), 1)
             self.assertTrue(await core._claude.wait_idle(0))
 
+    @requires_claude_sdk
     async def test_claude_requires_exactly_one_owner_and_verified_install_before_bind(self):
         from netizen_cli.admin.users import AdminIdentity, AdminUsersError
         from netizen_cli.claude_installation import REPAIR
@@ -1017,6 +1021,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(verify.call_count, int(state == "invalid-installation"))
                 self.assertIsNone(core.application)
 
+    @requires_claude_sdk
     async def test_claude_partial_start_closes_admission_and_listener(self):
         with tempfile.TemporaryDirectory() as raw:
             core = self._make_core(Path(raw))

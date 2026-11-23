@@ -20,6 +20,7 @@ class Provider:
     def __init__(self, cwd):
         self.cwd = cwd
         self.rows = []
+        self.live_session_reply = None
         self.arrived = asyncio.Condition()
 
     async def start(self):
@@ -106,6 +107,8 @@ class Provider:
                 tool = ("Write", {"file_path": str(self.cwd / ("file-" + label)), "content": "fixture data\n"})
             elif scenario == "mcp":
                 tool = ("mcp__fixture__identify", {})
+        if self.live_session_reply and any(t.get("name") == "Bash" for t in data.get("tools", [])):
+            tool, scenario, label = self.live_session_reply(messages)
         content = ({"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex, "name": tool[0], "input": tool[1]}
                    if tool else {"type": "text", "text": "fixture-reply-" + label})
         if scenario == "inline-image":

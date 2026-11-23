@@ -379,6 +379,8 @@ async def worker():
             await main_cases(cwd, provider, evidence)
             from tests.support.claude_channel_e2e import channel_cases
             await channel_cases(cwd, provider)
+        from tests.support.claude_session_facts import session_facts
+        await session_facts(cwd, provider, evidence)
         print(json.dumps({"checks": evidence.names, "mockRequests": len(provider.rows)}), flush=True)
     finally:
         await provider.close()
@@ -475,7 +477,7 @@ if __name__ == "__main__":
             command = [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--worker"]
             with subprocess.Popen(command, env=fixture_environment(home), cwd=cwd, start_new_session=True) as worker_process:
                 try:
-                    status = worker_process.wait(timeout=270)
+                    status = worker_process.wait(timeout=500)
                 except (subprocess.TimeoutExpired, KeyboardInterrupt):
                     # This group belongs exclusively to the disposable fixture worker.
                     os.killpg(worker_process.pid, signal.SIGTERM)

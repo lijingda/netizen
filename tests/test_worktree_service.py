@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from tests.support import requires_claude_sdk
+
 from netizen_cli.admin.port_config import ConfigFileSnapshot
 from netizen_cli.bindings import BindingNotFound, BindingStore
 from netizen_cli.domain import FeishuScope, ScopeKind
@@ -285,6 +287,7 @@ class WorktreeServiceTest(unittest.IsolatedAsyncioTestCase):
         (Path(resource["root"]) / "local.txt").write_text("keep")
         self.assertFalse((await self.service.preview_delete(resource["id"], delete_sessions=True))["safe"])
 
+    @requires_claude_sdk
     async def test_owner_backend_checks_cwd_and_blocks_materialized_cascade(self):
         from netizen_cli.management import ManagementRuntimePort
         from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions

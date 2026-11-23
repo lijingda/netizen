@@ -1,3 +1,7 @@
+import asyncio
+from contextlib import asynccontextmanager
+from importlib.util import find_spec
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -9,6 +13,67 @@ from tests.support.claude_live_smoke import TurnBudget
 
 
 class ClaudeIsolationTests(unittest.TestCase):
+    @unittest.skipUnless(find_spec("claude_agent_sdk"), "requires the Claude fixture")
+    def test_failed_scenario_reports_only_assertion_location(self):
+        from tests.support import claude_channel_e2e as harness
+
+        class Driver:
+            def submissions(self):
+                return 0
+
+            reported_turns = submissions
+
+            async def example(self):
+                assert False, "private scenario detail"
+
+        @asynccontextmanager
+        async def driver(*args):
+            yield Driver()
+
+        rows = []
+        with patch.object(harness, "CASES", ["example"]), patch.object(harness, "channel_driver", driver):
+            with self.assertRaises(AssertionError):
+                asyncio.run(harness.run_cases(None, report=lambda row, **kw: rows.append(row)))
+        report = json.loads(rows[0])
+        self.assertEqual(report["file"], Path(__file__).name)
+        self.assertEqual(report["line"], Driver.example.__code__.co_firstlineno + 1)
+        self.assertNotIn("private scenario detail", rows[0])
+
+    @unittest.skipUnless(find_spec("claude_agent_sdk") and find_spec("aiohttp"), "requires the Claude loopback fixture")
+    def test_intermediate_idle_cannot_split_a_notification_batch_from_its_result(self):
+        from claude_agent_sdk import ResultMessage, SystemMessage
+        from tests.support.claude_session_facts import QuiescenceProbe
+        trace = QuiescenceProbe(None, None, "three")
+        def membership(*ids):
+            return SystemMessage("background_tasks_changed", {"tasks": [{"task_id": i, "run_id": i} for i in ids]})
+        idle = SystemMessage("session_state_changed", {"state": "idle"})
+        result = ResultMessage("success", 1, 1, False, 1, "session", result="batch-answer", origin={"runId": "B"})
+        trace.frames = [membership("B", "C"), membership("C"), result, idle]
+        trace.batches = [(2, {"B"}, "batch-answer")]
+        trace.check_removals()
+        other = ResultMessage("success", 1, 1, False, 1, "session", result="unrelated")
+        trace.frames[2:2] = [other, idle]
+        with self.assertRaises(AssertionError):
+            trace.check_removals()
+
+    @unittest.skipUnless(find_spec("claude_agent_sdk") and find_spec("aiohttp"), "requires the Claude loopback fixture")
+    def test_receipt_cannot_hide_a_later_batch_for_the_same_removed_task(self):
+        from claude_agent_sdk import ResultMessage, SystemMessage
+        from tests.support.claude_session_facts import QuiescenceProbe
+        trace = QuiescenceProbe(None, None, "three")
+        def tasks(*ids):
+            return SystemMessage("background_tasks_changed", {"tasks": [{"task_id": i, "run_id": i} for i in ids]})
+        idle = SystemMessage("session_state_changed", {"state": "idle"})
+        receipt = ResultMessage("success", 1, 1, False, 1, "session", origin={"runId": "B"})
+        answer = ResultMessage("success", 1, 1, False, 1, "session", result="both")
+        trace.frames = [tasks("B", "C"), tasks("C"), receipt, tasks(), answer, idle]
+        trace.batches = [(4, {"B", "C"}, "both")]
+        trace.check_removals()
+        trace.frames.insert(3, idle)
+        trace.batches = [(5, {"B", "C"}, "both")]
+        with self.assertRaises(AssertionError):
+            trace.check_removals()
+
     def test_live_requires_explicit_local_opt_in_and_only_passes_login_environment(self):
         env = {"NETIZEN_CLAUDE_LIVE": "1", "HOME": "/owner", "PATH": "/usr/bin", "EXTRA": "x",
                "ANTHROPIC_API_KEY": "fixture", "CLAUDE_CONFIG_DIR": "/elsewhere"}

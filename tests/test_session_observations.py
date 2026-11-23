@@ -7,7 +7,8 @@ import unittest
 
 from lark_channel import OutboundCard
 
-from claude_agent_sdk import RateLimitEvent, RateLimitInfo
+from tests.support import has_claude_sdk, requires_claude_sdk
+
 from netizen_cli.admin.presentation import _runtime_binding_json
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.group_access import GroupAccessRule, GroupAccessService, GROUP_ACCESS_NOTICE
@@ -18,6 +19,10 @@ from tests.support.channel_fixtures import channel_fixture
 from netizen_cli.runtime.claude_status import ClaudeObservations
 from tests.support.channel_messages import FakeMessage
 from tests.test_claude_channel import owner_channel
+
+
+if has_claude_sdk:
+    from claude_agent_sdk import RateLimitEvent, RateLimitInfo
 
 
 class ObservationTest(unittest.IsolatedAsyncioTestCase):
@@ -285,6 +290,7 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIs(model.model.availability, Availability.UNOBSERVED)
             self.assertIs(model.configuration.availability, Availability.OBSERVED)
 
+    @requires_claude_sdk
     def test_bound_and_execution_identity(self):
         samples = ClaudeObservations(capacity=1, clock=lambda: 1.5)
         samples.init("a", "x", "first", "old", "/project")

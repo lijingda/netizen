@@ -527,6 +527,7 @@ async def run_cases(cwd, *, provider=None, live=None, report=print):
             requests = len(driver.rows()) if provider else None
             submissions = driver.submissions()
             reported_turns = driver.reported_turns()
+            location = {}
             status = "fail"
             try:
                 if live and name == "fallback":
@@ -540,8 +541,14 @@ async def run_cases(cwd, *, provider=None, live=None, report=print):
                     if provider:
                         assert len(driver.rows()) - requests == EXPECTED_REQUESTS[name], "unexpected model request count"
                 status = "pass"
+            except AssertionError as error:
+                frame = error.__traceback__
+                while frame.tb_next is not None:
+                    frame = frame.tb_next
+                location = {"file": Path(frame.tb_frame.f_code.co_filename).name, "line": frame.tb_lineno}
+                raise
             finally:
-                report(json.dumps({"scenario": name, "status": status, "seconds": round(time.monotonic()-started, 3),
+                report(json.dumps({"scenario": name, "status": status, **location, "seconds": round(time.monotonic()-started, 3),
                                    "submissions": driver.submissions()-submissions,
                                    "reportedModelTurns": driver.reported_turns()-reported_turns,
                                    "providerRequests": len(driver.rows())-requests if provider else None,

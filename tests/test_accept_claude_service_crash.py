@@ -11,6 +11,8 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
+from tests.support import requires_claude_sdk
+
 from netizen_cli.cli_services import ServiceManager
 from netizen_cli.instance import INSTANCE_ROOT_MARKER_CONTENT
 from scripts import accept_claude_service_crash as kit
@@ -161,6 +163,7 @@ class CrashKitTest(unittest.TestCase):
     def test_late_log_poll_cannot_move_admission_past_an_observed_exit(self):
         self.simulate("darwin", late_exit=True)
 
+    @requires_claude_sdk
     def simulate(self, platform, *, foreground=True, late_exit=False):
         config = self.root / "config.yaml"
         config.write_text("instance:\n  backend: claude\n")

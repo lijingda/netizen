@@ -11,14 +11,19 @@ from netizen_cli.backends import BackendPolicy, BackendUnsupported
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
-from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions, GRACE, UNKNOWN
+from tests.support import has_claude_sdk, requires_claude_sdk
+
 from tests.support.channel_cards import _card_button_value, _elements, direct_button_event, direct_card_event, form_values, elements
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
-from tests.support.claude_client import FakeClaudeClients
 
+
+if has_claude_sdk:
+    from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions, GRACE, UNKNOWN
+    from tests.support.claude_client import FakeClaudeClients
 
 @asynccontextmanager
+@requires_claude_sdk
 async def owner_channel():
     async with channel_fixture() as fixture:
         fixture.channel.chat_types["oc_direct"] = "p2p"
