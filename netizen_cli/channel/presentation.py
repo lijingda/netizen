@@ -161,21 +161,23 @@ class CompletionPresentationChannel(ChannelReplies):
                 if reply and attempt.message_id:
                     message_id = attempt.message_id
                     reply.confirmed(message_id)
-                    last_card = card
+                    confirmed_card = card
 
                     async def refresh(line: str | None) -> None:
-                        nonlocal last_card
+                        nonlocal confirmed_card
                         if not publishable():
                             return
                         try:
                             updated = render(line)
                         except Exception:
                             return  # The terminal body was already delivered.
-                        if last_card and updated.card == last_card.card:
+                        if confirmed_card and updated.card == confirmed_card.card:
                             return
+                        # Feishu can apply the replacement even if its receipt is lost.
+                        confirmed_card = None
                         if await self._progress_cards.update_message(message_id, updated, binding_id=binding_id,
                                 operation_id=turn_id, publishable=publishable, location=location, policy=DeliveryPolicy.ITEM_RECEIPTS):
-                            last_card = updated
+                            confirmed_card = updated
                         elif not location.can_write(message_id) and reply.message_id == message_id:
                             reply.message_id = None
                             reply.refresh = None

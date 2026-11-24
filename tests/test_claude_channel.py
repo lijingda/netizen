@@ -1699,6 +1699,67 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                                           ("reply", "H1"), ("update_card", "first")])
             self.assertEqual(fx.channel.send_calls[-1][2].reply_to, "wake")
 
+    @requires_claude_sdk
+    async def test_lost_busy_card_receipt_restores_idle_after_bodyless_wake(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        from netizen_cli.bindings import BindingTaskFeedback
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = fx.store.create_channel_binding(
+                scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT), project_alias="test",
+                creator_id="ou_user", task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+            )
+            fx.channel.reply_results.append(SendResult.ok(message_id="first"))
+            await app.handle_message(FakeMessage("work", message_id="H1"))
+            cli = clients.calls[-1]
+            execution = ordinary._active[binding.id]
+
+            def system(kind, **data):
+                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+
+            def activity_line(card):
+                return card["body"]["elements"][0]["header"]["title"]["content"]
+
+            cli.init()
+            await self.until(lambda: bool(app._progress_cards._sessions))
+            cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
+            system("task_started", task_id="t", run_id="r", tool_use_id="tool")
+            system("background_tasks_changed", tasks=[{"task_id": "t", "run_id": "r"}])
+            cli.result(result="first answer")
+            await self.until(lambda: execution.admissible and not execution.delivery.queues)
+            idle = f"执行过程 · 已完成 · Claude：空闲，后台任务 1 个运行中，可以发送新消息。{CLAUDE_RELEASE_HINT}"
+            busy = "执行过程 · 已完成 · Claude：执行中"
+            self.assertEqual(activity_line(fx.channel.updates[-1][1]), idle)
+
+            applied, release = asyncio.Event(), asyncio.Event()
+            update = fx.channel.update_card
+
+            async def lose_busy_receipt(message_id, card):
+                receipt = await update(message_id, card)
+                if not applied.is_set() and activity_line(card) == busy:
+                    applied.set()
+                    await release.wait()
+                    raise TimeoutError("busy card applied, response lost")
+                return receipt
+
+            start = len(fx.channel.updates)
+            with patch.object(fx.channel, "update_card", lose_busy_receipt):
+                cli.init(user_message_uuids=[])
+                try:
+                    await asyncio.wait_for(applied.wait(), 5)
+                    await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+                    cli.result(user_message_uuid=None, uuid="wake-result", result=None, reason=None,
+                               origin={"kind": "task-notification", "producer": "session-task", "runId": "r"})
+                    system("session_state_changed", state="idle")
+                    await self.until(lambda: "wake-result" in cli.live.seen and execution.admissible)
+                finally:
+                    release.set()
+                await self.until(lambda: not execution.delivery.queues)
+
+            self.assertEqual([(mid, activity_line(card)) for mid, card in fx.channel.updates[start:]],
+                             [("first", busy), ("first", idle)])
+
     async def test_single_result_before_idle_keeps_whole_task_heading_on_every_result_write(self):
         from claude_agent_sdk import SystemMessage
         from netizen_cli.bindings import BindingTaskFeedback

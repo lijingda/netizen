@@ -5475,6 +5475,15 @@
       {}
     ],
     [
+      "get_chat_members",
+      [
+        "oc_direct"
+      ],
+      {
+        "id_type": "open_id"
+      }
+    ],
+    [
       "send",
       [
         "oc_direct",

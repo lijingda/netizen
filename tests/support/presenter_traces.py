@@ -27,9 +27,9 @@ def delivery_value(value):
 def delivery_recorder(channel, stack, *, include_reads=False):
     events = []
 
-    def capture(method):
+    def capture(name, method):
         async def call(*args, **kwargs):
-            events.append([method.__name__, [delivery_value(v) for v in args],
+            events.append([name, [delivery_value(v) for v in args],
                            {k: delivery_value(v) for k, v in kwargs.items()}])
             return await method(*args, **kwargs)
         return call
@@ -37,8 +37,10 @@ def delivery_recorder(channel, stack, *, include_reads=False):
     methods = ("reply", "send", "update_card", "upload_media", "add_reaction", "remove_reaction")
     if include_reads:
         methods += ("fetch_message", "get_chat_info", "download_resource")
+        if hasattr(channel, "get_chat_members"):
+            methods += ("get_chat_members",)
     for name in methods:
-        stack.enter_context(patch.object(channel, name, capture(getattr(channel, name))))
+        stack.enter_context(patch.object(channel, name, capture(name, getattr(channel, name))))
     return events
 
 
