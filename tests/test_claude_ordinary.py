@@ -90,6 +90,10 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             while not predicate():
                 await asyncio.sleep(.005)
 
+    async def wait_for_history_baseline(self):
+        execution = self.runtime._active[self.binding.id]
+        await self.wait_until(lambda: execution.admissible and execution.last_assistant is not None)
+
     @staticmethod
     async def cron(cli, registered):
         await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}] if registered else []},
@@ -189,6 +193,7 @@ asyncio.run(probe())
 
     async def test_release_can_finish_during_a_send_check_and_prevents_the_stale_write(self):
         _, cli = await self.retain()
+        await self.wait_for_history_baseline()
         entered, proceed = asyncio.Event(), asyncio.Event()
         async def delayed(*args):
             entered.set()
@@ -209,6 +214,7 @@ asyncio.run(probe())
 
     async def test_overlapping_send_is_busy_until_the_reserved_history_check_finishes(self):
         _, cli = await self.retain()
+        await self.wait_for_history_baseline()
         entered, proceed = asyncio.Event(), asyncio.Event()
         overlap_started, first_done = asyncio.Event(), asyncio.Event()
         original = self.clients.history
@@ -244,6 +250,7 @@ asyncio.run(probe())
 
     async def test_divergence_card_captures_the_pending_stop_hook_revision(self):
         _, cli = await self.retain()
+        await self.wait_for_history_baseline()
         async def changed(*args):
             await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "a"}, {"id": "b"}]}, None, None)
             return "foreign"
@@ -258,6 +265,7 @@ asyncio.run(probe())
     async def test_live_divergence_rejects_only_one_input_even_if_history_disappears(self):
         _, cli = await self.retain()
         for assistant in ("foreign", None):
+            await self.wait_for_history_baseline()
             self.clients.history = assistant
             before = len(cli.inputs)
             with self.assertRaises(OrdinarySessionDiverged) as rejected:
