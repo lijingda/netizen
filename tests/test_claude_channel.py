@@ -939,6 +939,29 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((clients.calls, fx.channel.reactions, fx.channel.fetch_quoted_calls), ([], [], []))
 
     @requires_claude_sdk
+    async def test_divergence_button_releases_without_delivering_rejected_message(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            await fx.create_binding(scope)
+            await app.handle_message(FakeMessage("work", message_id="H1"))
+            cli = clients.calls[-1]
+            cli.init()
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+            cli.result()
+            await self.until(lambda: cli.live.ordered_idle)
+            clients.history = "terminal"
+            await app.handle_message(FakeMessage("continue", message_id="H2"))
+            card, = [body for target, body in fx.channel.replies if target == "H2"]
+            button = _card_button_value(card, "释放会话")
+            self.assertEqual((len(cli.inputs), cli.closes), (1, 0))
+            event = direct_button_event(button)
+            direct_card_event(fx.channel, {}, message_id=event.message_id)
+            await app.handle_card_action(event)
+            self.assertEqual((len(cli.inputs), cli.closes), (1, 1))
+            self.assertIn((event.message_id, "已释放 Claude 会话连接。"), fx.channel.replies)
+
+    @requires_claude_sdk
     async def test_release_card_rechecks_owner_scope_and_exact_connection(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2.

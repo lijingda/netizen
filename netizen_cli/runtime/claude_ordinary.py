@@ -27,7 +27,7 @@ from ..external_calls import ExternalCallCancelled, external_call
 from ..ordinary_sessions import (
     ClaudeCliState, CliStateChanged, ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted,
     LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
-    PreparedPrompt, ReleaseConfirmation, SessionShutdownPort, StopPreview,
+    OrdinarySessionDiverged, PreparedPrompt, ReleaseConfirmation, SessionShutdownPort, StopPreview,
 )
 from .claude_delivery import AnchorDelivery
 from .claude_status import ClaudeObservations, DEFAULT_OBSERVATIONS, record_observation
@@ -144,6 +144,8 @@ class _Execution:
     closing: bool = False
     close_finished: bool = False
     release_receipt: asyncio.Future[bool] | None = None
+    history_reader: asyncio.Task[None] | None = None
+    last_assistant: str | None = None
     concluded: bool = False
     stop_receipt: asyncio.Event | None = None
     broken: bool = False
@@ -371,6 +373,33 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             self._idle(binding_id, input=True)
             return self._admission(self._current(binding_id))
 
+    async def _capture_history(self, execution: _Execution, cwd: Path) -> None:
+        try:
+            execution.last_assistant = await self._clients.last_assistant(execution.session, cwd)
+        except Exception:
+            execution.last_assistant = None  # A later send reports the unavailable baseline.
+
+    async def _check_history(self, execution: _Execution, binding: ThreadBinding, admission: SubmissionAdmission) -> None:
+        reader = execution.history_reader
+        previous = execution.last_assistant
+        if previous is None:
+            logger.warning("Claude transcript check unavailable; admitting input", extra={"binding_id": binding.id})
+            return
+        try:
+            current = await self._clients.last_assistant(execution.session, self._owned_cwds[binding.id])
+        except Exception:
+            logger.warning("Claude transcript read failed; admitting input", extra={"binding_id": binding.id})
+            current = previous
+        # A native wake may have arrived during the read, including one that failed.
+        self._idle(binding.id, input=True)
+        if (self._active.get(binding.id) is not execution or reader is not execution.history_reader
+                or self._current(binding.id) != binding or self._admission(binding) != admission):
+            raise OrdinaryInputRejected(STALE)
+        if current != previous:
+            execution.last_assistant = current
+            raise OrdinarySessionDiverged(ReleaseConfirmation(execution.revision, execution.input_id,
+                                         len(execution.live.tasks), execution.live.crons))
+
     async def submit(
         self, *, binding: ThreadBinding, cwd: Path | None, input: PreparedPrompt, owner_id: str,
         origin: object, admission: SubmissionAdmission, context_commit: ContextCursorCommit | None,
@@ -400,6 +429,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 execution.task.add_done_callback(self._tasks.pop)
             else:
                 execution = active
+                await self._check_history(execution, binding, admission)
                 execution.reserve(human)
                 self._reconcile(execution)
                 execution.writer = asyncio.create_task(self._write_next(execution, human, message, execution.revision))
@@ -552,6 +582,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if unknown:
             execution.fail()
         self._reconcile(execution)
+        if execution.history_reader:
+            execution.history_reader.cancel()
+            await asyncio.gather(execution.history_reader, return_exceptions=True)
         if execution.writer:
             execution.writer.cancel()
             await asyncio.gather(execution.writer, return_exceptions=True)
@@ -737,6 +770,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         force = execution.ending or execution.broken
         close = force or (idle and not live.tasks and not live.crons and execution.pending is None
                           and not execution.awaiting_task_stop)
+        if not idle and execution.history_reader:
+            execution.history_reader.cancel()
+            execution.history_reader = None
+            execution.last_assistant = None
+        elif idle and live.initialized and not close and (live.tasks or live.crons) and execution.history_reader is None:
+            execution.history_reader = asyncio.create_task(
+                self._capture_history(execution, self._owned_cwds[binding_id]))
         if handoff and close:
             execution.closing = True
             live.changed.set()

@@ -136,8 +136,16 @@ class ObservedClient:
 
     async def receive_messages(self):
         from claude_agent_sdk import ResultMessage, SystemMessage
+        from tests.support.claude_session_facts import check_idle_history
 
         async for msg in self.client.receive_messages():
+            if isinstance(msg, SystemMessage) and msg.subtype == "session_state_changed" and msg.data["state"] == "idle":
+                try:
+                    await check_idle_history(msg.data["session_id"], Path(self.client.options.cwd))
+                except Exception as error:
+                    # The application contains reader failures; the native gate must surface them.
+                    self.clients.history_error = error
+                    raise
             if isinstance(msg, SystemMessage) and msg.subtype == "init":
                 self.modes.append((msg.data.get("permissionMode"), "AskUserQuestion" in msg.data.get("tools", [])))
             if isinstance(msg, ResultMessage):
@@ -151,6 +159,8 @@ class ObservedClients:
         from netizen_cli.runtime.claude_client import BundledClaudeClients
 
         self.bundled = BundledClaudeClients()
+        self.last_assistant = self.bundled.last_assistant
+        self.history_error = None
         self.provider = provider
         self.calls = []
         self.drop_receipt = False
@@ -166,7 +176,8 @@ class ObservedClients:
 
 async def main_cases(cwd, provider, evidence):
     import psutil
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, SystemMessage
+    from tests.support.claude_session_facts import check_idle_history
     from netizen_cli.bindings import BindingStore
     from netizen_cli.claude_installation import verified_claude_cli
     from netizen_cli.domain import FeishuScope, ScopeKind
@@ -240,6 +251,8 @@ async def main_cases(cwd, provider, evidence):
             raise AssertionError("different execution produced the Result")
         if not await runtime.wait_idle(20):
             raise AssertionError("client cleanup deadline")
+        if clients.history_error:
+            raise clients.history_error
         return event
     def rows(label):
         return [row for row in provider.rows if row["path"] == "/v1/messages" and row["label"] == label]
@@ -325,7 +338,8 @@ async def main_cases(cwd, provider, evidence):
 
         limited_id = str(uuid4())
         limit = ClaudeSDKClient(options=ClaudeAgentOptions(cli_path=cli, cwd=cwd, session_id=limited_id,
-                                                           permission_mode="auto", max_turns=1, verbatim_prompts=True))
+                                                           permission_mode="auto", max_turns=1, verbatim_prompts=True,
+                                                           env={"CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}))
         try:
             await limit.connect()
             await limit.query(single_message(user_message(PreparedPrompt("[[S:tool-error/limit]]"), str(uuid4()))))
@@ -333,6 +347,8 @@ async def main_cases(cwd, provider, evidence):
                 if isinstance(msg, ResultMessage):
                     evidence.check("native max-turn terminal", (msg.subtype, msg.terminal_reason, msg.is_error)
                                    == ("error_max_turns", "max_turns", True))
+                if isinstance(msg, SystemMessage) and msg.subtype == "session_state_changed" and msg.data["state"] == "idle":
+                    await check_idle_history(limited_id, cwd)
                     break
         finally:
             await limit.disconnect()
@@ -396,6 +412,8 @@ async def main_cases(cwd, provider, evidence):
     finally:
         await runtime.cancel_tasks()
         store.close()
+        if clients.history_error:
+            raise clients.history_error
 
 
 async def worker():

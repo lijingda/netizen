@@ -173,6 +173,12 @@ class ReleaseConfirmation:
     crons: int
 
 
+class OrdinarySessionDiverged(OrdinaryInputRejected):
+    def __init__(self, confirmation: ReleaseConfirmation):
+        super().__init__("检测到该会话在其他 Claude 客户端有新进展，这条消息未发送。")
+        self.confirmation = confirmation
+
+
 @dataclass(frozen=True, slots=True)
 class StopPreview:
     """Receipt text captured before the stop operation selects its target."""

@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, HookJSONOutput, HookMatcher, Message, ResultMessage,
-    StreamEvent, SystemMessage, TextBlock, ToolUseBlock, get_session_info,
+    StreamEvent, SystemMessage, TextBlock, ToolUseBlock, get_session_info, get_session_messages,
 )
 
 from .. import claude_installation
@@ -299,12 +299,27 @@ def native_human(frame: AssistantMessage | ResultMessage | StreamEvent) -> str |
     return frame.user_message_uuid or (ids[0] if ids else None)
 
 
+async def last_assistant(session: str, cwd: Path) -> str | None:
+    def read() -> str | None:
+        rows = get_session_messages(session, directory=str(cwd))
+        assistant = next((m for m in reversed(rows) if m.type == "assistant"), None)
+        if assistant and (assistant.session_id != session or not _identifier(assistant.uuid)):
+            raise ValueError("invalid assistant identity")
+        return assistant.uuid if assistant else None
+
+    async with asyncio.timeout(3):
+        return await asyncio.to_thread(read)
+
+
 class ClaudeClients(Protocol):
+    async def last_assistant(self, session: str, cwd: Path) -> str | None: ...
     def create(self, session_id: str, cwd: Path, *, resume: bool, live: LiveSession | None = None) -> ClaudeClient: ...
     async def session_cwd(self, session_id: str, candidates: tuple[Path, ...] = ()) -> Path | None: ...
 
 
 class BundledClaudeClients:
+    last_assistant = staticmethod(last_assistant)
+
     def __init__(self) -> None:
         self._cli = verified_claude_cli()
         if (claude_installation.SDK_VERSION, claude_installation.CLI_VERSION) != ("0.2.186", "2.1.329"):

@@ -11,8 +11,21 @@ from claude_agent_sdk import AssistantMessage, HookMatcher, ResultMessage, Syste
 
 from netizen_cli.claude_installation import CLI_VERSION
 from netizen_cli.ordinary_sessions import PreparedPrompt
-from netizen_cli.runtime.claude_client import BundledClaudeClients, single_message, user_message
+from netizen_cli.runtime.claude_client import BundledClaudeClients, last_assistant, single_message, user_message
 from tests.support.claude_provider import blocks
+
+
+async def check_idle_history(session, cwd):
+    """Hold the CLI connected; do not let the driver start its next send yet."""
+    baseline = await last_assistant(session, cwd)
+    await check_send_after_hold(session, cwd, baseline)
+    return baseline
+
+
+async def check_send_after_hold(session, cwd, baseline):
+    await asyncio.sleep(2.55)
+    checked = await last_assistant(session, cwd)
+    assert checked == baseline, ("false divergence", baseline, checked)
 
 
 class NativeSession:
@@ -25,6 +38,8 @@ class NativeSession:
         self.requests = 0
         self.cron_fired = False
         self.client = None
+        self.idle_history = None
+        self.reader = None
 
     def reply(self, messages):
         texts = [p.get("text", "") for m in messages if m["role"] == "user" for p in blocks(m)]
@@ -38,8 +53,10 @@ class NativeSession:
         elif n == 1 and case.startswith("agent"):
             tool = "Agent", {"description": "Fixture agent", "prompt": "child-signal", "subagent_type": "general-purpose",
                              "run_in_background": True}
-        elif n == 1 or (n == 2 and case in {"reverse", "wake_interrupt", "stop_busy", "stop_idle"}):
+        elif n == 1 or (n == 2 and case in {"reverse", "wake_interrupt", "stop_busy", "stop_idle", "empty-two"}):
             tool = "Bash", {"command": "./shell-" + case + str(n), "description": "Wait on fixture", "run_in_background": True}
+        if case in {"empty-one", "empty-two"} and n > (2 if case == "empty-one" else 3):
+            return None, "empty-answer", case
         self.cron_fired |= any("cron-signal" in t for t in texts)
         held = {"early": 2, "foreground_interrupt": 2, "overlap": 3, "wake": 3, "stop_busy": 3,
                 "wake_interrupt": 4, "agent_esc": 2}
@@ -62,15 +79,19 @@ class NativeSession:
 
         async def read():
             async for frame in self.client.receive_messages():
+                if isinstance(frame, SystemMessage) and frame.subtype == "session_state_changed" and frame.data["state"] == "idle":
+                    self.idle_history = await check_idle_history(self.session, self.cwd)
                 self.frames.append(frame)
 
-        reader = asyncio.create_task(read())
+        reader = self.reader = asyncio.create_task(read())
         try:
             yield
         finally:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
             await self.client.disconnect()
+            if not reader.cancelled():
+                reader.result()
 
     async def query(self, human):
         uid = self.h1 if human == "h1" else self.h2
@@ -90,6 +111,9 @@ class NativeSession:
 
     async def until(self, test):
         while not test():
+            if self.reader and self.reader.done():
+                self.reader.result()
+                raise AssertionError("native reader ended before fixture condition")
             await asyncio.sleep(.02)
 
     async def idle_after(self, number):
@@ -106,7 +130,7 @@ class NativeSession:
     def wake(self, result, task, reason="completed"):
         assert result.origin == {"kind": "task-notification", "producer": "session-task", "runId": task.data["run_id"]}
         assert result.session_id == self.session and result.uuid and result.user_message_uuid is None
-        assert result.terminal_reason == reason and bool(result.result) == (reason == "completed")
+        assert result.terminal_reason == reason and bool(result.result) == (reason == "completed" and not self.case.startswith("empty-"))
 
     async def external_turn(self):
         """Leave the task gated while a second bundled CLI resumes the same session."""
@@ -116,6 +140,8 @@ class NativeSession:
         assert len(self.system("background_tasks_changed")[-1].data["tasks"]) == 1
         original = await history()
         assert original
+        baseline = self.idle_history
+        assert baseline
         self.provider.live_session_reply = None
         terminal = NativeSession(self.cwd, self.provider, self.case)
         terminal.session = self.session
@@ -129,6 +155,8 @@ class NativeSession:
             await terminal.idle_after(len(terminal.results))
         changed = await history()
         assert changed != original
+        checked = await last_assistant(self.session, self.cwd)
+        assert checked and checked != baseline, "foreign turn passed send check"
         assert any(m.type == "assistant" and {"type": "text", "text": "fixture-reply-external"}
                    in m.message["content"] for m in changed)
 
@@ -145,13 +173,14 @@ class NativeSession:
             fired = next(r for r in self.results if r.user_message_uuid is None)
             assert fired.origin is None and fired.user_message_uuids is None and fired.uuid and fired.result
             assert self.stops[-1][1][0]["id"] == first[0]["id"]
+            await self.idle_after(self.results.index(fired) + 1)
             return
         if case == "agent_denied":
             await self.idle_after(1)
             assert self.system("permission_denied")[0].data["decision_reason"] == "Classifier unavailable"
             assert not self.system("task_started")
             return
-        multiple = case in {"reverse", "wake_interrupt", "stop_busy", "stop_idle"}
+        multiple = case in {"reverse", "wake_interrupt", "stop_busy", "stop_idle", "empty-two"}
         await self.until(lambda: len(self.system("task_started")) == 1 + multiple)
         starts = self.system("task_started")
         uses = [(b.id, m.user_message_uuid) for m in self.frames if isinstance(m, AssistantMessage)
@@ -194,6 +223,8 @@ class NativeSession:
             await self.until(lambda: self.system("background_tasks_changed")[-1].data["tasks"] == [] and self.state == "idle")
             assert {m.task_id for m in self.system("task_updated") if m.status == "killed"} == {t.task_id for t in starts}
             assert {m.task_id for m in self.system("task_notification") if m.status == "stopped"} == {t.task_id for t in starts}
+            assert self.idle_history is not None
+            await check_send_after_hold(self.session, self.cwd, self.idle_history)
             return
         if case == "foreground_interrupt":
             await self.idle_after(1)
@@ -324,7 +355,7 @@ class QuiescenceProbe(NativeSession):
 async def session_facts(cwd, provider, evidence):
     evidence.check("live session fact pins", (version("claude-agent-sdk"), CLI_VERSION) == ("0.2.186", "2.1.329"))
     for case in ("early", "reverse", "wake", "foreground_interrupt", "wake_interrupt", "overlap", "stop_idle",
-                 "stop_busy", "agent_denied", "agent", "agent_esc", "cold", "handoff", "cron",
+                 "stop_busy", "empty-one", "empty-two", "agent_denied", "agent", "agent_esc", "cold", "handoff", "cron",
                  "during-wake", "simultaneous", "during-h2", "three"):
         quiescence = case in {"during-wake", "simultaneous", "during-h2", "three"}
         trace = QuiescenceProbe(cwd, provider, case) if quiescence else NativeSession(cwd, provider, case)
@@ -342,6 +373,18 @@ async def session_facts(cwd, provider, evidence):
         try:
             async with asyncio.timeout(150 if case == "cron" else 30):
                 async with trace.connected():
+                    if case == "stop_busy":
+                        # Keep a dormant native cron after both listed tasks stop.
+                        def register(messages):
+                            tool = None if any(p.get("type") == "tool_result" for p in blocks(messages[-1])) else (
+                                "CronCreate", {"cron": "0 0 1 1 *", "recurring": True, "durable": False, "prompt": "hold"})
+                            return tool, "text", "dormant-cron"
+                        provider.live_session_reply = register
+                        await trace.query("setup-cron")
+                        await trace.idle_after(1)
+                        assert trace.stops[-1][1]
+                        trace.frames.clear()
+                        provider.live_session_reply = trace.reply
                     await trace.exercise()
                 if case in {"cold", "handoff", "cron"}:
                     trace.h2 = str(uuid4())
@@ -349,6 +392,7 @@ async def session_facts(cwd, provider, evidence):
                         start = len(provider.rows)
                         await trace.query("h2")
                         await trace.until(lambda: any(r.user_message_uuid == trace.h2 and r.result for r in trace.results))
+                        await trace.idle_after(len(trace.results))
                         if case == "cold":
                             current = next(m for m in trace.system("init") if m.data.get("user_message_uuids") == [trace.h2])
                             assert any(isinstance(m, ResultMessage) and not m.result and m.user_message_uuid is None
@@ -360,7 +404,6 @@ async def session_facts(cwd, provider, evidence):
                                        for m in row["history"])
                             assert any(m["role"] == "assistant" and "fixture-reply-external" in m["answers"]
                                        for m in row["history"])
-                            await trace.idle_after(len(trace.results))
                         else:
                             assert trace.stops[0][1][0]["id"] == trace.stops[-1][1][0]["id"]
                 evidence.check("live session " + case, True)

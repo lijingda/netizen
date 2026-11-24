@@ -10,13 +10,13 @@ from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.file_evidence import FileEvidence
 from netizen_cli.ordinary_sessions import (
-    ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, PhysicalAnswer, LogicalTerminal, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, PromptImage, ReleaseConfirmation,
+    ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, PhysicalAnswer, LogicalTerminal, OrdinaryConclusion, OrdinaryInputRejected, OrdinarySessionDiverged, PreparedPrompt, PromptImage, ReleaseConfirmation,
 )
 from netizen_cli.runtime.contracts import ContextCursorCommit, ReleaseDisposition, StopDisposition, TerminalStateUnknown, ThreadActivityChanged
 from tests.support import has_claude_sdk, requires_claude_sdk
 
 if has_claude_sdk:
-    from netizen_cli.runtime.claude_client import BundledClaudeClients
+    from netizen_cli.runtime.claude_client import BundledClaudeClients, last_assistant
     from netizen_cli.runtime.claude_ordinary import (
         CLOSE_FAILED, DEFAULT_MODE, DEGRADED, MODE_UNKNOWN, GRACE, START_FAILED, UNKNOWN, ClaudeOrdinarySessions,
     )
@@ -106,6 +106,65 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         arguments = dict(scope_key=self.binding.scope_key, sender_id="owner",
                          revision=preview.revision if preview else None, turn_id=preview.turn_id if preview else None)
         return await self.runtime.release_control(self.binding.id, **(arguments | overrides))
+
+    async def test_public_history_uses_exact_cwd_and_last_visible_assistant(self):
+        from types import SimpleNamespace
+        rows = [SimpleNamespace(type="assistant", uuid=id_, session_id="s") for id_ in ("a", "b")]
+        rows.append(SimpleNamespace(type="user"))
+        with patch("netizen_cli.runtime.claude_client.get_session_messages", return_value=rows) as messages:
+            self.assertEqual(await last_assistant("s", self.cwd), "b")
+            messages.assert_called_once_with("s", directory=str(self.cwd))
+            rows.clear()
+            self.assertIsNone(await last_assistant("s", self.cwd))
+
+    async def test_live_divergence_rejects_only_one_input_even_if_history_disappears(self):
+        _, cli = await self.retain()
+        for assistant in ("foreign", None):
+            self.clients.history = assistant
+            before = len(cli.inputs)
+            with self.assertRaises(OrdinarySessionDiverged) as rejected:
+                await self.submit()
+            self.assertEqual((rejected.exception.confirmation.crons, len(cli.inputs), cli.closes), (1, before, 0))
+            h2 = await self.submit()
+            self.assertEqual(len(cli.inputs), before + 1)
+            h2.release_receipt_attempt()
+            cli.init()
+            cli.result()
+            await self.wait_until(lambda: self.runtime._active[self.binding.id].admissible)
+
+    async def test_missing_pending_and_failed_snapshots_send_with_one_warning(self):
+        gate = asyncio.Event()
+        error = OSError()
+        async def read(*args):
+            await gate.wait()
+            if error:
+                raise error
+            return "assistant"
+        with patch.object(self.clients, "last_assistant", side_effect=read):
+            _, cli = await self.retain()
+            execution = self.runtime._active[self.binding.id]
+            for state in ("pending", "missing", "timeout"):
+                if state == "timeout":
+                    error = TimeoutError()
+                with self.assertLogs("netizen_cli.runtime.claude_ordinary", level="WARNING") as logs:
+                    receipt = await self.submit()
+                self.assertEqual(len(logs.records), 1)
+                gate.set()
+                if state == "missing":
+                    error = None
+                receipt.release_receipt_attempt()
+                cli.init()
+                cli.result()
+                await self.wait_until(lambda: execution.admissible and execution.history_reader.done())
+
+    async def test_idle_without_a_visible_assistant_admits_the_next_input(self):
+        self.clients.history = None
+        _, cli = await self.retain()
+        self.clients.history = "first-visible"
+        with self.assertLogs("netizen_cli.runtime.claude_ordinary", level="WARNING") as logs:
+            submitted = await self.submit()
+        self.assertEqual((len(logs.records), len(cli.inputs)), (1, 2))
+        submitted.release_receipt_attempt()
 
     async def test_release_states_and_exact_confirmation(self):
         self.assertEqual(await self.release_client(), ReleaseDisposition.NOT_SUBSCRIBED)
