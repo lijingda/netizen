@@ -116,6 +116,8 @@ Codex 普通 Turn、Side 和当前 Goal 单卡在结果发布时均显示整个�
 
 **切换 Goal 的映射**
 
+> 2026-11-24 维护者决定暂缓这一步（PR #323 已停放）。恢复前须先把 Codex 卡片投递迁入单消息对账，并让每个已结算 Turn 只从精确的原生历史读取内容，替换第 6 条 Goal 中基于 Tap 冻结事实的做法；在此之前 Goal 保持兼容映射。见 [ADR 0107](0107-present-process-in-feishu-process-messages.md) 第 7 条。
+
 - **改动范围：** 只修改 Goal 映射。同步修改 design.md 和 deployment.md 中受影响的验收条目，并有意更新相关的 Goal 测试。
 - **验收：**
   - 用真实 bundled App Server 跑一个至少两个物理 Turn 的 Goal，核对两个展示 Turn 各自的答案、文件和终态，以及唯一一次符合条件的提醒；
