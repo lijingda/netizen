@@ -403,22 +403,24 @@ class ChannelState:
                 root = message.source.topic_root_id
                 if not root:
                     raise ValueError("Claude topic has no confirmed root")
-            return await send_conversation_message(self._channel, scope, root, content, message.delivery_id, message.publishable,
+            sent = await send_conversation_message(self._channel, scope, root, content, message.delivery_id, message.publishable,
                                                    single_attempt=message.single_attempt, location=location)
-        if isinstance(message, (ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin, _CardReplyTarget)):
-            return await external_call(self._channel.reply(message, content, SendOpts(
+        elif isinstance(message, (ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin, _CardReplyTarget)):
+            sent = await external_call(self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=message.conversation.thread_id is not None,
                 reply_target_gone="fail",
             )), isolate=self._local_sessions is not None)
-        if isinstance(message, ScheduledOrigin):
+        elif isinstance(message, ScheduledOrigin):
             # A scheduled result belongs to this exact execution topic. The
             # SDK's default target-gone fallback would create a main-chat message.
-            return await self._channel.reply(message, content, SendOpts(
+            sent = await self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=True, reply_target_gone="fail",
             ))
-        return await external_call(self._channel.reply(message, content), isolate=self._local_sessions is not None)
+        else:
+            sent = await external_call(self._channel.reply(message, content), isolate=self._local_sessions is not None)
+        return self._progress_cards.ordinary_receipt(sent)
 
     @staticmethod
     def _scheduled_message_matches(message: ScheduledOrigin, data: object, message_id: str | None) -> bool:

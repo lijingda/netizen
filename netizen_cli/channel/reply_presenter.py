@@ -21,7 +21,7 @@ from ..partial_answers import PartialAnswer
 from .process_presentation import ProcessPresentation, Reason
 from .replacement_writer import ReplacementWriter
 from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, RunDisplay, TerminalStatus, TurnOpened, TurnResult
-from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
+from .messages import _confirmed_reply_id, _nonempty_field, _object_field, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
 from .topics import BindingCardLocation, CardReplyLocation
 from .physical_delivery import BODY, Item, Outcome, PhysicalDelivery, record_sent_answer
@@ -321,6 +321,17 @@ class _ReplyCardPresenter:
         results = await asyncio.gather(*(reconcile_message(mid, view) for mid, view in pending))
         return {mid: result for (mid, _), result in zip(pending, results, strict=True)}
 
+    def ordinary_receipt(self, result: SendResult) -> SendResult:
+        if not self._binding_locations or not result.success:
+            return result
+        nested = _nonempty_field(_object_field(result.raw, "data"), "message_id")
+        ids = {mid for mid in (result.message_id, nested, *(result.chunk_ids or ())) if mid}
+        for location in self._binding_locations.values():
+            if collision := location.process_messages.intersection(ids):
+                location.unusable.update(collision)
+                return SendResult(success=False)
+        return result
+
     def binding_location(self, binding_id: str) -> BindingCardLocation:
         return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners, release_cards=self._release_cards))
 
@@ -373,6 +384,7 @@ class _ReplyCardPresenter:
 
                 async def send_card() -> SendResult | None:
                     sent = await external_call(event.reply(card), isolate=event.policy.confirms_items)
+                    sent = self.ordinary_receipt(sent)
                     if event.validate_reply and not await external_call(event.validate_reply(sent), isolate=event.policy.confirms_items):
                         return None
                     return location.validate(sent, card=True) if location else sent

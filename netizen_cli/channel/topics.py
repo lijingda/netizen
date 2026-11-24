@@ -73,6 +73,21 @@ class BindingCardLocation:
     retired: bool = False
     release_cards: Callable[[set[str]], None] = lambda _: None
 
+    process_messages: set[str] = field(default_factory=set)
+    process_cots: dict[str, str] = field(default_factory=dict)
+
+    def reserve_process(self, cot: str, mid: str) -> bool:
+        if self.retired:
+            return False
+        previous = self.process_cots.setdefault(cot, mid)
+        collision = previous != mid or mid in self.process_messages or mid in self.owners
+        self.process_messages.add(mid)
+        if collision:
+            self.unusable.update((mid, previous))
+            if owner := self.owners.get(mid):
+                owner.binding.unusable.add(mid)
+        return not collision and mid not in self.unusable
+
     def retire(self) -> None:
         self.retired = True
         for owner in set(self.owners.values()):
@@ -80,6 +95,8 @@ class BindingCardLocation:
                 owner.retire()
         self.root = None
         self.unusable.clear()
+        self.process_messages.clear()
+        self.process_cots.clear()
 
 
 @dataclass(slots=True, eq=False)
@@ -104,7 +121,7 @@ class CardReplyLocation:
     def usable(self, message_id: str) -> bool:
         owner = self.binding.owners.get(message_id)
         return (not self.retired and not self.binding.retired and message_id not in self.binding.unusable
-                and (owner is None or owner is self))
+                and (owner is self or (owner is None and message_id not in self.binding.process_messages)))
 
     def can_write(self, message_id: str) -> bool:
         return self.usable(message_id) and self.binding.owners.get(message_id) is self

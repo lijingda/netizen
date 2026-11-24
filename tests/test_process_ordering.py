@@ -23,7 +23,7 @@ from netizen_cli.turn_activity import (
     TurnActivityEvent, TurnActivityKind as Kind, TurnActivityStatus as Status,
     TurnPlanStepSnapshot, TurnPlanStepState,
 )
-from tests.support.channel_results import turn_activity_snapshot
+from tests.support.channel_results import sent_result, turn_activity_snapshot
 from tests.support.process_transport import ProcessTransport
 from tests.test_process_presentation import process_port, process_snapshot
 
@@ -476,6 +476,64 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(port.update.await_count >= 1)
                     port.complete.assert_awaited_once_with("cot","process-mid","timeout" if unknown else "done")
                     self.assertNotIn(key, presenter._process)
+
+    async def test_released_process_ids_remain_exclusive_until_binding_retirement(self):
+        for collision in (Created("cot","process-mid"), Created("other","process-mid"), Created("cot","other-mid")):
+            with self.subTest(collision=collision):
+                async with channel_fixture() as fx, asyncio.timeout(2):
+                    presenter = fx.app._progress_cards
+                    port = process_port()
+                    presenter._process_port = port
+                    port.create.side_effect = [Created("cot","process-mid"), collision]
+                    for turn in ("first", "next"):
+                        snap = replace(process_snapshot(1), turn_id=turn)
+                        key = PresentationKey(snap.binding_id, snap.thread_id, turn)
+                        origin = FakeMessage("work", message_id=turn)
+                        with patch.object(fx.app._ordinary, "turn_activity", return_value=snap):
+                            await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
+                                BindingTaskFeedback(), lambda: True, lambda: True, LogicalReply()))
+                        state = presenter._process[key]
+                        await state.ready.wait()
+                        await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "owner", origin,
+                            "completed", "body", logical_id=turn, activity=snap))
+                        await state.task
+                        self.assertNotIn(key, presenter._process)
+                    self.assertEqual(port.create.await_count, 2)
+                    self.assertEqual(port.update.await_count, 2)
+                    port.complete.assert_awaited_once_with("cot","process-mid","done")
+                    location = presenter.binding_location("binding")
+                    self.assertIn(collision.message_id, location.unusable)
+                    await presenter.retire_binding("binding")
+                    self.assertFalse(location.process_messages)
+                    self.assertFalse(location.process_cots)
+
+    async def test_released_process_id_cannot_confirm_a_body_or_anchor_a_mention(self):
+        async with channel_fixture() as fx, asyncio.timeout(2):
+            presenter = fx.app._progress_cards
+            port = process_port()
+            presenter._process_port = port
+            snap = process_snapshot(1)
+            key = PresentationKey(snap.binding_id, snap.thread_id, snap.turn_id)
+            origin = FakeMessage("start", message_id="input")
+            reply = LogicalReply()
+            with patch.object(fx.app._ordinary, "turn_activity", return_value=snap):
+                await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin, BindingTaskFeedback(),
+                    lambda: True, lambda: True, reply))
+            state = presenter._process[key]
+            await state.ready.wait()
+            ordinary = fx.channel.reply
+            async def delayed_answer(target, content, *args):
+                if "actual body" in str(content):
+                    await state.task
+                    return sent_result("process-mid", chat_id="oc_direct")
+                return await ordinary(target, content, *args)
+            with patch.object(fx.channel, "reply", side_effect=delayed_answer):
+                await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "owner", origin, "completed",
+                    "actual body", logical_id=key.turn_id, activity=snap, reply=reply))
+            port.complete.assert_awaited_once()
+            self.assertNotIn("process-mid", reply.messages)
+            self.assertIsNone(reply.mention_target("input"))
+            self.assertIn("部分内容未能确认送达", str(fx.channel.replies))
 
     async def test_execution_unknown_then_exact_result_cannot_reopen_its_writer(self):
         async with channel_fixture() as fx:

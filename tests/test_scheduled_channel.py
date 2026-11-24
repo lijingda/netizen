@@ -610,7 +610,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.channel.reply = sdk_reply
         return driver
 
-    async def test_confirmed_process_never_confirms_an_unconfirmed_scheduled_answer(self):
+    async def test_scheduled_answer_receipt_with_process_id_remains_unknown(self):
         wire = ProcessTransport([])
         self.app._progress_cards._process_port = wire.port
         mid = "synthetic-process-1"
@@ -631,7 +631,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         claim, request = await self.completion_fixture()
         state, = self.app._progress_cards._process.values()
         await state.ready.wait()
-        self.channel.reply_results.append(SendResult(success=False))
+        self.channel.reply_results.append(sent_result(mid, chat_id="oc_group", thread_id="omt_fresh"))
         await self.finish_fixture(claim, request)
         await state.task
         self.assertEqual(wire.completed, {mid})

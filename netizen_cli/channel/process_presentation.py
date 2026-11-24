@@ -115,7 +115,8 @@ async def _verify(channel: ReplyChannel, location: CardReplyLocation, created: C
             _nonempty_field(actual, key) != required for key, required in expected.items()
         ):
             return False
-    return location.usable(mid)
+    return (not location.retired and not location.binding.retired
+            and mid not in location.binding.unusable and mid not in location.binding.owners)
 
 
 class ProcessPresentation:
@@ -189,6 +190,9 @@ class ProcessPresentation:
         if not isinstance(created, Created):
             if not isinstance(created, Rejected):
                 logger.warning("process message creation unconfirmed")
+            return False
+        if not location.binding.reserve_process(created.cot_id, created.message_id):
+            logger.warning("process message identity collision")
             return False
         async with asyncio.timeout(self.timeout):
             verified = await _verify(self.channel, location, created)
