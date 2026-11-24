@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from hashlib import sha256
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -54,14 +55,16 @@ class ProcessMessageShapes(unittest.IsolatedAsyncioTestCase):
         body = self.request(lark.HttpMethod.PUT, RESOURCE)
         events = body["events"]
         self.assertEqual(body, {"cot_id": "cot", "message_id": "msg", "events": events})
+        tool_id = sha256(b"tool").hexdigest()[:32]
+        text_id = sha256(b"text").hexdigest()[:32]
         expected = [
-            (0, "TOOL_CALL_START", {"toolCallId": "tool", "toolCallName": "安全操作"}),
+            (0, "TOOL_CALL_START", {"toolCallId": tool_id, "toolCallName": "安全操作"}),
             (1, "STEP_STARTED", {"stepName": "核对"}),
-            (1, "TEXT_MESSAGE_START", {"messageId": "text", "role": "assistant"}),
+            (1, "TEXT_MESSAGE_START", {"messageId": text_id, "role": "assistant"}),
             (2, "STEP_FINISHED", {"stepName": "核对"}),
-            (3, "TEXT_MESSAGE_CONTENT", {"messageId": "text", "delta": "进展"}),
-            (4, "TEXT_MESSAGE_END", {"messageId": "text"}),
-            (5, "TOOL_CALL_END", {"toolCallId": "tool"}),
+            (3, "TEXT_MESSAGE_CONTENT", {"messageId": text_id, "delta": "进展"}),
+            (4, "TEXT_MESSAGE_END", {"messageId": text_id}),
+            (5, "TOOL_CALL_END", {"toolCallId": tool_id}),
         ]
         for event, (delta, name, fields) in zip(events, expected, strict=True):
             self.assertEqual(event, {"timestamp": str(T + delta), "event_type": name, "content": event["content"]})

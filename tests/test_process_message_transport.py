@@ -5,6 +5,7 @@ import json
 import socket
 import threading
 import unittest
+from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
@@ -12,7 +13,8 @@ from uuid import uuid4
 import lark_oapi as lark
 
 from netizen_cli.process_messages import (
-    CONTENT_LIMIT, Created, Ok, ProcessMessages, Rejected, RejectionCode, ToolItem, Unknown,
+    CONTENT_LIMIT, Created, Ok, ProcessMessages, Rejected, RejectionCode, StepItem, TextItem, ToolItem,
+    Unknown, build_items, finish_items,
 )
 
 
@@ -29,7 +31,7 @@ class LocalFeishu(ThreadingHTTPServer):
         self.writer = threading.Lock()
         self.completed = False
         self.disconnect = False
-        self.malformed = False
+        self.raw_response = None
         self.updates = []
 
 
@@ -40,7 +42,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         pass
 
     def reply(self, payload):
-        raw = json.dumps(payload).encode()
+        self.reply_raw(json.dumps(payload).encode())
+
+    def reply_raw(self, raw):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
@@ -75,11 +79,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         if self.server.disconnect:
             self.connection.shutdown(socket.SHUT_RDWR)
             return
-        if self.server.malformed:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"unexpected response")
+        if self.server.raw_response is not None:
+            self.reply_raw(self.server.raw_response)
             return
         if self.server.completed:
             self.reply({"code": 10001})
@@ -137,7 +138,7 @@ class ProcessMessageTransport(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(len(e["content"]) <= CONTENT_LIMIT for e in (start, end)))
         label = json.loads(start["content"])["toolCallName"]
         self.assertEqual(label, self.items[0].text[:299] + "…")
-        self.assertEqual(json.loads(end["content"])["toolCallId"], "tool")
+        self.assertEqual(json.loads(end["content"])["toolCallId"], sha256(b"tool").hexdigest()[:32])
 
     async def test_timeout_on_dispatched_write_is_unknown(self):
         self.server.release.clear()
@@ -151,8 +152,17 @@ class ProcessMessageTransport(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.server.updates), 1)
 
     async def test_non_json_success_status_is_unknown(self):
-        self.server.malformed = True
+        self.server.raw_response = b"unexpected response"
         self.assertEqual(await self.port.update("cot", "msg", self.items), Unknown())
+
+    async def test_duplicate_keys_anywhere_in_a_receipt_are_unknown(self):
+        receipts = (b'{"code":10001,"code":0}', b'{"code":0,"code":10020}',
+                    b'{"code":0,"data":[{"extra":1,"extra":1}]}')
+        for raw in receipts:
+            with self.subTest(receipt=raw):
+                self.server.raw_response = raw
+                self.assertEqual(await self.port.update("cot", "msg", self.items), Unknown())
+        self.assertEqual(len(self.server.updates), len(receipts))
 
     async def test_cancellation_on_dispatched_write_propagates(self):
         self.server.release.clear()
@@ -164,8 +174,24 @@ class ProcessMessageTransport(unittest.IsolatedAsyncioTestCase):
                 await pending
         self.assertEqual(len(self.server.updates), 1)
 
-    async def test_impossible_identity_never_reaches_transport(self):
-        items = (ToolItem("x" * CONTENT_LIMIT, "工具", 1_800_000_000),)
-        with self.assertRaises(ValueError):
-            await self.port.update("cot", "msg", items)
-        self.assertEqual(self.server.updates, [])
+    async def test_long_local_identities_fit_all_event_envelopes_on_resend(self):
+        t = 1_800_000_000
+        long_id = "标" * 1800
+        cases = ((ToolItem(long_id, "工具", t), "toolCallId", 2),
+                 (StepItem(long_id, "步骤", t), "stepName", 2),
+                 (TextItem(long_id, "文字", t, t), "messageId", 3),
+                 (TextItem("x" * 1738, "p", t, t), "messageId", 3))
+        for item, field, count in cases:
+            with self.subTest(item_type=type(item).__name__, length=len(item.item_id)):
+                self.assertEqual(build_items((item,)), (item,))
+                final = finish_items((item,), t + 1)
+                self.assertEqual(final, (item.finish(t + 1),))
+                self.assertEqual(await self.port.update("cot", "msg", final), Ok())
+                self.assertEqual(await self.port.update("cot", "msg", final), Ok())
+                first, replay = self.server.updates[-2:]
+                self.assertEqual(first, replay)
+                self.assertEqual(len(first["events"]), count)
+                expected = item.text if field == "stepName" else sha256(item.item_id.encode()).hexdigest()[:32]
+                for event in first["events"]:
+                    self.assertLessEqual(len(event["content"]), CONTENT_LIMIT)
+                    self.assertEqual(json.loads(event["content"])[field], expected)

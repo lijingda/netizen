@@ -21,7 +21,7 @@ from lark_oapi.api.im.v1 import GetMessageRequest
 from netizen_cli.channel.topics import validate_topic_message
 from netizen_cli.lark_app import LARK_APP_RELATIVE_PATH, load_lark_app
 from netizen_cli.process_messages import (
-    CONTENT_LIMIT, ITEM_TEXT_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
+    CONTENT_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
     StepItem, TextItem, ToolItem, Unknown, finish_items, item_events,
 )
 
@@ -69,7 +69,7 @@ async def probe(root: Path, chat: str, report: dict[str, object]) -> None:
     try:
         for case, instruction in cases.items():
             report["phase"] = case
-            checks: dict[str, object] = {"seed_label": labels[case]}
+            checks: dict[str, object] = {}
             reports[case] = checks
             target = await create_in_topic(channel, client, port, chat, labels[case], instruction, checks)
             if target.cot_id in used_cots or target.message_id in used_messages:
@@ -123,13 +123,12 @@ async def create_in_topic(
 
 
 def budget_item(observed_at: int) -> ToolItem:
-    # Keep the visible label at 300 characters. Pad the synthetic, opaque ID
-    # to exercise the full serialized event budget with printable input.
-    label = "边界" + '"' * (ITEM_TEXT_LIMIT - 2)
-    item = ToolItem("budget", label, observed_at, observed_at)
+    item = ToolItem("budget", "边界", observed_at, observed_at)
     start, _ = item_events((item,))
-    padding = "x" * (CONTENT_LIMIT - len(start["content"]))
-    return ToolItem(item.item_id + padding, label, observed_at, observed_at)
+    # A JSON-escaped unit separator takes six characters in the inner event.
+    separators, remainder = divmod(CONTENT_LIMIT - len(start["content"]), 6)
+    label = item.text + "\x1f" * separators + "x" * remainder
+    return ToolItem(item.item_id, label, observed_at, observed_at)
 
 
 async def check_writes(port: ProcessMessages, target: Created, case: str, report: dict[str, object]) -> None:

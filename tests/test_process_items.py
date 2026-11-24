@@ -88,7 +88,7 @@ class ItemProjection(unittest.TestCase):
                 label = text if size <= ITEM_TEXT_LIMIT else text[:299] + "…"
                 self.assertEqual(labels, [label] * 4)
 
-    def test_per_event_budget_includes_escaping_identity_and_longer_step_end(self):
+    def test_per_event_budget_includes_escaping_and_longer_step_end(self):
         for make in (lambda: ToolItem("id", "\x00" * 300, T),
                      lambda: StepItem("step", "\x00" * 300, T)):
             item = make()
@@ -100,16 +100,13 @@ class ItemProjection(unittest.TestCase):
             if isinstance(item, StepItem):
                 self.assertEqual(json.loads(earlier["content"])["stepName"],
                                  json.loads(later[-1]["content"])["stepName"])
-        for suffix_len in (0, 1, 50):
-            # Hold the identity fixed; only safe text can be shortened.
-            base = TextItem("id", "甲" * 300, T, T)
-            overhead = len(item_events((base,))[1]["content"]) - len(base.item_id) - len(base.text)
-            identity = "x" * (CONTENT_LIMIT - overhead - 300 + suffix_len)
-            events = item_events((TextItem(identity, base.text, T, T),))
-            self.assertEqual(len(events[1]["content"]), CONTENT_LIMIT)
-            for e in events:
-                self.assertEqual(json.loads(e["content"])["messageId"], identity)
-            self.assertEqual(json.loads(events[1]["content"])["delta"].endswith("…"), suffix_len > 0)
+        empty = item_events((TextItem("id", "", T, T),))[1]["content"]
+        escaped, remainder = divmod(CONTENT_LIMIT - len(empty), 6)
+        boundary = "\x00" * escaped + "甲" * remainder
+        for text, expected in ((boundary, boundary), (boundary + "乙", boundary[:-1] + "…")):
+            content = item_events((TextItem("id", text, T, T),))[1]["content"]
+            self.assertLessEqual(len(content), CONTENT_LIMIT)
+            self.assertEqual(json.loads(content)["delta"], expected)
 
     def test_10_digit_seconds_and_ordering_are_validated(self):
         for bad in (True, T + 0.1, 999_999_999, 10_000_000_000):

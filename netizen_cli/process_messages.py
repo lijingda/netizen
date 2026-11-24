@@ -7,6 +7,7 @@ import logging
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
+from hashlib import sha256
 from typing import Literal, Self, TypedDict
 
 import lark_oapi as lark
@@ -38,6 +39,10 @@ class _Item:
             _check_timestamp(self.finished_at)
             if self.finished_at < self.started_at:
                 raise ValueError("END precedes START")
+
+    @property
+    def wire_id(self) -> str:
+        return sha256(self.item_id.encode("utf-8", errors="surrogatepass")).hexdigest()[:32]
 
     @property
     def state(self) -> Literal["running", "finished"]:
@@ -122,8 +127,6 @@ def _clip_item_text(text: str, available: int) -> str:
     candidate = text if len(text) <= ITEM_TEXT_LIMIT else text[:ITEM_TEXT_LIMIT - 1] + "…"
     if cost(candidate) <= available:
         return candidate
-    if available < 1:
-        raise ValueError("Activity identity leaves no room for the item text")
     remaining = available - 1  # The ellipsis costs one serialized character.
     for index, char in enumerate(text[:ITEM_TEXT_LIMIT - 1]):
         remaining -= cost(char)
@@ -134,13 +137,13 @@ def _clip_item_text(text: str, available: int) -> str:
 
 def _bounded_item(item: ProcessItem) -> ProcessItem:
     if isinstance(item, ToolItem):
-        empty = _inner("TOOL_CALL_START", toolCallId=item.item_id, toolCallName="")
+        empty = _inner("TOOL_CALL_START", toolCallId=item.wire_id, toolCallName="")
     elif isinstance(item, StepItem):
         # FINISHED has the longer envelope. The name must be identical even
         # when START was already sent while this step was still running.
         empty = _inner("STEP_FINISHED", stepName="")
     elif isinstance(item, TextItem):
-        empty = _inner("TEXT_MESSAGE_CONTENT", messageId=item.item_id, delta="")
+        empty = _inner("TEXT_MESSAGE_CONTENT", messageId=item.wire_id, delta="")
     else:
         raise TypeError("unsupported Activity item")
     text = _clip_item_text(item.text, CONTENT_LIMIT - len(empty))
@@ -174,19 +177,21 @@ def _event(name: str, seconds: int, **fields: str) -> _Event:
 
 def _events_for(item: ProcessItem) -> list[_Event]:
     if isinstance(item, TextItem):
+        message_id = item.wire_id
         return [
-            _event("TEXT_MESSAGE_START", item.started_at, messageId=item.item_id, role="assistant"),
-            _event("TEXT_MESSAGE_CONTENT", item.content_at or item.finished_at, messageId=item.item_id, delta=item.text),
-            _event("TEXT_MESSAGE_END", item.finished_at, messageId=item.item_id),
+            _event("TEXT_MESSAGE_START", item.started_at, messageId=message_id, role="assistant"),
+            _event("TEXT_MESSAGE_CONTENT", item.content_at or item.finished_at, messageId=message_id, delta=item.text),
+            _event("TEXT_MESSAGE_END", item.finished_at, messageId=message_id),
         ]
     if isinstance(item, StepItem):
         events = [_event("STEP_STARTED", item.started_at, stepName=item.text)]
         if item.finished_at is not None:
             events.append(_event("STEP_FINISHED", item.finished_at, stepName=item.text))
     else:
-        events = [_event("TOOL_CALL_START", item.started_at, toolCallId=item.item_id, toolCallName=item.text)]
+        tool_call_id = item.wire_id
+        events = [_event("TOOL_CALL_START", item.started_at, toolCallId=tool_call_id, toolCallName=item.text)]
         if item.finished_at is not None:
-            events.append(_event("TOOL_CALL_END", item.finished_at, toolCallId=item.item_id))
+            events.append(_event("TOOL_CALL_END", item.finished_at, toolCallId=tool_call_id))
     return events
 
 
@@ -204,12 +209,19 @@ def _check_timestamp(value: int) -> None:
         raise ValueError("timestamp must be ten-digit Unix seconds")
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate JSON field in process message receipt")
+    return result
+
+
 async def _receipt(
     pending: Awaitable[lark.BaseResponse],
 ) -> dict[str, object] | Rejected | Unknown:
     try:
         raw = (await pending).raw
-        payload = json.loads(raw.content)
+        payload = json.loads(raw.content, object_pairs_hook=_unique_object)
         status = raw.status_code
         if not isinstance(payload, dict) or type(status) is not int:
             return Unknown()

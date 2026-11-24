@@ -1,12 +1,44 @@
+import io
+import json
 import unittest
+from contextlib import redirect_stderr
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from netizen_cli.process_messages import Created, Ok, ProcessMessages, Rejected, Unknown, item_events
+from scripts import check_process_messages
 from scripts.check_process_messages import GateFailed, check_writes, exact
 
 
 class LiveProbeContract(unittest.IsolatedAsyncioTestCase):
+    async def test_lookup_labels_go_to_stderr_and_message_text_stays_out_of_json(self):
+        stamp = "2026-01-01T00:00:00Z"
+        labels = [f"[过程消息验收 {case}] {stamp}" for case in "ABC"]
+        stderr = io.StringIO()
+        report = {"run_utc": stamp}
+        port = AsyncMock(spec=ProcessMessages)
+        port.update.side_effect = [Ok()] * 3 + [Rejected(10001)] + [Ok()] * 6
+        port.complete.return_value = Ok()
+        with (
+            patch.object(check_process_messages, "load_lark_app",
+                         return_value=SimpleNamespace(app_id="fixture", app_secret="fixture")),
+            patch.object(check_process_messages, "FeishuChannel"),
+            patch.object(check_process_messages, "ProcessMessages", return_value=port),
+            patch.object(check_process_messages, "create_in_topic",
+                         side_effect=[Created(f"c{c}", f"m{c}") for c in "ABC"]) as create,
+            redirect_stderr(stderr),
+        ):
+            await check_process_messages.probe(Path("."), "chat", report)
+        self.assertEqual(stderr.getvalue().splitlines(), labels)
+        self.assertEqual([call.args[4] for call in create.await_args_list], labels)
+        transmitted_text = [text for call in create.await_args_list for text in call.args[4:6]]
+        transmitted_text.extend(item.text for call in port.update.await_args_list for item in call.args[2])
+        encoded = json.dumps(report, ensure_ascii=False)
+        for text in transmitted_text:
+            self.assertNotIn(json.dumps(text, ensure_ascii=False), encoded)
+        self.assertEqual(report["phase"], "finished")
+
     async def test_items_are_closed_in_the_final_list_before_completion(self):
         port = AsyncMock(spec=ProcessMessages)
         port.update.return_value = port.complete.return_value = Ok()
