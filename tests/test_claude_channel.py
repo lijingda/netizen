@@ -797,6 +797,39 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn("全部完成", visible["reply-0"])
 
     @requires_claude_sdk
+    async def test_card_fallback_freezes_the_first_card_with_the_physical_outcome(self):
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.presentation import turn_progress_card
+
+        def render(**fields):
+            if fields.get("final_response"):
+                raise ValueError("terminal card validation failed")
+            return turn_progress_card(**fields)
+
+        cases = (("error_max_turns", "max_turns", True, "任务未完成"),
+                 ("error_during_execution", "aborted_streaming", True, "任务已中断"),
+                 ("success", "completed", False, "任务已完成"))
+        for subtype, reason, is_error, header in cases:
+            with self.subTest(reason=reason):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                    fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=False))
+                    fx.channel.reply_results.append(SendResult.ok(message_id="first"))
+                    await app.handle_message(FakeMessage("work", message_id="H"))
+                    cli = clients.calls[-1]
+                    cli.init()
+                    await self.until(lambda: bool(app._progress_cards._sessions))
+                    with patch("netizen_cli.channel.presentation.turn_progress_card", side_effect=render):
+                        cli.result(subtype, reason, is_error)
+                        self.assertTrue(await ordinary.wait_idle(10))
+                    self.assertIsInstance(fx.channel.replies[1][1], str)
+                    mid, frozen = fx.channel.updates[-1]
+                    self.assertEqual(mid, "first")
+                    self.assertEqual(frozen["header"]["title"]["content"], header)
+
+    @requires_claude_sdk
     async def test_completion_mention_uses_the_feishu_receipt(self):
         from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock
         from netizen_cli.bindings import BindingTaskFeedback
