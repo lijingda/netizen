@@ -1,0 +1,5036 @@
+{
+  "clear_while_completing": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_clear",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Codex Goal"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已结束；不会中断正在执行的任务。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "当前 Codex 会话没有 Goal。使用 `/goal <objective>` 启动；Goal 可跨多个物理 Turn 自动继续。"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000003"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "finished after clear"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "「会话 00000000」本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_owner",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "om_reply_2",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ]
+  ],
+  "intermediate_and_final_files": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**最近操作**"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 修改文件 · 新增 second.txt"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "second file"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnfilesv4",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**本轮文件** · 共 1 个 · 第 1/1 页\n累计修改 <font color='green'>+1</font> <font color='red'>-0</font>\n<font color='grey'>行数累计成功的文件修改，重复修改会重复计数；统计不完整时省略总计或相应文件的数字。</font>\n<font color='grey'>点击“发送”后，文件将以图片或文件消息发送到本卡片话题。</font>"
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `second.txt`  <font color='green'>+1</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 4,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-two",
+                                      "path": "<root>/second.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "「会话 00000000」本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_owner",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "om_reply_2",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ]
+  ],
+  "interrupted": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_stop",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        "正在暂停 Codex Goal 并中断当前物理 Turn。"
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "CrossMark"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已中断"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已中断"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**最近操作**"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 修改文件 · 新增 unfinished.txt"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "before stop"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。前台工具进程不受此接口保证，可能仍在运行。"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已中断"
+            },
+            "template": "orange",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ]
+  ],
+  "multiturn_partials": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "first partial"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "second partial"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "second answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "「会话 00000000」本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_owner",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "om_reply_2",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ]
+  ],
+  "observation_loss_mid_candidate": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "ERROR"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务未完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 未完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "任务未完成：本次 Goal 观察已停止，该会话尚未确认空闲；请稍后发送消息或查看 /goal 重试。其他会话可继续使用。；原因：OSError：history unavailable"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务未完成"
+            },
+            "template": "red",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ]
+  ],
+  "pause_resume_same_stream": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_pause",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 已暂停"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已暂停；不会中断正在执行的任务，后续不再自动续跑。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-paused`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "恢复 Goal"
+                                  },
+                                  "type": "primary_filled",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.resume",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "paused",
+                                        "nonce": "00000000000000000000000000000003"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "paused"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000004"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "orange",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_resume",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已恢复。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000005"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000006"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "final answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "「会话 00000000」本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_owner",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "om_reply_2",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ]
+  ],
+  "progress_off": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "**阶段性答案**\n\nfirst partial",
+          "post": null,
+          "title": null,
+          "mentions": []
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "**阶段性答案**\n\nsecond partial",
+          "post": null,
+          "title": null,
+          "mentions": []
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "second answer",
+          "post": null,
+          "title": null,
+          "mentions": [
+            {
+              "open_id": "ou_owner",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        }
+      ],
+      {}
+    ]
+  ],
+  "resume_after_stream_ends": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_pause",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 已暂停"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已暂停；不会中断正在执行的任务，后续不再自动续跑。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-paused`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "恢复 Goal"
+                                  },
+                                  "type": "primary_filled",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.resume",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "paused",
+                                        "nonce": "00000000000000000000000000000003"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "paused"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000004"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "orange",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "before resume"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "「会话 00000000」本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_owner",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "om_reply_2",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_resume",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_resume",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_resume",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已恢复。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000005"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000006"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_resume",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_resume",
+        "reaction-3"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_4",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "after resume"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "「会话 00000000」本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_resumer",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "om_reply_4",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-d159a4fd8c5895581ab4e1f4fc3232c4",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ]
+  ],
+  "scheduled_binding_input": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：1 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "goal_generation": "w8genDGPGIGrjOpo_pYIrxduLQ8v2s40vnpXhKLkPDM",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "00000000 · work"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "get_chat_info",
+      [
+        "oc_direct"
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "width_mode": "default"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "定时任务 · 原会话检查"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "div",
+                  "text": {
+                    "tag": "plain_text",
+                    "content": "定时触发 · 1970-01-01T00:02+00:00"
+                  }
+                },
+                {
+                  "tag": "div",
+                  "text": {
+                    "tag": "plain_text",
+                    "content": "检查刚才的结果"
+                  }
+                }
+              ]
+            }
+          },
+          "card_id": null
+        },
+        {
+          "reply_to": null,
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "00000000-0000-0000-0000-000000000004",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_trigger",
+        "OnIt"
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "first partial"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "second partial"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "second answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "「会话 00000000」本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_owner",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "om_reply_2",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ]
+  ]
+}

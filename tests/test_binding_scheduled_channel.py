@@ -44,8 +44,8 @@ from tests.support.channel_results import sent_result
 from tests.test_codex_runtime import FakeCodex, FakeGoalControl, FakeTerminalCleanup, FakeThread
 
 
-class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
-    """Exercise saved inputs through the real Channel preparation and Runtime."""
+class BindingChannelCase(unittest.IsolatedAsyncioTestCase):
+    """A real Channel and Runtime with in-memory native and Feishu transports."""
 
     async def asyncSetUp(self):
         self.cwd = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -125,6 +125,8 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(claim)
         return claim
 
+
+class BindingScheduledChannelTest(BindingChannelCase):
     async def test_group_access_blocks_before_anchor_preparation_and_submission(self):
         for kind, error in ((ScopeKind.GROUP, None), (ScopeKind.TOPIC, OSError("capture failed"))):
             with self.subTest(kind=kind):
