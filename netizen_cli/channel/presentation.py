@@ -512,9 +512,9 @@ class CompletionPresentationChannel(ChannelReplies):
         evidence = FileEvidence()
         try:
             evidence = file_evidence()
-            if evidence == FileEvidence():
-                return _TaskFiles()
             if cwd is None:
+                if evidence == FileEvidence():
+                    return _TaskFiles()
                 raise TurnFileError("本轮工作目录未确认，不能使用项目默认目录解释文件。")
             summary = summarize_file_evidence(evidence, cwd)
         except Exception:
