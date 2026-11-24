@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from claude_agent_sdk import AssistantMessage, HookMatcher, ResultMessage, SystemMessage, ToolUseBlock
+from claude_agent_sdk import AssistantMessage, HookMatcher, ResultMessage, SystemMessage, ToolUseBlock, get_session_messages
 
 from netizen_cli.claude_installation import CLI_VERSION
 from netizen_cli.ordinary_sessions import PreparedPrompt
@@ -108,6 +108,30 @@ class NativeSession:
         assert result.session_id == self.session and result.uuid and result.user_message_uuid is None
         assert result.terminal_reason == reason and bool(result.result) == (reason == "completed")
 
+    async def external_turn(self):
+        """Leave the task gated while a second bundled CLI resumes the same session."""
+        async def history():
+            return await asyncio.to_thread(get_session_messages, self.session, directory=str(self.cwd))
+
+        assert len(self.system("background_tasks_changed")[-1].data["tasks"]) == 1
+        original = await history()
+        assert original
+        self.provider.live_session_reply = None
+        terminal = NativeSession(self.cwd, self.provider, self.case)
+        terminal.session = self.session
+        async with terminal.connected(resume=True):
+            assert await terminal.client.get_server_info()  # CLI initialized without a human query.
+            silent = await history()
+            print("Pure headless resume changed visible history:", silent != original, flush=True)
+            await terminal.query("external")
+            await terminal.until(lambda: any(r.user_message_uuid == terminal.h2 and
+                                             r.result == "fixture-reply-external" for r in terminal.results))
+            await terminal.idle_after(len(terminal.results))
+        changed = await history()
+        assert changed != original
+        assert any(m.type == "assistant" and {"type": "text", "text": "fixture-reply-external"}
+                   in m.message["content"] for m in changed)
+
     async def exercise(self):
         case = self.case
         await self.query("h1")
@@ -149,6 +173,9 @@ class NativeSession:
             assert partial.uuid and partial.message_id == tool_frame.message_id
             assert partial.user_message_uuid == self.h1 and frames.index(partial) <= frames.index(tool_frame)
         if case == "cold":
+            return
+        if case == "handoff":
+            await self.external_turn()
             return
         if case.startswith("agent"):
             await self.gate("child")
@@ -297,7 +324,7 @@ class QuiescenceProbe(NativeSession):
 async def session_facts(cwd, provider, evidence):
     evidence.check("live session fact pins", (version("claude-agent-sdk"), CLI_VERSION) == ("0.2.186", "2.1.329"))
     for case in ("early", "reverse", "wake", "foreground_interrupt", "wake_interrupt", "overlap", "stop_idle",
-                 "stop_busy", "agent_denied", "agent", "agent_esc", "cold", "cron",
+                 "stop_busy", "agent_denied", "agent", "agent_esc", "cold", "handoff", "cron",
                  "during-wake", "simultaneous", "during-h2", "three"):
         quiescence = case in {"during-wake", "simultaneous", "during-h2", "three"}
         trace = QuiescenceProbe(cwd, provider, case) if quiescence else NativeSession(cwd, provider, case)
@@ -316,15 +343,24 @@ async def session_facts(cwd, provider, evidence):
             async with asyncio.timeout(150 if case == "cron" else 30):
                 async with trace.connected():
                     await trace.exercise()
-                if case in {"cold", "cron"}:
+                if case in {"cold", "handoff", "cron"}:
                     trace.h2 = str(uuid4())
                     async with trace.connected(resume=True):
+                        start = len(provider.rows)
                         await trace.query("h2")
                         await trace.until(lambda: any(r.user_message_uuid == trace.h2 and r.result for r in trace.results))
                         if case == "cold":
                             current = next(m for m in trace.system("init") if m.data.get("user_message_uuids") == [trace.h2])
                             assert any(isinstance(m, ResultMessage) and not m.result and m.user_message_uuid is None
                                        for m in trace.frames[:trace.frames.index(current)])
+                        elif case == "handoff":
+                            # First model request after the holder's confirmed disconnect.
+                            row = next(r for r in provider.rows[start:] if r["path"] == "/v1/messages" and r["label"] == "h2")
+                            assert any(m["role"] == "user" and ("text", "external") in m["markers"]
+                                       for m in row["history"])
+                            assert any(m["role"] == "assistant" and "fixture-reply-external" in m["answers"]
+                                       for m in row["history"])
+                            await trace.idle_after(len(trace.results))
                         else:
                             assert trace.stops[0][1][0]["id"] == trace.stops[-1][1][0]["id"]
                 evidence.check("live session " + case, True)
