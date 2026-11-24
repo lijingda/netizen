@@ -21,7 +21,7 @@ from lark_oapi.api.im.v1 import GetMessageRequest
 from netizen_cli.channel.topics import validate_topic_message
 from netizen_cli.lark_app import LARK_APP_RELATIVE_PATH, load_lark_app
 from netizen_cli.process_messages import (
-    CONTENT_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
+    ITEM_TEXT_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
     StepItem, TextItem, ToolItem, Unknown, finish_items, item_events,
 )
 
@@ -77,7 +77,7 @@ async def probe(root: Path, chat: str, report: dict[str, object]) -> None:
                             outbound=OutboundConfig(retry=RetryConfig(max_attempts=1)))
     cases = {
         "A": "活动条目：桌面端请记录工具、清单和进展文字以及完成对勾的显示。",
-        "B": "大小预算：验证 1,800 字符的单事件与完成后拒绝更新。",
+        "B": "大小预算：验证适配层能发送的最大单事件与完成后拒绝更新。",
         "C": "并发样本：在本消息内发出六次重叠更新。",
     }
     reports: dict[str, dict[str, object]] = {}
@@ -141,15 +141,6 @@ async def create_in_topic(
     return created
 
 
-def budget_item(observed_at: int) -> ToolItem:
-    item = ToolItem("budget", "边界", observed_at, observed_at)
-    start, _ = item_events((item,))
-    # A JSON-escaped unit separator takes six characters in the inner event.
-    separators, remainder = divmod(CONTENT_LIMIT - len(start["content"]), 6)
-    label = item.text + "\x1f" * separators + "x" * remainder
-    return ToolItem(item.item_id, label, observed_at, observed_at)
-
-
 async def check_writes(port: ProcessMessages, target: Created, case: str, report: dict[str, object]) -> None:
     started_at = int(time.time())
 
@@ -173,11 +164,9 @@ async def check_writes(port: ProcessMessages, target: Created, case: str, report
             text = TextItem("progress", "已核对结果", observed_at, observed_at)
             await require_write("final_items", finish_items((tool, step, text), observed_at))
         elif case == "B":
-            items = (budget_item(started_at),)
-            size = max(len(e["content"]) for e in item_events(items))
-            report["max_event_characters"] = size
-            if size != CONTENT_LIMIT:
-                raise GateFailed
+            # TOOL_CALL_START has the largest envelope. Each quote costs two JSON characters.
+            items = (ToolItem("budget", '"' * ITEM_TEXT_LIMIT, started_at, started_at),)
+            report["max_event_characters"] = max(len(e["content"]) for e in item_events(items))
             await require_write("budget", items)
         elif case == "C":
             report["phase"] = "concurrent_updates"

@@ -12,6 +12,8 @@ from typing import Literal, Self, TypedDict
 
 import lark_oapi as lark
 
+from .turn_activity import normalize_activity_text_layout
+
 
 _RESOURCE = "/open-apis/im/v1/message_cot"
 CONTENT_LIMIT = 1_800
@@ -34,6 +36,7 @@ class _Item:
             raise ValueError("an Activity item requires a stable identity")
         if not isinstance(self.text, str):
             raise ValueError("Activity item text must be projected text")
+        object.__setattr__(self, "text", normalize_activity_text_layout(self.text))
         _check_timestamp(self.started_at)
         if self.finished_at is not None:
             _check_timestamp(self.finished_at)
@@ -119,35 +122,12 @@ def _inner(event_type: str, **fields: str) -> str:
     return json.dumps({"type": event_type, **fields}, ensure_ascii=False, separators=(",", ":"))
 
 
-def _clip_item_text(text: str, available: int) -> str:
-    # A JSON string literal includes two quotes already counted in the empty event.
-    def cost(value: str) -> int:
-        return len(json.dumps(value, ensure_ascii=False)) - 2
-
-    candidate = text if len(text) <= ITEM_TEXT_LIMIT else text[:ITEM_TEXT_LIMIT - 1] + "…"
-    if cost(candidate) <= available:
-        return candidate
-    remaining = available - 1  # The ellipsis costs one serialized character.
-    for index, char in enumerate(text[:ITEM_TEXT_LIMIT - 1]):
-        remaining -= cost(char)
-        if remaining < 0:
-            return text[:index] + "…"
-    return text[:ITEM_TEXT_LIMIT - 1] + "…"
-
-
 def _bounded_item(item: ProcessItem) -> ProcessItem:
-    if isinstance(item, ToolItem):
-        empty = _inner("TOOL_CALL_START", toolCallId=item.wire_id, toolCallName="")
-    elif isinstance(item, StepItem):
-        # FINISHED has the longer envelope. The name must be identical even
-        # when START was already sent while this step was still running.
-        empty = _inner("STEP_FINISHED", stepName="")
-    elif isinstance(item, TextItem):
-        empty = _inner("TEXT_MESSAGE_CONTENT", messageId=item.wire_id, delta="")
-    else:
+    if not isinstance(item, (ToolItem, StepItem, TextItem)):
         raise TypeError("unsupported Activity item")
-    text = _clip_item_text(item.text, CONTENT_LIMIT - len(empty))
-    return item if text == item.text else replace(item, text=text)
+    if len(item.text) <= ITEM_TEXT_LIMIT:
+        return item
+    return replace(item, text=item.text[:ITEM_TEXT_LIMIT - 1] + "…")
 
 
 def build_items(items: Sequence[ProcessItem]) -> tuple[ProcessItem, ...]:

@@ -88,25 +88,33 @@ class ItemProjection(unittest.TestCase):
                 label = text if size <= ITEM_TEXT_LIMIT else text[:299] + "…"
                 self.assertEqual(labels, [label] * 4)
 
-    def test_per_event_budget_includes_escaping_and_longer_step_end(self):
-        for make in (lambda: ToolItem("id", "\x00" * 300, T),
-                     lambda: StepItem("step", "\x00" * 300, T)):
-            item = make()
-            earlier, = item_events((item,))
-            later = item_events((item.finish(T + 1),))
-            self.assertEqual(earlier, later[0])
-            for e in later:
-                self.assertLessEqual(len(e["content"]), CONTENT_LIMIT)
-            if isinstance(item, StepItem):
-                self.assertEqual(json.loads(earlier["content"])["stepName"],
-                                 json.loads(later[-1]["content"])["stepName"])
-        empty = item_events((TextItem("id", "", T, T),))[1]["content"]
-        escaped, remainder = divmod(CONTENT_LIMIT - len(empty), 6)
-        boundary = "\x00" * escaped + "甲" * remainder
-        for text, expected in ((boundary, boundary), (boundary + "乙", boundary[:-1] + "…")):
-            content = item_events((TextItem("id", text, T, T),))[1]["content"]
-            self.assertLessEqual(len(content), CONTENT_LIMIT)
-            self.assertEqual(json.loads(content)["delta"], expected)
+    def test_normalizes_item_text_at_construction_and_preserves_paired_step_names_on_resend(self):
+        raw = "甲\x1f乙\r\n丙\t丁"
+        expected = "甲\uFFFD乙\n丙    丁"
+        step = StepItem("step", raw, T)
+        for item in (step, ToolItem("tool", raw, T), TextItem("text", raw, T, T)):
+            self.assertEqual(item.text, expected)
+
+        start, = item_events((step,))
+        final = finish_items((step,), T + 1)
+        pair = item_events(final)
+        self.assertEqual(pair[0], start)
+        self.assertEqual([json.loads(event["content"])["stepName"] for event in pair], [expected, expected])
+        self.assertEqual(item_events(finish_items(final, T + 2)), pair)
+
+    def test_maximum_serialized_event_for_each_item_type(self):
+        # After normalization each text character needs at most two inner JSON characters.
+        for item_type, event_type, maximum in ((ToolItem, "TOOL_CALL_START", 692),
+                                               (StepItem, "STEP_FINISHED", 638),
+                                               (TextItem, "TEXT_MESSAGE_CONTENT", 689)):
+            for char in ('"', "\\", "\n"):
+                with self.subTest(item_type=item_type.__name__, char=char):
+                    item = item_type("id", char * ITEM_TEXT_LIMIT, T, T)
+                    largest = max(item_events((item,)), key=lambda event: len(event["content"]))
+                    self.assertEqual((largest["event_type"], len(largest["content"])), (event_type, maximum))
+                    oversized = item_type("id", char * (ITEM_TEXT_LIMIT + 1), T, T)
+                    self.assertTrue(all(len(e["content"]) <= maximum for e in item_events((oversized,))))
+            self.assertLessEqual(maximum, CONTENT_LIMIT)
 
     def test_10_digit_seconds_and_ordering_are_validated(self):
         for bad in (True, T + 0.1, 999_999_999, 10_000_000_000):
