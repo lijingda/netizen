@@ -75,8 +75,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             await writer.drain()
             return await _read_response(reader)
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await _close_client(writer)
 
     async def test_request_and_response_are_immutable(self) -> None:
         seen: list[Request] = []
@@ -143,8 +142,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             await writer.drain()
             status, _headers, _body = await _read_response(reader)
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await _close_client(writer)
         self.assertEqual(status, 503)
         self.assertEqual(calls, 1)
 
@@ -233,12 +231,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 200)
             self.assertEqual(body, b"/capacity-returned")
         finally:
-            for _reader, writer in held:
-                writer.close()
-            await asyncio.gather(
-                *(writer.wait_closed() for _reader, writer in held),
-                return_exceptions=True,
-            )
+            await asyncio.gather(*(_close_client(writer) for _reader, writer in held))
 
     async def test_header_deadline_is_absolute_despite_drip(self) -> None:
         with patch("netizen_cli.admin.transport.HEADER_TIMEOUT_SECONDS", 0.15):
@@ -256,8 +249,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
                     await writer.drain()
                 status, _headers, body = await _read_response(reader)
             finally:
-                writer.close()
-                await writer.wait_closed()
+                await _close_client(writer)
 
         self.assertEqual(status, 408)
         self.assertEqual(body, b"request timeout")
@@ -282,8 +274,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.14)
                 status, _headers, body = await _read_response(reader)
             finally:
-                writer.close()
-                await writer.wait_closed()
+                await _close_client(writer)
 
         self.assertEqual(status, 408)
         self.assertEqual(body, b"request timeout")
@@ -457,8 +448,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(second_body, b"request timeout")
                 self.assertEqual(await reader.read(), b"")
             finally:
-                writer.close()
-                await writer.wait_closed()
+                await _close_client(writer)
 
     async def test_post_always_closes_connection(self) -> None:
         transport = await self._transport()
@@ -474,8 +464,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(headers[b"connection"], b"close")
             self.assertEqual(await reader.read(), b"")
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await _close_client(writer)
 
     async def test_same_write_pipelining_is_rejected_before_handler(self) -> None:
         calls = 0
@@ -550,8 +539,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await reader.read(), b"")
         self.assertEqual(transport.active_connection_count, 0)
         self.assertEqual(transport.active_handler_count, 0)
-        writer.close()
-        await writer.wait_closed()
+        await _close_client(writer)
 
     async def test_drain_deadline_cancels_remaining_handler(self) -> None:
         started = asyncio.Event()
@@ -575,8 +563,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cancelled.is_set())
         self.assertEqual(transport.active_connection_count, 0)
         self.assertEqual(transport.active_handler_count, 0)
-        writer.close()
-        await writer.wait_closed()
+        await _close_client(writer)
 
     async def test_port_conflict_leaves_failed_transport_closed(self) -> None:
         first = await self._transport()
@@ -608,6 +595,12 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(transport.state, AdminHttpState.BOUND_CLOSED)
         self.assertTrue(transport.admission_open)
+
+
+async def _close_client(writer: asyncio.StreamWriter) -> None:
+    writer.close()
+    with contextlib.suppress(ConnectionError):
+        await writer.wait_closed()
 
 
 async def _read_response(
