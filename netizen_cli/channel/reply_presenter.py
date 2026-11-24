@@ -19,7 +19,7 @@ from ..partial_answers import PartialAnswer
 from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, RunDisplay, TerminalStatus, TurnOpened, TurnResult
 from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
-from .topics import BindingCardLocation, CardReplyLocation, receipt
+from .topics import BindingCardLocation, CardReplyLocation
 from .physical_delivery import BODY, Item, Outcome, PhysicalDelivery, record_sent_answer
 
 
@@ -318,22 +318,26 @@ class _ReplyCardPresenter:
         if event.feedback.progress_card_enabled:
             try:
                 card = turn_progress_card(snapshot=snapshot)
+
+                async def send_card() -> SendResult | None:
+                    sent = await external_call(event.reply(card), isolate=event.policy.confirms_items)
+                    if event.validate_reply and not await external_call(event.validate_reply(sent), isolate=event.policy.confirms_items):
+                        return None
+                    return location.validate(sent, card=True) if location else sent
+
                 async with asyncio.timeout(self._operation_timeout_seconds):
-                    items = tuple(delivery.partial(item) for item in snapshot.partial_answers) if delivery else ()
                     if delivery:
-                        delivery.begin(items, event.run_reply)
-                    result = await external_call(event.reply(card), isolate=event.policy.confirms_items)
-                    if event.validate_reply is None or await external_call(event.validate_reply(result), isolate=event.policy.confirms_items):
-                        if location:
-                            result = location.validate(result, card=True)
-                        message_id = _confirmed_reply_id(result) if event.policy.confirms_items else _receipt_message_id(result)
-                        if delivery:
-                            delivery.record(items, receipt(result))
-                            if message_id:
-                                writer = self._message_writer(message_id)
-                                writer.known = card
-                                if event.run_reply and location:
-                                    event.run_reply.published(message_id, key.turn_id, items, location.usable)
+                        items = tuple(delivery.partial(item) for item in snapshot.partial_answers)
+                        _, result = await delivery.send(items, event.run_reply, send_card())
+                        message_id = _confirmed_reply_id(result) if result is not None else None
+                        if message_id:
+                            writer = self._message_writer(message_id)
+                            writer.known = card
+                            if event.run_reply and location:
+                                event.run_reply.published(message_id, key.turn_id, items, location.usable)
+                    else:
+                        result = await send_card()
+                        message_id = _receipt_message_id(result) if result is not None else None
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -452,14 +456,17 @@ class _ReplyCardPresenter:
                 item = ledger.partial(answer)
                 if ledger.items.get(item, "unattempted") != "unattempted":
                     continue
-                ledger.begin((item,), run_reply, post=True)
             try:
                 async with asyncio.timeout(self._operation_timeout_seconds):
-                    result = await external_call(reply(post), isolate=session.policy.confirms_items)
+                    operation = external_call(reply(post), isolate=session.policy.confirms_items)
                     if ledger:
-                        ledger.record((item,), receipt(result))
-                    if not _CardUpdateAttempt("", result).confirmed:
-                        continue
+                        outcome, result = await ledger.send((item,), run_reply, operation, post=True)
+                        if outcome != "confirmed" or result is None:
+                            continue
+                    else:
+                        result = await operation
+                        if not _CardUpdateAttempt("", result).confirmed:
+                            continue
                     if session.validate_reply is not None and not await external_call(session.validate_reply(result), isolate=session.policy.confirms_items):
                         continue
                     if ledger and session.location:

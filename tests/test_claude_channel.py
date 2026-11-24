@@ -1763,6 +1763,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         for outcome in ("rejected", "unknown", "confirmed"):
             with self.subTest(replacement_receipt=outcome):
                 await self.exercise_replacement_receipt(outcome)
+        for cards, outcome in product((True, False), ("code", "rejection exception", "unknown exception")):
+            with self.subTest(opening_card=cards, running_partial=outcome):
+                await self.exercise_initial_partial(cards, outcome)
         for cut in ("preparation error", "preparation deadline", "running rejection", "terminal rejection",
                     "fallback", "uncertain matching", "uncertain distinct", "uncertain matching then confirmed freeze",
                     "budget", "registry", "newer header"):
@@ -2063,6 +2066,53 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(mentions.assert_reminder(self), "fallback-B")
                 else:
                     self.assertEqual(mentions.assert_reminder(self), "card-A")
+
+    async def exercise_initial_partial(self, cards, outcome):
+        from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock
+        from lark_channel import OutboundCard, OutboundPost
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.topics import TopicPublishError
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                task_feedback=BindingTaskFeedback(progress_card_enabled=cards, completion_mention_enabled=False))
+            presenter = app._progress_cards
+            presenter._poll_seconds = .01
+            open_card = presenter.open
+
+            async def open_with_stage(event):
+                await self.until(lambda: (change := event.observe()) and change.snapshot.partial_answers)
+                return await open_card(event)
+
+            unknown = outcome == "unknown exception"
+            fx.channel.reply_results.append(SendResult(success=False, raw={"code": 99991400}) if outcome == "code"
+                                            else TopicPublishError("opening send", unknown=unknown))
+            with patch.object(presenter, "open", open_with_stage):
+                await app.handle_message(FakeMessage("work", message_id="H1"))
+                cli = clients.calls[-1]
+                cli.init()
+                for block in (TextBlock("stage"), ToolUseBlock("tool", "Read", {})):
+                    cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session,
+                        uuid=type(block).__name__, message_id="initial"))
+                await self.until(lambda: presenter._sessions and fx.channel.replies)
+                session = next(iter(presenter._sessions.values()))
+                first = fx.channel.replies[0][1]
+                self.assertIsInstance(first, OutboundCard if cards else OutboundPost)
+                self.assertIn("stage", str(first))
+                opening_receipt = list(session.delivery.items.values())
+                cli.result(result="distinct final")
+                self.assertTrue(await ordinary.wait_idle(10))
+            posts = [getattr(body, "markdown", body) for _, body in fx.channel.replies if not isinstance(body, OutboundCard)]
+            expected = [] if cards and unknown else ["**阶段性答案**\n\nstage"]
+            expected.append("distinct final")
+            if unknown or not cards:
+                expected.append(INCOMPLETE)
+            self.assertEqual(posts, expected)
+            self.assertEqual(sum(isinstance(body, OutboundCard) for _, body in fx.channel.replies), int(cards))
+            self.assertTrue(all(target == "H1" for target, _ in fx.channel.replies))
+            self.assertEqual(opening_receipt, ["unknown" if unknown else "rejected"])
 
     async def exercise_review_cut(self, cut):
         from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
