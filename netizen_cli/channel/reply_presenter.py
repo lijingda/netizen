@@ -19,8 +19,8 @@ from ..partial_answers import PartialAnswer
 from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, RunDisplay, TerminalStatus, TurnOpened, TurnResult
 from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
-from .topics import BindingCardLocation, CardReplyLocation
-from .physical_delivery import BODY, Item, Outcome, PhysicalDelivery, receipt, record_sent_answer
+from .topics import BindingCardLocation, CardReplyLocation, receipt
+from .physical_delivery import BODY, Item, Outcome, PhysicalDelivery, record_sent_answer
 
 
 logger = logging.getLogger(__name__)
@@ -230,12 +230,13 @@ class _ReplyCardPresenter:
                           delivery: PhysicalDelivery, items: tuple[Item, ...], reply: LogicalReply | None) -> Outcome:
         if location and not location.can_write(mid):
             return "unknown"
-        undisputed = delivery.begin(items, reply)
-        attempt = await self._attempt_update_message(mid, card, binding_id=key.owner_id,
-            operation_id=key.turn_id, location=location, policy=DeliveryPolicy.ITEM_RECEIPTS)
-        outcome = receipt(attempt.result)
-        # Rejecting this replacement cannot disprove an earlier unacknowledged write.
-        delivery.record(undisputed if outcome == "rejected" else items, outcome)
+
+        async def update() -> SendResult | None:
+            attempt = await self._attempt_update_message(mid, card, binding_id=key.owner_id,
+                operation_id=key.turn_id, location=location, policy=DeliveryPolicy.ITEM_RECEIPTS)
+            return attempt.result
+
+        outcome, _ = await delivery.send(items, reply, update())
         if (location and not location.can_write(mid)) or (reply and reply.messages is None):
             return "unknown"
         if outcome == "confirmed" and reply and location:
@@ -771,6 +772,8 @@ class _ReplyCardPresenter:
         except asyncio.CancelledError:
             raise
         except Exception:
+            if policy.confirms_items:
+                raise  # The physical delivery ledger classifies this transport exception.
             logger.exception(
                 "failed to update progress card",
                 extra={

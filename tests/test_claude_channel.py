@@ -1764,7 +1764,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(replacement_receipt=outcome):
                 await self.exercise_replacement_receipt(outcome)
         for cut in ("preparation error", "preparation deadline", "running rejection", "terminal rejection",
-                    "fallback", "uncertain matching", "uncertain distinct", "budget", "registry", "newer header"):
+                    "fallback", "uncertain matching", "uncertain distinct", "uncertain matching then confirmed freeze",
+                    "budget", "registry", "newer header"):
             with self.subTest(review_cut=cut):
                 await self.exercise_review_cut(cut)
         # Hold the busy receipt across a bodyless wake, a cron change and the final idle.
@@ -2098,6 +2099,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                                 if uncertain and card["header"]["title"]["content"] == "任务进行中":
                                     await update(mid, card)
                                     raise TimeoutError("applied running partial, receipt lost")
+                                if (cut.endswith("confirmed freeze") and
+                                        not any(e.get("element_id") == "turnanswerv1" for e in card["body"]["elements"])):
+                                    return await update(mid, card)
                                 return SendResult(success=False, raw={"code": 99991400})
                             return await update(mid, card)
                         stack.enter_context(patch.object(fx.channel, "update_card", reject_answer))
@@ -2121,12 +2125,20 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIn("streamed partial", str(fx.channel.updates[-1][1]))
                         self.assertEqual(mentions.assert_reminder(self), "first")
                         return
-                    cli.result(result="streamed partial" if cut == "uncertain matching" else "final answer")
+                    matching = cut.startswith("uncertain matching")
+                    cli.result(result="streamed partial" if matching else "final answer")
                     self.assertTrue(await ordinary.wait_idle(10))
                     if cut == "fallback" or uncertain:
                         posts = [getattr(c, "markdown", c) for _, c in fx.channel.replies if not hasattr(c, "card")]
-                        self.assertEqual(posts.count("final answer"), int(cut != "uncertain matching"))
+                        self.assertEqual(posts.count("final answer"), int(not matching))
                         self.assertEqual(sum(isinstance(c, str) and "streamed partial" in c for c in posts), int(cut == "fallback"))
+                        if cut.endswith("confirmed freeze"):
+                            self.assertEqual(fx.channel.updates[-1][1]["header"]["title"]["content"], "任务已完成")
+                            self.assertIn("streamed partial", str(fx.channel.updates[-1][1]))
+                            self.assertEqual(posts, [])
+                            self.assertCountEqual([(kind, state) for (kind, _), state in session.delivery.items.items()],
+                                                  [("body", "confirmed"), ("partial", "confirmed")])
+                            self.assertEqual(mentions.assert_reminder(self), "first")
                     return
                 if cut == "budget":
                     end = app._present_run_end
@@ -2694,8 +2706,10 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unowned_cron_card_and_plain_fragments_reach_the_exact_topic_once(self):
         from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.topics import TopicPublishError
         from lark_channel import OutboundCard
-        for cards in (False, True):
+        for cards, outcome in ((False, "confirmed"), (True, "lost"), (True, "rejected"),
+                               (True, "rejection exception"), (True, "confirmed")):
             async with owner_channel() as (app, fx, clients, clock, ordinary):
                 from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock
                 clock[0] = 2.
@@ -2711,26 +2725,39 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     while ordinary._active[binding.id].humans:
                         await asyncio.sleep(.005)
                 await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
-                if cards:
+                if cards and outcome == "confirmed":
                     self.freeze_trace(fx, "ownerless_cron")
                 cli.init(user_message_uuids=[])
                 for i, block in enumerate((TextBlock("stage"), ToolUseBlock("tool", "Bash", {}))):
                     cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session, message_id="m", uuid=str(i)))
                 raw = {"code": 0, "data": {"message_id": "sent", "chat_id": scope.chat_id,
                                            "thread_id": scope.topic_id, "root_id": "root"}}
-                count = 1 if cards else 2
-                fx.channel.send_results.extend([SendResult.ok(message_id="sent", raw=raw)] * count)
+                if outcome == "rejected":
+                    fx.channel.send_results.append(SendResult(success=False, raw={"code": 99991400}))
+                elif outcome == "rejection exception":
+                    fx.channel.send_results.append(TopicPublishError("explicit non-delivery", unknown=False))
+                elif outcome == "lost":
+                    fx.channel.send_results.append(TimeoutError("fresh card receipt lost"))
+                fx.channel.send_results.extend([SendResult.ok(message_id="sent", raw=raw)] * 2)
                 cli.result(user_message_uuid=None, uuid="cron-result", result="final text")
-                await self.until(lambda: len(fx.channel.send_calls) >= count)
+                await self.until(lambda: "cron-result" in cli.live.seen and not ordinary._active[binding.id].delivery.queues)
                 calls = fx.channel.send_calls
-                self.assertEqual(len(calls), count)
+                self.assertEqual(sum(isinstance(body, OutboundCard) for _, body, _ in calls), int(cards))
                 for to, body, opts in calls:
                     self.assertEqual((to, opts.reply_to, opts.reply_in_thread), (scope.chat_id, "root", True))
-                    self.assertEqual(isinstance(body, OutboundCard), cards)
-                self.assertIn("stage", str(calls[0][1]))
-                self.assertIn("final text", str(calls[-1][1]))
-                self.assertEqual(len({opts.uuid for _, _, opts in calls}), count)
+                self.assertEqual(len({opts.uuid for _, _, opts in calls}), len(calls))
+                texts = [body for _, body, _ in calls if isinstance(body, str)]
+                self.assertEqual(len(calls), int(cards) + len(texts))
+                if outcome == "lost":
+                    self.assertEqual(texts, [INCOMPLETE])
+                elif not cards or outcome in ("rejected", "rejection exception"):
+                    self.assertEqual(texts, ["**阶段性答案**\n\nstage", f"final text\n\n{CLAUDE_RELEASE_HINT}"])
+                else:
+                    self.assertEqual(texts, [])
                 if cards:
+                    self.assertIn("stage", str(calls[0][1]))
+                    self.assertIn("final text", str(calls[0][1]))
+                if cards and outcome == "confirmed":
                     await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
                     expect_presenter_trace(self, fx, "bodyless_anonymous_wake", reference=CLAUDE_FIXTURE)
                     cli.init(user_message_uuids=[])

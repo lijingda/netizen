@@ -1,4 +1,7 @@
 """In-memory receipts for one Claude physical answer and its running presentation."""
+import asyncio
+import logging
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -7,20 +10,14 @@ from lark_channel import SendResult
 from ..cards.reply import feishu_answer_text
 from ..partial_answers import PartialAnswer
 from ..ordinary_sessions import LogicalReply
-from .messages import _confirmed_reply_id, _send_result_error_code
-from .topics import CardReplyLocation
+from .messages import _confirmed_reply_id
+from .topics import CardReplyLocation, receipt
 
 Item = tuple[str, str]
 Outcome = Literal["unattempted", "unknown", "rejected", "confirmed"]
 BODY: Item = ("body", "")
 INCOMPLETE = "部分内容未能确认送达。"
-
-
-def receipt(result: SendResult | None) -> Outcome:
-    code = _send_result_error_code(result)
-    if result is not None and result.success and code in (None, 0):
-        return "confirmed"
-    return "rejected" if code is not None and code > 0 else "unknown"
+logger = logging.getLogger(__name__)
 
 
 def record_sent_answer(reply: LogicalReply | None, location: CardReplyLocation, turn_id: str,
@@ -49,8 +46,8 @@ class PhysicalDelivery:
         self.partial_text[item] = feishu_answer_text(answer.text)
         return item
 
-    def partial_receipt(self, content: str) -> Outcome:
-        states = {self.items[item] for item, text in self.partial_text.items() if text == content}
+    def partial_receipt(self, items: tuple[Item, ...]) -> Outcome:
+        states = {self.items[item] for item in items}
         for state in ("confirmed", "unknown", "rejected"):
             if state in states:
                 return state
@@ -73,6 +70,21 @@ class PhysicalDelivery:
         for item in items:
             if self.items.get(item) != "confirmed":
                 self.items[item] = outcome
+
+    async def send(self, items: tuple[Item, ...], reply: LogicalReply | None, operation: Awaitable[SendResult | None],
+                   *, post: bool = False, timeout: float | None = None) -> tuple[Outcome, SendResult | None]:
+        undisputed = self.begin(items, reply, post=post)
+        result = None
+        try:
+            async with asyncio.timeout(timeout):
+                result = await operation
+            outcome = receipt(result)
+        except Exception as error:
+            outcome = receipt(error)
+            logger.warning("content write %s (%s)", outcome, type(error).__name__)
+        # Rejecting this request cannot disprove an earlier unacknowledged write.
+        self.record(undisputed if outcome == "rejected" else items, outcome)
+        return outcome, result
 
     def image(self, source: str, state: Literal["unattempted", "unknown", "rejected", "ready"]) -> None:
         item = ("image", source)

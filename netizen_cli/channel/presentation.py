@@ -48,7 +48,7 @@ from .base import (
 )
 from .completion_mentions import send_completion_mention
 from .messages import _confirmed_reply_id
-from .physical_delivery import BODY, INCOMPLETE, Item, PhysicalDelivery, receipt, record_sent_answer
+from .physical_delivery import BODY, INCOMPLETE, Item, PhysicalDelivery, record_sent_answer
 from .replies import ChannelReplies
 from .reply_events import ItemDelivery, RunEnded, RunState, TurnResult
 from .reply_presenter import (
@@ -56,7 +56,7 @@ from .reply_presenter import (
     _PartialAnswerDelivery,
     render_run_card,
 )
-from .topics import CardReplyLocation, TopicPublishError
+from .topics import CardReplyLocation, receipt
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
 
@@ -119,14 +119,14 @@ class CompletionPresentationChannel(ChannelReplies):
         publishable = display.publishable
         first_id = partials.message_id
         body_items = ((BODY, *ledger.prepared_images) if content else ())
+        matching_items = tuple(item for item, text in ledger.partial_text.items() if content and text == content)
         location = partials.location or policy.location
         in_card_mode = outcome.task_feedback.progress_card_enabled and not partials.text_only
         has_answer = bool(content or outcome.partial_answers)
         if in_card_mode and snapshot and (has_answer or first_id):
             card_partials = {("partial", part.item_id) for part in outcome.partial_answers}
             # A Result can represent a running partial that the terminal snapshot coalesced.
-            shown_partials = tuple(item for item, text in ledger.partial_text.items()
-                                   if item in card_partials or (content and text == content))
+            shown_partials = tuple(item for item in ledger.partial_text if item in card_partials or item in matching_items)
             items = (*body_items, *shown_partials)
             try:
                 projection = turn_progress_projection(snapshot=snapshot, partial_answers=outcome.partial_answers,
@@ -143,11 +143,8 @@ class CompletionPresentationChannel(ChannelReplies):
                     return
             if (card and not first_id and publishable()
                     and all(ledger.items[item] not in ("unknown", "rejected") for item in ledger.partial_text)):
-                ledger.begin(items, reply)
-                sent = await policy.send(card, None, location)
-                state = receipt(sent)
-                ledger.record(items, state)
-                if state == "confirmed":
+                state, sent = await ledger.send(items, reply, policy.send(card, None, location))
+                if state == "confirmed" and sent is not None:
                     record_sent_answer(reply, location, key.turn_id, items, sent)
                     if reply and (mid := _confirmed_reply_id(sent)):
                         await self._progress_cards.publish_card(display, mid, key, location, projection, delivery=ledger, items=items, confirmed=card)
@@ -166,8 +163,7 @@ class CompletionPresentationChannel(ChannelReplies):
                         and ledger.can_post(item)):
                     post = OutboundPost(markdown=f"**阶段性答案**\n\n{feishu_answer_text(fragment.text)}")
                     await self._send_receipted_items(outcome, policy, ledger, (item,), post, f"partial/{index}", location)
-            matching_items = tuple(item for item, text in ledger.partial_text.items() if content and text == content)
-            matching = ledger.partial_receipt(content) if matching_items else "unattempted"
+            matching = ledger.partial_receipt(matching_items)
             if matching in ("confirmed", "unknown") or (matching == "rejected" and ledger.posted.intersection(matching_items)):
                 ledger.record(body_items, matching)
             elif content and ledger.can_post(BODY):
@@ -177,8 +173,10 @@ class CompletionPresentationChannel(ChannelReplies):
             if first_id and last_snapshot:
                 frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
                     run_continues=outcome.run_continues, include_result=False, collapsed=True)
+                shown = tuple(("partial", part.item_id) for part in last_snapshot.partial_answers)
+                items = (*shown, *body_items) if any(item in matching_items for item in shown) else shown
                 await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False,
-                    delivery=ledger, items=tuple(("partial", part.item_id) for part in last_snapshot.partial_answers))
+                    delivery=ledger, items=items)
             else:
                 await self._progress_cards.reconcile(display)
 
@@ -187,16 +185,10 @@ class CompletionPresentationChannel(ChannelReplies):
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
-        ledger.begin(items, policy.display.reply, post=True)
-        try:
-            async with asyncio.timeout(self._progress_cards.operation_timeout):
-                result = await external_call(policy.send(content, operation, location))
-            ledger.record(items, receipt(result))
+        _, result = await ledger.send(items, policy.display.reply, external_call(policy.send(content, operation, location)),
+                                      post=True, timeout=self._progress_cards.operation_timeout)
+        if result is not None:
             record_sent_answer(policy.display.reply, location, outcome.turn_id, items, result)
-        except TopicPublishError as error:
-            ledger.record(items, "unknown" if error.unknown else "rejected")
-        except Exception:
-            logger.warning("content delivery was not confirmed")
 
     async def _terminal_card_delivery(self, outcome: TurnResult,
                                       deliver: Callable[[], Awaitable[_CardUpdateAttempt | None]]) -> _CardUpdateAttempt | None:
