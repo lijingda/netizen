@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from hashlib import blake2b
 from secrets import token_bytes
@@ -13,6 +13,16 @@ from .turn_activity import (
     ACTIVITY_PLAN_LIMIT, TurnActivityEvent, TurnActivityKind, TurnActivityStatus,
     TurnPlanStepSnapshot, TurnPlanStepState, activity_operation_label, bounded_activity_text, sanitize_activity_text,
 )
+
+
+def process_plan_steps(steps: tuple[TurnPlanStepSnapshot, ...]) -> Iterator[tuple[str, TurnPlanStepState, bool]]:
+    """Yield the first status for each wire name and whether it can admit a new step."""
+    seen: set[str] = set()
+    for index, step in enumerate(steps):
+        name = sanitize_activity_text(step.step) or "未命名步骤"
+        if name not in seen:
+            seen.add(name)
+            yield name, step.status, index < ACTIVITY_PLAN_LIMIT
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,14 +94,13 @@ class ProcessActivityWindow:
     def plan(self, steps: tuple[TurnPlanStepSnapshot, ...]) -> None:
         now = int(self._clock())
         current: set[str] = set()
-        for step in steps[:ACTIVITY_PLAN_LIMIT]:
-            text = sanitize_activity_text(step.step) or "未命名步骤"
+        for text, status, admit in process_plan_steps(steps):
             identity = self._identity("step", text)
-            if identity in current:
+            row = self._rows.get(identity)
+            if row is None and not admit:
                 continue
             current.add(identity)
-            row = self._rows.get(identity)
-            if step.status is TurnPlanStepState.PENDING:
+            if status is TurnPlanStepState.PENDING:
                 if row is not None and row.finished_at is None:
                     self._rows[identity] = row.finish(now)
                     self.revision += 1
@@ -99,7 +108,7 @@ class ProcessActivityWindow:
             if row is None:
                 row = self._rows[identity] = ObservedProcessItem(identity, "step", text, now)
                 self.revision += 1
-            if step.status is TurnPlanStepState.COMPLETED and row.finished_at is None:
+            if status is TurnPlanStepState.COMPLETED and row.finished_at is None:
                 self._rows[identity] = row.finish(now)
                 self.revision += 1
         for key, row in tuple(self._rows.items()):

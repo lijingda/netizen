@@ -3022,6 +3022,21 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.cancel_tasks()
         self.assertTrue(cancelled.is_set())
 
+    async def test_side_offered_step_survives_position_thirteen(self):
+        from netizen_cli.channel.reply_events import PresentationKey
+        from tests.support.process_transport import check_displaced_step
+
+        self.runtime._turn_plan_observer = observer = FakeTurnPlanObserver()
+        _, record, _ = await self.open_side()
+        sub = await self.runtime.submit_side(side_id=record.id, input="work", owner_id="ou_owner", origin=object())
+        def observe(steps):
+            observer.append(thread_id=sub.thread_id, turn_id=sub.turn_id, steps=steps)
+            return self.runtime.side_turn_activity(record.id, refresh_plan=True)
+        try:
+            await check_displaced_step(self, PresentationKey(record.id, sub.thread_id, sub.turn_id, True), observe)
+        finally:
+            await self.finish_side_turn(sub)
+
     async def test_side_retains_command_after_drain_failure_while_steer_holds_the_lock(self):
         await self.check_retained_side_drain(fails=True)
 
@@ -5672,6 +5687,47 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await fx.app.handle_completion(replace(self.outcomes[-1], origin=origin))
             await state.task
             wire.assert_retained_completion(self, "done")
+
+    async def test_ordinary_offered_step_survives_position_thirteen(self):
+        from netizen_cli.channel.reply_events import PresentationKey
+        from tests.support.process_transport import check_displaced_step
+
+        self.runtime._turn_plan_observer = observer = FakeTurnPlanObserver()
+        binding = self.binding()
+        sub = await self.submit(binding)
+        def observe(steps):
+            observer.append(thread_id=sub.thread_id, turn_id=sub.turn_id, steps=steps)
+            return self.runtime.turn_activity(binding.id, refresh_plan=True)
+        try:
+            await check_displaced_step(self, PresentationKey(binding.id, sub.thread_id, sub.turn_id), observe)
+        finally:
+            await self.finish(self.codex.handles[-1], sub)
+
+    async def test_goal_offered_step_survives_position_thirteen(self):
+        await self.check_displaced_goal_step(rollover=False)
+
+    async def test_goal_offered_step_survives_position_thirteen_on_first_plan_after_rollover(self):
+        await self.check_displaced_goal_step(rollover=True)
+
+    async def check_displaced_goal_step(self, *, rollover):
+        from netizen_cli.channel.app_values import _goal_reply_activity
+        from netizen_cli.channel.reply_events import PresentationKey
+        from tests.support.process_transport import check_displaced_step
+
+        binding, handle, submission = await self.start_fake_goal()
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        def observe(steps):
+            handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.record.id, plan_updated=True, steps=steps))
+            return _goal_reply_activity(self.runtime.goal_activity(binding.id))
+        def advance():
+            handle.rollover("next")
+            handle.emit_activity(TurnActivityNotificationProjection(turn_id="next", turn_started=True))
+            return _goal_reply_activity(self.runtime.goal_activity(binding.id))
+        try:
+            await check_displaced_step(self, key, observe, advance if rollover else None)
+        finally:
+            handle.finish(response="done")
+            await self.runtime.wait_idle()
 
     async def test_goal_terminal_uses_finished_checklist_rows_since_the_last_poll(self):
         from netizen_cli.channel.codex_reply_events import CodexReplyEvents

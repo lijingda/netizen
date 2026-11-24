@@ -12,8 +12,8 @@ from typing import Literal
 
 from ..domain import FeishuScope
 from ..external_calls import external_call
-from ..turn_activity import sanitize_activity_text
-from ..process_activity import ObservedProcessItem
+from ..turn_activity import ACTIVITY_PLAN_LIMIT, TurnPlanStepState, sanitize_activity_text
+from ..process_activity import ObservedProcessItem, process_plan_steps
 from ..process_messages import (
     ITEM_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
     StepItem, TextItem, ToolItem, build_items, finish_items,
@@ -65,6 +65,9 @@ class ProcessList:
         # A new physical Turn may supply operations before its first checklist.
         # Only a known plan replaces the logical run's previous checklist.
         has_plan = rows is not None and snapshot.plan_available and snapshot.plan_generated
+        outside = {}
+        if has_plan and len(snapshot.steps) > ACTIVITY_PLAN_LIMIT:
+            outside = {name: status for name, status, admit in process_plan_steps(snapshot.steps) if not admit}
         current: dict[str, ProcessItem] = {
             key: item for key, item in self._window.items() if isinstance(item, StepItem) and not has_plan
         }
@@ -73,12 +76,18 @@ class ProcessList:
                 continue
             item = self._item(row)
             key = item.item_id
-            if key in current:
+            if key in current or (isinstance(item, StepItem) and item.text in outside and key not in self._step_pins):
                 continue
             pinned = self._step_pins.get(key) or self.running_offers.get(key) or self.pinned.get(key)
             if pinned is not None:
                 item = pinned.finish(row.finished_at) if row.finished_at is not None else pinned
             current[key] = item
+        if outside:
+            # A new physical window has never admitted the logical run's displaced step.
+            for key, pinned_step in self._step_pins.items():
+                status = outside.get(pinned_step.text)
+                if status is not None and key not in current:
+                    current[key] = pinned_step if status is TurnPlanStepState.IN_PROGRESS else pinned_step.finish(now)
         self._window = current
         for key, offered in self.running_offers.items():
             observed = current.get(key)

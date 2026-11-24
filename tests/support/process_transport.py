@@ -93,3 +93,61 @@ class ProcessTransport:
         case.assertEqual(final, running)
         case.assertEqual(ended, set(running))
         case.assertEqual(self.events[-1][1][1], reason)
+
+
+async def check_displaced_step(case, key, observe_plan, rollover=None):
+    """Drive the native snapshot and decode each replacement sent by the real writer."""
+    import asyncio
+    from unittest.mock import patch
+
+    from netizen_cli.channel.process_presentation import ProcessLocation, ProcessPresentation
+    from netizen_cli.domain import FeishuScope, ScopeKind
+    from netizen_cli.turn_activity import TurnPlanStepSnapshot, TurnPlanStepState
+
+    start = 1_800_000_000
+    now = start
+    wire = ProcessTransport([])
+    scope = FeishuScope("app", "chat", ScopeKind.DIRECT)
+    state = ProcessPresentation(key, key, wire.port, None, lambda: ProcessLocation(scope, "input", None),
+                                lambda _: None, lambda: now, 1, claimed_cot_ids=set(), binding_id=key.owner_id)
+    inspect = TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS)
+    other = TurnPlanStepSnapshot("Never offered", TurnPlanStepState.IN_PROGRESS)
+    prefix = tuple(TurnPlanStepSnapshot(f"Pending {n}", TurnPlanStepState.PENDING) for n in range(12))
+    async def sample(snapshot):
+        state.sample(snapshot)
+        while state.sampled != state.generation:
+            await asyncio.sleep(0)
+    def updates():
+        return [check_pairs(args[1]) for name, args, _ in wire.events if name == "process.update"]
+    try:
+        with patch("netizen_cli.runtime.activity.time", new=lambda: now):
+            async with asyncio.timeout(2):
+                await sample(observe_plan((inspect,)))
+                case.assertEqual(updates(), [({("step", "Inspect"): start}, set())])
+                now += 1
+                if rollover:
+                    await sample(rollover())
+                displaced = observe_plan((*prefix, inspect, other))
+                case.assertEqual(displaced.steps[12], inspect)
+                await sample(displaced)
+                for starts, ends in updates():
+                    case.assertNotIn(("step", "Inspect"), ends)
+                    case.assertEqual(starts, {("step", "Inspect"): start})
+                now += 1
+                await sample(observe_plan((inspect, TurnPlanStepSnapshot("Verify", TurnPlanStepState.IN_PROGRESS))))
+                starts, ends = updates()[-1]
+                case.assertEqual(starts, {("step", "Inspect"): start, ("step", "Verify"): now})
+                case.assertFalse(ends)
+                now += 1
+                await sample(observe_plan((*prefix, TurnPlanStepSnapshot("Inspect", TurnPlanStepState.COMPLETED), other)))
+                starts, ends = updates()[-1]
+                case.assertEqual(starts[("step", "Inspect")], start)
+                case.assertIn(("step", "Inspect"), ends)
+                case.assertNotIn(("step", "Never offered"), starts)
+                state.finish("done")
+                await state.task
+                case.assertEqual(len(wire.completed), 1)
+    finally:
+        state.revoke()
+        if state.task:
+            await asyncio.gather(state.task, return_exceptions=True)
