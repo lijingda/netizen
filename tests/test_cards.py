@@ -2199,6 +2199,14 @@ class CardRendererTest(unittest.TestCase):
                 self.assertNotIn("状态：", json.dumps(panel, ensure_ascii=False))
                 self.assertIn("过程信息：暂不可用", json.dumps(panel, ensure_ascii=False))
 
+        for status, title in (("interrupted", "任务已中断"), ("failed", "任务未完成")):
+            with self.subTest(status=status):
+                card = turn_progress_card(snapshot=snapshot, terminal_status=status, include_result=False).card
+                self.assertEqual(card["header"]["title"]["content"], title)
+                self.assertNotIn("turnanswerv1", [item.get("element_id") for item in _tagged_elements(card)])
+
+        with self.assertRaises(ValueError):
+            turn_progress_card(snapshot=snapshot, terminal_status="failed", final_response="失败", include_result=False)
         with self.assertRaises(ValueError):
             turn_progress_card(snapshot=snapshot, final_response="尚未结束")
         with self.assertRaises(ValueError):

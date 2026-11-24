@@ -346,7 +346,7 @@ class CompletionPresentationChannel(ChannelReplies):
         finally:
             if first_id and last_snapshot and not any(value == "unknown" for value in ledger.items.values()):
                 async def freeze() -> None:
-                    card = turn_progress_card(snapshot=replace(last_snapshot, state_line=None), terminal_status="completed",
+                    card = turn_progress_card(snapshot=replace(last_snapshot, state_line=None), terminal_status=status,
                                               include_result=False, collapsed=True)
                     await self._progress_cards.update_message(first_id, card, binding_id=binding_id,
                                                              operation_id=turn_id, publishable=publishable, location=location)
