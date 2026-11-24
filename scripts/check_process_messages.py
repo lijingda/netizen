@@ -12,7 +12,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Never
 
 import lark_oapi as lark
 from lark_channel import FeishuChannel, LogLevel, OutboundConfig, OutboundText, RetryConfig, SendOpts
@@ -36,14 +36,34 @@ def code(result: Created | Ok | Rejected | Unknown) -> int | None:
     return None if isinstance(result, Unknown) else 0
 
 
-async def exact(client: lark.Client, chat: str, message_id: str):
+def placement_mismatch(report: dict[str, object], reason: str) -> Never:
+    report["placement_mismatch"] = reason
+    raise GateFailed
+
+
+async def exact(client: lark.Client, chat: str, message_id: str, report: dict[str, object], phase: str):
+    report["phase"] = phase
     request = GetMessageRequest.builder().message_id(message_id).build()
-    response = await client.im.v1.message.aget(request)
-    if response.code != 0 or response.data is None or len(response.data.items or []) != 1:
+    for attempt in range(3):
+        if attempt:
+            await asyncio.sleep(1)
+        try:
+            response = await client.im.v1.message.aget(request)
+            if type(response.code) is not int:
+                raise TypeError("invalid message read response code")
+        except Exception as exc:
+            report[f"{phase}_read_failure"] = type(exc).__name__
+        else:
+            if response.code == 0:
+                break
+            report[f"{phase}_read_failure"] = response.code
+    else:
         raise GateFailed
+    if response.data is None or len(response.data.items or []) != 1:
+        placement_mismatch(report, "item_count")
     item, = response.data.items
     if item.message_id != message_id or item.chat_id != chat or item.deleted:
-        raise GateFailed
+        placement_mismatch(report, "message_identity_or_deleted")
     return item
 
 
@@ -73,7 +93,7 @@ async def probe(root: Path, chat: str, report: dict[str, object]) -> None:
             reports[case] = checks
             target = await create_in_topic(channel, client, port, chat, labels[case], instruction, checks)
             if target.cot_id in used_cots or target.message_id in used_messages:
-                raise GateFailed
+                placement_mismatch(checks, "reused_process_target")
             used_cots.add(target.cot_id)
             used_messages.add(target.message_id)
             await check_writes(port, target, case, checks)
@@ -97,14 +117,14 @@ async def create_in_topic(
                  reply_in_thread=True, reply_target_gone="fail"),
     ), chat)
 
-    report["phase"] = "read_parent_and_root"
-    parent = await exact(client, chat, origin.message_id)
-    anchor = await exact(client, chat, seed.message_id)
+    parent = await exact(client, chat, origin.message_id, report, "read_parent")
+    anchor = await exact(client, chat, seed.message_id, report, "read_root")
     if (origin.message_id == seed.message_id or not parent.thread_id
             or parent.root_id != seed.message_id or parent.parent_id != seed.message_id
             or anchor.parent_id or (anchor.root_id and anchor.root_id != seed.message_id)
             or (anchor.thread_id and anchor.thread_id != parent.thread_id)):
-        raise GateFailed
+        report["phase"] = "read_parent_and_root"
+        placement_mismatch(report, "parent_or_root_relationship")
     report["parent_and_root_verified"] = True
     report["phase"] = "create"
     created = await port.create(chat, origin.message_id, True)
@@ -112,12 +132,11 @@ async def create_in_topic(
     if not isinstance(created, Created):
         raise GateFailed
 
-    report["phase"] = "read_process_placement"
-    placed = await exact(client, chat, created.message_id)
+    placed = await exact(client, chat, created.message_id, report, "read_process_placement")
     if (created.message_id in (origin.message_id, seed.message_id)
             or placed.thread_id != parent.thread_id or placed.root_id != seed.message_id
             or placed.parent_id != origin.message_id):
-        raise GateFailed
+        placement_mismatch(report, "process_relationship")
     report["process_placement_verified"] = True
     return created
 
@@ -209,7 +228,7 @@ def main() -> int:
         asyncio.run(probe(args.root.expanduser().resolve(), args.chat, report))
         report["api_passed"] = True
     except Exception:
-        pass  # Phase, structural checks and numeric codes are the only diagnostics.
+        pass  # Retain only the structural diagnostics recorded at the failed phase.
     print(json.dumps(report, indent=2))
     return 0 if report["api_passed"] else 1
 

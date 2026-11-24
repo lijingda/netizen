@@ -4,7 +4,7 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from netizen_cli.process_messages import Created, Ok, ProcessMessages, Rejected, Unknown, item_events
 from scripts import check_process_messages
@@ -101,15 +101,69 @@ class LiveProbeContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["phase"], "concurrent_updates")
         port.complete.assert_awaited_once_with("c", "m", "error")
 
-    async def test_exact_read_checks_single_item_and_its_identity(self):
+    async def test_exact_read_retries_only_failed_gets_and_records_the_last_failure(self):
+        item = SimpleNamespace(message_id="m", chat_id="chat", deleted=False)
+        success = SimpleNamespace(code=0, data=SimpleNamespace(items=[item]))
+        rejected = SimpleNamespace(code=230001, msg="private response")
+        timeout = TimeoutError("private exception")
+        for outcomes, failure, recovered in (
+            ([rejected, timeout, success], "TimeoutError", True),
+            ([timeout, success], "TimeoutError", True),
+            ([timeout, rejected, rejected], 230001, False),
+            ([rejected, timeout, timeout], "TimeoutError", False),
+        ):
+            with self.subTest(failure=failure, attempts=len(outcomes), recovered=recovered):
+                client = AsyncMock()
+                fetch = client.im.v1.message.aget
+                fetch.side_effect = outcomes
+                report = {}
+                with patch.object(check_process_messages.asyncio, "sleep") as delay:
+                    if recovered:
+                        self.assertIs(await exact(client, "chat", "m", report, "read_parent"), item)
+                    else:
+                        with self.assertRaises(GateFailed):
+                            await exact(client, "chat", "m", report, "read_parent")
+                self.assertEqual(report, {"phase": "read_parent", "read_parent_read_failure": failure})
+                self.assertEqual([args.args[0].message_id for args in fetch.await_args_list], ["m"] * len(outcomes))
+                self.assertEqual(delay.await_args_list, [call(1)] * (len(outcomes) - 1))
+
+    async def test_exact_read_checks_single_item_and_identity_without_retrying_mismatches(self):
         client = AsyncMock()
         fetch = client.im.v1.message.aget
         item = SimpleNamespace(message_id="m", chat_id="chat", deleted=False)
-        for items, chat, message in (([], "chat", "m"), ([item, item], "chat", "m"),
-                                     ([item], "other", "m"), ([item], "chat", "other")):
+        for items, chat, message, reason in (([], "chat", "m", "item_count"), ([item, item], "chat", "m", "item_count"),
+                                             ([item], "other", "m", "message_identity_or_deleted"),
+                                             ([item], "chat", "other", "message_identity_or_deleted")):
+            fetch.reset_mock()
             fetch.return_value = SimpleNamespace(code=0, data=SimpleNamespace(items=items))
-            with self.assertRaises(GateFailed):
-                await exact(client, chat, message)
-        self.assertIs(await exact(client, "chat", "m"), item)
-        request, = fetch.await_args.args
-        self.assertEqual(request.message_id, "m")
+            report = {}
+            with patch.object(check_process_messages.asyncio, "sleep") as delay:
+                with self.assertRaises(GateFailed):
+                    await exact(client, chat, message, report, "read_root")
+            self.assertEqual(report, {"phase": "read_root", "placement_mismatch": reason})
+            fetch.assert_awaited_once()
+            delay.assert_not_awaited()
+
+    async def test_process_relationship_mismatch_stops_after_the_first_read(self):
+        def location(message, root, parent):
+            return SimpleNamespace(message_id=message, chat_id="chat", deleted=False,
+                                   root_id=root, parent_id=parent, thread_id="topic")
+
+        parent, root = location("parent", "root", "root"), location("root", None, None)
+        placed = location("process", "root", "wrong-parent")
+        client = AsyncMock()
+        fetch = client.im.v1.message.aget
+        fetch.side_effect = [SimpleNamespace(code=0, data=SimpleNamespace(items=[item]))
+                             for item in (parent, root, placed)]
+        port = AsyncMock(spec=ProcessMessages)
+        port.create.return_value = Created("cot", "process")
+        report = {}
+        with (patch.object(check_process_messages, "validate_topic_message", side_effect=(root, parent)),
+              patch.object(check_process_messages.asyncio, "sleep") as delay,
+              self.assertRaises(GateFailed)):
+            await check_process_messages.create_in_topic(AsyncMock(), client, port, "chat", "seed", "parent", report)
+        self.assertEqual([c.args[0].message_id for c in fetch.await_args_list], ["parent", "root", "process"])
+        delay.assert_not_awaited()
+        self.assertEqual(report["placement_mismatch"], "process_relationship")
+        self.assertNotIn("read_process_placement_read_failure", report)
+        port.create.assert_awaited_once()
