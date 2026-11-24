@@ -792,6 +792,7 @@ class SideRuntime(SubmissionRuntime):
             turn_state=active.state if active is not None else None,
             last_activity=session.last_activity,
             revision=session.revision,
+            task_feedback=session.task_feedback,
         )
 
     def _require_side(self, side_id: str) -> _SideSession:

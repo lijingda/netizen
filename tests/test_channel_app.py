@@ -6923,7 +6923,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         rendered = str(self.channel.updates[-1][1])
         self.assertIn("执行中表情闪烁：开启", rendered)
-        self.assertIn("进度卡：开启", rendered)
+        self.assertIn("回复消息类型：卡片", rendered)
 
     async def test_config_replaces_persistent_settings_without_starting_turn(self) -> None:
         await self.fixture.new()
@@ -7067,7 +7067,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(values["new_progress_card"].startswith("progress-card:v1:[true,"))
         control = next(item for item in form_controls(card.card) if item["name"] == "new_progress_card")
         values["new_progress_card"] = next(
-            option["value"] for option in control["options"] if option["text"]["content"] == "关闭"
+            option["value"] for option in control["options"] if option["text"]["content"] == "过程消息"
         )
 
         await self.app.handle_card_action(direct_card_event(self.channel, values))

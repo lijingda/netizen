@@ -618,6 +618,7 @@ class SideSessionSnapshot:
     turn_state: ActiveState | None
     last_activity: float
     revision: int = 0
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
 
 
 @dataclass(frozen=True, slots=True)

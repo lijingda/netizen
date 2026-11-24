@@ -422,13 +422,13 @@
             <h4>任务反馈</h4>
             <div class="defaults-feedback">
               <label><input id="session-settings-reactions" type="checkbox">表情反馈</label>
-              <label><input id="session-settings-progress" type="checkbox">进度卡片</label>
+              <label>回复消息类型<select id="session-settings-progress"><option value="card">卡片</option><option value="process">过程消息</option></select></label>
               <label><input id="session-settings-completion-mention" type="checkbox">结束时 @ 提醒</label>
             </div>
             <button id="session-settings-progress-reset" class="progress-reset" type="button" hidden>恢复跟随全局</button>
             <div id="session-settings-progress-settings" class="progress-settings" hidden>
               <p id="session-settings-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局过程卡配置。修改细项后将保存为独立配置。</p>
-              <label>过程卡组织方式<select id="session-settings-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
+              <label>卡片组织方式（仅卡片生效）<select id="session-settings-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
               <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
               <div class="defaults-feedback"><label><input id="session-settings-progress-show-commentary" type="checkbox">最近进展</label></div>
               <div id="session-settings-progress-commentary-capacity" class="schedule-form-grid">
@@ -510,13 +510,13 @@
             <h4>任务反馈</h4>
             <div class="defaults-feedback">
               <label><input id="defaults-reactions" type="checkbox">表情反馈</label>
-              <label><input id="defaults-progress" type="checkbox">进度卡片</label>
+              <label>回复消息类型<select id="defaults-progress"><option value="card">卡片</option><option value="process">过程消息</option></select></label>
               <label><input id="defaults-completion-mention" type="checkbox">结束时 @ 提醒</label>
             </div>
             <button id="defaults-progress-reset" class="progress-reset" type="button" hidden>恢复跟随全局</button>
             <div id="defaults-progress-settings" class="progress-settings" hidden>
               <p id="defaults-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局过程卡配置。修改细项后将保存为独立配置。</p>
-              <label>过程卡组织方式<select id="defaults-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
+              <label>卡片组织方式（仅卡片生效）<select id="defaults-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
               <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
               <div class="defaults-feedback"><label><input id="defaults-progress-show-commentary" type="checkbox">最近进展</label></div>
               <div id="defaults-progress-commentary-capacity" class="schedule-form-grid">
@@ -711,7 +711,7 @@
                   <label id="schedule-context-field">消息上下文<select id="schedule-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
                 </div>
                 <label class="schedule-checkbox"><input id="schedule-reactions" type="checkbox">表情反馈</label>
-                <label class="schedule-checkbox"><input id="schedule-progress" type="checkbox">进度卡片</label>
+                <label class="schedule-checkbox">回复消息类型<select id="schedule-progress"><option value="card">卡片</option><option value="process">过程消息</option></select></label>
                 <label class="schedule-checkbox"><input id="schedule-completion-mention" type="checkbox">结束时 @ 提醒（自动首轮除外）</label>
               </div>
             </details>
@@ -832,7 +832,7 @@
         <form id="global-card-form" class="card-form global-card-form">
           <fieldset id="global-card-fields" disabled>
             <div id="global-card-progress-settings" class="progress-settings" hidden>
-              <label>过程卡组织方式<select id="global-card-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
+              <label>卡片组织方式（仅卡片生效）<select id="global-card-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
               <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
               <div class="defaults-feedback"><label><input id="global-card-progress-show-commentary" type="checkbox">最近进展</label></div>
               <div id="global-card-progress-commentary-capacity" class="schedule-form-grid">

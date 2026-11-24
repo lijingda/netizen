@@ -259,7 +259,7 @@ class ServiceCore:
 
     async def _assemble_claude(
         self, owner: AdminIdentity, clients: ClaudeClients,
-        _editor: ConfigFileEditor | None, _progress: ProgressCardConfigService,
+        _editor: ConfigFileEditor | None, progress_card_config: ProgressCardConfigService,
     ) -> BackendAssembly:
         from .runtime.claude_ordinary import ClaudeOrdinarySessions
 
@@ -273,7 +273,7 @@ class ServiceCore:
 
         self._claude = ClaudeOrdinarySessions(
             bindings=self._store, clients=clients, owner_id=owner.open_id,
-            on_completion=completed, notice=notice,
+            on_completion=completed, notice=notice, progress_card_defaults=lambda: progress_card_config.current,
         )
         return BackendAssembly(
             self._claude, self._claude,

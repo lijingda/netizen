@@ -375,7 +375,7 @@ class SideChannel(PromptChannel):
                     parent_short_id=record.parent_binding_id[:8],
                     state=snapshot.state.value,
                     turn_state=turn_state,
-                    git_branch_lines=git_branch_lines,
+                    git_branch_lines=(*git_branch_lines, f"回复消息类型：{snapshot.task_feedback.reply_type_label}"),
                 ),
             )
             return

@@ -436,7 +436,7 @@ class CardControlChannel(TurnFileChannel):
                 f"{context_mode_display(binding.message_context_mode)}。"
                 f"执行中表情闪烁："
                 f"{'开启' if binding.task_feedback.reaction_pulse_enabled else '关闭'}；"
-                f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}；"
+                f"回复消息类型：{binding.task_feedback.reply_type_label}；"
                 f"结束时 @ 提醒：{'开启' if binding.task_feedback.completion_mention_enabled else '关闭'}。"
                 "现在可以直接发送任务，例如：梳理这个项目的结构。"
                 "如果刚才的任务因没有会话而未执行，请重新发送。"
@@ -521,7 +521,7 @@ class CardControlChannel(TurnFileChannel):
                 f"{context_mode_display(binding.message_context_mode)}。"
                 f"执行中表情闪烁："
                 f"{'开启' if binding.task_feedback.reaction_pulse_enabled else '关闭'}；"
-                f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}；"
+                f"回复消息类型：{binding.task_feedback.reply_type_label}；"
                 f"结束时 @ 提醒：{'开启' if binding.task_feedback.completion_mention_enabled else '关闭'}。"
                 "会话后续每条新 Turn 都会应用。",
             )

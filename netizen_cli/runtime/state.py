@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -362,9 +362,7 @@ class RuntimeState:
 
     def _capture_task_feedback(self, feedback: BindingTaskFeedback) -> BindingTaskFeedback:
         """Freeze presentation defaults without changing the Binding's intent."""
-        if feedback.progress_card_settings is not None:
-            return feedback
-        return replace(feedback, progress_card_settings=self._progress_card_defaults())
+        return feedback.capture(self._progress_card_defaults)
 
     def set_completion_handler(self, handler: CompletionHandler) -> None:
         self._on_completion = handler

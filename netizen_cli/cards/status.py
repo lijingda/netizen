@@ -88,7 +88,7 @@ def _decode_snapshot(target_kind: str, value: Any) -> dict[str, Any]:
     # and never use these historical labels as command admission or identity.
     if target_kind == "side":
         strings = {"short_id", "parent_short_id", "state", "turn_state"}
-        lines = {"git_branch_lines": 1}
+        lines = {"git_branch_lines": 2}
     else:
         strings = {"short_id", "project_alias", "native_thread_id", "state", "context_window_line", "subscription_line"}
         # Ordinary status includes cwd, an optional Git header, and a warning

@@ -1,0 +1,454 @@
+{
+  "True/True": [
+    [
+      "add_reaction",
+      [
+        "om_new",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_new",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "**阶段性答案**\n\n阶段正文",
+          "post": null,
+          "title": null,
+          "mentions": []
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_new",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务已完成 · 本轮文件 1 个"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "turnanswerv1",
+                  "flex_mode": "none",
+                  "background_style": "default",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "4px",
+                      "elements": [
+                        {
+                          "tag": "markdown",
+                          "content": "最终正文"
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "<at id=ou_user></at>"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "tag": "column_set",
+                  "element_id": "turnfilesv4",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "markdown",
+                          "content": "**本轮文件** · 共 1 个 · 第 1/1 页\n累计修改 <font color='green'>+0</font> <font color='red'>-0</font>\n<font color='grey'>行数累计成功的文件修改，重复修改会重复计数；统计不完整时省略总计或相应文件的数字。</font>\n<font color='grey'>点击“发送”后，文件将以图片或文件消息发送到本卡片话题。</font>"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "background_style": "default",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 5,
+                              "padding": "8px",
+                              "vertical_spacing": "2px",
+                              "elements": [
+                                {
+                                  "tag": "markdown",
+                                  "content": "📄 `output.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "auto",
+                              "vertical_align": "center",
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "发送"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "turn-file.send",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "turn_id": "turn:v1:turn-one",
+                                        "path": "<root>/project/output.txt"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务已完成"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "本轮文件 1 个 · 第 1/1 页"
+              },
+              "template": "green",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ]
+  ],
+  "True/False": [
+    [
+      "add_reaction",
+      [
+        "om_new",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_new",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "**阶段性答案**\n\n阶段正文",
+          "post": null,
+          "title": null,
+          "mentions": []
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_new",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "最终正文",
+          "post": null,
+          "title": null,
+          "mentions": [
+            {
+              "open_id": "ou_user",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        }
+      ],
+      {}
+    ]
+  ],
+  "False/True": [
+    [
+      "add_reaction",
+      [
+        "om_new",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_new",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "**阶段性答案**\n\n阶段正文",
+          "post": null,
+          "title": null,
+          "mentions": []
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_new",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务已完成 · 本轮文件 1 个"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "turnanswerv1",
+                  "flex_mode": "none",
+                  "background_style": "default",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "4px",
+                      "elements": [
+                        {
+                          "tag": "markdown",
+                          "content": "最终正文"
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "<at id=ou_user></at>"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "tag": "column_set",
+                  "element_id": "turnfilesv4",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "markdown",
+                          "content": "**本轮文件** · 共 1 个 · 第 1/1 页\n累计修改 <font color='green'>+0</font> <font color='red'>-0</font>\n<font color='grey'>行数累计成功的文件修改，重复修改会重复计数；统计不完整时省略总计或相应文件的数字。</font>\n<font color='grey'>点击“发送”后，文件将以图片或文件消息发送到本卡片话题。</font>"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "background_style": "default",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 5,
+                              "padding": "8px",
+                              "vertical_spacing": "2px",
+                              "elements": [
+                                {
+                                  "tag": "markdown",
+                                  "content": "📄 `output.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "auto",
+                              "vertical_align": "center",
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "发送"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "turn-file.send",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "turn_id": "turn:v1:turn-one",
+                                        "path": "<root>/project/output.txt"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务已完成"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "本轮文件 1 个 · 第 1/1 页"
+              },
+              "template": "green",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ]
+  ],
+  "False/False": [
+    [
+      "add_reaction",
+      [
+        "om_new",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_new",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "**阶段性答案**\n\n阶段正文",
+          "post": null,
+          "title": null,
+          "mentions": []
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_new",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "最终正文",
+          "post": null,
+          "title": null,
+          "mentions": [
+            {
+              "open_id": "ou_user",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        }
+      ],
+      {}
+    ]
+  ]
+}

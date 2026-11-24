@@ -3089,7 +3089,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("cost", rendered.lower())
         self.assertIn("自动带上期间的群聊讨论", rendered)
         self.assertIn("执行中表情闪烁：开启", rendered)
-        self.assertIn("进度卡：开启", rendered)
+        self.assertIn("回复消息类型：卡片", rendered)
 
         inherited = str(
             binding_configured_card(
@@ -3102,7 +3102,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("继承 Codex", inherited)
         self.assertIn("仅这条 @ 消息", inherited)
         self.assertIn("执行中表情闪烁：关闭", inherited)
-        self.assertIn("进度卡：关闭", inherited)
+        self.assertIn("回复消息类型：过程消息", inherited)
 
         created = str(
             binding_created_card(

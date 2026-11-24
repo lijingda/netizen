@@ -834,7 +834,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.runner.open_admission()
         session = await self.login()
         for path in ("session-tool-access", "side-topics", "schedules?mode=options", "schedules?mode=runs",
-                     "progress-card/settings", "question-notifications/settings", "sessions/conversation",
+                     "question-notifications/settings", "sessions/conversation",
                      "runtime-snapshots?sideIds=side", "sessions?sortBy=updatedAt", "sessions?inventoryState=archived"):
             with self.subTest(path=path):
                 status, _, result = await self.json_get("/api/v1/" + path, session)

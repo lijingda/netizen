@@ -672,7 +672,7 @@ class CommandChannel(CardControlChannel):
                 scope=intent.scope, binding_id=binding.id, short_id=binding.short_id, project_alias=binding.project_alias,
                 native_thread_id=binding.native_thread_id, state=state, metadata_lines=thread_metadata_lines,
                 git_branch_lines=git_branch_lines, context_window_line=codex_context_line(context),
-                context_mode_lines=context_mode_lines, model_lines=codex_model_lines(model),
+                context_mode_lines=(*context_mode_lines, f"回复消息类型：{binding.task_feedback.reply_type_label}"), model_lines=codex_model_lines(model),
                 progress_lines=progress_lines, subscription_line=subscription_line,
             ),
         )
