@@ -1,7 +1,7 @@
 """Netizen-owned values for ordinary session inputs and completion."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -91,13 +91,50 @@ class ClaudeCliState:
         return "全部完成"
 
 
+@dataclass(slots=True)
+class _ReplyMessage:
+    message_id: str
+    disqualified_ids: set[str] = field(repr=False)
+    confirmed_answer_items: set[tuple[str, str, str]] = field(default_factory=set)
+
+    @property
+    def usable(self) -> bool:
+        # The Binding's ID set also catches a contradiction on a different send.
+        return self.message_id not in self.disqualified_ids
+
+
 @dataclass(slots=True, weakref_slot=True, eq=False)
 class LogicalReply:
     attempted: bool = False
-    message_id: str | None = None
+    # Insertion order is publication order. Replacing an existing message never promotes it.
+    messages: dict[str, _ReplyMessage] | None = field(default_factory=dict)
+    unaddressed_confirmation: bool = False
 
-    def confirmed(self, message_id: str) -> None:
-        self.message_id = message_id
+    def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], disqualified_ids: set[str]) -> None:
+        if self.messages is None:
+            return
+        answers = {(turn_id, kind, item_id) for kind, item_id in items if kind in ("body", "partial")}
+        if answers:
+            self.attempted = True
+        if mid:
+            message = self.messages.setdefault(mid, _ReplyMessage(mid, disqualified_ids))
+            message.confirmed_answer_items.update(answers)
+        elif answers:
+            self.unaddressed_confirmation = True
+
+    def mention_target(self, source: str, usable: Callable[[str], bool]) -> str | None:
+        if self.messages is None:
+            return None
+        for message in reversed(self.messages.values()):
+            if message.usable and message.confirmed_answer_items and usable(message.message_id):
+                return message.message_id
+        return source if (not self.attempted or self.unaddressed_confirmation) and usable(source) else None
+
+    def retire(self) -> None:
+        if self.messages is not None:
+            self.messages.clear()
+            self.messages = None
+        self.unaddressed_confirmation = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,7 +6,9 @@ from lark_channel import SendResult
 
 from ..cards.reply import feishu_answer_text
 from ..partial_answers import PartialAnswer
-from .messages import _send_result_error_code
+from ..ordinary_sessions import LogicalReply
+from .messages import _confirmed_reply_id, _send_result_error_code
+from .topics import CardReplyLocation
 
 Item = tuple[str, str]
 Outcome = Literal["unattempted", "unknown", "rejected", "confirmed"]
@@ -21,8 +23,18 @@ def receipt(result: SendResult | None) -> Outcome:
     return "rejected" if code is not None and code > 0 else "unknown"
 
 
+def record_sent_answer(reply: LogicalReply | None, location: CardReplyLocation, turn_id: str,
+                       items: tuple[Item, ...], result: SendResult) -> None:
+    # An empty ID denotes a confirmed post with contradictory IDs. It may qualify
+    # for the original-input exception, but is never evidence of content on that input.
+    mid = _confirmed_reply_id(result, on_conflict="")
+    if reply is not None and mid is not None:
+        reply.published(mid, turn_id, items, location.binding.unusable)
+
+
 @dataclass(slots=True)
 class PhysicalDelivery:
+    reply: LogicalReply | None = None
     items: dict[Item, Outcome] = field(default_factory=dict)
     partial_text: dict[Item, str] = field(default_factory=dict)
     prepared_images: set[Item] = field(default_factory=set)
@@ -46,6 +58,8 @@ class PhysicalDelivery:
 
     def begin(self, items: tuple[Item, ...]) -> None:
         # Mark before awaiting the Channel. Cancellation leaves an unknown outcome.
+        if self.reply and any(kind in ("body", "partial") for kind, _ in items):
+            self.reply.attempted = True
         self.record(items, "unknown")
 
     def record(self, items: tuple[Item, ...], outcome: Outcome) -> None:

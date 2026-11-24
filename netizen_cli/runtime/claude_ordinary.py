@@ -646,6 +646,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
     def _retire(self, execution: _Execution, human: _Human) -> None:
         if execution.humans.pop(human.input_id, None) is None:
             return
+        human.reply.retire()
         human.take_cursor()  # Discard a cursor for which intake was never proven.
         anchor = human.origin
         if isinstance(anchor, ClaudeInputAnchor):

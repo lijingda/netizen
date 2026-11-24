@@ -48,7 +48,7 @@ from .base import (
 )
 from .completion_mentions import send_completion_mention
 from .messages import _confirmed_reply_id
-from .physical_delivery import BODY, INCOMPLETE, Item, PhysicalDelivery, receipt
+from .physical_delivery import BODY, INCOMPLETE, Item, PhysicalDelivery, receipt, record_sent_answer
 from .replies import ChannelReplies
 from .reply_events import ItemDelivery, RunEnded, RunState, TurnResult
 from .reply_presenter import (
@@ -84,10 +84,13 @@ class CompletionPresentationChannel(ChannelReplies):
         if not display.publishable():
             return
         ledger = self._progress_cards.physical_delivery(key)
+        ledger.reply = display.reply
         for part in outcome.partial_answers:
             ledger.partial(part)
         if outcome.content:
             ledger.expect(BODY)
+        if display.reply and ledger.items:
+            display.reply.attempted = True
         try:
             async with asyncio.timeout_at(policy.deadline):
                 content = outcome.content
@@ -115,8 +118,6 @@ class CompletionPresentationChannel(ChannelReplies):
         await self._progress_cards.abandon(key=key)
         if not display.publishable():
             return
-        if reply and ledger.items:
-            reply.attempted = True
         status = outcome.status
         publishable = display.publishable
         first_id = partials.message_id
@@ -127,8 +128,10 @@ class CompletionPresentationChannel(ChannelReplies):
         if in_card_mode and snapshot and (has_answer or first_id):
             card_partials = {("partial", part.item_id) for part in outcome.partial_answers}
             # A Result can represent a running partial that the terminal snapshot coalesced.
-            items = (*body_items, *(item for item, text in ledger.partial_text.items()
-                                    if item in card_partials or (content and text == content)))
+            shown_partials = tuple(item for item, text in ledger.partial_text.items()
+                                   if item in card_partials or (content and text == content))
+            answer_items = (BODY, *shown_partials) if content else shown_partials
+            items = (*body_items, *shown_partials)
             try:
                 projection = turn_progress_projection(snapshot=snapshot, partial_answers=outcome.partial_answers,
                     final_response=content or None, include_result=bool(content), terminal_status=status,
@@ -138,10 +141,8 @@ class CompletionPresentationChannel(ChannelReplies):
                 card = None
             if card and first_id and location.can_write(first_id):
                 ledger.begin(items)
-                if await self._progress_cards.publish_card(display, first_id, key, location, projection):
+                if await self._progress_cards.publish_card(display, first_id, key, location, projection, answer_items=answer_items):
                     ledger.record(items, "confirmed")
-                    if reply and has_answer:
-                        reply.confirmed(first_id)
                 return
             if (card and not first_id and publishable()
                     and all(ledger.items[item] not in ("unknown", "rejected") for item in ledger.partial_text)):
@@ -150,18 +151,15 @@ class CompletionPresentationChannel(ChannelReplies):
                 state = receipt(sent)
                 ledger.record(items, state)
                 if state == "confirmed":
-                    if reply and has_answer and (mid := _confirmed_reply_id(sent, on_conflict=_message_id(outcome.origin))):
-                        reply.confirmed(mid)
+                    record_sent_answer(reply, location, key.turn_id, answer_items, sent)
                     if reply and (mid := _confirmed_reply_id(sent)):
-                        await self._progress_cards.publish_card(display, mid, key, location, projection, confirmed=card)
+                        await self._progress_cards.publish_card(display, mid, key, location, projection, answer_items=answer_items, confirmed=card)
                     return
         # A fallback freezes the card at the last confirmed poll. Plain posts have
         # their own receipts, including attempts whose publication is uncertain.
         if first_id and not location.can_write(first_id):
             first_id = None
         last_snapshot = partials.confirmed_snapshot
-        if reply and first_id and last_snapshot and last_snapshot.partial_answers:
-            reply.confirmed(first_id)
         try:
             for index, fragment in enumerate(outcome.partial_answers):
                 item = ("partial", fragment.item_id)
@@ -178,7 +176,8 @@ class CompletionPresentationChannel(ChannelReplies):
             if first_id and last_snapshot:
                 frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
                     run_continues=outcome.run_continues, include_result=False, collapsed=True)
-                await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False)
+                await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False,
+                    answer_items=tuple(("partial", part.item_id) for part in last_snapshot.partial_answers))
             else:
                 await self._progress_cards.reconcile(display)
 
@@ -192,8 +191,7 @@ class CompletionPresentationChannel(ChannelReplies):
             async with asyncio.timeout(self._progress_cards.operation_timeout):
                 result = await external_call(policy.send(content, operation, location))
             ledger.record(items, receipt(result))
-            if policy.display.reply and (mid := _confirmed_reply_id(result, on_conflict=_message_id(outcome.origin))):
-                policy.display.reply.confirmed(mid)
+            record_sent_answer(policy.display.reply, location, outcome.turn_id, items, result)
         except TopicPublishError as error:
             ledger.record(items, "unknown" if error.unknown else "rejected")
         except Exception:
@@ -246,23 +244,20 @@ class CompletionPresentationChannel(ChannelReplies):
                 return
             if not await self._progress_cards.reconcile(display) and not reply.attempted:
                 await _best_effort_update(self._progress_cards.finish_initial_card(run, display, event.status))
+            await _best_effort_update(self._reactions.freeze(run.turn_id))
+            await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
+            if event.mention_user_id and display.publishable():
+                location = event.location
+                assert location is not None
+                source_id = _message_id(event.target.origin)
+                anchor = reply.mention_target(source_id, location.usable)
+                await send_completion_mention(
+                    self._channel, scope=self._scope(event.target.origin), card_message_id=anchor,
+                    user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
+                )
         finally:
             self._progress_cards.retire_run(reply)
-        await _best_effort_update(self._reactions.freeze(run.turn_id))
-        await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
-        if event.mention_user_id and display.publishable():
-            confirmed_id = reply.message_id
-            location = event.location
-            assert location is not None
-            source_id = _message_id(event.target.origin)
-            if confirmed_id and not location.usable(confirmed_id):
-                confirmed_id = source_id if location.usable(source_id) else None
-            await send_completion_mention(
-                self._channel, scope=self._scope(event.target.origin), card_message_id=confirmed_id,
-                user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True,
-                source_message_id=source_id if not reply.attempted and location.usable(source_id) else None,
-                location=location,
-            )
+            reply.retire()
 
     async def _terminal_partials(self, outcome: TurnResult) -> _PartialAnswerDelivery:
         def reply(post: OutboundPost) -> Awaitable[SendResult]:

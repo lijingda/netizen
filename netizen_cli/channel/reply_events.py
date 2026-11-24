@@ -119,6 +119,7 @@ class TurnOpened:
     retained: Callable[[], bool] = lambda: True
     location: CardReplyLocation | None = None
     reuse_existing: bool = False
+    run_reply: LogicalReply | None = None
 
 
 @dataclass(frozen=True, slots=True)

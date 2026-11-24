@@ -60,7 +60,6 @@ from .base import (
 )
 from .claude_reply_events import ClaudeReplyEvents
 from .codex_reply_events import CodexReplyEvents
-from .messages import _confirmed_reply_id
 from .presentation import CompletionPresentationChannel
 from .reply_events import DeliveryReceipt, PresentationKey, ReplyTarget, RunEnded, RunState, TurnResult
 from .topics import CardReplyLocation
@@ -80,7 +79,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
                     location = self._physical_card_location(outcome.binding_id, outcome.origin)
                     event = ClaudeReplyEvents.opened(outcome, self._ordinary, location,
                         lambda card: self._reply_to_origin(outcome.origin, card),
-                        lambda post: self._send_physical_partial(outcome, post, location))
+                        lambda post: self._physical_reply(outcome.origin, post, location))
                     await self._progress_cards.open(event)
             return
         if isinstance(outcome, (CliStateChanged, LogicalTerminal)):
@@ -310,12 +309,6 @@ class NativeReplyChannel(CompletionPresentationChannel):
             reply_partial=lambda post: self._reply_to_origin(origin, post),
         )
         return await self._progress_cards.open(event)
-
-    async def _send_physical_partial(self, event: PhysicalStarted, post: OutboundPost, location: CardReplyLocation) -> SendResult:
-        result = await self._physical_reply(event.origin, post, location)
-        if target := _confirmed_reply_id(result, on_conflict=_message_id(event.origin)):
-            event.reply.confirmed(target)
-        return result
 
     async def _goal_management_receipt(
         self, binding: ThreadBinding, scope: FeishuScope, origin: object, *,

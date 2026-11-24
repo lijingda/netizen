@@ -60,6 +60,7 @@ class ClaudeReplyEvents:
             partial,
             retained=event.retained,
             location=location,
+            run_reply=event.reply,
         )
 
     @staticmethod
