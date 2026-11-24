@@ -28,7 +28,7 @@ Claude Code 实例先读 [Claude Code 试点](references/user-guide.md#claude-co
 | 新建、默认配置、切换、命名、归档、删除、模型与反馈设置 | [会话与 Project](references/sessions.md)：作用范围、后续生效及历史删除后果 |
 | 让会话新建话题、发现、读取或联系其他会话 | [会话协作](references/session-collaboration.md)：原生 Thread ID、目标状态及两组实例范围 |
 | 群聊 @、引用、图片、转发材料、回答提问卡 | [消息输入](references/messages.md)：读取范围、提交方式与整条消息失败边界 |
-| 过程卡、表情、结束 @、阶段性答案、本轮文件 | [运行反馈与文件](references/feedback-and-files.md)：开关、展示范围、统计口径与发送时的文件版本 |
+| 回复类型、表情、结束 @、阶段性答案、本轮文件 | [运行反馈与文件](references/feedback-and-files.md)：开关、展示范围、统计口径与发送时的文件版本 |
 | 状态、账号额度、压缩、停止 | [状态与控制](references/status-and-control.md)：区分上下文用量和共享账号额度，说明客户端时区与停止限制 |
 | 定时创建、修改、暂停或立即运行任务 | [定时任务](references/scheduled-tasks.md)：执行目标、时间规则、计划与单次执行的区别 |
 | 持久分支、Side 或 Goal | [持久分支、Side 与 Goal](references/fork-side-goal.md)：并发、共享目录、失效与暂停/结束后果 |

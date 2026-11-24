@@ -385,7 +385,7 @@ handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 inter
    关键词不得为空，使用 `casefold()` 忽略大小写，不支持正则或类别兜底；仅群聊适用。
 
 一次采用命中规则的完整配置，不跨规则拼字段。配置保存 Project alias、独立工作区策略、
-可选 Model/Effort/Speed、三个 Task Feedback 开关、过程卡展示设置与 Mention Context Mode；Project 必填，
+可选 Model/Effort/Speed、Task Feedback 的两项开关、回复消息类型、展示设置与 Mention Context Mode；Project 必填，
 会话设置沿用现有创建默认值及 inherit Codex 语义，P2P 固定 current-only。它不是 effective Codex
 配置，也不含 Prompt 或业务流程。创建意图应用于新 Binding，后续修改或删除默认值、修改
 规则顺序或群名，都不改变已创建的 Binding，包括尚未物化的 Lazy Binding。
@@ -454,7 +454,7 @@ continuation 的多个物理 Turn 合并为一个通知流。按
 objective、tokens used、可用预算及控制按钮，不自动刷新、不包含任务答案或 Files。
 切换 Scope 的 active Binding 不改变按钮的 exact Binding 目标。任务回复以整个 SDK
 logical stream 为单位复用普通回复链：过程卡、阶段性答案、终态、富文本和文件遵循普通
-任务的展示规则，不为每个物理 Turn 发新卡，也不强制开启过程卡。
+任务的展示规则，不为每个物理 Turn 发新卡，回复消息类型沿用运行开始时的选择。
 Goal Activity 不通过普通 queue observer 读取；Adapter 在现有 logical stream 的唯一消费链
 内先做安全 Tap，再把原通知交还 SDK。每次 exact `turn/started` 切换物理 Turn 时，Runtime
 原子替换 physical identity，并清空上一轮 checklist、commentary、operation 与 cursor；
@@ -1138,7 +1138,7 @@ tombstone 关键路径。Side 不进入 `/sessions`，不增加 archive/delete �
 
 ephemeral Side 明确不复用[普通 Turn 的持久 history recovery](#普通-turn-终态与观测恢复)。
 按 ADR 0052/0072/0079 在同一循环只读观察 exact Turn 的 retained events，阶段性答案和
-已注册的问题展示不受进度卡开关影响。任一次刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
+已注册的问题展示独立于回复消息类型。任一次刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
 active Turn 保留 `completion_notification_seen`，即使其他刷新已推进 cursor，consumer
 仍进入同一个 `handle.run()` 唯一 drain。
 该标记只触发 drain，终态仍由 `run()` 返回值确认。observer 不可用、cursor 回退、
@@ -1258,7 +1258,7 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 
 | 适配／用途 | 固定方法或观察面 | 本项门禁与限制 | 替代／移除触发器 |
 | --- | --- | --- | --- |
-| 飞书过程消息（[0107](adr/0107-present-process-in-feishu-process-messages.md)） | `ProcessMessages` 借用实例的 `lark-oapi` 客户端，通过公开 `BaseRequest` / `arequest` 仅创建、更新和完成 `message_cot`。 | 更新发送安全 Activity 条目及其成对事件。每项文字最多 300 字符，每个内层事件 JSON 最多 1,800 个 Unicode 字符，每次最多 60 项，优先保留最早开始的运行中条目。创建只返回两个 ID，明确拒绝保留数值码，传输或回执未知由调用方处理。门禁包含形状测试、已安装客户端的回环测试和[飞书实测](deployment.md#代码门禁与按需实时兼容性验证)。 | 固定的 `lark-channel-sdk` 或 `lark-oapi` 提供 typed `message_cot` 接口并通过相同行为与实机门禁后切换，删除本适配层。 |
+| 飞书过程消息（[0107](adr/0107-present-process-in-feishu-process-messages.md)） | 通用回复展示层在过程消息类型下调用 `ProcessMessages`，借用实例的 `lark-oapi` 客户端，通过公开 `BaseRequest` / `arequest` 仅创建、更新和完成 `message_cot`。 | 更新发送安全 Activity 条目及其成对事件。每项文字最多 300 字符，每个内层事件 JSON 最多 1,800 个 Unicode 字符，每次最多 60 项，优先保留最早开始的运行中条目。创建只返回两个 ID，明确拒绝保留数值码，传输或回执未知由调用方处理。门禁包含形状测试、已安装客户端的回环测试和[飞书实测](deployment.md#代码门禁与按需实时兼容性验证)。 | 固定的 `lark-channel-sdk` 或 `lark-oapi` 提供 typed `message_cot` 接口并通过相同行为与实机门禁后切换，删除本适配层。 |
 | Claude 活动会话（[0105](adr/0105-extend-backends-through-capabilities-and-shared-presentation.md)） | SDK 0.2.186／CLI 2.1.329 的公开消息元数据、完整任务快照、Stop 的 `session_crons`，仅本客户端开启 `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`。 | 固定 CLI 回环验证列表、输入与工具归属、空闲与交接顺序、停止、cron 与重放。消费字段按表校验，异常走本轮断开。 | 公开 typed 任务、会话状态及归属 API 通过同一组门禁后替换解码与观测开关。 |
 | Terminal cleanup（[0009](adr/0009-use-version-gated-experimental-terminal-cleanup.md)） | `thread/backgroundTerminals/clean`，exact `threadId`，空 object 响应 | **精确 SDK 版本、整个源码包指纹、内部持有类型、initialized client、`experimentalApi`**；失败拒绝服务启动。只清理官方登记的 background terminal，空响应不证明 foreground 退出。 | 公开等价 cleanup 通过同一 fake contract 与 Linux marker/resume 探针后，删除适配、指纹及运行时例外。 |
 | `GoalControl`（[0014](adr/0014-use-removable-sdk-gap-adapters.md)） | 固定 `thread/goal/get`、`thread/goal/set`、`thread/goal/clear` 及 SDK 原有 route/start/logical stream 编排 | 能力门禁；保留唯一 `next_notification` 消费链的受限 Tap，Goal 不读普通 event store。 | 公开等价 Goal facade，独立迁移。 |
@@ -1270,6 +1270,10 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | `AppServerAccountRateLimits.read`（[0077](adr/0077-read-account-rate-limits-on-demand.md)） | 只读固定 `account/rateLimits/read` | 能力门禁；不消费通知、不维护账号状态。 | 公开等价额度读取 facade。 |
 | `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0101](adr/0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页。Admin 按页内顺序在期限内读取每轮首项（升序、`limit=1`、最多十轮），首项为 `functionCallOutput` 时替换 Summary 输入 | shape/synthetic 与原生 paginated/legacy 探针。首项读取失败按 [Admin 对话记录规则](#管理查询与操作) 降级，legacy `-32601` 不告警。运行终态与 Files 仍有各自的证据读取。 | 公开等价历史分页 facade。 |
 | `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
+
+终态首次创建过程消息时，从交给 SDK 起，创建与必要的位置读取共用服务事件循环上的两秒期限。
+固定版 `lark-oapi` 的异步请求在租户令牌过期或缓存为空时会先同步刷新令牌，因此实际耗时可能超过两秒。
+期限触发后此次创建按未知处理，随即发送普通内容。上游提供异步令牌路径后移除这项 SDK 限制。
 
 Channel SDK 的卡片原始结构适配见 [ADR 0099](adr/0099-project-original-card-content-with-bounded-component-adapter.md)
 及[引用读取与 SDK 内容适配](#引用读取与-sdk-内容适配)：仅用公开 SDK 取得原始卡片，
@@ -1428,7 +1432,7 @@ identity/slot、阻止重复 start/steer，并停止全部周期性 I/O。“重
 取消共享观察者，后续仍遵守 exact identity 和 admission revision 校验。重检先冻结现有版本，
 只有本 consumer 的恢复运行/终态释放转换能在锁内按匹配的前版本推进它；中间的控制操作
 使等待消息失效，不因检查成功而采纳最新版本。旧结果尽力交付，不阻塞已确认终态后的新输入。
-同一 Turn 的 Reaction session、Reaction Pulse 和 Progress Card 轮询也
+同一 Turn 的 Reaction session、Reaction Pulse 和回复展示轮询也
 停止，已记录的 `Typing` 与当时可见的 `THINKING` 尽力清理，已有卡片一次更新为观测
 不可用，但不添加伪造的终态表情。后续确认终态时仍可走普通回复兜底。
 恢复观察不重建旧卡和 Pulse，新 Turn 仍使用普通展示流程。不建立长预算、
@@ -1475,6 +1479,26 @@ Turn、投递目标与任务反馈设置。`ActivityChanged`、`PartialAnswer` �
 Codex 普通 Turn 与 Side 一一映射。Goal 当前仍共用一条回复链和一张任务卡，阶段性答案按
 原物理身份去重，Files 仅取已核实的最终物理 Turn。Claude 的匿名唤醒和 cron 在 Result
 确认归属时映射。成功且没有正文或片段的匿名 Turn 不新发消息。
+
+Binding 的“回复消息类型”可选卡片或过程消息。卡片沿用原卡的活动、阶段性答案、结果和文件。
+过程消息只显示可见的安全 Activity。阶段性答案单独用有标识的富文本发送；无文件的结果通过
+普通消息交付，有文件的结果通过 Result+Files 卡交付。表情、发送时的后台状态与释放提示、
+结束提及和定时首轮回执继续以承载内容的回复为依据。Claude 当前只有阶段性答案和状态行，
+因此通常只发送普通内容。
+
+过程消息在首次观察到可见条目时创建。运行中由展示任务异步写入；终态才观察到条目时先尝试
+创建并确认位置，再发送最终内容。话题内精确读取一次新消息，核对消息、聊天、话题、根和
+直接父消息；定时首轮引用选定的根或种子，无归属的 Claude 话题结果引用已核实的根。明确矛盾
+会停用该 Binding 下涉及的消息 ID。创建回执丢失、读取不完整或位置不符时，该轮结束过程写入。
+
+每条过程消息串行替换完整列表，保存上次确认的列表。未知回执、超时或并发码 10020 后，
+下次活动变化或生命周期事件重新写入，其他明确拒绝保留上次确认值。每个 END 与其 START
+同列。已提供的运行项在首次写入时固定文字与起始秒，结束后优先占用可用名额直至确认；
+每次最多 60 项，运行项饱和时保留最早开始的 60 项。同一输入有更新的已确认过程消息、
+运行结束或执行结果明确未知时，写入者关闭运行项并执行一次有界最终写入，再尝试完成一次。
+已完成和中断用 `done`，失败用 `error`，执行结果明确未知用 `timeout`。单纯失去 Activity
+观察时保留写入者。确认为执行未知后恢复的结果只交付普通内容。Goal 整个逻辑运行使用同一条
+过程消息，物理换轮重新区分条目。详见 [ADR 0107](adr/0107-present-process-in-feishu-process-messages.md)。
 
 ### 当前物理 Turn 的结果静默
 
@@ -1554,9 +1578,8 @@ Project 仅作为相对路径解析基准，不是文件授权边界；子任务
 或 `..` 路径同样规范化，其他 Project 的任务内修改同样计入。访问权限仍由原生 Codex
 sandbox/approval 决定。canonical 重复、缺失、目录和设备文件不进入发送列表；不扫描
 工作区、不从最终文本发现 Files 条目，也不推断没有进入受支持 native 事实的 shell/MCP/第三方工具
-输出。Progress Card 关闭时，没有文件条目仍发送原富文本/静态文本；存在
-条目（含已删除文件）时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress Card
-开启时，completed 结果与文件条目进入已发送的同一张卡。
+输出。选择过程消息时，没有文件条目仍发送原富文本/静态文本；存在
+条目（含已删除文件）时只发送一张包含最终回复与“本轮文件”的 Card 2.0。选择卡片时，completed 结果与文件条目进入已发送的同一张卡。
 
 Goal 复用普通任务的回复形态；满足四项终态证据后，只从 exact 最终成功 physical Turn 及其本轮
 新建子任务提取文件和累计统计，并只用该 Turn 的 final agent answer，不聚合更早 rollover
@@ -1635,7 +1658,7 @@ Database 或进程内保存 card session。删除卡片、错误 230071 或任�
 单张上传被取消时，该图提示等待已取消，其他图片继续处理。同次回复不重试。
 整批到期则标明尚未完成的图片当时在排队、读取还是上传；上层取消整条回复时，终止整批并向上传播取消。
 
-图片处理只改变正文，不参与消息类型选择：无 Files 且进度卡关闭时仍走原富文本路径，
+图片处理只改变正文，不参与消息类型选择：选择过程消息且无 Files 时仍走原富文本路径，
 由 SDK 默认 native `post/tag:md` 承载图片引用；原有卡片仍是卡片。
 富文本回退和 v4/v5 分页复用含 image key 的正文，重启或本地文件删除不触发重传。
 不新增 post AST 转换或发送循环，分段、提及、话题路由与投递回执继续由原流程负责。
@@ -1654,17 +1677,14 @@ Markdown 正文中将它显示为文件名，可附页码、幻灯片、工作�
 普通 Binding 每个新 Turn，以及 Goal 新 logical run，在 exact admission 中捕获当时的 Binding
 Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedback 并供所有 Side Turn
 沿用。运行中或 Side 创建后修改 Parent 配置不会改变已经捕获的 operation。新建会话默认
-关闭 Reaction Pulse、开启 Progress Card 与 Completion Mention，已有表情/进度卡选择保留。Reaction Pulse
-只控制普通/Side Turn 和 Goal logical run 的 `THINKING` 执行中闪烁，Progress Card
-控制普通/Side Turn 和 Goal logical run 是否产生 Activity 运行卡；
-不控制阶段性答案或原生问题的观察与投递。
-普通、Side Turn 与 Goal logical run 的 Lifecycle Reaction 始终尽力展示；两项都关闭时仍有 accepted、成功
-steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal 管理卡独立于任务反馈。Completion Mention 在普通/Side 终态和 Goal 逻辑终态
+关闭 Reaction Pulse、选择卡片并开启 Completion Mention。原有布尔值 true 选择卡片，false 选择过程消息。
+Reaction Pulse 单独控制 `THINKING` 闪烁。普通、Side 与 Goal 的生命周期表情始终尽力展示。
+Goal 管理卡独立于任务反馈。Completion Mention 在普通/Side 终态和 Goal 逻辑终态
 提及 admission 捕获的发起人；停止、执行状态未知和系统定时输入新建的 Turn 不提及，
 定时 steer 不改变原轮提及归属。提及只随
 终态投递，不进入运行卡、文件分页或 Goal 管理卡。新发送的最终回复在消息内 @；
 已有过程卡的更新不带 @，确认更新后另发一次引用结果卡的 @ 回复。Goal 同样按实际
-回复形态处理，关闭进度卡时无文件结果可直接使用富文本。
+回复形态处理，选择过程消息时无文件结果可直接使用富文本。
 普通私聊和群主线使用普通引用回复，不创建话题；已有话题仍在原话题内发送新提醒。
 原卡不可用而另发最终回复（包括 Goal 超大正文）时，复用新回复内
 的 @，不为提醒造卡；已尝试提及后的回退不重复 @。客户端通知效果需要实测，完整边界见
@@ -1678,13 +1698,13 @@ steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal
 
 ### 过程卡展示设置
 
-Progress Card 在现有总开关下增加八项展示设置：最近进展、最近操作、任务清单分别显隐，
+卡片和过程消息共用同一组展示设置，包括最近进展、最近操作、任务清单分别显隐，
 进展和操作各自的条数与摘要长度，以及 `content`/`time` 组织方式。默认三个内容均显示、
 按内容组织，进展 4 条/160 字符、操作 8 条/120 字符；四个容量值均为正整数，上限分别为
 8/320、16/240。任务清单的 12 项/160 字符限制不变。关闭内容保留其容量值，三个内容
-全关仍显示状态、失败/中断、观测不可用等必要提示；不影响其他回复模块。
+全关时卡片仍显示状态与异常提示，过程消息没有可见条目时跳过创建。组织方式只影响卡片。
 
-Admin 在“会话配置 → 任务反馈 → 过程卡”和默认会话配置中复用同一组控件，无预设、
+Admin 在“会话配置 → 任务反馈 → 回复消息类型”和默认会话配置中复用同一组控件，无预设、
 排版、操作类别筛选或卡片预览。完整 SessionSettings 的 `progress_card_settings` 为显式
 八字段对象或 null；null 表示未配置。聊天默认规则在自动创建时复制该意图，之后会话
 独立维护；更改默认规则不改变已有 Binding，手动 `/new` 不套用聊天规则且默认未配置。
@@ -1692,18 +1712,18 @@ Admin 在“会话配置 → 任务反馈 → 过程卡”和默认会话配置�
 全局值并随 Task Feedback 冻结；steer、Goal 换物理 Turn 和已有 Side 后续输入不重新解析。
 有效值不回写 Binding、默认规则或定时计划，既有终态卡片继续使用自身 manifest。
 
-“默认配置 → 全局过程卡”的“全局过程卡配置”提供同样八项控件、保存与放弃修改，说明
+“默认配置 → 全局过程卡”页面提供同样八项控件、保存与放弃修改，说明
 仅用于未配置的会话。实例 `config.yaml` 的 `progressCard` 保存完整八项，缺节时取上述
 工厂默认值；由共享 `ConfigFileEditor` 原子写入，成功后切换进程内值，不增加配置文件。
 `GET/POST /api/v1/progress-card/settings` 复用 Admin 登录、同源与一次性 action grant，
 用 revision 拒绝陈旧提交，外部 YAML 修改沿既有文件冲突规则拒绝覆盖。
 
 Admin 会话及默认配置表单未配置时显示全局值供编辑参考；只在编辑过程卡细项时生成
-显式对象，改模型、反馈总开关或其他选项仍保留 null。飞书 `/new`、`/config`、`/defaults`
+显式对象，改模型、回复消息类型或其他选项仍保留 null。飞书 `/new`、`/config`、`/defaults`
 和定时计划表单不增加细项控件，保存与重绘保留完整对象或 null。
 Admin 会话及默认配置表单对显式值提供“恢复跟随全局”：点击后草稿改为 null，
 读取并显示当前全局值；仅保存后才清除原显式设置，放弃则保留原值。未配置时不显示该按钮。
-会话与默认配置列表在过程卡开启时显示“过程卡：跟随全局”或“过程卡：单独配置”，
+会话与默认配置列表显示所选类型和“展示细项：跟随全局”或“展示细项：单独配置”，
 仅依据现有配置意图投影，不为列表解析有效值或另发请求。
 历史值全部保留为显式选择，包括与旧默认值相同的配置，不追溯来源；全局兜底边界见
 [ADR 0087](adr/0087-use-instance-progress-card-settings-for-missing-session-intent.md)。
@@ -1733,11 +1753,17 @@ checklist 只接受匹配 current `thread_id + turn_id` 的 fixed generated `tur
 仍按原序唯一排空。成功 steer 的次数/freshness 仅用于普通/Side，Goal 不累计次数，清单
 固定标明最近一次原生上报、可能尚未反映追加消息。
 
-同一 item ID 的 started/completed 只更新一个 identity-free 操作行，并以 exact
+卡片中同一 item ID 的 started/completed 只更新一个 identity-free 操作行，并以 exact
 `completedAtMs` 替换 `startedAtMs`；commentary 使用 exact `completedAtMs`，checklist
 无 item lifecycle 时间，不显示时间。毫秒时间原样进入 v4/v5 manifest，以 Card 2.0
 `local_datetime` 的 `date_num` 与 `time` 交给客户端按查看者时区/语言渲染到分钟；不是
 服务端当前时间或 elapsed time，旧 manifest 无时间字段时不补造。
+
+过程消息从相同的安全事件取得分组前的条目。每个物理 Turn 使用独立的随机密钥生成内存身份摘要，
+清单用过滤后的步骤文字配对，同名步骤以第一项状态为准。摘要仅在进程内关联不可变观察值，
+卡片、回调、日志、Admin 和数据库均不携带它。显示时间采用首次观察的秒，结束时钟回拨
+则钳制到起始秒。原生运行项只会在结束后离开窗口，移除或更名的清单步骤也结束；
+可用快照中已消失的已提供项由写入者补齐 END，观察不可用期间保留原状态。
 
 commentary 保留内部换行；CRLF/CR 统一为 LF，tab 展开为四个空格，其他不可展示控制字符
 替换为 Unicode replacement character。该布局规范化不折叠合法 Markdown 空白。
@@ -1755,10 +1781,9 @@ Activity 不显示 reasoning、partial/final answer、delta、MCP server、工�
 usage；不生成 elapsed time、百分比或 ETA，commentary/checklist 沿用估算过滤，原生命令/
 查询中的同名字面内容不作估算解释。它不是原生终态事实或历史记录。
 
-Progress Card 开启时，Runtime 既有 consumer/poll loop 更新同一投影，Presenter 每秒
-仅在 revision 变化时重绘，不访问 queue；关闭时普通/Side 无 Activity 卡、Goal 无 Activity
-模块。各自同一 observer cursor/logical Tap 仍提取阶段性答案，并在已注册的问题 handler
-路径接收结构化问题，不增加消费者。event-store 及 Goal 唯一 Tap 门禁统一见
+两种类型下，Runtime 都用现有 consumer/poll loop 或 Goal 唯一 Tap 更新 Activity。Presenter
+轮询同一快照，只按新 revision 或生命周期事件触发写入。阶段性答案与结构化问题共用既有观察链。
+event-store 及 Goal 唯一 Tap 门禁统一见
 [SDK 适配边界](#sdk-适配边界)；只接受 ADR 0052/0071/0079 白名单，未知事件忽略，白名单
 shape 变化 fail closed，不扩展为任意通知或私有 RPC gateway。进度卡、`/status` 和分页
 callback 共用上述窗口、时间与过滤规则；观察/展示失败不改变 Turn、steer、stop、终态或最终回复。
@@ -1828,7 +1853,7 @@ Markdown 转换或私有补丁，也不将其表述为已验证的无损兜底�
 
 实例配置 `questionNotifications.mentionInitiator` 默认 false，由 Admin“提问通知”独立维护。
 每张新问题卡发送时读取有效配置，并使用 Runtime 在本轮捕获的真实 owner；没有合法真人
-发起人则不 @。与过程卡/结束提醒开关独立，没有会话级覆盖，不按问题组抑制。已发卡更新、
+发起人则不 @。独立于回复消息类型和结束提醒开关，没有会话级覆盖，不按问题组抑制。已发卡更新、
 失败重绘、回答回执和提交反馈不再 @；复用现有问题身份、UUID 和去重，不额外发送文字提醒。
 提醒不是 Agent 必定暂停的证明，不增加未答计数、回补、定时催促或通知队列。
 
@@ -2160,7 +2185,7 @@ Thread → Binding → Scope。可选 header 身份存在时须核对一致，�
 会话列表查询忙碌或超时只返回该组选项的错误，不丢弃已取得的模型和会话配置；
 管理界面明确提示列表暂不可用，不将查询失败解释为没有会话。
 
-新话题目标的会话配置与 `/new` 共用 Model/Effort/Speed、Reaction Pulse、Progress Card、Completion Mention 和 Mention
+新话题目标的会话配置与 `/new` 共用 Model/Effort/Speed、Reaction Pulse、回复消息类型、Completion Mention 和 Mention
 Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后独立保存；继承仍存 null，
 不复制有效 Codex 配置。无来源采用 `/new` 默认值，每次认领冻结设置用于新 Binding。
 私聊及私聊话题固定 current-only；群话题 catch-up 从本次真实 root/seed 建立边界，自动
@@ -2357,7 +2382,7 @@ wait 最多八个不同的其他目标，使用独立的 `afterCursor` 状态快
 来源取自原生 MCP `_meta.threadId`，不接受参数或正文冒充来源。新建继承来源 Project
 和原生 Thread 实际 cwd，仅在来源 chat 新建普通 sibling topic；匹配受管 Worktree 时关联
 同一资源。`create_thread` 不增加 cwd/worktree 参数；可选模型覆盖遵循原生规则。
-新会话关闭 Reaction Pulse 和 Completion Mention，复制 Progress Card，之后独立。
+新会话关闭 Reaction Pulse 和 Completion Mention，复制回复消息类型，之后独立。
 新建标题沿用 Netizen 的 120 字符限制，接口 schema 同步注明；提示词遵循原生 1,000
 UTF-8 字节限制。模型目录 ID 在 SDK 提交前解析为实际 model，不直接混用两者。
 普通话题发布、缺 topic 时的 seed、exact 发送响应核对和空目标原子登记与已有创建路径
@@ -3321,7 +3346,7 @@ Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side r
 Admin 专属生命周期、恢复、归档或删除 Side 墓碑操作。
 
 会话的“配置”使用完整会话设置抽屉，回填 Model/Effort/Speed、Reaction Pulse、
-Progress Card 及其展示设置、Completion Mention 和消息上下文；未配置的过程卡细项读取全局值
+回复消息类型及其展示设置、Completion Mention 和消息上下文；未配置的过程卡细项读取全局值
 供编辑参考，未编辑细项则仍保存 null。显式设置可点击“恢复跟随全局”，保存时提交 null；
 放弃不改变已存配置。单聊不显示上下文选择。它与飞书
 `/config` 复用同一个 Runtime/Store 原子保存入口，grant 同时固定 settings、feedback、
@@ -3474,9 +3499,9 @@ UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改�
 条件不显示。定时任务表单继续使用共享字段生成器的平铺布局。
 
 `/new` 卡片只保留一个 form 和一个 Project 下拉框，包含全部 enabled Projects，以及
-Model、Effort、Speed、Reaction Pulse、Progress Card 和 Completion Mention；群聊和群话题再增加 Mention
-Context Mode。Reaction Pulse 默认关闭，Progress Card 和 Completion Mention 默认开启，三项可独立修改；这项
-进度卡新建默认值取代 ADR 0046 最初的关闭，不修改已有 Binding 的进度卡选择；
+Model、Effort、Speed、Reaction Pulse、回复消息类型和 Completion Mention；群聊和群话题再增加 Mention
+Context Mode。Reaction Pulse 默认关闭，回复消息类型默认为卡片，Completion Mention 默认开启，三项可独立修改。
+已有 Binding 保留各自的选择；
 结束提及的默认值与升级见 ADR 0063。默认 mode 是
 `current-only`，P2P 不显示 mode 字段。Model 下拉包含稳定的 `inherit Codex` sentinel；
 选择实际模型时三项必须完整并经
@@ -3517,7 +3542,7 @@ Binding，两者不受默认值回填影响。
 
 `/config` 是独立的会话配置卡片，与实例级 `/projects` 项目管理入口分开；它用同一组
 Model inherit/explicit 语义更新当前 active Binding 的持久设置，并允许独立切换
-Reaction Pulse、Progress Card 与 Completion Mention；群聊/群话题还可切换 Mention Context Mode。不要求任务、不创建
+Reaction Pulse、回复消息类型与 Completion Mention；群聊/群话题还可切换 Mention Context Mode。不要求任务、不创建
 Turn。配置其他 Binding 必须先 `/resume` 切换。完整 Binding ID、settings revision、
 feedback revision 与 context revision 编码在版本化 option reference 中；三类设置在一笔
 Store transaction 内校验和保存，即使 active Binding 已切换、另一张卡先提交或 catch-up

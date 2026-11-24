@@ -72,8 +72,8 @@ Side 适合在不打断 Parent 会话的情况下讨论一个临时分支。
   只承载 reaction 和最终回复。后续每条 Side Prompt 使用其实际发送者。
 - Parent 和多个 Side 可以并发，但共享来源的实际工作目录，包括已选 worktree。
 - Side 在同一个临时 fork 上支持多轮：空闲时开始新 Turn，运行中继续 steer。
-- Side 创建时冻结 Parent 当时的 Model、Effort、Speed、Reaction Pulse、Progress Card 与结束时 @ 提醒；
-  Parent 后续 `/config` 不影响既有 Side。每轮 Side Turn 的表情、进度卡、富文本和文件卡
+- Side 创建时冻结 Parent 当时的 Model、Effort、Speed、Reaction Pulse、回复消息类型及其展示设置与结束时 @ 提醒；
+  Parent 后续 `/config` 不影响既有 Side。每轮 Side Turn 的表情、过程消息、回复卡和富文本
   与普通 Turn 使用同一规则。
 - Side 内只支持普通 prompt、`//`、`/status`、`/usage`（能力可用时）、`/stop`、`/admin`、`/help`、`/` 和 `/side close`。
 - Side 内不支持 Goal；需要 Goal 时回到普通会话。
@@ -99,8 +99,8 @@ Goal 适合让 Codex 围绕一个持续目标自动推进多个物理 Turn。
 - `/goal pause`：暂停后续自动推进，当前任务继续执行；`/goal clear` 清除目标，同样不停止当前任务。
 - `/goal resume`：恢复目标。当前任务仍运行时继续沿用原回复，之前执行已结束时开始新的回复。
   管理卡提供同样的操作，点击时会重新核对当前目标。
-- 任务答案与 Goal 管理卡分开展示。开启 Progress Card 时，同次连续执行更新同一张回复卡；
-  关闭时按普通任务使用富文本，产生文件时展示文件卡。阶段性答案跨自动换轮保留，
+- 任务答案与 Goal 管理卡分开展示。选择卡片时，同次连续执行更新同一张回复卡。选择过程消息时，
+  同次执行的活动更新同一条过程消息，答案使用富文本，产生文件时展示文件卡。阶段性答案跨自动换轮保留，
   新一次连续执行重新开始。任务清单是最近一次 Codex 上报，可能尚未反映追加消息。
 - Goal 确认完成且最终任务成功结束后自动清除；暂停、受阻、额度限制或收尾不确定时不会
   自动清除。收尾结果未知时不自动重试，但已确认的最终回答仍会显示；管理卡不保存旧答案。

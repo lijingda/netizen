@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-24
 amends: 0046, 0048, 0052, 0079, 0086, 0087, 0106
 related: 0014, 0039, 0055, 0063, 0080, 0105
@@ -53,7 +53,7 @@ related: 0014, 0039, 0055, 0063, 0080, 0105
   - 实例兜底不提供这一项，只有显式值。
   - 所有历史显式值保留原值，按新的映射解释。
   - 不新增数据库结构。
-- **展示细节。** 即 [ADR 0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md) 中的八项设置，同样适用于两种类型。缺省时仍按 [ADR 0087](0087-use-instance-progress-card-settings-for-missing-session-intent.md) 在捕获执行设置时读取实例兜底，捕获时机是普通 Turn 准入、新的 Goal 运行开始或 Side 创建。保存无关修改时，保留空值和与默认值相同的显式值。
+- **展示细节。** 即 [ADR 0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md) 中的八项设置，同样适用于两种类型。缺省时仍按 [ADR 0087](0087-use-instance-progress-card-settings-for-missing-session-intent.md) 在捕获执行设置时读取实例兜底，捕获时机是普通 Turn 准入、新的 Goal 运行开始或 Side 创建。保存无关修改时，保留空值和与默认值相同的显式值。组织方式仅影响卡片，过程消息始终按时间排列。
 
 展示细节仍在现有的 Admin 细节编辑器中编辑，两种类型下都可见、可编辑，并标明来源。`/status` 显示所选的回复类型。现有的飞书表单保留类型选择，往返时保留空值。
 
@@ -83,7 +83,7 @@ Codex 普通 Turn、Goal 和 Side 与 Claude 都采用这一规则。Side 的每
 ### 4. 过程消息逐项追加活动，完成时配对结束事件
 
 每个展示 Turn 最多对应一条过程消息。工具操作、进行中的清单步骤和已完成的进展文字来自与卡片相同的安全 Activity 投影。
-条目的稳定身份由展示 Turn 和原生 Activity 身份共同确定。首次写入时固定文字，之后只补充结束事件。过程消息不显示状态行。
+同一展示 Turn 内，原生操作和进展按物理 Turn 和原生 Activity 身份生成进程内摘要。清单步骤按物理 Turn 和过滤后的步骤文字配对，插入步骤保留后续步骤的身份。重复文字采用首次出现的状态，移除或更名时结束原步骤。身份摘要只用于内存中的过程消息投影。首次写入时固定文字，之后只补充结束事件。过程消息不显示状态行。
 
 | 条目 | 事件与安全字段 |
 | --- | --- |

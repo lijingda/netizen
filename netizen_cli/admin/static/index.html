@@ -427,7 +427,7 @@
             </div>
             <button id="session-settings-progress-reset" class="progress-reset" type="button" hidden>恢复跟随全局</button>
             <div id="session-settings-progress-settings" class="progress-settings" hidden>
-              <p id="session-settings-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局过程卡配置。修改细项后将保存为独立配置。</p>
+              <p id="session-settings-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局展示细项。修改细项后将保存为独立配置。</p>
               <label>卡片组织方式（仅卡片生效）<select id="session-settings-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
               <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
               <div class="defaults-feedback"><label><input id="session-settings-progress-show-commentary" type="checkbox">最近进展</label></div>
@@ -515,7 +515,7 @@
             </div>
             <button id="defaults-progress-reset" class="progress-reset" type="button" hidden>恢复跟随全局</button>
             <div id="defaults-progress-settings" class="progress-settings" hidden>
-              <p id="defaults-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局过程卡配置。修改细项后将保存为独立配置。</p>
+              <p id="defaults-progress-source" class="session-settings-help" hidden>当前未单独配置，显示全局展示细项。修改细项后将保存为独立配置。</p>
               <label>卡片组织方式（仅卡片生效）<select id="defaults-progress-organization"><option value="content">按内容</option><option value="time">按时间</option></select></label>
               <p class="session-settings-help">按时间交错显示进展与操作，任务清单固定在底部。执行状态和异常提示始终保留。</p>
               <div class="defaults-feedback"><label><input id="defaults-progress-show-commentary" type="checkbox">最近进展</label></div>
@@ -804,7 +804,7 @@
     <section id="question-notifications" class="panel" aria-labelledby="question-notifications-heading" hidden>
       <div class="section-head"><div><h2 id="question-notifications-heading">提问通知</h2><time id="question-notifications-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"><button class="refresh" data-refresh="question-notifications">刷新</button></div></div>
       <div id="question-notifications-error" class="list-error" role="status" hidden></div>
-        <p class="defaults-help">设置 Agent 提问时是否 @ 发起人。</p><details class="panel-explanation"><summary>说明</summary><p>设置 Agent 提问时的 @ 提醒，与过程卡及结束提醒开关独立，不影响问题卡显示和回答。</p></details>
+        <p class="defaults-help">设置 Agent 提问时是否 @ 发起人。</p><details class="panel-explanation"><summary>说明</summary><p>设置 Agent 提问时的 @ 提醒，与回复消息类型及结束提醒独立，不影响问题卡显示和回答。</p></details>
         <form id="question-notifications-form" class="card-form question-notifications-form">
           <fieldset id="question-notifications-fields" disabled>
             <label class="question-notifications-option">
@@ -828,7 +828,7 @@
     <section id="progress-card" class="panel" aria-labelledby="progress-card-heading" hidden>
       <div class="section-head"><div><h2 id="progress-card-heading">全局过程卡</h2><time id="progress-card-refreshed-at" class="hint list-freshness" aria-live="polite" hidden></time></div><div class="actions"><button class="refresh" data-refresh="progress-card">刷新</button></div></div>
       <div id="progress-card-error" class="list-error" role="status" hidden></div>
-        <p class="defaults-help">设置未单独配置的会话所使用的过程卡样式。</p><details class="panel-explanation"><summary>说明</summary><p>仅在本实例的会话未单独配置过程卡时使用，不覆盖会话及聊天默认配置中已有的过程卡设置。</p></details>
+        <p class="defaults-help">设置未单独配置的会话所使用的展示细项。卡片和过程消息均可使用，组织方式仅适用于卡片。</p><details class="panel-explanation"><summary>说明</summary><p>普通任务开始、Goal 新运行或 Side 创建时读取这些设置。会话及聊天默认配置中单独保存的细项优先。</p></details>
         <form id="global-card-form" class="card-form global-card-form">
           <fieldset id="global-card-fields" disabled>
             <div id="global-card-progress-settings" class="progress-settings" hidden>

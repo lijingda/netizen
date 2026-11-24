@@ -3,6 +3,7 @@ status: accepted
 date: 2026-10-21
 amends: 0086
 related: 0073, 0076
+amended_by: 0107
 ---
 
 # 未配置过程卡的会话使用实例级兜底

@@ -3,7 +3,7 @@ status: accepted
 date: 2026-09-01
 amends: 0020, 0047, 0048, 0049
 related: 0021, 0046, 0051
-amended_by: 0071, 0072, 0079, 0086
+amended_by: 0071, 0072, 0079, 0086, 0107
 ---
 
 # 用单一消费链投影安全的 Turn Activity

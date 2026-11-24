@@ -3466,7 +3466,7 @@ function renderProgressCardSettings(input, settings) {
   for (const [kind, shown] of [["commentary", progress?.show_commentary], ["operation", progress?.show_operations]]) {
     input(`progress-${kind}-capacity`).hidden = !shown;
   }
-  const error = progress ? progressCardSettingsError(settings) : "读取全局配置后可编辑过程卡细项。";
+  const error = progress ? progressCardSettingsError(settings) : "读取全局配置后可编辑展示细项。";
   const note = input("progress-error");
   note.textContent = error;
   note.hidden = !error;
