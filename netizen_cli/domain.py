@@ -391,6 +391,7 @@ class ReplyCardActivityModule:
     collapsed: bool = False
     hidden_steps: int = 0
     state_line: str | None = None
+    turn_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)

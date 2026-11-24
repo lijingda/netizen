@@ -322,6 +322,8 @@ def _normalize_activity_module(
     if activity is None:
         return None
     terminal_status = _terminal_progress_status(activity.terminal_status)
+    if type(activity.turn_only) is not bool or (activity.turn_only and terminal_status != "completed"):
+        raise ValueError("only a completed Turn may have a per-turn completion heading")
     if activity.state_line is not None:
         _bounded_card_text(activity.state_line, "activity.state_line", 128)
     progress = _sanitize_turn_progress_manifest(activity.progress)
@@ -556,6 +558,7 @@ def turn_progress_card(
     final_response: str | None = None,
     files: tuple[TurnFile, ...] = (),
     terminal_status: str | None = None,
+    run_outcome: str | None = "completed",
     collapsed: bool = False,
     scope: FeishuScope | None = None,
     binding_id: str | None = None,
@@ -575,6 +578,8 @@ def turn_progress_card(
     only Activity and partial answers, without inventing a result.
     """
 
+    # Legacy direct callers finish one complete run. The event presenter supplies
+    # its verified run outcome explicitly, including None while a run continues.
     normalized_terminal_status = _terminal_progress_status(terminal_status)
     if not include_result and (final_response is not None or files or completion_mention_user_id is not None):
         raise ValueError("a progress card without Result cannot contain a final response, Files or a completion mention")
@@ -598,6 +603,7 @@ def turn_progress_card(
         progress=_turn_progress_manifest(snapshot),
         state_line=getattr(snapshot, "state_line", None),
         terminal_status=normalized_terminal_status,
+        turn_only=normalized_terminal_status == "completed" and run_outcome != "completed",
         collapsed=collapsed,
         # v4 file callbacks freeze only the already-bounded progress manifest.
         # Preserve their established initial/paged behavior until that legacy
@@ -619,7 +625,7 @@ def turn_progress_card(
             turn_id=turn_id,
             items=tuple(_reply_file_item(item) for item in files),
             action_version=(
-                REPLY_CARD_ACTION_VERSION if partial_answer is not None or activity.state_line
+                REPLY_CARD_ACTION_VERSION if partial_answer is not None or activity.state_line or activity.turn_only
                 else TURN_FILE_ACTION_VERSION
             ),
             additions=additions,
@@ -847,7 +853,7 @@ def _reply_card_chrome(
         )
     if projection.activity is not None:
         title, template, summary = _progress_card_chrome(
-            projection.activity.terminal_status
+            projection.activity.terminal_status, projection.activity.turn_only
         )
         return title, None, template, summary
     if projection.files is not None:
@@ -857,15 +863,12 @@ def _reply_card_chrome(
             f"本轮文件 {visible.total_items} 个 · "
             f"第 {visible.page + 1}/{visible.total_pages} 页"
         )
-        return (
-            "任务已完成",
-            subtitle,
-            "green",
-            f"任务已完成 · 本轮文件 {visible.total_items} 个",
-        )
+        title, template, summary = _progress_card_chrome("completed")
+        return title, subtitle, template, f"{summary} · 本轮文件 {visible.total_items} 个"
     if projection.result is None and projection.partial_answer is not None:
         return "任务执行中", None, "blue", "阶段性答案"
-    return "任务已完成", None, "green", "任务已完成"
+    title, template, summary = _progress_card_chrome("completed")
+    return title, None, template, summary
 
 
 def _reply_goal_block(
@@ -1049,9 +1052,10 @@ def _terminal_progress_status(value: str | None) -> str | None:
     return normalized
 
 
-def _progress_card_chrome(status: str | None) -> tuple[str, str, str]:
+def _progress_card_chrome(status: str | None, turn_only: bool = False) -> tuple[str, str, str]:
     if status == "completed":
-        return "任务已完成", "green", "任务已完成"
+        title = "本轮已完成" if turn_only else "任务已完成"
+        return title, "green", title
     if status == "interrupted":
         return "任务已中断", "orange", "任务已中断"
     if status == "failed":
@@ -1887,7 +1891,7 @@ def _decode_reply_goal_module(
 def _decode_reply_activity_module(value: Any) -> ReplyCardActivityModule | None:
     if value is None:
         return None
-    if not isinstance(value, Mapping) or set(value) - {"state_line"} != {
+    if not isinstance(value, Mapping) or set(value) - {"state_line", "turn_only"} != {
         "progress",
         "terminal_status",
         "collapsed",
@@ -1915,8 +1919,11 @@ def _decode_reply_activity_module(value: Any) -> ReplyCardActivityModule | None:
     state_line = value.get("state_line")
     if state_line is not None and (not isinstance(state_line, str) or not 0 < len(state_line) <= 128):
         raise CardActionError("Activity 状态文字无效。")
+    turn_only = value.get("turn_only", False)
+    if type(turn_only) is not bool or (turn_only and terminal_status != "completed"):
+        raise CardActionError("Activity 完成状态无效。")
     return ReplyCardActivityModule(
-        state_line=state_line, progress=progress,
+        state_line=state_line, progress=progress, turn_only=turn_only,
         terminal_status=terminal_status,
         collapsed=collapsed,
         hidden_steps=hidden_steps,
@@ -2393,6 +2400,7 @@ def _encode_reply_activity_module(
         "collapsed": activity.collapsed,
         "hidden_steps": activity.hidden_steps,
         **({"state_line": activity.state_line} if activity.state_line else {}),
+        **({"turn_only": True} if activity.turn_only else {}),
     }
 
 

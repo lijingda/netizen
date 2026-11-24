@@ -20,6 +20,7 @@ from lark_channel import (
     RetryConfig, SendOpts,
 )
 
+from netizen_cli.external_calls import external_call
 from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
 from netizen_cli.cards import decode_turn_file_action, reply_card, reply_card_from_manifest
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
@@ -139,7 +140,7 @@ def _card_scenarios(scope: FeishuScope) -> list[tuple[str, list[tuple[str, Outbo
 async def _text_samples(send_post) -> int:
     # No native runtime or notification consumer: delivery uses only supplied
     # exact completed items and the real production rich-text delivery method.
-    presenter = _ReplyCardPresenter(None, confirm_each_write=True, operation_timeout_seconds=30)
+    presenter = _ReplyCardPresenter(None, operation_timeout_seconds=30)
     try:
         for side in (False, True):
             label = "Side" if side else "普通会话"
@@ -148,7 +149,7 @@ async def _text_samples(send_post) -> int:
             second = PartialAnswer(thread_id, turn_id, "second", f"{_NOTICE}\n{label}／关闭进度卡：第二段稳定答案。")
             delivery = await presenter.prepare_partial_answers(
                     target=ReplyTarget(PresentationKey(f'probe-owner-{side}', thread_id, turn_id, side=side), label, None),
-                    reply=lambda post: send_post(label, post))
+                    reply=lambda post: external_call(send_post(label, post)))
             confirmed = await presenter.deliver_partial_answers(delivery, tuple(delivery.target.partial(item) for item in (first, first, second)))
             if not confirmed:
                 raise RuntimeError("synthetic rich-text sample delivery was not confirmed")

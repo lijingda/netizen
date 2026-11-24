@@ -10,6 +10,7 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from ..bindings import BindingTaskFeedback
 from ..file_evidence import FileEvidence
+from ..ordinary_sessions import LogicalReply, RunCardState
 from ..partial_answers import PartialAnswer as NativePartial
 from ..runtime.contracts import SideTurnActivitySnapshot, TurnActivitySnapshot
 from .topics import CardReplyLocation
@@ -80,16 +81,37 @@ class TurnOpened:
 
 
 @dataclass(frozen=True, slots=True)
+class RunDisplay:
+    reply: LogicalReply | None
+    location: CardReplyLocation
+    publishable: Callable[[], bool]
+    current: Callable[[], RunCardState]
+
+
+@dataclass(frozen=True, slots=True)
+class ItemDelivery:
+    """Receipt policy for content which can only be attempted once."""
+    display: RunDisplay
+    send: Callable[[str | OutboundPost | OutboundCard, str | None, CardReplyLocation], Awaitable[SendResult]]
+    plain_suffix: Callable[[], str]
+    deadline: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class RunEnded:
     target: ReplyTarget
     status: TerminalStatus
     mention_user_id: str | None
+    display: RunDisplay | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RunState:
     target: ReplyTarget
-    notice: str
+    notice: str | None = None
+    display: RunDisplay | None = None
+    background: bool = False
+    send_notice: Callable[[str], Awaitable[SendResult]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +139,7 @@ class TurnResult:
     allow_suppression: bool
     end: RunEnded | None
     receipt: DeliveryReceipt | None = None
+    items: ItemDelivery | None = None
 
     @property
     def origin(self) -> object:
@@ -136,4 +159,4 @@ class TurnResult:
 
     @property
     def partial_answers(self) -> tuple[NativePartial, ...]:
-        return tuple(part.item for part in self.partials if part.target.key == self.target.key)
+        return tuple(part.item for part in self.partials if part.target == self.target)

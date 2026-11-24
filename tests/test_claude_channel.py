@@ -56,7 +56,17 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
     def freeze_trace(self, fx, scenario):
         self.enterContext(patch("netizen_cli.runtime.claude_ordinary.uuid4",
                                side_effect=(UUID(int=1), UUID(int=2))))
-        return expect_presenter_trace(self, fx, scenario, reference=CLAUDE_FIXTURE)
+        def per_turn_headings(trace):
+            for i in (3, 5, 6, 7):
+                card = trace[i][1][1]
+                if i == 6:
+                    card = card["card"]
+                for field in (card["header"]["title"], card["config"]["summary"]):
+                    self.assertEqual(field["content"], "任务已完成")
+                    field["content"] = "本轮已完成"
+
+        return expect_presenter_trace(self, fx, scenario, reference=CLAUDE_FIXTURE,
+                                      expected_edits=per_turn_headings if scenario == "background_cards" else None)
 
     async def until(self, predicate):
         async with asyncio.timeout(10):
@@ -271,16 +281,16 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         if mid == "card-H2" and receipt == "terminal update":
                             return response("H2", conflict=True)
                         return SendResult.ok()
-                    start = app._start_logical_presentation
+                    start = app._progress_cards.open
                     skipped = asyncio.Event()
-                    async def start_card(binding_id, thread_id, turn_id, origin, feedback, **kwargs):
-                        if receipt == "new terminal card" and origin.id == "H2":
+                    async def start_card(event):
+                        if receipt == "new terminal card" and event.target.origin.id == "H2":
                             skipped.set()
                             return False
-                        return await start(binding_id, thread_id, turn_id, origin, feedback, **kwargs)
+                        return await start(event)
                     with (patch.object(fx.channel, "reply", side_effect=send),
                           patch.object(fx.channel, "update_card", side_effect=update),
-                          patch.object(app, "_start_logical_presentation", side_effect=start_card)):
+                          patch.object(app._progress_cards, "open", side_effect=start_card)):
                         for h in ("H1", "H2"):
                             loc = address(h)
                             scope = FeishuScope("cli_test", loc["chat_id"], ScopeKind.TOPIC, loc["thread_id"])
@@ -1850,7 +1860,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             event = PhysicalAnswer("b", "session", "turn", "owner", object(), "completed",
                                    "![x](image.png)", None, publishable=lambda: False)
-            with patch.object(app, "_result_view") as view, patch.object(app, "_prepare_task_result_images") as images:
+            with patch("netizen_cli.channel.claude_reply_events.ClaudeReplyEvents.result") as view, patch.object(app, "_prepare_task_result_images") as images:
                 await app.handle_ordinary_completion(event)
             view.assert_not_called()
             images.assert_not_called()

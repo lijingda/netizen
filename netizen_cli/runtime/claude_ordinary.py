@@ -693,6 +693,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         finish_presentation = direct and isinstance(source.origin, ClaudeInputAnchor)
         if frame.result or detail or live.partials or (status == "completed" and finish_presentation):
             turn_id = source.input_id if direct else frame.uuid
+            if human:
+                human.reply.latest_answer_turn_id = turn_id
             snapshot = execution.activity(turn_id, source.binding.task_feedback, final=body)
             event = PhysicalAnswer(source.binding.id, execution.session,
                                    turn_id, self._owner,
@@ -750,7 +752,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             background = live.has_work(human.input_id)
             if (display, background) != human.last_display:
                 human.last_display = (display, background)
-                self._queue(execution, human, CliStateChanged(human.source, human.input_id, background,
+                self._queue(execution, human, CliStateChanged(binding_id, execution.session, human.source, human.input_id, background,
                             human.reply, execution.cli_state, execution.publication.valid))
         if idle and not force and not execution.closing:
             self._complete_humans(execution)
@@ -766,6 +768,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if human.status is None or human.terminal_sent or live.has_work(human.input_id):
                 continue
             human.terminal_sent = True
+            human.reply.verified_status = human.status
             mention = None
             if human.binding.task_feedback.completion_mention_enabled and not human.stop_requested and human.status != "interrupted":
                 mention = valid_completion_mention_user_id(self._owner)

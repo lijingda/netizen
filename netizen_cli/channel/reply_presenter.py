@@ -82,13 +82,12 @@ class _TurnProgressCardSession:
 
 
 class _ReplyCardPresenter:
-    """One best-effort owner for Turn, Side Turn, and Goal Reply Cards."""
+    """In-memory progress cards and delivery receipts for exact presentation turns."""
 
     def __init__(
         self,
         channel: ReplyChannel,
         *,
-        confirm_each_write: bool = False,
         poll_seconds: float = _PROGRESS_CARD_POLL_SECONDS,
         operation_timeout_seconds: float = _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS,
     ) -> None:
@@ -97,7 +96,6 @@ class _ReplyCardPresenter:
         if operation_timeout_seconds <= 0:
             raise ValueError("progress card operation timeout must be positive")
         self._channel = channel
-        self._confirm_each_write = confirm_each_write
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
         self._sessions: dict[
@@ -124,8 +122,8 @@ class _ReplyCardPresenter:
     def operation_timeout(self) -> float:
         return self._operation_timeout_seconds
 
-    def physical_delivery(self, binding_id: str, thread_id: str, turn_id: str) -> PhysicalDelivery:
-        session = self._sessions.get((binding_id, thread_id, turn_id))
+    def physical_delivery(self, key: PresentationKey) -> PhysicalDelivery:
+        session = self._sessions_for(key).get(key.index)
         return session.delivery if session and session.delivery is not None else PhysicalDelivery()
 
     async def write_physical_card(self, message_id: str, card: OutboundCard, *, binding_id: str, turn_id: str,
@@ -168,11 +166,11 @@ class _ReplyCardPresenter:
                     items = tuple(delivery.partial(p.item) for p in initial.partials if p.target == target) if delivery else ()
                     if delivery:
                         delivery.begin(items)
-                    result = await external_call(event.reply(card), isolate=self._confirm_each_write)
-                    if event.validate_reply is None or await external_call(event.validate_reply(result), isolate=self._confirm_each_write):
+                    result = await external_call(event.reply(card), isolate=location is not None)
+                    if event.validate_reply is None or await external_call(event.validate_reply(result), isolate=location is not None):
                         if location:
                             result = location.validate(result, card=True)
-                        message_id = _confirmed_reply_id(result) if self._confirm_each_write else _receipt_message_id(result)
+                        message_id = _confirmed_reply_id(result) if location else _receipt_message_id(result)
                         if delivery:
                             delivery.record(items, receipt(result))
             except asyncio.CancelledError:
@@ -210,9 +208,9 @@ class _ReplyCardPresenter:
         session = self._sessions_for(target.key).get(target.key.index)
         if session is not None:
             try:
-                # The Claude poll bounds its SDK call. Join that write before
+                # A location-verified poll bounds its SDK call. Join that write before
                 # transferring its receipts and the message to the terminal writer.
-                async with asyncio.timeout(None if self._confirm_each_write else self._operation_timeout_seconds):
+                async with asyncio.timeout(None if session.location else self._operation_timeout_seconds):
                     await self._stop_session(session)
             except TimeoutError:
                 # Cancellation affects only this local presentation task. Its
@@ -252,15 +250,12 @@ class _ReplyCardPresenter:
             logger.warning("terminal partial-answer delivery budget exhausted")
         identities = {
             (part.item.thread_id, part.item.turn_id, part.item.item_id)
-            for part in answers if part.target.key == delivery.target.key and part.item.text.strip()
+            for part in answers if part.target == delivery.target and part.item.text.strip()
         }
         return (not answers or bool(identities)) and identities <= delivery.confirmed_partials
 
-    def has_card(
-        self, *, owner_id: str, thread_id: str, turn_id: str, side: bool = False,
-    ) -> bool:
-        sessions = self._side_sessions if side else self._sessions
-        session = sessions.get((owner_id, thread_id, turn_id))
+    def has_card(self, key: PresentationKey) -> bool:
+        session = self._sessions_for(key).get(key.index)
         return session is not None and session.message_id is not None
 
     async def _deliver_partial_answers(
@@ -279,7 +274,7 @@ class _ReplyCardPresenter:
                 return
             identity = (answer.thread_id, answer.turn_id, answer.item_id)
             if (
-                part.target.key != session.target.key
+                part.target != session.target
                 or not answer.text.strip()
                 or identity in session.attempted_partials
             ):
@@ -302,12 +297,12 @@ class _ReplyCardPresenter:
                 ledger.begin((item,))
             try:
                 async with asyncio.timeout(self._operation_timeout_seconds):
-                    result = await external_call(reply(post), isolate=self._confirm_each_write)
+                    result = await external_call(reply(post), isolate=session.location is not None)
                     if ledger:
                         ledger.record((item,), receipt(result))
                     if not _CardUpdateAttempt("", result).confirmed:
                         continue
-                    if session.validate_reply is not None and not await external_call(session.validate_reply(result), isolate=self._confirm_each_write):
+                    if session.validate_reply is not None and not await external_call(session.validate_reply(result), isolate=session.location is not None):
                         continue
                     session.confirmed_partials.add(identity)
             except asyncio.CancelledError:
@@ -537,7 +532,7 @@ class _ReplyCardPresenter:
             attempt = await self._attempt_update_message(
                 message_id, card, binding_id=binding_id, operation_id=operation_id, location=location,
             )
-            return attempt.confirmed if self._confirm_each_write else attempt.updated
+            return attempt.confirmed if location else attempt.updated
 
     def _message_writer(self, message_id: str) -> asyncio.Lock:
         # A waiter retains the same lock until its complete card replacement settles.
@@ -601,7 +596,7 @@ class _ReplyCardPresenter:
                 result = await external_call(self._channel.update_card(
                     message_id,
                     card.card,
-                ), isolate=self._confirm_each_write)
+                ), isolate=location is not None)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -637,7 +632,7 @@ class _ReplyCardPresenter:
         if task is None or task is asyncio.current_task():
             return
         try:
-            await external_call(task, isolate=self._confirm_each_write)
+            await external_call(task, isolate=session.location is not None)
         except asyncio.CancelledError:
             raise
         except Exception:

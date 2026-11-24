@@ -204,6 +204,23 @@ class ProgressCardPresentationTest(unittest.TestCase):
         with self.assertRaises(TurnFileCardLimitError):
             self.render(snapshot, files=self.files)
 
+    def test_files_page_keeps_the_verified_completion_heading(self):
+        for status, title in ((None, "本轮已完成"), ("completed", "任务已完成")):
+            with self.subTest(run_outcome=status):
+                first = turn_progress_card(snapshot=self.snapshot(ProgressCardSettings()), files=self.files,
+                    final_response="答案", terminal_status="completed", run_outcome=status,
+                    scope=self.scope, binding_id="binding-123", turn_id="turn-123")
+                page = self.decode(self.page_value(first))
+                if page.reply:
+                    rebuilt = reply_card_from_manifest(scope=page.scope, binding_id=page.binding_id, turn_id=page.turn_id,
+                        manifest=page.files, reply=page.reply, page=page.page or 0)
+                else:
+                    rebuilt = turn_progress_card_from_manifest(scope=page.scope, binding_id=page.binding_id, turn_id=page.turn_id,
+                        final_response=page.answer or "", manifest=page.files, progress=page.progress, page=page.page or 0)
+                for card in (first, rebuilt):
+                    self.assertEqual(card.card["header"]["title"]["content"], title)
+                    self.assertEqual(card.card["config"]["summary"]["content"], title)
+
     def test_v4_and_v5_pagination_freeze_settings_and_order(self):
         settings = ProgressCardSettings(
             show_plan=False, organization="time",

@@ -1,6 +1,6 @@
 """Netizen-owned values for ordinary session inputs and completion."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -88,14 +88,26 @@ class ClaudeCliState:
         return "全部完成"
 
 
+@dataclass(frozen=True, slots=True)
+class RunCardState:
+    line: str
+    verified_status: str | None
+    revision: Hashable
+
+
 @dataclass(slots=True)
 class LogicalReply:
-    refresh: Callable[[ClaudeCliState | None], Awaitable[None]] | None = None
+    refresh: Callable[[RunCardState | None], Awaitable[None]] | None = None
     attempted: bool = False
     message_id: str | None = None
 
-    def confirmed(self, message_id: str) -> None:
+    confirmed_turn_id: str | None = None
+    latest_answer_turn_id: str | None = None
+    verified_status: str | None = None
+
+    def confirmed(self, message_id: str, turn_id: str) -> None:
         self.message_id = message_id
+        self.confirmed_turn_id = turn_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +135,8 @@ class PhysicalAnswer(OrdinaryConclusion):
 
 @dataclass(frozen=True, slots=True)
 class CliStateChanged:
+    binding_id: str
+    thread_id: str
     origin: object
     turn_id: str
     background: bool

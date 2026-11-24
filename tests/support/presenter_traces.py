@@ -45,7 +45,7 @@ def _encode_media(value):
     raise TypeError(f"Unexpected transport value {type(value).__name__}")
 
 
-def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE):
+def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE, expected_edits=None):
     """Compare the complete ordered trace after the scenario finishes."""
     stack = case.enterContext(ExitStack())
     nonces = itertools.count(1)
@@ -57,6 +57,8 @@ def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE):
         root = fixture.project_root
         actual = json.loads(serialized.replace(str(root.resolve()), "<root>").replace(str(root), "<root>"))
         expected = json.loads(reference.read_text(encoding="utf-8"))[name]
+        if expected_edits:
+            expected_edits(expected)
         case.assertEqual(expected, actual, name)
 
     case.addCleanup(compare)

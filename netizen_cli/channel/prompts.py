@@ -78,13 +78,13 @@ from .app_values import (
     _message_chat_type,
     _message_id,
 )
-from .presentation import CompletionPresentationChannel
+from .reply_adapters import NativeReplyChannel
 
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
 
 
-class PromptChannel(CompletionPresentationChannel):
+class PromptChannel(NativeReplyChannel):
     """Ordinary prompt admission, automatic session creation and context receipts."""
 
     async def _prompt(
