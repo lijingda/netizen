@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Literal
 
 from ..external_calls import external_call
+from ..runtime.contracts import TurnActivitySnapshot
 from ..process_activity import ObservedProcessItem
 from ..process_messages import (
     ITEM_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
@@ -35,50 +36,62 @@ def _item(row: ObservedProcessItem) -> ProcessItem:
 
 
 class ProcessList:
+    """Reserve a slot for each running START until its paired END is confirmed."""
+
     def __init__(self) -> None:
         self.pinned: dict[str, ProcessItem] = {}
         self.running_offers: dict[str, ProcessItem] = {}
+        self._step_pins: dict[str, ProcessItem] = {}
+        self._physical_turn: str | None = None
+        self._window: dict[str, ProcessItem] = {}
         self.desired: Payload = ()
 
     def observe(self, snapshot: Activity, now: int) -> None:
         if not snapshot.process_available:
             return
+        physical = (snapshot.physical_turn_id if isinstance(snapshot, TurnActivitySnapshot) else None) or snapshot.turn_id
+        if physical != self._physical_turn:
+            self._physical_turn = physical
+            self._step_pins.clear()
         current = {}
         for row in snapshot.process_items:
             item = _item(row)
-            if pinned := self.pinned.get(item.item_id):
-                item = pinned.finish(item.finished_at) if item.finished_at is not None else pinned
-            current[item.item_id] = item
-        # Only an available window proves that a missing running item has ended.
+            pinned = self._step_pins.get(row.identity) or self.running_offers.get(row.identity) or self.pinned.get(row.identity)
+            if pinned is not None:
+                item = pinned.finish(row.finished_at) if row.finished_at is not None else pinned
+            current[row.identity] = item
+        self._window = current
         for key, offered in self.running_offers.items():
-            if key not in current:
-                current[key] = offered.finish(now)
-            if current[key].finished_at is not None:
-                self.running_offers[key] = current[key]
-        running = build_items([item for item in current.values() if item.finished_at is None])
-        reserved = build_items([item for key, item in current.items()
-                                if key in self.running_offers and item.finished_at is not None])
-        # Reserve paired ends before the recent finished window competes for spare slots.
-        reserved = tuple(sorted(reserved, key=lambda item: (item.started_at, item.item_id)))[:ITEM_LIMIT - len(running)]
-        remaining = ITEM_LIMIT - len(running) - len(reserved)
-        recent = sorted((item for key, item in current.items()
-                         if key not in self.running_offers and item.finished_at is not None),
-                        key=lambda item: (item.finished_at or 0, item.started_at, item.item_id), reverse=True)
-        self.desired = build_items((*running, *reserved, *recent[:remaining]))
+            observed = current.get(key)
+            self.running_offers[key] = offered.finish(now) if observed is None else observed
+            if key in self._step_pins:
+                self._step_pins[key] = self.running_offers[key]
+        self._select()
+
+    def _select(self) -> None:
+        # All obligations fit because only free slots can admit a new START.
+        reserved = self.running_offers
+        available = [item for key, item in self._window.items() if key not in reserved]
+        running = sorted((item for item in available if item.finished_at is None),
+                         key=lambda item: (item.started_at, item.item_id))
+        finished = sorted((item for item in available if item.finished_at is not None),
+                          key=lambda item: (item.finished_at or 0, item.started_at, item.item_id), reverse=True)
+        free = ITEM_LIMIT - len(reserved)
+        self.desired = build_items((*reserved.values(), *(running + finished)[:free]))
 
     def offered(self, payload: Payload) -> None:
         self.pinned = {item.item_id: item for item in payload}
         for item in payload:
             if item.finished_at is None:
                 self.running_offers.setdefault(item.item_id, item)
-        if len(self.running_offers) > ITEM_LIMIT:
-            # The native cap permits displacement only under saturation.
-            self.running_offers = {key: self.running_offers[key] for key in self.pinned if key in self.running_offers}
+            if isinstance(item, StepItem) and item.item_id in self._window:
+                self._step_pins[item.item_id] = item
 
     def confirmed(self, payload: Payload) -> None:
         for item in payload:
             if item.finished_at is not None:
                 self.running_offers.pop(item.item_id, None)
+        self._select()
 
 
 async def _verify(channel: ReplyChannel, location: CardReplyLocation, created: Created) -> bool:

@@ -260,7 +260,66 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         output.offered(output.desired)
         remaining = [row for row in window.rows if row.identity not in expected[:3]]
         output.observe(replace(snapshot,process_items=tuple(remaining)),T+1)
+        ends = output.desired
+        self.assertEqual({item.item_id for item in ends}, set(expected[:60]))
+        output.offered(ends)
+        output.confirmed(ends)
         self.assertEqual({item.item_id for item in output.desired}, set(expected[3:]))
+
+    def test_an_offered_start_keeps_a_slot_until_its_end_is_confirmed(self):
+        for count in (1, 2, 59, 60):
+            with self.subTest(count=count):
+                window = ProcessActivityWindow(lambda: T)
+                settings = ProgressCardSettings(operation_limit=1)
+                output = ProcessList()
+                starts, ends = set(), set()
+                def observe(keys, status):
+                    for key in keys:
+                        window.observe(TurnActivityEvent(str(key), Kind.TOOL, status, 0), settings)
+                def write(*, confirm=True):
+                    output.observe(replace(process_snapshot(1), process_items=window.rows), T)
+                    sent = output.desired
+                    offered, finished = check_pairs(item_events(sent))
+                    starts.update(offered)
+                    if confirm:
+                        ends.update(finished)
+                    output.offered(sent)
+                    if confirm:
+                        output.confirmed(sent)
+                    self.assertLessEqual(len(output.running_offers), 60)
+                    return finished
+                observe(range(count), Status.IN_PROGRESS)
+                write()
+                first_starts = starts.copy()
+                retire = min(2, count)
+                observe(range(retire), Status.COMPLETED)
+                observe(range(count, count + retire), Status.IN_PROGRESS)
+                unconfirmed = write(confirm=False)
+                self.assertEqual(len(unconfirmed & first_starts), retire)
+                self.assertEqual(unconfirmed, write())
+                write()
+                observe(range(retire, count + retire), Status.COMPLETED)
+                write()
+                self.assertEqual(starts, ends)
+                self.assertFalse(output.running_offers)
+
+    def test_reappearing_steps_retain_original_start_and_stay_finished(self):
+        clock = [T]
+        window = ProcessActivityWindow(lambda: clock[0])
+        output = ProcessList()
+        history = []
+        for plan in ("A", "B", "BC", "AC"):
+            window.plan(tuple(TurnPlanStepSnapshot(text, TurnPlanStepState.IN_PROGRESS) for text in plan))
+            output.observe(replace(process_snapshot(1), process_items=window.rows), clock[0])
+            sent = output.desired
+            history.append({item.text: (item.started_at, item.finished_at) for item in sent})
+            output.offered(sent)
+            output.confirmed(sent)
+            clock[0] += 1
+        self.assertEqual(history[0]["A"], (T, None))
+        self.assertEqual(history[1]["A"], (T, T+1))
+        self.assertNotIn("A", history[2])
+        self.assertEqual(history[3]["A"], history[1]["A"])
 
     def test_visibility_and_step_text_identity(self):
         window = ProcessActivityWindow(lambda:T)

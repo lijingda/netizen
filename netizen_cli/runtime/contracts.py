@@ -437,6 +437,7 @@ class TurnActivitySnapshot:
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
     state_line: str | None = None
+    physical_turn_id: str | None = field(default=None, repr=False, compare=False, kw_only=True)
 
     process_available: bool = field(default=False, repr=False, compare=False, kw_only=True)
     process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
