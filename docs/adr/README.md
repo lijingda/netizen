@@ -46,7 +46,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0077](0077-read-account-rate-limits-on-demand.md) | 按需读取共享 Codex 账号额度 | 架构决策 | 有效 |  |
 | [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) | 原生会话历史采用只读分页适配 | 架构决策 | 有效 | 被 [0096](0096-read-admin-conversations-through-summary-turn-pages.md)、[0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md) 修订 |
 | [0104](0104-host-native-agent-backends-per-instance.md) | 按实例接入多个原生 Agent 后端 | 架构决策 | 有效 | 修订 [0008](0008-use-python-sdk-for-native-turn-control.md)、[0060](0060-delete-projects-with-exact-session-inventory.md)、[0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0074](0074-deploy-independent-instances-by-root.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0080](0080-authenticate-admins-with-feishu-identities.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md)，[0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) 修订本条 |
-| [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) | 按能力接口与共用展示扩展多后端，并规划 Claude 原生能力 | 架构决策 | 有效 | 修订 [0104](0104-host-native-agent-backends-per-instance.md) |
+| [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) | 按能力接口与共用展示扩展多后端，并规划 Claude 原生能力 | 架构决策 | 有效 | 修订 [0104](0104-host-native-agent-backends-per-instance.md)，[0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 拟修订本条 |
 
 ## 会话身份、生命周期与并发
 
@@ -83,7 +83,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md) | 让 Side Turn 复用普通 Turn 的任务反馈与回复卡 | 功能契约 | 有效 | 被 [0051](0051-keep-lifecycle-reactions-and-make-pulse-optional.md)、[0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0072](0072-share-question-interaction-across-binding-and-side.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) 修订 |
 | [0067](0067-name-threads-with-private-ephemeral-forks.md) | 用内部临时 fork 自动补全原生会话名称 | 架构决策 | 有效 |  |
 | [0069](0069-steer-the-current-physical-goal-turn.md) | 将 Goal 中的普通消息 steer 到捕获的当前物理 Turn | 架构决策 | 有效 | 被 [0084](0084-separate-goal-controls-from-logical-turn-replies.md)、[0088](0088-align-steer-failures-and-input-resume-rejections.md) 修订 |
-| [0084](0084-separate-goal-controls-from-logical-turn-replies.md) | Goal 管理与逻辑 Turn 回复分离 | 架构决策 | 有效 |  |
+| [0084](0084-separate-goal-controls-from-logical-turn-replies.md) | Goal 管理与逻辑 Turn 回复分离 | 架构决策 | 有效 | [0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 拟修订本条 |
 
 ## 会话协作与 Worktree
 
@@ -118,15 +118,16 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0046](0046-add-opt-in-binding-task-feedback.md) | 增加默认关闭的 Binding 任务反馈与有界进度卡 | 功能契约 | 有效 | 被 [0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md)、[0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md)、[0051](0051-keep-lifecycle-reactions-and-make-pulse-optional.md) 修订 |
 | [0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md) | 组合类型化回复卡并只自动收尾完成的 Goal | 架构决策 | 有效 | 被 [0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md)、[0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0053](0053-show-exact-turn-line-statistics-in-files.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md)、[0084](0084-separate-goal-controls-from-logical-turn-replies.md) 修订 |
 | [0051](0051-keep-lifecycle-reactions-and-make-pulse-optional.md) | 始终反馈任务生命周期，只让执行中表情闪烁可选 | 功能契约 | 有效 |  |
-| [0052](0052-project-safe-turn-activity-with-one-consumer.md) | 用单一消费链投影安全的 Turn Activity | 架构决策 | 有效 | 被 [0071](0071-answer-native-questions-through-binding-input.md)、[0072](0072-share-question-interaction-across-binding-and-side.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md)、[0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md) 修订 |
-| [0053](0053-show-exact-turn-line-statistics-in-files.md) | 在 Files 模块展示 exact Turn 行数统计 | 功能契约 | 有效 | 被 [0056](0056-count-successful-patches-in-task-files.md) 修订 |
-| [0056](0056-count-successful-patches-in-task-files.md) | 按成功 patch 累计本轮文件行数 | 功能契约 | 有效 |  |
+| [0052](0052-project-safe-turn-activity-with-one-consumer.md) | 用单一消费链投影安全的 Turn Activity | 架构决策 | 有效 | 被 [0071](0071-answer-native-questions-through-binding-input.md)、[0072](0072-share-question-interaction-across-binding-and-side.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md)、[0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md) 修订，[0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 拟修订本条 |
+| [0053](0053-show-exact-turn-line-statistics-in-files.md) | 在 Files 模块展示 exact Turn 行数统计 | 功能契约 | 有效 | 被 [0056](0056-count-successful-patches-in-task-files.md) 修订，[0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 拟修订本条 |
+| [0056](0056-count-successful-patches-in-task-files.md) | 按成功 patch 累计本轮文件行数 | 功能契约 | 有效 | [0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 拟修订本条 |
 | [0058](0058-use-page-selection-for-file-cards.md) | 文件卡片统一使用页码选择与跳转 | 功能契约 | 有效 |  |
 | [0063](0063-mention-task-initiators-in-terminal-results.md) | 在任务结束时提及任务发起人 | 功能契约 | 有效 | 被 [0068](0068-run-saved-scheduled-plans-manually.md)、[0070](0070-schedule-inputs-in-existing-bindings.md) 修订 |
 | [0065](0065-preview-local-images-in-result-markdown.md) | 在结果正文中预览明确引用的本地图片 | 功能契约 | 有效 | 当前预览限额与失败提示见[工程设计](../design.md#最终正文中的本地图片) |
-| [0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) | 在现有回复形态中交付阶段性答案 | 架构决策 | 有效 | 被 [0084](0084-separate-goal-controls-from-logical-turn-replies.md) 修订 |
+| [0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) | 在现有回复形态中交付阶段性答案 | 架构决策 | 有效 | 被 [0084](0084-separate-goal-controls-from-logical-turn-replies.md) 修订，[0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 拟修订本条 |
 | [0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md) | 用有界活动分段配置过程卡展示 | 功能契约 | 有效 |  |
 | [0087](0087-use-instance-progress-card-settings-for-missing-session-intent.md) | 未配置过程卡的会话使用实例级兜底 | 功能契约 | 有效 |  |
+| [0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) | 以飞书展示 Turn 统一各后端的回复展示 | 架构决策 | 草案 | 拟修订 [0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0053](0053-show-exact-turn-line-statistics-in-files.md)、[0056](0056-count-successful-patches-in-task-files.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md)、[0084](0084-separate-goal-controls-from-logical-turn-replies.md)、[0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) |
 
 ## 命令与 Skills
 
@@ -197,4 +198,4 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 ## 统计
 
-共 105 个 ADR：架构决策 72 个，功能契约 31 个，升级记录 2 个；其中 97 个有效，8 个已被取代。
+共 106 个 ADR：架构决策 73 个，功能契约 31 个，升级记录 2 个；其中 97 个有效，8 个已被取代，1 个草案。

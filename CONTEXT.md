@@ -377,6 +377,15 @@ accepted 原消息使用 `Typing`，成功 steer 使用 `OnIt`，终态使用
 Activity、Partial Answer、Result 与 Files 四种。模块只投影已经确认的领域状态，不独立发送或更新消息，也
 不构成动态插件系统。
 
+**Presentation Turn / 展示 Turn**：一个原生物理 Turn 在飞书上的展示单位：开启过程卡时为一张
+Reply Card，关闭时为对应的一组富文本消息。它只展示该物理 Turn 自己的 Activity、阶段性答案、
+结果与本轮文件，与后端、Goal 轮次或触发来源无关；没有可见内容时不发送消息。
+_Avoid_：“逻辑回复卡”“唤醒卡”，因为展示不区分轮次的来源。
+
+**Logical Run / 逻辑运行**：一条人工输入、一次定时输入或一次 `/goal` 启动，连同由它派生的
+全部物理 Turn。它只承载 Lifecycle Reaction、最新 Presentation Turn 上的状态行、停止后的
+提醒抑制和结束时最多一次 Completion Mention，不承载答案正文。
+
 **Partial Answer / 阶段性答案**：Codex 明确标记为稳定但非终态的答案片段，任务之后仍可能
 继续输出或执行工具。它是答案正文，不是 Activity 摘要，也不是任务完成或最终结果的证明。
 
