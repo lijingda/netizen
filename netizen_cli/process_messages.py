@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Literal
@@ -29,6 +29,11 @@ class ActivitySnapshot:
     activity_id: str  # Stable identity of the presentation Turn inside the event.
     content: SnapshotContent
     timestamp: int
+
+    def __post_init__(self) -> None:
+        if not self.activity_id.strip():
+            raise ValueError("a snapshot requires a stable activity identity")
+        _check_timestamp(self.timestamp)
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,72 @@ def _serialize(activity_id: str, content: SnapshotContent) -> str:
         "type": _EVENT, "messageId": activity_id, "activityType": "PLAN",
         "content": {"title": content.title, "rows": content.rows}, "replace": True,
     }, ensure_ascii=False, separators=(",", ":"))
+
+
+def build_snapshot_content(
+    activity_id: str, title: str, rows: tuple[str, ...], *,
+    state_line: str | None = None, terminal_lines: tuple[str, ...] = (),
+) -> SnapshotContent:
+    """Pack already-safe display rows (oldest first), including the full event overhead."""
+    state = (state_line,) if state_line is not None else ()
+    required = state + terminal_lines
+    available = CONTENT_LIMIT - len(_serialize(activity_id, SnapshotContent(title, required)))
+    if available < 0:
+        # All ordinary rows have been dropped. Keep each required line, sharing
+        # the remaining space when even the title/state/terminal text is long.
+        def shortened(width: int) -> SnapshotContent:
+            return SnapshotContent(_clip(title, width), tuple(_clip(row, width) for row in required))
+
+        width = _largest_width(lambda n: len(_serialize(activity_id, shortened(n))) <= CONTENT_LIMIT)
+        if width < 0:
+            raise ValueError("Activity identity and required line structure exceed the budget")
+        return shortened(width)
+
+    kept: list[str] = []
+    for row in reversed(rows):
+        separator = int(bool(required or kept))
+        cost = len(json.dumps(row, ensure_ascii=False)) + separator
+        if cost > available:
+            if not kept:
+                # Once just the newest row remains, shorten its text in place.
+                width = _largest_width(
+                    lambda n: len(json.dumps(_clip(row, n), ensure_ascii=False)) + separator <= available
+                )
+                if width >= 0:
+                    kept.append(_clip(row, width))
+            break
+        kept.append(row)
+        available -= cost
+    return SnapshotContent(title, (*state, *reversed(kept), *terminal_lines))
+
+
+def _clip(text: str, width: int) -> str:
+    return text if len(text) <= width else text[:width] + "…"
+
+
+def _largest_width(fits: Callable[[int], bool]) -> int:
+    low, high = -1, CONTENT_LIMIT + 1
+    while high - low > 1:
+        middle = (low + high) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle
+    return low
+
+
+def snapshot_revision(
+    activity_id: str, content: SnapshotContent, *, now_seconds: int,
+    previous: ActivitySnapshot | None = None,
+) -> ActivitySnapshot:
+    """Allocate a revision from this message's last desired snapshot, including unacknowledged writes."""
+    if previous is not None:
+        if previous.activity_id != activity_id:
+            raise ValueError("previous revision belongs to a different activity")
+        if previous.content == content:
+            return previous
+        now_seconds = max(now_seconds, previous.timestamp + 1)
+    return ActivitySnapshot(activity_id, content, now_seconds)
 
 
 def _check_timestamp(value: int) -> None:
@@ -123,7 +194,6 @@ class ProcessMessages:
     async def update(
         self, cot_id: str, message_id: str, snapshot: ActivitySnapshot,
     ) -> Ok | Rejected | Unknown:
-        _check_timestamp(snapshot.timestamp)
         inner = _serialize(snapshot.activity_id, snapshot.content)
         if len(inner) > CONTENT_LIMIT:
             raise ValueError("serialized Activity snapshot exceeds its character budget")
