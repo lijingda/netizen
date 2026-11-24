@@ -11,9 +11,8 @@ from unittest.mock import AsyncMock, patch
 
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.codex_reply_events import CodexReplyEvents
-from netizen_cli.channel.process_presentation import ProcessPresentation
+from netizen_cli.channel.process_presentation import ProcessLocation, ProcessPresentation
 from netizen_cli.channel.reply_events import PresentationKey
-from netizen_cli.channel.topics import BindingCardLocation, CardReplyLocation
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.ordinary_sessions import LogicalReply, PhysicalAnswer, PhysicalStarted
 from netizen_cli.process_messages import Created, Ok, Unknown
@@ -139,8 +138,8 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
         key = PresentationKey("binding", "native-one", "turn-one")
         scope = FeishuScope("app", "chat", ScopeKind.DIRECT)
         message = ProcessPresentation(key, key, port, None,
-            lambda: CardReplyLocation(scope, "input", None, BindingCardLocation({})),
-            lambda *_: True, lambda: 1_800_000_001, 1)
+            lambda: ProcessLocation(scope, "input", None),
+            lambda _: None, lambda: 1_800_000_001, 1, claimed_cot_ids=set(), binding_id=key.owner_id)
         try:
             async with asyncio.timeout(2):
                 message.sample(process_snapshot(1))
@@ -201,10 +200,9 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
                 elif variant == "deleted":
                     row["deleted"] = True
                 channel = SimpleNamespace(fetch_message=AsyncMock(return_value={"code":0,"data":{"items":[row]}}))
-                binding = BindingCardLocation({})
                 port = process_port()
                 message = ProcessPresentation(key, key, port, channel,
-                    lambda: CardReplyLocation(scope, "input", "root", binding), lambda *_: True, lambda: 1_800_000_001, 1)
+                    lambda: ProcessLocation(scope, "input", "root"), lambda _: None, lambda: 1_800_000_001, 1, claimed_cot_ids=set(), binding_id=key.owner_id)
                 message.sample(process_snapshot(1))
                 await message.ready.wait()
                 message.finish("done")
@@ -214,7 +212,6 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
                 channel.fetch_message.assert_awaited_once_with("process-mid")
                 self.assertEqual(port.update.await_count, 2 if variant == "exact" else 0)
                 self.assertEqual(port.complete.await_count, int(variant == "exact"))
-                self.assertEqual("process-mid" in binding.unusable, variant == "wrong")
 
 
 class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
@@ -255,7 +252,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
             port.complete.assert_awaited_once_with("cot", "process-mid", "done")
             self.assertFalse(fx.app._progress_cards._process)
 
-    async def test_side_verifies_root_and_disables_contradiction_at_parent_binding(self):
+    async def test_side_placement_contradiction_leaves_parent_binding_usable(self):
         async with channel_fixture() as fx:
             port = process_port()
             presenter = fx.app._progress_cards
@@ -279,7 +276,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
                     activity=activity, root_message_id="root"))
             port.create.assert_awaited_once_with("chat", "input", True)
             read.assert_awaited_once_with("process-mid")
-            self.assertIn("process-mid", presenter.binding_location("parent").unusable)
+            self.assertFalse(presenter.binding_location("parent").unusable)
             self.assertNotIn("side", presenter._binding_locations)
             port.update.assert_not_awaited()
             port.complete.assert_not_awaited()

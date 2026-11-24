@@ -7,12 +7,11 @@ import unittest
 from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
-from netizen_cli.channel.process_presentation import ProcessList, ProcessPresentation
+from netizen_cli.channel.process_presentation import ProcessList, ProcessLocation, ProcessPresentation
 from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
-from netizen_cli.channel.topics import BindingCardLocation, CardReplyLocation
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.bindings import BindingTaskFeedback
-from netizen_cli.ordinary_sessions import DegradedTurn, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted
+from netizen_cli.ordinary_sessions import ClaudeInputAnchor, ConversationTarget, DegradedTurn, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted
 from netizen_cli.runtime.contracts import TerminalStateUnknown
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -68,8 +67,9 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
     def message(self, port, *, channel=None, topic=False):
         key = PresentationKey("binding", "native-one", "turn-one")
         scope = FeishuScope("app", "chat", ScopeKind.TOPIC if topic else ScopeKind.DIRECT, "topic" if topic else None)
-        location = CardReplyLocation(scope, "input", "root" if topic else None, BindingCardLocation({}))
-        state = ProcessPresentation(key, key, port, channel, lambda:location, lambda *_:True, lambda:T+1, 1)
+        location = ProcessLocation(scope, "input", "root" if topic else None)
+        state = ProcessPresentation(key, key, port, channel, lambda: location, lambda _: None, lambda: T+1, 1,
+                                    claimed_cot_ids=set(), binding_id=key.owner_id)
         async def close():
             state.revoke()
             if state.task:
@@ -477,17 +477,18 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                     port.complete.assert_awaited_once_with("cot","process-mid","timeout" if unknown else "done")
                     self.assertNotIn(key, presenter._process)
 
-    async def test_released_process_ids_remain_exclusive_until_binding_retirement(self):
-        for collision in (Created("cot","process-mid"), Created("other","process-mid"), Created("cot","other-mid")):
-            with self.subTest(collision=collision):
+    async def test_only_cot_ids_are_exclusive_across_bindings_and_retirement(self):
+        receipts = (Created("cot", "process-mid"), Created("other", "process-mid"), Created("cot", "other-mid"))
+        for receipt, binding, retire in itertools.product(receipts, ("A", "B"), (False, True)):
+            with self.subTest(receipt=receipt, binding=binding, retire=retire):
                 async with channel_fixture() as fx, asyncio.timeout(2):
                     presenter = fx.app._progress_cards
                     port = process_port()
                     presenter._process_port = port
-                    port.create.side_effect = [Created("cot","process-mid"), collision]
-                    for turn in ("first", "next"):
-                        snap = replace(process_snapshot(1), turn_id=turn)
-                        key = PresentationKey(snap.binding_id, snap.thread_id, turn)
+                    port.create.side_effect = [Created("cot", "process-mid"), receipt]
+                    for owner, turn in (("A", "first"), (binding, "next")):
+                        snap = replace(process_snapshot(1, binding=owner), turn_id=turn)
+                        key = PresentationKey(owner, snap.thread_id, turn)
                         origin = FakeMessage("work", message_id=turn)
                         with patch.object(fx.app._ordinary, "turn_activity", return_value=snap):
                             await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
@@ -497,43 +498,113 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                         await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "owner", origin,
                             "completed", "body", logical_id=turn, activity=snap))
                         await state.task
-                        self.assertNotIn(key, presenter._process)
+                        if retire and turn == "first":
+                            await presenter.retire_binding(owner)
+                    expected = [("cot", "process-mid")]
+                    if receipt.cot_id != "cot":
+                        expected.append((receipt.cot_id, receipt.message_id))
                     self.assertEqual(port.create.await_count, 2)
-                    self.assertEqual(port.update.await_count, 2)
-                    port.complete.assert_awaited_once_with("cot","process-mid","done")
-                    location = presenter.binding_location("binding")
-                    self.assertIn(collision.message_id, location.unusable)
-                    await presenter.retire_binding("binding")
-                    self.assertFalse(location.process_messages)
-                    self.assertFalse(location.process_cots)
+                    self.assertEqual([c.args[:2] for c in port.complete.await_args_list], expected)
+                    self.assertEqual([c.args[:2] for c in port.update.await_args_list],
+                                     [pair for pair in expected for _ in range(2)])
 
-    async def test_released_process_id_cannot_confirm_a_body_or_anchor_a_mention(self):
-        async with channel_fixture() as fx, asyncio.timeout(2):
-            presenter = fx.app._progress_cards
-            port = process_port()
-            presenter._process_port = port
-            snap = process_snapshot(1)
-            key = PresentationKey(snap.binding_id, snap.thread_id, snap.turn_id)
-            origin = FakeMessage("start", message_id="input")
-            reply = LogicalReply()
-            with patch.object(fx.app._ordinary, "turn_activity", return_value=snap):
-                await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin, BindingTaskFeedback(),
-                    lambda: True, lambda: True, reply))
-            state = presenter._process[key]
-            await state.ready.wait()
-            ordinary = fx.channel.reply
-            async def delayed_answer(target, content, *args):
-                if "actual body" in str(content):
-                    await state.task
-                    return sent_result("process-mid", chat_id="oc_direct")
-                return await ordinary(target, content, *args)
-            with patch.object(fx.channel, "reply", side_effect=delayed_answer):
+    async def test_process_ids_do_not_change_ordinary_ledger_or_explicit_mention(self):
+        async def run(order):
+            async with channel_fixture() as fx, asyncio.timeout(2):
+                presenter = fx.app._progress_cards
+                port = process_port()
+                presenter._process_port = port if order != "off" else None
+                entered, release = asyncio.Event(), asyncio.Event()
+                async def create(*_):
+                    entered.set()
+                    await release.wait()
+                    return Created("cot", "process-mid")
+                port.create.side_effect = create
+                snap = process_snapshot(1)
+                key = PresentationKey(snap.binding_id, snap.thread_id, snap.turn_id)
+                origin = FakeMessage("start", message_id="input")
+                reply = LogicalReply()
+                with patch.object(fx.app._ordinary, "turn_activity", return_value=snap):
+                    await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin, BindingTaskFeedback(),
+                        lambda: True, lambda: True, reply))
+                state = presenter._process.get(key)
+                if state:
+                    await entered.wait()
+                    if order == "early":
+                        release.set()
+                        await state.ready.wait()
+                        state.finish("done")
+                        await state.task
+                fx.channel.reply_results.append(sent_result("process-mid", chat_id="oc_direct"))
                 await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "owner", origin, "completed",
                     "actual body", logical_id=key.turn_id, activity=snap, reply=reply))
-            port.complete.assert_awaited_once()
-            self.assertNotIn("process-mid", reply.messages)
-            self.assertIsNone(reply.mention_target("input"))
-            self.assertIn("部分内容未能确认送达", str(fx.channel.replies))
+                ledger = {mid: row.confirmed_answer_items.copy() for mid, row in reply.messages.items()}
+                await fx.app.handle_ordinary_completion(LogicalTerminal(*key.index, "owner", origin, "completed",
+                    reply, "ou_owner", lambda: True))
+                anchors = [opts.reply_to for _, _, opts in fx.channel.send_calls]
+                if state:
+                    release.set()
+                    await state.task
+                    port.complete.assert_awaited_once_with("cot", "process-mid", "done")
+                return ledger, anchors
+        baseline = await run("off")
+        self.assertEqual(set(baseline[0]), {"process-mid"})
+        self.assertTrue(baseline[0]["process-mid"])
+        self.assertEqual(baseline[1], ["process-mid"])
+        for order in ("early", "late"):
+            self.assertEqual(await run(order), baseline)
+
+    async def test_cross_binding_split_receipts_match_ordinary_delivery(self):
+        async def run(enabled):
+            async with channel_fixture() as fx, asyncio.timeout(2):
+                if enabled:
+                    port = process_port()
+                    presenter = fx.app._progress_cards
+                    presenter._process_port = port
+                    snap = process_snapshot(1, binding="A")
+                    key = PresentationKey("A", snap.thread_id, snap.turn_id)
+                    origin = FakeMessage("work", message_id="input-A")
+                    with patch.object(fx.app._ordinary, "turn_activity", return_value=snap):
+                        await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
+                            BindingTaskFeedback(), lambda: True, lambda: True, LogicalReply()))
+                    state = presenter._process[key]
+                    await state.ready.wait()
+                    await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "owner", origin,
+                        "completed", "first body", logical_id=key.turn_id, activity=snap))
+                    await state.task
+                    port.complete.assert_awaited_once_with("cot", "process-mid", "done")
+                scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                human = FakeMessage("start", message_id="input-B")
+                anchor = ClaudeInputAnchor(scope, human, None, AsyncMock())
+                target = ConversationTarget(scope, anchor, "turn-B")
+                reply = LogicalReply()
+                fx.channel.send_results.extend(sent_result(mid, chat_id=scope.chat_id)
+                                               for mid in ("first-chunk", "process-mid"))
+                await fx.app.handle_ordinary_completion(PhysicalAnswer("B", "thread-B", "turn-B", "owner", target,
+                    "completed", "x" * 2000 + "\n" + "y" * 2000, logical_id="turn-B", reply=reply))
+                self.assertEqual(len(fx.channel.send_calls), 2)
+                return {mid: row.confirmed_answer_items.copy() for mid, row in reply.messages.items()}, reply.mention_target(human.id)
+        baseline = await run(False)
+        self.assertEqual(set(baseline[0]), {"first-chunk"})
+        self.assertTrue(baseline[0]["first-chunk"])
+        self.assertEqual(baseline[1], "first-chunk")
+        self.assertEqual(await run(True), baseline)
+
+    async def test_malformed_sdk_id_does_not_interrupt_ordinary_codex_delivery(self):
+        from types import SimpleNamespace
+        from lark_channel.channel.outbound.sender import OutboundSender
+        from netizen_cli.runtime.contracts import TurnOutcome
+        from tests.support.channel_results import completed_turn_result
+
+        async with channel_fixture() as fx:
+            fx.app._progress_cards.binding_location("binding")
+            receipt = OutboundSender._to_result(SimpleNamespace(_on_success=None),
+                                                {"code": 0, "data": {"message_id": {"malformed": 1}}})
+            fx.channel.reply_results.append(receipt)
+            await fx.app.handle_completion(TurnOutcome(binding_id="binding", thread_id="s", turn_id="p",
+                owner_id="owner", origin=FakeMessage("start", message_id="input"), cwd=fx.project,
+                result=completed_turn_result(final_response="actual body"), task_feedback=BindingTaskFeedback()))
+            self.assertEqual([mid for mid, content in fx.channel.replies if "actual body" in str(content)], ["input"])
 
     async def test_execution_unknown_then_exact_result_cannot_reopen_its_writer(self):
         async with channel_fixture() as fx:
@@ -563,22 +634,22 @@ class ProcessMutationTest(unittest.TestCase):
             return await start_goal(case, **kwargs)
 
         create = ProcessPresentation._create
-        claim = _ReplyCardPresenter._claim_process
+        supersede = _ReplyCardPresenter._supersede_process
         write = ProcessPresentation._write
         async def replay_create(state):
             return await create(state) or await create(state)
         async def keep_unknown(state, payload):
             result = await write(state,payload)
             return "rejected" if result == "unknown" else result
-        def publish_receipt(presenter, state, created):
+        def publish_receipt(presenter, state):
             if session := presenter._sessions.get(state.key.index):
-                session.run_reply.published(created.message_id,state.key.turn_id,(),lambda _:True)
-            return claim(presenter,state,created)
-        def supersede_other_inputs(presenter,state,created):
+                session.run_reply.published(state.created.message_id,state.key.turn_id,(),lambda _:True)
+            supersede(presenter,state)
+        def supersede_other_inputs(presenter,state):
             for previous in presenter._process.values():
                 if previous is not state and previous.created:
                     previous.finish("done")
-            return claim(presenter,state,created)
+            supersede(presenter,state)
         for owner, name, change, case in (
             (GoalReplySeparationTest, "start", create_in_card_mode,
              GoalReplySeparationTest("test_rollover_partials_share_one_card_through_final_files_page")),
@@ -588,9 +659,9 @@ class ProcessMutationTest(unittest.TestCase):
              ProcessOrderingTest("test_only_uncertain_replacement_invalidates_previously_confirmed_list")),
             (process_presentation,"_verify",AsyncMock(return_value=True),
              OrdinaryProcessTest("test_topic_requires_one_exact_placement_read_before_writes")),
-            (_ReplyCardPresenter,"_claim_process",publish_receipt,
+            (_ReplyCardPresenter,"_supersede_process",publish_receipt,
              OrdinaryProcessTest("test_claude_safe_items_flow_through_start_and_result_without_becoming_receipts")),
-            (_ReplyCardPresenter,"_claim_process",supersede_other_inputs,
+            (_ReplyCardPresenter,"_supersede_process",supersede_other_inputs,
              ProcessOrderingTest("test_supersession_closes_only_the_previous_process_for_the_same_input")),
         ):
             with self.subTest(case=case.id()), patch.object(owner,name,change):

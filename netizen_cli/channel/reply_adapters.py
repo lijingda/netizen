@@ -61,6 +61,7 @@ from .base import (
 )
 from .claude_reply_events import ClaudeReplyEvents
 from .codex_reply_events import CodexReplyEvents
+from .process_presentation import ProcessLocation
 from .presentation import CompletionPresentationChannel
 from .reply_events import DeliveryReceipt, PresentationKey, ReplyTarget, RunEnded, RunState, TurnResult
 from .topics import CardReplyLocation
@@ -122,31 +123,28 @@ class NativeReplyChannel(CompletionPresentationChannel):
         finally:
             self._finish_ordinary_completion(outcome)
 
-    def _process_reply_location(self, binding_id: str, origin: object, root_id: str | None) -> CardReplyLocation | None:
+    def _process_reply_location(self, origin: object, root_id: str | None) -> ProcessLocation | None:
         if getattr(origin, "app_id", self._app_id) != self._app_id:
             return None
-        location = self._physical_card_location(binding_id, origin)
-        scope = location.scope
-        if scope.app_id != self._app_id or location.retired or location.binding.retired:
-            return None
-        parent = location.parent
-        root = location.root or _inbound_root_message_id(origin)
-        if root_id is not None and (not scope.topic_id or root not in (None, root_id)):
-            return None
-        root = root or root_id
         if isinstance(origin, ConversationTarget):
             if not origin.publishable():
                 return None
+            scope = origin.scope
+            parent = root = None
             if scope.topic_id:
                 if not isinstance(origin.source, ClaudeInputAnchor) or origin.source.scope != scope:
                     return None
-                parent = root
-        elif not parent:
+                parent = root = origin.source.topic_root_id
+        elif isinstance(origin, _ClaudeReplyTarget):
+            scope, parent, root = origin.location.scope, origin.location.parent, origin.location.root
+        else:
+            scope, parent = self._scope(origin), _message_id(origin)
+            root = getattr(origin, "root_id", None) or _inbound_root_message_id(origin)
+            if not parent:
+                return None
+        if scope.app_id != self._app_id or (root_id is not None and (not scope.topic_id or root not in (None, root_id))):
             return None
-        if scope.topic_id and not (root and parent):
-            return None
-        # The process ID has independent write ownership within the same Binding.
-        return CardReplyLocation(scope, parent, root, location.binding)
+        return ProcessLocation(scope, parent, root or root_id)
 
     def _physical_card_location(self, binding_id: str, origin: object) -> CardReplyLocation:
         if isinstance(origin, _ClaudeReplyTarget):

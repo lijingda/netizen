@@ -14,7 +14,6 @@ from openai_codex.errors import InvalidRequestError
 
 from netizen_cli.bindings import BindingStore
 from netizen_cli.channel_app import ChannelApplication
-from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.codex_runtime import CodexRuntime
 from netizen_cli.domain import ActiveState, ScheduledConversation, ScheduledOrigin
 from netizen_cli.schedules.service import ScheduleService
@@ -389,7 +388,6 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
         channel = FakeFeishu()
         application = object.__new__(ChannelApplication)
         application._channel = channel
-        application._progress_cards = _ReplyCardPresenter(channel)
         origin = ScheduledOrigin(
             "probe", "probe-chat", "probe-root", ScheduledConversation("probe-topic"),
             "probe-plan", "probe-run",

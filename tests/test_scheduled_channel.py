@@ -610,7 +610,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.channel.reply = sdk_reply
         return driver
 
-    async def test_scheduled_answer_receipt_with_process_id_remains_unknown(self):
+    async def test_scheduled_answer_receipt_confirms_delivery_even_if_its_id_matches_a_process_message(self):
         wire = ProcessTransport([])
         self.app._progress_cards._process_port = wire.port
         mid = "synthetic-process-1"
@@ -635,7 +635,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.finish_fixture(claim, request)
         await state.task
         self.assertEqual(wire.completed, {mid})
-        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")
 
     async def finish_fixture(self, claim, request, content="验收成功", *, activity=None):
         await self.app.handle_completion(TurnOutcome(binding_id=request["binding"].id,

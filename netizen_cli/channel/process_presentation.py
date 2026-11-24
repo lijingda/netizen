@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Literal
 
+from ..domain import FeishuScope
 from ..external_calls import external_call
 from ..runtime.contracts import TurnActivitySnapshot
 from ..process_activity import ObservedProcessItem
@@ -19,7 +21,6 @@ from .physical_delivery import Outcome
 from .ports import ReplyChannel
 from .replacement_writer import ReplacementWriter
 from .reply_events import Activity, PresentationKey
-from .topics import CardReplyLocation
 
 
 logger = logging.getLogger(__name__)
@@ -94,10 +95,16 @@ class ProcessList:
         self._select()
 
 
-async def _verify(channel: ReplyChannel, location: CardReplyLocation, created: Created) -> bool:
+@dataclass(frozen=True, slots=True)
+class ProcessLocation:
+    scope: FeishuScope
+    parent: str | None
+    root: str | None
+
+
+async def _verify(channel: ReplyChannel, location: ProcessLocation, created: Created) -> bool:
     mid = created.message_id
-    if mid in (location.parent, location.root) or mid in location.binding.owners:
-        location.binding.unusable.add(mid)
+    if mid in (location.parent, location.root):
         return False
     if location.scope.topic_id:
         response = await external_call(channel.fetch_message(mid))
@@ -108,31 +115,28 @@ async def _verify(channel: ReplyChannel, location: CardReplyLocation, created: C
         actual = items[0]
         expected = {"message_id": mid, "chat_id": location.scope.chat_id, "thread_id": location.scope.topic_id,
                     "root_id": location.root, "parent_id": location.parent}
-        if any((value := _nonempty_field(actual, key)) and value != required for key, required in expected.items()):
-            location.binding.unusable.add(mid)
-            return False
         if _object_field(actual, "deleted") is not False or any(
             _nonempty_field(actual, key) != required for key, required in expected.items()
         ):
             return False
-    return (not location.retired and not location.binding.retired
-            and mid not in location.binding.unusable and mid not in location.binding.owners)
+    return True
 
 
 class ProcessPresentation:
     """The presenter's poll supplies revisions. Only this task touches the process transport."""
 
     def __init__(self, key: PresentationKey, run: PresentationKey | None, port: ProcessMessages,
-                 channel: ReplyChannel, location: Callable[[], CardReplyLocation | None],
-                 claim: Callable[[ProcessPresentation, Created], bool], clock: Callable[[], float],
-                 timeout: float, on_closed: Callable[[ProcessPresentation], None] = lambda _: None) -> None:
+                 channel: ReplyChannel, location: Callable[[], ProcessLocation | None],
+                 on_created: Callable[[ProcessPresentation], None], clock: Callable[[], float],
+                 timeout: float, on_closed: Callable[[ProcessPresentation], None] = lambda _: None,
+                 *, claimed_cot_ids: set[str], binding_id: str) -> None:
         self.key, self.run = key, run
-        self.port, self.channel, self.resolve, self.claim = port, channel, location, claim
+        self.port, self.channel, self.resolve, self.on_created = port, channel, location, on_created
+        self.claimed_cot_ids, self.binding_id = claimed_cot_ids, binding_id
         self.clock, self.timeout, self.on_closed = clock, timeout, on_closed
         self.terminal = False
         self.items = ProcessList()
         self.writer = ReplacementWriter[Payload](lambda items: items)
-        self.location: CardReplyLocation | None = None
         self.created: Created | None = None
         self.ready = asyncio.Event()
         self.task: asyncio.Task[None] | None = None
@@ -181,8 +185,8 @@ class ProcessPresentation:
         self._trigger()
 
     async def _create(self) -> bool:
-        location = self.location = self.resolve()
-        if location is None or location.binding.retired or (location.scope.topic_id and not (location.root and location.parent)):
+        location = self.resolve()
+        if location is None or (location.scope.topic_id and not (location.root and location.parent)):
             logger.warning("process message target unavailable")
             return False
         async with asyncio.timeout(self.timeout):
@@ -191,21 +195,21 @@ class ProcessPresentation:
             if not isinstance(created, Rejected):
                 logger.warning("process message creation unconfirmed")
             return False
-        if not location.binding.reserve_process(created.cot_id, created.message_id):
+        if created.cot_id in self.claimed_cot_ids:
             logger.warning("process message identity collision")
             return False
+        self.claimed_cot_ids.add(created.cot_id)
         async with asyncio.timeout(self.timeout):
             verified = await _verify(self.channel, location, created)
-        if not verified or self.closed or not self.claim(self, created):
+        if not verified or self.closed:
             logger.warning("process message location unconfirmed")
             return False
         self.created = created
-        location.binding.owners[created.message_id] = location
-        location.cards.add(created.message_id)
+        self.on_created(self)
         return True
 
     def _can_write(self) -> bool:
-        return bool(self.created and self.location and not self.closed and self.location.can_write(self.created.message_id))
+        return self.created is not None and not self.closed
 
     async def _write(self, payload: Payload) -> Outcome:
         if not self._can_write():
@@ -261,6 +265,4 @@ class ProcessPresentation:
         finally:
             self.closed = True
             self.ready.set()
-            if self.location:
-                self.location.retire()
             self.on_closed(self)

@@ -11,17 +11,17 @@ from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
-from ..process_messages import Created, ProcessMessages
+from ..process_messages import ProcessMessages
 from ..external_calls import external_call
 from ..cards import reply_card, turn_progress_card
 from ..domain import ReplyCardProjection
 from ..ordinary_sessions import LogicalReply
 from ..cards.reply import feishu_answer_text, turn_progress_projection
 from ..partial_answers import PartialAnswer
-from .process_presentation import ProcessPresentation, Reason
+from .process_presentation import ProcessLocation, ProcessPresentation, Reason
 from .replacement_writer import ReplacementWriter
 from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, RunDisplay, TerminalStatus, TurnOpened, TurnResult
-from .messages import _confirmed_reply_id, _nonempty_field, _object_field, _send_result_error_code, _receipt_message_id
+from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
 from .topics import BindingCardLocation, CardReplyLocation
 from .physical_delivery import BODY, Item, Outcome, PhysicalDelivery, record_sent_answer
@@ -128,7 +128,7 @@ class _ReplyCardPresenter:
         channel: ReplyChannel,
         *,
         process_messages: ProcessMessages | None = None,
-        process_location: Callable[[str, object, str | None], CardReplyLocation | None] | None = None,
+        process_location: Callable[[object, str | None], ProcessLocation | None] | None = None,
         clock: Callable[[], float] = time,
         poll_seconds: float = _PROGRESS_CARD_POLL_SECONDS,
         operation_timeout_seconds: float = _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS,
@@ -140,6 +140,7 @@ class _ReplyCardPresenter:
         self._channel = channel
         self._process_port, self._process_location, self._clock = process_messages, process_location, clock
         self._process: dict[PresentationKey, ProcessPresentation] = {}
+        self._claimed_cot_ids: set[str] = set()
         self._process_tombstones: set[PresentationKey] = set()
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
@@ -164,23 +165,15 @@ class _ReplyCardPresenter:
             return state
         resolve = self._process_location
         state = ProcessPresentation(target.key, target.run, self._process_port, self._channel,
-            lambda: resolve(binding_id, target.origin, root_id), self._claim_process, self._clock, self.operation_timeout, self._forget_process)
+            lambda: resolve(target.origin, root_id), self._supersede_process, self._clock, self.operation_timeout,
+            self._forget_process, claimed_cot_ids=self._claimed_cot_ids, binding_id=binding_id)
         self._process[target.key] = state
         return state
 
-    def _claim_process(self, state: ProcessPresentation, created: Created) -> bool:
-        for other in self._process.values():
-            if other is state or not other.created:
-                continue
-            if created.cot_id == other.created.cot_id or created.message_id == other.created.message_id:
-                for owner, mid in ((state, created.message_id), (other, other.created.message_id)):
-                    if owner.location:
-                        owner.location.binding.unusable.add(mid)
-                return False
+    def _supersede_process(self, state: ProcessPresentation) -> None:
         for other in self._process.values():
             if other is not state and state.run is not None and other.run == state.run and other.created:
                 other.finish(other.verdict or "error")
-        return True
 
     def _forget_process(self, state: ProcessPresentation) -> None:
         if self._process.get(state.key) is state:
@@ -321,17 +314,6 @@ class _ReplyCardPresenter:
         results = await asyncio.gather(*(reconcile_message(mid, view) for mid, view in pending))
         return {mid: result for (mid, _), result in zip(pending, results, strict=True)}
 
-    def ordinary_receipt(self, result: SendResult) -> SendResult:
-        if not self._binding_locations or not result.success:
-            return result
-        nested = _nonempty_field(_object_field(result.raw, "data"), "message_id")
-        ids = {mid for mid in (result.message_id, nested, *(result.chunk_ids or ())) if mid}
-        for location in self._binding_locations.values():
-            if collision := location.process_messages.intersection(ids):
-                location.unusable.update(collision)
-                return SendResult(success=False)
-        return result
-
     def binding_location(self, binding_id: str) -> BindingCardLocation:
         return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners, release_cards=self._release_cards))
 
@@ -340,7 +322,7 @@ class _ReplyCardPresenter:
         location = self._binding_locations.pop(binding_id, None)
         processes = []
         for key, process in tuple(self._process.items()):
-            if key.owner_id == binding_id or (location and process.location and process.location.binding is location):
+            if process.binding_id == binding_id:
                 processes.append(self._process.pop(key))
         if location:
             location.retire()
@@ -384,7 +366,6 @@ class _ReplyCardPresenter:
 
                 async def send_card() -> SendResult | None:
                     sent = await external_call(event.reply(card), isolate=event.policy.confirms_items)
-                    sent = self.ordinary_receipt(sent)
                     if event.validate_reply and not await external_call(event.validate_reply(sent), isolate=event.policy.confirms_items):
                         return None
                     return location.validate(sent, card=True) if location else sent
