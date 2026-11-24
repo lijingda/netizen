@@ -20,6 +20,7 @@ from lark_channel import (
     RetryConfig,
 )
 
+from tests.support.reply_events import codex_result, open_card
 from netizen_cli.channel import reply_presenter
 from netizen_cli.channel.completion_mentions import send_completion_mention
 from netizen_cli.channel_app import _outcome_completion_mention_user_id
@@ -172,7 +173,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 turn_id=outcome.turn_id,
             )
             self.runtime.side_turn_activity_values[outcome.side_id] = snapshot
-            started = await self.app._progress_cards.start_side(
+            started = await open_card(self.app._progress_cards, self.runtime,
                 side_id=outcome.side_id, thread_id=outcome.thread_id,
                 turn_id=outcome.turn_id, origin=outcome.origin,
             )
@@ -182,7 +183,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 turn_id=outcome.turn_id,
             )
             self.runtime.turn_activity_values[outcome.binding_id] = snapshot
-            started = await self.app._progress_cards.start(
+            started = await open_card(self.app._progress_cards, self.runtime,
                 binding_id=outcome.binding_id, thread_id=outcome.thread_id,
                 turn_id=outcome.turn_id, origin=outcome.origin,
             )
@@ -228,7 +229,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content.mentions, [Identity(open_id="ou_initiator")])
         self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata("native-one", "Renamed", "")
         self.queue_reminder()
-        await self.app._remind_task_completion(outcome, "om_progress")
+        await self.app._remind_task_completion(codex_result(outcome), "om_progress")
         self.assertEqual(self.channel.send_calls[-1][2].uuid, opts.uuid)
 
     async def test_reminder_empty_failed_long_name_and_side_fallbacks(self):
@@ -236,7 +237,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata("native-one", name, "")
             self.queue_reminder()
             await self.app._remind_task_completion(
-                self.outcome(task_feedback=BindingTaskFeedback(progress_card_enabled=True)), "om_progress",
+                codex_result(self.outcome(task_feedback=BindingTaskFeedback(progress_card_enabled=True))), "om_progress",
             )
             content = self.channel.send_calls[-1][1].text
             if name and name.strip():
@@ -247,13 +248,13 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.thread_summary = AsyncMock(side_effect=TimeoutError())
         self.queue_reminder()
         await self.app._remind_task_completion(
-            self.outcome(task_feedback=BindingTaskFeedback(progress_card_enabled=True)), "om_progress",
+            codex_result(self.outcome(task_feedback=BindingTaskFeedback(progress_card_enabled=True))), "om_progress",
         )
         self.assertIn(self.binding.short_id, self.channel.send_calls[-1][1].text)
         self.runtime.thread_summary.reset_mock()
         self.queue_reminder()
         await self.app._remind_task_completion(
-            self.outcome(side=True, task_feedback=BindingTaskFeedback(progress_card_enabled=True)), "om_progress",
+            codex_result(self.outcome(side=True, task_feedback=BindingTaskFeedback(progress_card_enabled=True))), "om_progress",
         )
         self.runtime.thread_summary.assert_not_awaited()
         self.assertIn("临时会话 side-one", self.channel.send_calls[-1][1].text)
@@ -440,7 +441,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.channel.send_calls.clear()
             self.queue_reminder(card_id)
-            await self.app._remind_task_completion(candidate, card_id)
+            await self.app._remind_task_completion(codex_result(candidate), card_id)
             self.assert_reminder(card_id=card_id)
             uuids.append(self.channel.send_calls[0][2].uuid)
         self.assertEqual(uuids[0], uuids[1])

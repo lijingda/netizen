@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from lark_channel import Identity, OutboundCard, OutboundText
 
 from netizen_cli import turn_files
+from tests.support.reply_events import open_card
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel import reply_presenter
 from netizen_cli.domain import ActiveState, FeishuScope, GoalOperationState, GoalStatus, ScopeKind
@@ -146,7 +147,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 binding_id=self.binding.id, thread_id=outcome.thread_id, turn_id=outcome.turn_id,
             )
             self.runtime.turn_activity_values[self.binding.id] = snapshot
-            started = await self.app._progress_cards.start(
+            started = await open_card(self.app._progress_cards, self.runtime,
                 binding_id=self.binding.id, thread_id=outcome.thread_id,
                 turn_id=outcome.turn_id, origin=outcome.origin,
             )
@@ -402,7 +403,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                     self.channel.reply_results.append(sent_result("om_progress", chat_id="oc_direct"))
                 with (patch.object(self.channel, "reply", side_effect=reply),
                       patch.object(self.channel, "update_card", side_effect=update)):
-                    self.assertTrue(await self.app._progress_cards.start(
+                    self.assertTrue(await open_card(self.app._progress_cards, self.runtime,
                         binding_id=self.binding.id, thread_id=outcome.thread_id, turn_id=outcome.turn_id,
                         origin=self.origin, progress_enabled=progress,
                     ))

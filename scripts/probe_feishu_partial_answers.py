@@ -14,13 +14,13 @@ import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 from lark_channel import (
     FeishuChannel, LogLevel, OutboundCard, OutboundConfig, OutboundPost,
     RetryConfig, SendOpts,
 )
 
+from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
 from netizen_cli.cards import decode_turn_file_action, reply_card, reply_card_from_manifest
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.domain import (
@@ -28,7 +28,6 @@ from netizen_cli.domain import (
     ReplyCardGoalModule, ReplyCardPartialAnswerModule, ReplyCardProjection,
     ReplyCardResultModule, ScopeKind, TurnCommentaryManifestEntry, TurnProgressManifest,
 )
-from netizen_cli.ordinary_sessions import OrdinarySessionPort
 from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.settings import Settings
 
@@ -140,17 +139,17 @@ def _card_scenarios(scope: FeishuScope) -> list[tuple[str, list[tuple[str, Outbo
 async def _text_samples(send_post) -> int:
     # No native runtime or notification consumer: delivery uses only supplied
     # exact completed items and the real production rich-text delivery method.
-    presenter = _ReplyCardPresenter(None, None, ordinary=Mock(spec_set=OrdinarySessionPort), operation_timeout_seconds=30)
+    presenter = _ReplyCardPresenter(None, confirm_each_write=True, operation_timeout_seconds=30)
     try:
         for side in (False, True):
             label = "Side" if side else "普通会话"
             thread_id, turn_id = f"probe-thread-{side}", f"probe-turn-{side}"
             first = PartialAnswer(thread_id, turn_id, "first", f"{_NOTICE}\n{label}／关闭进度卡：第一段稳定答案。")
             second = PartialAnswer(thread_id, turn_id, "second", f"{_NOTICE}\n{label}／关闭进度卡：第二段稳定答案。")
-            delivery = await presenter.prepare_partial_answers(owner_id=f"probe-owner-{side}", thread_id=thread_id,
-                turn_id=turn_id, side=side,
-                reply=lambda post: send_post(label, post))
-            confirmed = await presenter.deliver_partial_answers(delivery, (first, first, second))
+            delivery = await presenter.prepare_partial_answers(
+                    target=ReplyTarget(PresentationKey(f'probe-owner-{side}', thread_id, turn_id, side=side), label, None),
+                    reply=lambda post: send_post(label, post))
+            confirmed = await presenter.deliver_partial_answers(delivery, tuple(delivery.target.partial(item) for item in (first, first, second)))
             if not confirmed:
                 raise RuntimeError("synthetic rich-text sample delivery was not confirmed")
         return 4

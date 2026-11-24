@@ -22,6 +22,7 @@ from lark_channel import (
     RetryConfig,
 )
 
+from tests.support.reply_events import open_card
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings
 from netizen_cli.cards import decode_turn_file_action
@@ -830,9 +831,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.queue_topic(promote=True)
         native_id = "native-" + claim.run.id
         partial = PartialAnswer(native_id, "turn-initial", "partial-one", "stable answer")
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(
-            self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.001,
-        )
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.001)
 
         async def submit_initial(**kwargs):
             submission = await self.fixture.submit_initial(**kwargs)
@@ -1067,7 +1066,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.store.set_configuration(binding_id=binding.id, expected_settings_revision=binding.settings_revision,
             expected_context_revision=binding.context_revision, expected_feedback_revision=binding.feedback_revision,
             settings=binding.turn_settings, task_feedback=feedback, message_context_mode=binding.message_context_mode, context_anchor=None)
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.01)
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.01)
         source_activity = turn_activity_snapshot(binding_id=source.id, thread_id="native-source", turn_id="turn-followup",
             steps=(TurnPlanStepSnapshot("source scope activity", TurnPlanStepState.IN_PROGRESS),))
         initial = turn_activity_snapshot(binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-followup")
@@ -1076,7 +1075,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             sent_result("om_source_progress", chat_id="oc_group"),
             sent_result("om_followup_progress", chat_id="oc_group", thread_id="omt_fresh"),
         ])
-        self.assertTrue(await self.app._progress_cards.start(binding_id=source.id, thread_id="native-source", turn_id="turn-followup",
+        self.assertTrue(await open_card(self.app._progress_cards, self.runtime, binding_id=source.id, thread_id="native-source", turn_id="turn-followup",
             origin=FakeMessage("source work", message_id="om_source", chat_id="oc_group", chat_type="group")))
         self.runtime.submission = Submission(SubmitDisposition.STARTED, binding.id, binding.native_thread_id, "turn-followup", lambda: None, task_feedback=feedback)
         prompt = FakeMessage("生成后续报告", message_id="om_followup", chat_id="oc_group", thread_id="omt_fresh", chat_type="group")

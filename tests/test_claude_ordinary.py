@@ -1635,7 +1635,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
 
         async with channel_fixture() as fixture:
             with (patch.object(fixture.app._reactions, "start", side_effect=slow_reaction),
-                  patch.object(fixture.app._progress_cards, "start", new=AsyncMock(return_value=True))):
+                  patch.object(fixture.app._progress_cards, "open", new=AsyncMock(return_value=True))):
                 delivery = asyncio.create_task(fixture.app._present_ordinary_receipt(receipt, message))
                 await asyncio.wait_for(started.wait(), 1)
                 self.assertEqual(self.events, [])

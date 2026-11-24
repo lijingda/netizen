@@ -35,13 +35,11 @@ from .reply_presenter import (
 from ..ordinary_sessions import ClaudeInputAnchor, ClaudeCliState, CliStateChanged, ConversationTarget, DegradedTurn, LogicalTerminal, OrdinaryConclusion, OrdinaryEvent, PhysicalAnswer, PhysicalStarted
 from ..external_calls import external_call
 from ..file_evidence import FileEvidence
-from ..runtime.codex_replies import CodexFeatureEvent, outcome_file_evidence
+from ..runtime.codex_replies import CodexFeatureEvent
 from ..runtime.codex_contracts import GoalOutcome
 from ..runtime.contracts import (
     CompactionOutcome,
-    GoalFinalizationStatus,
     GoalSubmission,
-    GoalStateUnknown,
     SideLifecycleOutcome,
     SideTurnActivitySnapshot,
     SideTurnOutcome,
@@ -71,15 +69,14 @@ from ..turn_files import (
 from ..schedules.models import ScheduleNotFound
 
 from ..session_views import ResultView
+from .codex_reply_events import CodexReplyEvents
+from .reply_events import (ActivityChanged, DeliveryReceipt, PresentationKey, ReplyTarget, RunState, TurnOpened, TurnResult)
 from . import constants
 from .app_values import (
     _ClaudeReplyTarget,
     _task_has_error,
     _ScheduledCompletion,
     _message_id,
-    _task_interruption_text,
-    _goal_reply_activity,
-    _task_failure_text,
     _outcome_completion_mention_user_id,
 )
 from .base import (
@@ -129,8 +126,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 await _best_effort_update(outcome.reply.refresh(outcome.state()))
             elif not outcome.reply.attempted:
                 async def finish_initial_card() -> None:
-                    attempt = await self._progress_cards.finish(binding_id=outcome.binding_id, thread_id=outcome.thread_id,
-                        turn_id=outcome.turn_id, activity=None, publishable=outcome.publishable, render=lambda snap: turn_progress_card(
+                    attempt = await self._progress_cards.finish(key=PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id), activity=None, publishable=outcome.publishable, render=lambda snap: turn_progress_card(
                             snapshot=replace(snap, state_line=outcome.state().line), terminal_status=outcome.status,
                             collapsed=True, include_result=outcome.status != "completed"))
                     if attempt and attempt.confirmed:
@@ -169,7 +165,7 @@ class CompletionPresentationChannel(ChannelReplies):
         if scheduled is not None:
             self._scheduled_completions[scheduled.run_id] = completion
         try:
-            await self._complete_task(outcome, file_evidence=outcome.file_evidence)
+            await self._complete_task(self._codex_result(outcome))
             if (scheduled is not None and scheduled.auto_archive and outcome.error_detail is None
                     and outcome.status == "completed" and completion.delivery_state == "sent"):
                 # The initial submission carries the immutable claim policy.
@@ -246,10 +242,10 @@ class CompletionPresentationChannel(ChannelReplies):
                 raise RuntimeError("本轮投递已取消。")
             return await self._send_physical_partial(outcome.origin, post, reply.confirmed if reply else None, location)
 
+        key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
         partials = await self._progress_cards.prepare_partial_answers(
-            owner_id=outcome.binding_id, thread_id=outcome.thread_id, turn_id=outcome.turn_id,
-            side=False, reply=send_partial)
-        await self._progress_cards.abandon(binding_id=outcome.binding_id, thread_id=outcome.thread_id, turn_id=outcome.turn_id)
+            target=ReplyTarget(key, outcome.origin, None), reply=send_partial)
+        await self._progress_cards.abandon(key=key)
         if not outcome.publishable():
             return
         previous_refresh = reply.refresh if reply else None
@@ -377,7 +373,21 @@ class CompletionPresentationChannel(ChannelReplies):
         except Exception:
             logger.warning("Claude content delivery was not confirmed")
 
-    async def _terminal_card_delivery(self, outcome: OrdinaryConclusion | SideTurnOutcome,
+    def _codex_result(self, outcome: OrdinaryConclusion | SideTurnOutcome | GoalOutcome) -> TurnResult:
+        event = CodexReplyEvents.result(outcome)
+        origin = outcome.origin
+        if isinstance(origin, ScheduledOrigin):
+            def record_partials(confirmed: bool) -> None:
+                if completion := self._scheduled_completions.get(origin.run_id):
+                    completion.partial_answers_confirmed = confirmed
+            return replace(event, receipt=DeliveryReceipt(
+                lambda result: self._scheduled_reply_confirmed(origin, result), record_partials,
+                lambda: self._record_scheduled_delivery(origin, "suppressed"),
+                lambda message_id, result: self._record_scheduled_card_delivery(origin, message_id, result),
+            ))
+        return event
+
+    async def _terminal_card_delivery(self, outcome: TurnResult,
                                       deliver: Callable[[], Awaitable[_CardUpdateAttempt | None]]) -> _CardUpdateAttempt | None:
         try:
             return await deliver()
@@ -408,7 +418,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 await self._finish_task_reactions(outcome.origin, turn_id, constants.ERROR_REACTION)
             finally:
                 await self._progress_cards.abandon(
-                    binding_id=outcome.binding_id, thread_id=outcome.thread_id, turn_id=turn_id,
+                    key=PresentationKey(outcome.binding_id, outcome.thread_id, turn_id),
                 )
         finally:
             if isinstance(outcome, TurnOutcome):
@@ -475,26 +485,9 @@ class CompletionPresentationChannel(ChannelReplies):
                     f"会话上下文压缩以未知状态结束：{outcome.status!r}。",
                 )
             return
-        await self._complete_task(outcome, file_evidence=lambda: outcome_file_evidence(outcome))
+        await self._complete_task(self._codex_result(outcome))
 
     async def _park_observation(self, outcome: TurnObservationUnavailableOutcome) -> None:
-        await self._reactions.stop(outcome.turn_id)
-        try:
-            await self._progress_cards.park_unavailable(
-                binding_id=outcome.binding_id,
-                thread_id=outcome.thread_id,
-                turn_id=outcome.turn_id,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "failed to park unavailable Turn progress card",
-                extra={
-                    "binding_id": outcome.binding_id,
-                    "turn_id": outcome.turn_id,
-                },
-            )
         message = (
             f"本次 Codex Turn 状态无法确认：{describe_error(outcome.error)}。"
             "已停止后台读取，当前会话及上下文仍保留。"
@@ -502,7 +495,18 @@ class CompletionPresentationChannel(ChannelReplies):
             "或发送 `/sessions` 重新检查、停止、归档或删除这个会话。"
             "状态仍无法确认时，新消息不会执行。"
         )
-        await self._reply(outcome.origin, message)
+        key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+        await self._present_run_state(RunState(ReplyTarget(key, outcome.origin, key), message))
+
+    async def _present_run_state(self, event: RunState) -> None:
+        key = event.target.key
+        await self._reactions.stop(key.turn_id)
+        try:
+            await self._progress_cards.park_unavailable(binding_id=key.owner_id, thread_id=key.thread_id, turn_id=key.turn_id)
+        except Exception:
+            logger.exception("failed to park unavailable Turn progress card")
+        await self._reply(event.target.origin, event.notice)
+
 
     @staticmethod
     def _result_view(
@@ -525,61 +529,43 @@ class CompletionPresentationChannel(ChannelReplies):
             mention_user_id=_outcome_completion_mention_user_id(outcome),
         )
 
-    async def _finish_result_reactions(self, result: ResultView) -> None:
+    async def _finish_result_reactions(self, result: TurnResult) -> None:
         reaction = {"completed": constants.DONE_REACTION, "interrupted": constants.INTERRUPTED_REACTION,
                     "failed": constants.ERROR_REACTION}[result.status]
         await self._finish_task_reactions(result.origin, result.turn_id, reaction)
 
-    async def _complete_task(
-        self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
-        *,
-        file_evidence: Callable[[], FileEvidence],
-        file_turn_id: str | None = None,
-        logical_turn: bool = False,
-        allow_suppression: bool = True,
-    ) -> None:
-        """Present one ordinary or SDK logical execution through the same reply path."""
-        result = self._result_view(
-            outcome, failure=lambda: _task_failure_text(outcome), interruption=lambda: _task_interruption_text(outcome),
-            empty_answer="任务已结束，未产生文本回复。",
-        )
-        silent = (allow_suppression and result.status == "completed"
+    async def _complete_task(self, outcome: TurnResult) -> None:
+        file_evidence = outcome.file_evidence
+        silent = (outcome.allow_suppression and outcome.status == "completed"
                   and not outcome.final_response
                   and self._reply_suppression.is_suppressed(
-                      outcome.thread_id, outcome.turn_id, file_turn_id or outcome.turn_id,
+                      outcome.thread_id, outcome.turn_id, outcome.physical_turn_id,
                   ))
         partial_delivery = await self._progress_cards.prepare_partial_answers(
-            owner_id=result.session_id, thread_id=result.thread_id, turn_id=result.turn_id,
-            side=isinstance(outcome, SideTurnOutcome),
-            logical_turn=logical_turn,
-            reply=lambda post: self._reply_to_origin(outcome.origin, post),
-            validate_reply=(
-                (lambda result: self._scheduled_reply_confirmed(outcome.origin, result))
-                if isinstance(outcome.origin, ScheduledOrigin) else None
-            ),
+            target=outcome.target, reply=lambda post: self._reply_to_origin(outcome.origin, post),
+            validate_reply=outcome.receipt.validate if outcome.receipt else None,
         )
-        await self._finish_result_reactions(result)
+        await self._finish_result_reactions(outcome)
         task_files = _TaskFiles()
         prepared_response = None
-        if not silent and result.status == "completed":
+        if not silent and outcome.status == "completed":
             task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence)
         if outcome.task_feedback.progress_card_enabled:
             # A missing card stays silent; failure of an existing card uses
             # the original result fallback below. Successful updates return.
             fallback_to_result = silent and self._progress_cards.has_card(
-                owner_id=(outcome.binding_id if isinstance(outcome, OrdinaryConclusion) else outcome.side_id),
+                owner_id=outcome.target.key.owner_id,
                 thread_id=outcome.thread_id, turn_id=outcome.turn_id,
-                side=isinstance(outcome, SideTurnOutcome),
+                side=outcome.target.key.side,
             )
             attempt = await self._terminal_card_delivery(outcome, lambda: self._complete_task_progress_card(
-                outcome, result, task_files, prepared_response=prepared_response, file_turn_id=file_turn_id,
+                outcome, task_files, prepared_response=prepared_response,
                 suppress_result=silent))
             if attempt is not None and attempt.updated:
                 if attempt.confirmed:
                     await self._remind_task_completion(outcome, attempt.message_id)
                 return
-            if isinstance(outcome.origin, ScheduledOrigin) and attempt is not None:
+            if outcome.receipt and attempt is not None:
                 return
             if silent and (fallback_to_result or (attempt is not None and not attempt.message_id)):
                 silent = False
@@ -590,12 +576,12 @@ class CompletionPresentationChannel(ChannelReplies):
                     # Only the existing partial-delivery failure notice is nonempty.
                     if content:
                         await self._complete_task_with_files(
-                            outcome, result, self._prepare_task_files(outcome.cwd, file_evidence),
-                            prepared_response=content, file_turn_id=file_turn_id,
+                            outcome, self._prepare_task_files(outcome.cwd, file_evidence),
+                            prepared_response=content,
                         )
                         return
-                    if isinstance(outcome.origin, ScheduledOrigin):
-                        self._record_scheduled_delivery(outcome.origin, "suppressed")
+                    if outcome.receipt:
+                        outcome.receipt.suppressed()
                     await self._remind_task_completion(
                         outcome, None, source_message_id=_message_id(outcome.origin),
                     )
@@ -607,26 +593,26 @@ class CompletionPresentationChannel(ChannelReplies):
                     ),
                     final_reply=finish_silent_reply,
                 )
-            elif result.status != "completed":
+            elif outcome.status != "completed":
                 await self._reply_task_answers(
-                    outcome, result.content, partial_delivery=partial_delivery,
-                    allow_completion_mention=result.status != "interrupted",
+                    outcome, outcome.content, partial_delivery=partial_delivery,
+                    allow_completion_mention=outcome.status != "interrupted",
                 )
             elif not outcome.partial_answers:
                 await self._complete_task_with_files(
-                    outcome, result, task_files, prepared_response=prepared_response, file_turn_id=file_turn_id,
+                    outcome, task_files, prepared_response=prepared_response,
                 )
             else:
                 await self._reply_task_answers(
                     outcome,
-                    prepared_response or result.content,
+                    prepared_response or outcome.content,
                     partial_delivery=partial_delivery,
                     unconfirmed_content=(
                         "任务已完成，但阶段性答案投递未确认。"
                         if outcome.partial_answers and not outcome.final_response else None
                     ),
                     final_reply=lambda content: self._complete_task_with_files(
-                        outcome, result, task_files, prepared_response=content, file_turn_id=file_turn_id,
+                        outcome, task_files, prepared_response=content,
                     ),
                 )
         finally:
@@ -638,7 +624,7 @@ class CompletionPresentationChannel(ChannelReplies):
         await self._reactions.stop(turn_id)
 
     async def _prepare_task_result(
-        self, outcome: OrdinaryConclusion | SideTurnOutcome, file_evidence: Callable[[], FileEvidence],
+        self, outcome: TurnResult, file_evidence: Callable[[], FileEvidence],
     ) -> tuple[_TaskFiles, str | None]:
         task_files = self._prepare_task_files(outcome.cwd, file_evidence)
         response = await self._prepare_task_result_images(outcome)
@@ -647,7 +633,7 @@ class CompletionPresentationChannel(ChannelReplies):
         return task_files, response
 
     async def _prepare_task_result_images(
-        self, outcome: OrdinaryConclusion | SideTurnOutcome | ResultView, *, ledger: PhysicalDelivery | None = None,
+        self, outcome: TurnResult | ResultView, *, ledger: PhysicalDelivery | None = None,
     ) -> str | None:
         content = outcome.content if isinstance(outcome, ResultView) else outcome.final_response
         if not content:
@@ -672,24 +658,22 @@ class CompletionPresentationChannel(ChannelReplies):
 
     async def _complete_task_progress_card(
         self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
-        result: ResultView,
+        outcome: TurnResult,
         task_files: _TaskFiles,
         *,
         prepared_response: str | None = None,
-        file_turn_id: str | None = None,
         suppress_result: bool = False,
     ) -> _CardUpdateAttempt | None:
-        terminal_status = result.status
+        terminal_status = outcome.status
         final_response: str | None
         files: tuple[TurnFile, ...] = ()
         scope: FeishuScope | None = None
         file_provenance_id: str | None = None
         file_additions: int | None = None
         file_deletions: int | None = None
-        final_response = result.content
-        if result.status == "completed":
-            final_response = None if suppress_result else prepared_response or result.content
+        final_response = outcome.content
+        if outcome.status == "completed":
+            final_response = None if suppress_result else prepared_response or outcome.content
             if not suppress_result and has_file_evidence(task_files.evidence, task_files.summary):
                 try:
                     scope, files, file_provenance_id = (
@@ -701,8 +685,7 @@ class CompletionPresentationChannel(ChannelReplies):
                     logger.exception(
                         "failed to prepare terminal progress-card files",
                         extra={
-                            "binding_id": getattr(outcome, "binding_id", None),
-                            "side_id": getattr(outcome, "side_id", None),
+                            "owner_id": outcome.target.key.owner_id,
                             "turn_id": outcome.turn_id,
                         },
                     )
@@ -722,46 +705,23 @@ class CompletionPresentationChannel(ChannelReplies):
                 collapsed=True,
                 scope=scope,
                 binding_id=(file_provenance_id if files else None),
-                turn_id=((file_turn_id or outcome.turn_id) if files else None),
+                turn_id=(outcome.physical_turn_id if files else None),
                 additions=file_additions,
                 deletions=file_deletions,
             )
 
-        if isinstance(outcome, OrdinaryConclusion):
-            attempt = await self._progress_cards.finish(
-                binding_id=outcome.binding_id, thread_id=outcome.thread_id, turn_id=outcome.turn_id,
-                activity=outcome.activity, render=render,
-            )
-            if attempt is not None and isinstance(outcome.origin, ScheduledOrigin):
-                if suppress_result and attempt.confirmed:
-                    self._record_scheduled_delivery(outcome.origin, "suppressed")
-                else:
-                    await self._record_scheduled_card_delivery(outcome.origin, attempt.message_id, attempt.result)
-            return attempt
-        return await self._progress_cards.finish_side(
-            side_id=outcome.side_id,
-            thread_id=outcome.thread_id,
-            turn_id=outcome.turn_id,
-            activity=outcome.activity,
-            render=render,
+        attempt = await self._progress_cards.finish(
+            key=outcome.target.key, activity=outcome.activity, render=render,
         )
+        if attempt is not None and outcome.receipt:
+            if suppress_result and attempt.confirmed:
+                outcome.receipt.suppressed()
+            else:
+                await outcome.receipt.card(attempt.message_id, attempt.result)
+        return attempt
 
-    async def _abandon_task_progress_card(
-        self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
-    ) -> None:
-        if isinstance(outcome, OrdinaryConclusion):
-            await self._progress_cards.abandon(
-                binding_id=outcome.binding_id,
-                thread_id=outcome.thread_id,
-                turn_id=outcome.turn_id,
-            )
-            return
-        await self._progress_cards.abandon_side(
-            side_id=outcome.side_id,
-            thread_id=outcome.thread_id,
-            turn_id=outcome.turn_id,
-        )
+    async def _abandon_task_progress_card(self, outcome: TurnResult) -> None:
+        await self._progress_cards.abandon(key=outcome.target.key)
 
     def _prepare_task_files(self, cwd: Path | None, file_evidence: Callable[[], FileEvidence]) -> _TaskFiles:
         evidence = FileEvidence()
@@ -775,65 +735,35 @@ class CompletionPresentationChannel(ChannelReplies):
             summary = TurnDiffSummary()
         return _TaskFiles(evidence, summary)
 
-    def _completion_files(
-        self,
-        outcome: OrdinaryConclusion,
-        task_files: _TaskFiles,
-    ) -> tuple[FeishuScope, tuple[TurnFile, ...]]:
-        binding = self._bindings.get(outcome.binding_id)
+    def _task_completion_files(
+        self, outcome: TurnResult, task_files: _TaskFiles,
+    ) -> tuple[FeishuScope, tuple[TurnFile, ...], str]:
         scope = self._scope(outcome.origin)
-        if (
-            binding.scope_key != scope.key
-            or binding.native_thread_id != outcome.thread_id
-        ):
-            raise TurnFileError("本轮文件与完成消息的会话身份不一致。")
+        key = outcome.target.key
+        if key.side:
+            record = self._bindings.get_side_topic(key.owner_id)
+            if (record.parent_binding_id != outcome.file_binding_id or record.app_id != scope.app_id
+                    or record.chat_id != scope.chat_id or record.topic_id != scope.topic_id):
+                raise TurnFileError("本轮文件与 Side 完成消息的身份不一致。")
+        else:
+            binding = self._bindings.get(key.owner_id)
+            if binding.scope_key != scope.key or binding.native_thread_id != key.thread_id:
+                raise TurnFileError("本轮文件与完成消息的会话身份不一致。")
         if outcome.cwd is None:
             raise TurnFileError("本轮工作目录未确认，无法解析相对文件路径。")
-        return scope, resolve_evidenced_files(task_files.evidence, outcome.cwd, task_files.summary)
-
-    def _side_completion_files(
-        self,
-        outcome: SideTurnOutcome,
-        task_files: _TaskFiles,
-    ) -> tuple[FeishuScope, tuple[TurnFile, ...]]:
-        record = self._bindings.get_side_topic(outcome.side_id)
-        scope = self._scope(outcome.origin)
-        if (
-            record.parent_binding_id != outcome.parent_binding_id
-            or record.app_id != scope.app_id
-            or record.chat_id != scope.chat_id
-            or record.topic_id != scope.topic_id
-        ):
-            raise TurnFileError("本轮文件与 Side 完成消息的身份不一致。")
-        return scope, resolve_evidenced_files(task_files.evidence, outcome.cwd, task_files.summary)
-
-    def _task_completion_files(
-        self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
-        task_files: _TaskFiles,
-    ) -> tuple[FeishuScope, tuple[TurnFile, ...], str]:
-        if isinstance(outcome, OrdinaryConclusion):
-            scope, files = self._completion_files(outcome, task_files)
-            return scope, files, outcome.binding_id
-        scope, files = self._side_completion_files(outcome, task_files)
-        # v4 callbacks are self-contained. The captured Parent Binding is
-        # provenance and deterministic-action identity only; paging and send
-        # never read its current state or reinterpret the Side as a Binding.
-        return scope, files, outcome.parent_binding_id
+        return scope, resolve_evidenced_files(task_files.evidence, outcome.cwd, task_files.summary), outcome.file_binding_id
 
     async def _complete_task_with_files(
         self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
-        result_view: ResultView,
+        outcome: TurnResult,
         task_files: _TaskFiles,
         *,
         prepared_response: str | None = None,
-        file_turn_id: str | None = None,
     ) -> None:
-        final_response = prepared_response or result_view.content
+        final_response = prepared_response or outcome.content
         if not has_file_evidence(task_files.evidence, task_files.summary):
             await self._reply_task_result(
-                result_view, final_response,
+                outcome, final_response,
             )
             return
         try:
@@ -844,14 +774,14 @@ class CompletionPresentationChannel(ChannelReplies):
             card = turn_files_card(
                 scope=scope,
                 binding_id=file_provenance_id,
-                turn_id=file_turn_id or outcome.turn_id,
+                turn_id=outcome.physical_turn_id,
                 final_response=(
                     prepared_response or outcome.final_response or constants.TURN_FILES_WITHOUT_FINAL_RESPONSE
                 ),
                 files=files,
                 additions=task_files.summary.additions,
                 deletions=task_files.summary.deletions,
-                completion_mention_user_id=result_view.mention_user_id,
+                completion_mention_user_id=outcome.mention_user_id,
             ) if files else None
         except asyncio.CancelledError:
             raise
@@ -859,13 +789,12 @@ class CompletionPresentationChannel(ChannelReplies):
             logger.warning(
                 "completed Turn file manifest exceeds card limit",
                 extra={
-                    "binding_id": getattr(outcome, "binding_id", None),
-                    "side_id": getattr(outcome, "side_id", None),
+                    "owner_id": outcome.target.key.owner_id,
                     "turn_id": outcome.turn_id,
                 },
             )
             await self._reply_task_result(
-                result_view,
+                outcome,
                 f"{final_response}\n\n⚠️ 本轮文件卡片未生成：{error}",
             )
             return
@@ -873,13 +802,12 @@ class CompletionPresentationChannel(ChannelReplies):
             logger.exception(
                 "failed to prepare completed Turn file card",
                 extra={
-                    "binding_id": getattr(outcome, "binding_id", None),
-                    "side_id": getattr(outcome, "side_id", None),
+                    "owner_id": outcome.target.key.owner_id,
                     "turn_id": outcome.turn_id,
                 },
             )
             await self._reply_task_result(
-                result_view, final_response,
+                outcome, final_response,
             )
             return
 
@@ -887,7 +815,7 @@ class CompletionPresentationChannel(ChannelReplies):
         # Do not catch a text fallback's own failure and send it a second time.
         if card is None:
             await self._reply_task_result(
-                result_view, final_response,
+                outcome, final_response,
             )
             return
         try:
@@ -901,8 +829,8 @@ class CompletionPresentationChannel(ChannelReplies):
             logger.exception("failed to deliver completed Turn file card", extra={"turn_id": outcome.turn_id})
         # SendResult.failure can hide a timeout, retry, or partial publication.
         # Keep the scheduled receipt and never replace it with a fallback's ack.
-        if not isinstance(outcome.origin, ScheduledOrigin):
-            await self._reply_task_result(result_view, final_response, allow_completion_mention=False)
+        if not outcome.receipt:
+            await self._reply_task_result(outcome, final_response, allow_completion_mention=False)
 
     async def _complete_side_lifecycle(
         self,
@@ -931,58 +859,11 @@ class CompletionPresentationChannel(ChannelReplies):
 
     async def _complete_goal(self, outcome: GoalOutcome) -> None:
         try:
-            task = self._goal_conclusion(outcome)
+            event = self._codex_result(outcome)
         except BaseException:
             await self._projection_failed(outcome)
             raise
-        await self._complete_task(
-            task, file_evidence=lambda: outcome_file_evidence(outcome),
-            file_turn_id=outcome.final_physical_turn_id, logical_turn=True,
-            allow_suppression=(outcome.error is None
-                               and outcome.finalization is not GoalFinalizationStatus.UNKNOWN
-                               and outcome.finalization_error is None),
-        )
-
-    @staticmethod
-    def _goal_conclusion(outcome: GoalOutcome) -> OrdinaryConclusion:
-        # The SDK logical stream is one reply lifecycle. Its identifier is only
-        # the presenter key; Files always retain the verified final physical ID.
-        origin = outcome.origin
-        terminal = (
-            outcome.final_physical_turn_id is not None
-            and outcome.final_turn_status in {"completed", "interrupted", "failed"}
-        )
-        response = outcome.final_response if terminal else None
-        error = outcome.error or (None if terminal else GoalStateUnknown("Goal 终态尚未确认。"))
-        if terminal:
-            # An uncertain control receipt must not hide an independently
-            # confirmed final answer, nor reinterpret its files as logical-ID files.
-            notices = []
-            if error is not None:
-                notices.append(f"Goal 操作结果未确认：{describe_error(error)}")
-                error = None
-            if outcome.finalization is GoalFinalizationStatus.UNKNOWN:
-                detail = describe_error(outcome.finalization_error) if outcome.finalization_error else "自动结束结果未确认"
-                notices.append(f"Goal 已完成，但自动结束结果未确认：{detail}")
-            if notices:
-                response = "\n\n".join(filter(None, [response, *notices]))
-        return OrdinaryConclusion(
-            binding_id=outcome.binding_id, thread_id=outcome.thread_id,
-            turn_id=outcome.logical_turn_id or outcome.final_physical_turn_id or "goal",
-            owner_id=outcome.owner_id, origin=origin,
-            cwd=outcome.cwd,
-            status=outcome.final_turn_status if terminal else None,
-            final_response=response,
-            error_detail=describe_error(error) if error is not None else None,
-            background_cleanup_requested=outcome.background_cleanup_requested,
-            task_feedback=(
-                outcome.task_feedback if terminal and outcome.error is None
-                else replace(outcome.task_feedback, completion_mention_enabled=False)
-            ),
-            feedback_revision=outcome.feedback_revision,
-            activity=None if outcome.activity is None else _goal_reply_activity(outcome.activity),
-            partial_answers=outcome.partial_answers,
-        )
+        await self._complete_task(event)
 
     async def _present_running_goal(
         self,
@@ -994,34 +875,36 @@ class CompletionPresentationChannel(ChannelReplies):
         if submission.continued:
             return True
 
-        def snapshot_reader() -> TurnActivitySnapshot | None:
-            snapshot = self._runtime.goal_activity(
-                binding.id, thread_id=submission.thread_id,
-                logical_turn_id=submission.logical_turn_id,
-            )
-            return None if snapshot is None else _goal_reply_activity(snapshot)
-
-        return await self._start_logical_presentation(binding.id, submission.thread_id, submission.logical_turn_id,
-            origin, submission.task_feedback, snapshot_reader=snapshot_reader, goal=True)
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        await self._reactions.start(key.turn_id, _message_id(origin), pulse_enabled=submission.task_feedback.reaction_pulse_enabled)
+        event = CodexReplyEvents(self._runtime, self._ordinary).opened(
+            key, origin, submission.task_feedback, goal=True,
+            reply=lambda card: self._channel.reply(origin, card),
+            reply_partial=lambda post: self._reply_to_origin(origin, post),
+        )
+        return await self._progress_cards.open(event)
 
     async def _start_logical_presentation(
         self, binding_id: str, thread_id: str, turn_id: str, origin: object, feedback: BindingTaskFeedback, *,
-        snapshot_reader: Callable[[], TurnActivitySnapshot | None] | None = None, goal: bool = False,
-        active: Callable[[], bool] = lambda: True, retained: Callable[[], bool] = lambda: True,
-        on_confirmed: Callable[[str], None] | None = None,
+        active: Callable[[], bool], retained: Callable[[], bool], on_confirmed: Callable[[str], None],
     ) -> bool:
         await self._reactions.start(turn_id, _message_id(origin), pulse_enabled=feedback.reaction_pulse_enabled,
                                     retained=retained)
         if not active():
             return False
-        location = None if goal else self._physical_card_location(binding_id, origin)
-        return await self._progress_cards.start(
-            binding_id=binding_id, thread_id=thread_id, turn_id=turn_id, origin=origin,
-            progress_enabled=feedback.progress_card_enabled, snapshot_reader=snapshot_reader, logical_turn=goal,
-            retain_for_terminal=not goal, retained=retained,
-            location=location,
-            reply=None if goal else lambda card: self._reply_to_origin(origin, card),
-            reply_partial=lambda post: self._send_physical_partial(origin, post, on_confirmed, location))
+        key = PresentationKey(binding_id, thread_id, turn_id)
+        target = ReplyTarget(key, origin, key)
+        location = self._physical_card_location(binding_id, origin)
+        def observe() -> ActivityChanged | None:
+            snapshot = self._ordinary.turn_activity(binding_id, thread_id=thread_id, turn_id=turn_id)
+            if snapshot is None or not key.matches(snapshot):
+                return None
+            return ActivityChanged(target, snapshot, tuple(target.partial(p) for p in snapshot.partial_answers))
+        return await self._progress_cards.open(TurnOpened(target, feedback, observe,
+            lambda: not self._ordinary.reply_blocked_by_lifecycle(binding_id),
+            lambda card: self._reply_to_origin(origin, card),
+            lambda post: self._send_physical_partial(origin, post, on_confirmed, location),
+            retained=retained, location=location))
 
     async def _send_physical_partial(self, origin: object, post: OutboundPost,
                                      on_confirmed: Callable[[str], None] | None, location: CardReplyLocation | None) -> SendResult:
@@ -1059,7 +942,7 @@ class CompletionPresentationChannel(ChannelReplies):
 
     async def _remind_task_completion(
         self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
+        outcome: TurnResult,
         card_message_id: str | None,
         *,
         scope: FeishuScope | None = None,
@@ -1069,16 +952,16 @@ class CompletionPresentationChannel(ChannelReplies):
             card_message_id is None or not outcome.task_feedback.progress_card_enabled
         ):
             return
-        user_id = _outcome_completion_mention_user_id(outcome)
+        user_id = outcome.mention_user_id
         if user_id is None:
             return
-        if isinstance(outcome, SideTurnOutcome):
-            session_label = f"临时会话 {outcome.side_id[:8]}"
+        if outcome.target.key.side:
+            session_label = f"临时会话 {outcome.target.key.owner_id[:8]}"
         else:
             name = await self._management.completion_thread_name(outcome.thread_id)
             session_label = (
                 _normalized_thread_text(name, max_chars=80)
-                or f"会话 {outcome.binding_id[:8]}"
+                or f"会话 {outcome.target.key.owner_id[:8]}"
             )
         await send_completion_mention(
             self._channel, scope=scope or self._scope(outcome.origin),
@@ -1090,7 +973,7 @@ class CompletionPresentationChannel(ChannelReplies):
 
     async def _reply_task_answers(
         self,
-        outcome: OrdinaryConclusion | SideTurnOutcome,
+        outcome: TurnResult,
         content: str,
         *,
         origin: object | None = None,
@@ -1118,19 +1001,17 @@ class CompletionPresentationChannel(ChannelReplies):
             return
         if partial_delivery is None:
             partial_delivery = _PartialAnswerDelivery(
-                thread_id=outcome.thread_id,
-                turn_id=outcome.turn_id,
+                target=outcome.target,
                 stopped=asyncio.Event(),
                 reply_partial=lambda post: self._reply_to_origin(target, post),
                 validate_reply=(
-                    (lambda result: self._scheduled_reply_confirmed(target, result))
-                    if isinstance(target, ScheduledOrigin) else None
+                    outcome.receipt.validate if outcome.receipt else None
                 ),
             )
         try:
             async with asyncio.timeout(timeout_seconds):
                 confirmed = await self._progress_cards.deliver_partial_answers(
-                    partial_delivery, outcome.partial_answers,
+                    partial_delivery, outcome.partials,
                     timeout_seconds=min(5.0, timeout_seconds / 2),
                 )
                 if not confirmed:
@@ -1140,8 +1021,8 @@ class CompletionPresentationChannel(ChannelReplies):
                     )
                     if unconfirmed_content is not None:
                         content = unconfirmed_content
-                if isinstance(target, ScheduledOrigin) and target.run_id in self._scheduled_completions:
-                    self._scheduled_completions[target.run_id].partial_answers_confirmed = confirmed
+                if outcome.receipt:
+                    outcome.receipt.partials(confirmed)
                 await final_reply(content)
         except TimeoutError:
             # A timed-out post may already have published SDK chunks. Do not
@@ -1150,13 +1031,13 @@ class CompletionPresentationChannel(ChannelReplies):
 
     async def _reply_task_result(
         self,
-        outcome: OrdinaryConclusion | SideTurnOutcome | ResultView,
+        outcome: TurnResult,
         content: str,
         *,
         origin: object | None = None,
         allow_completion_mention: bool = True,
     ) -> None:
-        mention = outcome.mention_user_id if isinstance(outcome, ResultView) else _outcome_completion_mention_user_id(outcome)
+        mention = outcome.mention_user_id
         await self._reply(
             outcome.origin if origin is None else origin,
             content,

@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
+from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
+from tests.support.reply_events import open_card, partial_events
 from netizen_cli.cards import turn_progress_card
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.partial_answers import PartialAnswer
@@ -43,17 +45,12 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             lifecycle_state=Mock(return_value=None),
         )
         self.ordinary = CodexOrdinarySessions(self.runtime)
-        self.presenter = _ReplyCardPresenter(
-            self.channel,  # type: ignore[arg-type]
-            self.runtime,  # type: ignore[arg-type]
-            ordinary=self.ordinary,
-            poll_seconds=60,
-        )
+        self.presenter = _ReplyCardPresenter(self.channel, poll_seconds=60)
         self.addAsyncCleanup(self.presenter.close)
         self.origin = object()
 
     async def start(self, **kwargs):
-        return await self.presenter.start(
+        return await open_card(self.presenter, self.runtime,
             **self.identity,
             origin=self.origin,
             **kwargs,
@@ -66,12 +63,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             terminal_status="completed",
             collapsed=True,
         ))
-        return await self.presenter.finish(
-            **self.identity,
-            activity=self.activity,
-            render=render,
-            **kwargs,
-        )
+        return await self.presenter.finish(key=PresentationKey(*self.identity.values()), activity=self.activity, render=render, **kwargs)
 
     async def test_default_route_and_terminal_update_remain_ordinary(self):
         self.assertTrue(await self.start())
@@ -140,26 +132,20 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(session.message_id)
                     self.assertIsNotNone(session.task)
                     delivery = await self.presenter.prepare_partial_answers(
-                        owner_id=self.identity["binding_id"], thread_id=self.identity["thread_id"],
-                        turn_id=self.identity["turn_id"], side=False, reply=reply_partial,
-                    )
+                    target=ReplyTarget(PresentationKey(self.identity['binding_id'], self.identity['thread_id'], self.identity['turn_id']), self.origin, None),
+                    reply=reply_partial)
                 self.assertEqual([call.args[0] for call in validate.await_args_list],
                     [self.result, partial_result])
                 reply_partial.assert_awaited_once_with(OutboundPost(markdown="**阶段性答案**\n\nscheduled partial"))
                 self.assertEqual(session.confirmed_partials, set())
                 self.assertIsNone(await self.finish())
-                self.assertFalse(await self.presenter.deliver_partial_answers(delivery, (partial,)))
+                self.assertFalse(await self.presenter.deliver_partial_answers(delivery, partial_events(delivery.target, (partial,))))
                 reply_partial.assert_awaited_once()
                 self.assertEqual(self.presenter._sessions, {})
                 self.channel.update_card.assert_not_awaited()
 
     async def test_validation_obeys_initial_reply_operation_deadline(self):
-        presenter = _ReplyCardPresenter(
-            self.channel,  # type: ignore[arg-type]
-            self.runtime,  # type: ignore[arg-type]
-            ordinary=self.ordinary,
-            operation_timeout_seconds=0.01,
-        )
+        presenter = _ReplyCardPresenter(self.channel, operation_timeout_seconds=0.01)
         self.addAsyncCleanup(presenter.close)
         entered = asyncio.Event()
 
@@ -170,7 +156,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(presenter, "_poll", new_callable=AsyncMock) as poll:
             with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
-                self.assertTrue(await asyncio.wait_for(presenter.start(
+                self.assertTrue(await asyncio.wait_for(open_card(presenter, self.runtime,
                     **self.identity, origin=self.origin, validate_reply=validate,
                 ), 1))
             poll.assert_called_once()
@@ -178,7 +164,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
         session = presenter._sessions[tuple(self.identity.values())]
         self.assertIsNone(session.message_id)
         render = Mock()
-        self.assertIsNone(await presenter.finish(**self.identity, activity=self.activity, render=render))
+        self.assertIsNone(await presenter.finish(key=PresentationKey(*self.identity.values()), activity=self.activity, render=render))
         render.assert_not_called()
         self.channel.update_card.assert_not_awaited()
 
