@@ -1215,6 +1215,26 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.topic_id, record.topic_id)
         self.assertEqual(snapshot.state, SideSessionState.OPEN)
 
+    async def test_side_outcome_keeps_its_own_verdict_across_a_held_receipt(self) -> None:
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+
+        _, record, _ = await self.open_side()
+        async with asyncio.timeout(3):
+            first = await self.runtime.submit_side(side_id=record.id, input="A", owner_id="owner", origin=object())
+            self.codex.handles[-1].complete(response="A")
+            while self.runtime.side_snapshot(record.id).turn_id is not None:
+                await asyncio.sleep(0)
+            second = await self.runtime.submit_side(side_id=record.id, input="B", owner_id="owner", origin=object())
+            self.codex.handles[-1].notifications.put_nowait(OSError("drain lost"))
+            second.release_receipt_attempt()
+            while not self.outcomes:
+                await asyncio.sleep(0)
+            first.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        reasons = {row.turn_id: CodexReplyEvents.result(row).process_reason
+                   for row in self.outcomes if isinstance(row, SideTurnOutcome)}
+        self.assertEqual(reasons, {first.turn_id: "done", second.turn_id: "timeout"})
+
     async def test_interrupted_side_with_native_error_keeps_terminal_and_admission(self) -> None:
         _binding, record, snapshot = await self.open_side()
         submission = await self.runtime.submit_side(

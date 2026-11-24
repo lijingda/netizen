@@ -125,7 +125,7 @@ class ProcessPresentation:
         self.sampled = -1
         self.wake = asyncio.Event()
         self.closing: Reason | None = None
-        self.verdict: Reason = "error"
+        self.verdict: Reason | None = None
         self.closed = False
 
     def sample(self, snapshot: Activity | None, *, terminal: bool = False) -> None:

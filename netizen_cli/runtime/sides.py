@@ -977,6 +977,7 @@ class SideRuntime(SubmissionRuntime):
         result: object | None = None
         error: BaseException | None = None
         activity: SideTurnActivitySnapshot | None = None
+        execution_unknown = False
         try:
             # Side Threads are ephemeral. Intentionally use the normal SDK
             # handle path and do not apply persisted-thread completion recovery.
@@ -1073,6 +1074,7 @@ class SideRuntime(SubmissionRuntime):
                     if error is not None:
                         session.state = SideSessionState.CLOSING
                         session.turn_terminal_state_unknown = True
+                        execution_unknown = True
                         session.revision += 1
                         self._cancel_side_idle(session)
                         self.close_admission()
@@ -1088,7 +1090,7 @@ class SideRuntime(SubmissionRuntime):
 
         await active.receipt_attempted.wait()
         outcome = SideTurnOutcome(
-            root_message_id=session.root_message_id, execution_unknown=session.turn_terminal_state_unknown,
+            root_message_id=session.root_message_id, execution_unknown=execution_unknown,
             side_id=session.side_id,
             parent_binding_id=session.parent_binding_id,
             thread_id=session.thread.id,

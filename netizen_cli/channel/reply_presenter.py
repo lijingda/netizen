@@ -179,7 +179,7 @@ class _ReplyCardPresenter:
                 return False
         for other in self._process.values():
             if other is not state and state.run is not None and other.run == state.run and other.created:
-                other.finish(other.verdict)
+                other.finish(other.verdict or "error")
         return True
 
     def _forget_process(self, state: ProcessPresentation) -> None:
@@ -205,7 +205,7 @@ class _ReplyCardPresenter:
     def end_process_run(self, run: PresentationKey, reason: Reason) -> None:
         for state in tuple(self._process.values()):
             if state.run == run:
-                state.finish(reason if reason == "timeout" or state.revision is None else state.verdict)
+                state.finish(state.verdict or reason)
 
     def tombstone_unknown_process(self, key: PresentationKey) -> None:
         self._process_tombstones.add(key)

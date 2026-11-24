@@ -12,7 +12,7 @@ from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
 from netizen_cli.channel.topics import BindingCardLocation, CardReplyLocation
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.bindings import BindingTaskFeedback
-from netizen_cli.ordinary_sessions import DegradedTurn, LogicalReply, PhysicalAnswer, PhysicalStarted
+from netizen_cli.ordinary_sessions import DegradedTurn, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted
 from netizen_cli.runtime.contracts import TerminalStateUnknown
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -317,11 +317,30 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                 presenter.end_process_run(PresentationKey("binding","native-one","A"),"done")
                 await latest.task
             completions = [args for name,args,_ in wire.events if name == "process.complete"]
-            self.assertEqual(completions, [["synthetic-process-1","done"],["synthetic-process-2","timeout"],
+            self.assertEqual(completions, [["synthetic-process-1","done"],["synthetic-process-2","done"],
                                           ["synthetic-process-3","done"]])
             self.assertFalse(presenter._process)
             for reply in replies.values():
                 self.assertTrue(wire.completed.isdisjoint(reply.messages))
+
+    async def test_bodyless_claude_interruption_supplies_the_typed_verdict(self):
+        async with channel_fixture() as fx, asyncio.timeout(2):
+            port = process_port()
+            presenter = fx.app._progress_cards
+            presenter._process_port = port
+            snap = process_snapshot(1)
+            key = PresentationKey(snap.binding_id, snap.thread_id, snap.turn_id)
+            origin = FakeMessage("prompt", message_id="in")
+            reply = LogicalReply()
+            with patch.object(fx.app._ordinary, "turn_activity", return_value=snap):
+                await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
+                    BindingTaskFeedback(), lambda: True, lambda: True, reply))
+            state = presenter._process[key]
+            await state.ready.wait()
+            await fx.app.handle_ordinary_completion(LogicalTerminal(*key.index, "user", origin, "interrupted",
+                reply, None, lambda: True))
+            await state.task
+            port.complete.assert_awaited_once_with("cot", "process-mid", "done")
 
     async def test_terminal_only_claude_sample_cannot_spend_the_answer_deadline(self):
         async with channel_fixture() as fx:
