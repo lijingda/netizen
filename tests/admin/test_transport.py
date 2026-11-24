@@ -9,6 +9,7 @@ import unittest
 from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock, patch
 
+from netizen_cli.admin import transport as admin_transport
 from netizen_cli.admin.transport import (
     AdminHttpState,
     AdminHttpTransport,
@@ -234,19 +235,26 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*(_close_client(writer) for _reader, writer in held))
 
     async def test_header_deadline_is_absolute_despite_drip(self) -> None:
-        with patch("netizen_cli.admin.transport.HEADER_TIMEOUT_SECONDS", 0.15):
+        fragments = iter((b"GET / HTTP/1.1\r\n", b"Host: local", b"host\r\n\r\n"))
+        read_before = admin_transport._read_before
+
+        async def read_fragment(_size: int) -> bytes:
+            # Each read takes less than the 150 ms timeout, but completing
+            # the header takes at least 180 ms.
+            await asyncio.sleep(0.06)
+            return next(fragments, b"")
+
+        async def drip(reader: asyncio.StreamReader, deadline: float) -> bytes:
+            with patch.object(reader, "read", read_fragment):
+                return await read_before(reader, deadline)
+
+        with (
+            patch.object(admin_transport, "_read_before", drip),
+            patch.object(admin_transport, "HEADER_TIMEOUT_SECONDS", 0.15),
+        ):
             transport = await self._transport()
             reader, writer = await self._connect(transport)
             try:
-                writer.write(b"GET / HTTP/1.1\r\n")
-                await writer.drain()
-                await asyncio.sleep(0.08)
-                writer.write(b"Host: local")
-                await writer.drain()
-                await asyncio.sleep(0.09)
-                with contextlib.suppress(ConnectionError):
-                    writer.write(b"host\r\n\r\n")
-                    await writer.drain()
                 status, _headers, body = await _read_response(reader)
             finally:
                 await _close_client(writer)
