@@ -13,7 +13,7 @@ from ..error_messages import describe_error
 from ..ordinary_sessions import OrdinaryConclusion, OrdinarySessionPort
 from ..runtime.codex_contracts import GoalOutcome
 from ..runtime.codex_replies import outcome_file_evidence
-from ..runtime.contracts import GoalFinalizationStatus, GoalStateUnknown, SideTurnOutcome
+from ..runtime.contracts import GoalFinalizationStatus, GoalStateUnknown, SideTurnOutcome, TerminalStateUnknown
 from ..codex_runtime import CodexRuntime
 from .app_values import (
     _goal_reply_activity,
@@ -50,6 +50,8 @@ class CodexReplyEvents:
         reply_partial: Callable[[OutboundPost], Awaitable[SendResult]],
         validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None,
         goal: bool = False,
+        parent_binding_id: str | None = None,
+        root_message_id: str | None = None,
     ) -> TurnOpened:
         target = ReplyTarget(key, origin, key)
         owner, thread, turn = key.index
@@ -81,7 +83,8 @@ class CodexReplyEvents:
 
         return TurnOpened(
             target, DeliveryPolicy.BOUNDED_FALLBACK, feedback, observe, retain,
-            reply, reply_partial, validate_reply, reuse_existing=goal, process_enabled=not goal and not key.side,
+            reply, reply_partial, validate_reply, reuse_existing=goal,
+            process_binding_id=parent_binding_id, process_root_id=root_message_id,
         )
 
     @classmethod
@@ -112,8 +115,8 @@ class CodexReplyEvents:
         )
         return TurnResult(
             target=target,
-            process_enabled=isinstance(native, OrdinaryConclusion),
-            execution_unknown=outcome.execution_unknown if isinstance(outcome, OrdinaryConclusion) else False,
+            process_root_id=outcome.root_message_id if isinstance(outcome, SideTurnOutcome) else None,
+            execution_unknown=outcome.execution_unknown,
             status=status,
             content=content,
             final_response=outcome.final_response,
@@ -174,6 +177,7 @@ class CodexReplyEvents:
             status=outcome.final_turn_status if terminal else None,
             final_response=response,
             error_detail=describe_error(error) if error is not None else None,
+            execution_unknown=not terminal and isinstance(outcome.error, (GoalStateUnknown, TerminalStateUnknown)),
             background_cleanup_requested=outcome.background_cleanup_requested,
             task_feedback=(
                 outcome.task_feedback

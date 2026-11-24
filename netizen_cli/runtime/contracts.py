@@ -369,6 +369,8 @@ class SideSubmission:
     release_receipt_attempt: Callable[[], None] | None = None
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
+    parent_binding_id: str | None = None
+    root_message_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -770,6 +772,8 @@ class SideTurnOutcome:
     activity: SideTurnActivitySnapshot | None = None
     patch_children: TaskPatchChildren = TaskPatchChildren()
     partial_answers: tuple[PartialAnswer, ...] = ()
+    root_message_id: str | None = None
+    execution_unknown: bool = False
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:

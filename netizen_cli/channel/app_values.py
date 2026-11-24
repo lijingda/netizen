@@ -212,6 +212,7 @@ def _side_reply_target(
         message_id=message.message_id,
         chat_id=message.chat_id,
         conversation=_CardReplyConversation(thread_id=topic_id),
+        root_id=message.root_id or message.message_id,
     )
 
 

@@ -120,7 +120,7 @@ class TurnOpened:
     location: CardReplyLocation | None = None
     reuse_existing: bool = False
     run_reply: LogicalReply | None = None
-    process_enabled: bool = True
+    process_root_id: str | None = None
     process_binding_id: str | None = None
 
 
@@ -186,7 +186,7 @@ class TurnResult:
     end: RunEnded | None
     receipt: DeliveryReceipt | None = None
     items: ItemDelivery | None = None
-    process_enabled: bool = True
+    process_root_id: str | None = None
     execution_unknown: bool = False
     partial_answers: tuple[NativePartial, ...] = field(init=False)
 

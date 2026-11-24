@@ -582,6 +582,7 @@ class SideRuntime(SubmissionRuntime):
                         session.thread.id,
                         handle.id,
                         receipt_attempted.set,
+                        parent_binding_id=session.parent_binding_id, root_message_id=session.root_message_id,
                         task_feedback=active.task_feedback,
                         feedback_revision=active.feedback_revision,
                     )
@@ -1087,6 +1088,7 @@ class SideRuntime(SubmissionRuntime):
 
         await active.receipt_attempted.wait()
         outcome = SideTurnOutcome(
+            root_message_id=session.root_message_id, execution_unknown=session.turn_terminal_state_unknown,
             side_id=session.side_id,
             parent_binding_id=session.parent_binding_id,
             thread_id=session.thread.id,

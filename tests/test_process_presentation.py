@@ -19,10 +19,12 @@ from netizen_cli.process_messages import Created, Ok, Unknown
 from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.process_activity import ObservedProcessItem, ProcessActivityWindow
 from netizen_cli.progress_card_settings import ProgressCardSettings
-from netizen_cli.runtime.contracts import TurnOutcome
+from netizen_cli.runtime.codex_contracts import GoalOutcome
+from netizen_cli.runtime.contracts import GoalSubmission, SideTurnOutcome, TurnOutcome
 from netizen_cli.turn_activity import TurnActivityEvent, TurnActivityKind, TurnActivityStatus, TurnPlanStepSnapshot, TurnPlanStepState
 from tests.support.channel_fixtures import channel_fixture
-from tests.support.channel_results import completed_turn_result, file_change_item, turn_activity_snapshot
+from tests.support.channel_messages import FakeMessage
+from tests.support.channel_results import completed_turn_result, file_change_item, goal_activity_snapshot, side_turn_activity_snapshot, turn_activity_snapshot
 from tests.support.presenter_traces import delivery_recorder
 
 REFERENCE = Path(__file__).with_name("fixtures") / "short_turn_presenter_15548d5.json"
@@ -211,3 +213,62 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(port.update.await_count, int(variant == "exact"))
                 self.assertEqual(port.complete.await_count, int(variant == "exact"))
                 self.assertEqual("process-mid" in binding.unusable, variant == "wrong")
+
+
+class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_rollover_reuses_one_process_and_finishes_the_previous_physical_item(self):
+        async with channel_fixture() as fx:
+            origin = await fx.new()
+            binding = fx.store.active_binding(fx.app._scope(origin).key)
+            port = process_port()
+            fx.app._progress_cards._process_port = port
+            fx.app._progress_cards._poll_seconds = 0.001
+            written = asyncio.Queue()
+            async def update(cot, mid, payload):
+                written.put_nowait(payload)
+                return Ok()
+            port.update.side_effect = update
+            def sample(n):
+                window = ProcessActivityWindow(lambda: 1_800_000_000 + n)
+                window.observe(TurnActivityEvent("same-native-id", TurnActivityKind.TOOL, TurnActivityStatus.IN_PROGRESS, 0),
+                               ProgressCardSettings())
+                return replace(goal_activity_snapshot(binding_id=binding.id, revision=n),
+                               physical_turn_id=f"physical-{n}", process_items=window.rows)
+            first, last = sample(1), sample(2)
+            fx.runtime.goal_activity_values[binding.id] = first
+            submission = GoalSubmission(binding.id, "native-one", "goal-one", lambda: None)
+            async with asyncio.timeout(2):
+                await fx.app._present_running_goal(binding=binding, origin=origin, submission=submission)
+                initial, = await written.get()
+                await fx.app._present_running_goal(binding=binding, origin=origin, submission=replace(submission, continued=True))
+                fx.runtime.goal_activity_values[binding.id] = last
+                rollover = await written.get()
+                self.assertEqual([(r.item_id, r.finished_at is None) for r in rollover],
+                                 [(initial.item_id, False), (last.process_items[0].identity, True)])
+                await fx.app.handle_completion(GoalOutcome(binding.id, "native-one", "goal-one", "user", origin,
+                    final_physical_turn_id="physical-2", final_turn_status="completed", final_response="done", activity=last))
+            port.create.assert_awaited_once()
+            port.complete.assert_awaited_once_with("cot", "process-mid", "done")
+            self.assertFalse(fx.app._progress_cards._process)
+
+    async def test_side_verifies_root_and_disables_contradiction_at_parent_binding(self):
+        async with channel_fixture() as fx:
+            port = process_port()
+            presenter = fx.app._progress_cards
+            presenter._process_port = port
+            origin = FakeMessage("round", message_id="input", chat_id="chat", thread_id="topic")
+            activity = replace(side_turn_activity_snapshot(side_id="side"),
+                               process_items=process_snapshot(1).process_items)
+            with patch.object(fx.channel, "fetch_message", AsyncMock(return_value={"code":0,"data":{"items":[{
+                "message_id":"process-mid","chat_id":"chat","thread_id":"topic","root_id":"wrong","parent_id":"input","deleted":False
+            }]}})) as read:
+                await fx.app.handle_completion(SideTurnOutcome("side", "parent", activity.thread_id, activity.turn_id,
+                    "owner", origin, fx.project, result=completed_turn_result(final_response="side result"),
+                    activity=activity, root_message_id="root"))
+            port.create.assert_awaited_once_with("chat", "input", True)
+            read.assert_awaited_once_with("process-mid")
+            self.assertIn("process-mid", presenter.binding_location("parent").unusable)
+            self.assertNotIn("side", presenter._binding_locations)
+            port.update.assert_not_awaited()
+            port.complete.assert_not_awaited()
+            self.assertIn("side result", str(fx.channel.replies))

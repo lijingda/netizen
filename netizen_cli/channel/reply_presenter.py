@@ -128,7 +128,7 @@ class _ReplyCardPresenter:
         channel: ReplyChannel,
         *,
         process_messages: ProcessMessages | None = None,
-        process_location: Callable[[str, object], CardReplyLocation | None] | None = None,
+        process_location: Callable[[str, object, str | None], CardReplyLocation | None] | None = None,
         clock: Callable[[], float] = time,
         poll_seconds: float = _PROGRESS_CARD_POLL_SECONDS,
         operation_timeout_seconds: float = _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS,
@@ -156,14 +156,14 @@ class _ReplyCardPresenter:
         self._published: WeakKeyDictionary[LogicalReply, dict[str, _PublishedCard]] = WeakKeyDictionary()
         self._closed = False
 
-    def _process_for(self, target: ReplyTarget, binding_id: str) -> ProcessPresentation | None:
-        if self._closed or self._process_port is None or self._process_location is None:
+    def _process_for(self, target: ReplyTarget, binding_id: str | None, root_id: str | None = None) -> ProcessPresentation | None:
+        if not binding_id or self._closed or self._process_port is None or self._process_location is None:
             return None
         if state := self._process.get(target.key):
             return state
         resolve = self._process_location
         state = ProcessPresentation(target.key, target.run, self._process_port, self._channel,
-            lambda: resolve(binding_id, target.origin), self._claim_process, self._clock, self.operation_timeout)
+            lambda: resolve(binding_id, target.origin, root_id), self._claim_process, self._clock, self.operation_timeout)
         self._process[target.key] = state
         return state
 
@@ -182,11 +182,11 @@ class _ReplyCardPresenter:
         return True
 
     async def process_result(self, result: TurnResult) -> None:
-        if result.task_feedback.progress_card_enabled or not result.process_enabled:
+        if result.task_feedback.progress_card_enabled:
             return
         if result.target.run is None and result.status == "completed" and not (result.content or result.partial_answers):
             return
-        state = self._process_for(result.target, result.file_binding_id)
+        state = self._process_for(result.target, result.file_binding_id, result.process_root_id)
         if state is None:
             return
         try:
@@ -418,9 +418,9 @@ class _ReplyCardPresenter:
             confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
         sessions[key.index] = session
-        if not event.feedback.progress_card_enabled and event.process_enabled:
+        if not event.feedback.progress_card_enabled:
             try:
-                state = self._process_for(target, event.process_binding_id or key.owner_id)
+                state = self._process_for(target, event.process_binding_id if key.side else key.owner_id, event.process_root_id)
                 if state:
                     state.sample(snapshot)
             except Exception:

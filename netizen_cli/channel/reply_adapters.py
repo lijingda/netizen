@@ -122,7 +122,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
         finally:
             self._finish_ordinary_completion(outcome)
 
-    def _process_reply_location(self, binding_id: str, origin: object) -> CardReplyLocation | None:
+    def _process_reply_location(self, binding_id: str, origin: object, root_id: str | None) -> CardReplyLocation | None:
         if getattr(origin, "app_id", self._app_id) != self._app_id:
             return None
         location = self._physical_card_location(binding_id, origin)
@@ -131,6 +131,9 @@ class NativeReplyChannel(CompletionPresentationChannel):
             return None
         parent = location.parent
         root = location.root or _inbound_root_message_id(origin)
+        if root_id is not None and (not scope.topic_id or root not in (None, root_id)):
+            return None
+        root = root or root_id
         if isinstance(origin, ConversationTarget):
             if not origin.publishable():
                 return None
@@ -203,9 +206,9 @@ class NativeReplyChannel(CompletionPresentationChannel):
             try:
                 await self._finish_task_reactions(outcome.origin, turn_id, constants.ERROR_REACTION)
             finally:
-                await self._progress_cards.abandon(
-                    key=PresentationKey(outcome.binding_id, outcome.thread_id, turn_id),
-                )
+                key = PresentationKey(outcome.binding_id, outcome.thread_id, turn_id)
+                await self._progress_cards.end_process_run(key, "error")
+                await self._progress_cards.abandon(key=key)
         finally:
             if isinstance(outcome, TurnOutcome):
                 self._finish_ordinary_completion(outcome)
