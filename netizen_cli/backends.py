@@ -1,7 +1,7 @@
 """Native backend identifiers supported by this program version."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -12,6 +12,7 @@ from .domain import NativeCapability
 from .management_errors import ManagementError
 
 BackendId = Literal["codex", "claude"]
+Surface = Literal["command", "card", "api"]
 DEFAULT_BACKEND: Literal["codex"] = "codex"
 KNOWN_BACKENDS = (DEFAULT_BACKEND, "claude")
 
@@ -96,6 +97,7 @@ class Operation:
     command_probe: NativeCapability | None = None
     grant: str = ""
     action_key: str = ""
+    surface_providers: Mapping[tuple[str, Surface], Provider | None] = field(default_factory=dict)
 
 # Each route is an actual authenticated endpoint. The router retains ownership
 # of unknown paths, HTTP methods, request schemas and one-time grant redemption.
@@ -208,11 +210,14 @@ OPERATIONS = {
         ),
     ),
     OperationId.RELEASE: Operation(
-        "释放会话订阅",
+        "释放会话",
         Provider.CODEX_RUNTIME,
         ("release",),
+        cards=("binding.release.confirm",),
         routes=(("POST", "/sessions/release"),),
         command_probe=NativeCapability.RELEASE,
+        surface_providers={("claude", "command"): Provider.ORDINARY, ("claude", "card"): Provider.ORDINARY,
+                           ("codex", "card"): None, ("claude", "api"): None},
     ),
     OperationId.ARCHIVE: Operation(
         "会话归档",
@@ -361,8 +366,13 @@ class BackendPolicy:
         # concrete provider lookup before admission.
         return self.backend == "codex" or provider in (Provider.HOST, Provider.ORDINARY, Provider.REPLY_PROGRESS)
 
-    def allows(self, operation: OperationId) -> bool:
-        return self.has_provider(OPERATIONS[operation].provider)
+    def allows(self, operation: OperationId, surface: Surface = "command") -> bool:
+        provider = self.provider_for(operation, surface)
+        return provider is not None and self.has_provider(provider)
+
+    def provider_for(self, operation: OperationId, surface: Surface) -> Provider | None:
+        definition = OPERATIONS[operation]
+        return definition.surface_providers.get((self.backend, surface), definition.provider)
 
     def require_provider(self, provider: Provider, label: str) -> None:
         if not self.has_provider(provider):
@@ -375,9 +385,10 @@ class BackendPolicy:
             else f"当前实例不支持【{label}】。"
         )
 
-    def require(self, operation: OperationId) -> None:
-        definition = OPERATIONS[operation]
-        self.require_provider(definition.provider, definition.label)
+    def require(self, operation: OperationId, surface: Surface = "command") -> None:
+        if not self.allows(operation, surface):
+            label = "确认释放 Claude 会话" if (operation, surface) == (OperationId.RELEASE, "card") else OPERATIONS[operation].label
+            raise BackendUnsupported(label, detail=self.refusal(label))
 
     def operation_refusal(self, operation: str, label: str) -> str | None:
         # Kept for standalone callers of the original diagnostic API.
@@ -404,15 +415,15 @@ class BackendPolicy:
         selected = _CARDS.get(card)
         if selected is None:
             raise BackendUnsupported("卡片操作", detail=self.refusal("卡片操作"))
-        self.require(selected)
+        self.require(selected, "card")
 
     def require_api(self, method: str, path: str) -> None:
         if (selected := _ROUTES.get((method, path))) is not None:
-            self.require(selected)
+            self.require(selected, "api")
             return
         for family, operation in _API_FAMILIES.items():
             if path == family or path.startswith(family + "/"):
-                self.require(operation)
+                self.require(operation, "api")
                 return
 
     def sender_refusal(

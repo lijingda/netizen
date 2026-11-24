@@ -10,9 +10,11 @@ from types import SimpleNamespace
 import unittest
 
 from netizen_cli.backends import BackendPolicy, BackendUnsupported
+from netizen_cli.cards.controls import error_card, release_confirmation_card
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.channel.physical_delivery import INCOMPLETE
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.ordinary_sessions import CLAUDE_RELEASE_HINT, ReleaseConfirmation
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from tests.support import has_claude_sdk, requires_claude_sdk
 
@@ -56,16 +58,28 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
     def freeze_trace(self, fx, scenario):
         self.enterContext(patch("netizen_cli.runtime.claude_ordinary.uuid4",
                                side_effect=(UUID(int=1), UUID(int=2))))
-        def per_turn_headings(trace):
-            writes = [args[1] for op, args, _ in trace if op == "update_card" and args[0] == "first"]
-            self.assertEqual(len(writes), 2 if scenario == "late_first_receipt" else 3)
-            for card in writes:
-                for field in (card["header"]["title"], card["config"]["summary"]):
-                    self.assertEqual(field["content"], "任务已完成")
-                    field["content"] = "本轮已完成"
+        def expected_changes(trace):
+            # PR 315, merged after the fixture was recorded on a1b9eee.
+            hint = "如需在终端继续这个会话，请先 /release"
+            if scenario == "background_plain":
+                self.assertEqual(trace[3][1][1], "physical one\n\n后台任务 1 个运行中，可继续发送消息")
+                trace[3][1][1] += "\n\n" + hint
+            if scenario == "background_cards":
+                line = trace[3][1][1]["body"]["elements"][0]["header"]["title"]
+                self.assertEqual(line["content"], "执行过程 · 已完成 · Claude：空闲，后台任务 1 个运行中，可以发送新消息")
+                line["content"] += "。" + hint
+
+            # ADR 0106 §4 changes only the title and collapsed summary of the first answer.
+            if scenario in {"background_cards", "late_first_receipt"}:
+                writes = [args[1] for op, args, _ in trace if op == "update_card" and args[0] == "first"]
+                self.assertEqual(len(writes), 2 if scenario == "late_first_receipt" else 3)
+                for card in writes:
+                    for field in (card["header"]["title"], card["config"]["summary"]):
+                        self.assertEqual(field["content"], "任务已完成")
+                        field["content"] = "本轮已完成"
 
         return expect_presenter_trace(self, fx, scenario, reference=CLAUDE_FIXTURE,
-            expected_edits=per_turn_headings if scenario in {"background_cards", "late_first_receipt"} else None)
+                                     expected_edits=expected_changes)
 
     async def until(self, predicate):
         async with asyncio.timeout(10):
@@ -608,7 +622,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(clients.calls), 1)
             self.assertNotIn("card-V", writes)
             self.assertIn("card-H", writes)
-            self.assertEqual(plain, [("H2", "body-H2"), ("H3", "body-H3")])
+            self.assertEqual(plain, [("H2", f"body-H2\n\n{CLAUDE_RELEASE_HINT}"), ("H3", f"body-H3\n\n{CLAUDE_RELEASE_HINT}")])
 
     @requires_claude_sdk
     async def test_unconfirmed_partial_matching_the_prepared_body_is_never_replayed(self):
@@ -987,6 +1001,198 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(fx.store.has_bindings(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key))
             self.assertEqual((clients.calls, fx.channel.reactions, fx.channel.fetch_quoted_calls), ([], [], []))
 
+    @requires_claude_sdk
+    async def test_release_settles_launcher_at_close_deadline_and_drains_before_readmission(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.runtime.claude_ordinary import CLOSE_FAILED
+        for late in (True, False):
+            with self.subTest(late=late):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                    binding = fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=True, reaction_pulse_enabled=True,
+                                                          completion_mention_enabled=True))
+                    fx.channel.reply_results.append(SendResult.ok(message_id="launcher"))
+                    await app.handle_message(FakeMessage("launch", message_id="H1"))
+                    cli = clients.calls[-1]
+                    cli.init()
+                    await self.until(lambda: bool(app._progress_cards._sessions))
+                    cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
+                    cli.stream.put_nowait(SystemMessage("task_started", dict(session_id=cli.session, task_id="A", run_id="R", tool_use_id="tool")))
+                    cli.stream.put_nowait(SystemMessage("background_tasks_changed", dict(session_id=cli.session, tasks=[dict(task_id="A", run_id="R")])))
+                    cli.result(result=None, reason=None)
+                    await self.until(lambda: "后台任务 1 个" in str(fx.channel.updates))
+                    await app.handle_message(FakeMessage("/release", message_id="command"))
+                    card, = [body for target, body in fx.channel.replies if target == "command"]
+                    event = direct_button_event(_card_button_value(card, "确认释放"))
+                    direct_card_event(fx.channel, {}, message_id=event.message_id)
+                    reaction = fx.channel.add_reaction
+                    entered, drain = asyncio.Event(), asyncio.Event()
+                    async def gated(message_id, emoji):
+                        if message_id == "H1" and emoji == "DONE":
+                            entered.set()
+                            await drain.wait()
+                        return await reaction(message_id, emoji)
+                    if late:
+                        cli.close_gate.clear()
+                    try:
+                        with patch.object(fx.channel, "add_reaction", side_effect=gated), \
+                             patch("netizen_cli.runtime.claude_ordinary._CLOSE_SECONDS", .1):
+                            callback = asyncio.create_task(app.handle_card_action(event))
+                            await asyncio.wait_for(entered.wait(), 2)
+                            self.assertIn("全部完成", str(fx.channel.updates[-1]))
+                            expected = CLOSE_FAILED if late else "已释放 Claude 会话连接。"
+                            if late:
+                                await asyncio.wait_for(asyncio.shield(callback), 2)
+                                self.assertIn((event.message_id, CLOSE_FAILED), fx.channel.replies)
+                                await app.handle_message(FakeMessage("before disconnect", message_id="blocked"))
+                                self.assertIn(("blocked", CLOSE_FAILED), fx.channel.replies)
+                                cli.close_gate.set()
+                                await self.until(lambda: binding.id not in ordinary._unavailable)
+                            else:
+                                self.assertFalse(callback.done())
+                            await app.handle_message(FakeMessage("before terminal delivery", message_id="draining"))
+                            self.assertIn("收尾", [body for target, body in fx.channel.replies if target == "draining"][0])
+                            self.assertEqual(len(clients.calls), 1)
+                    finally:
+                        drain.set()
+                        cli.close_gate.set()
+                    self.assertTrue(await ordinary.wait_idle(2))
+                    await asyncio.wait_for(callback, 2)
+                    self.assertEqual([body for target, body in fx.channel.replies if target == event.message_id], [expected])
+                    self.assertEqual(fx.channel.reactions.count(("H1", "DONE")), 1)
+                    self.assertFalse([body for _, body, _ in fx.channel.send_calls if body.mentions])
+                    await app.handle_message(FakeMessage("cold", message_id="H2"))
+                    cold = clients.calls[-1]
+                    self.assertTrue(cold.resume)
+                    cold.init()
+                    cold.result()
+                    self.assertTrue(await ordinary.wait_idle(2))
+
+    @requires_claude_sdk
+    async def test_divergence_button_releases_without_delivering_rejected_message(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            await fx.create_binding(scope)
+            await app.handle_message(FakeMessage("work", message_id="H1"))
+            cli = clients.calls[-1]
+            cli.init()
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+            cli.result()
+            await self.until(lambda: cli.live.ordered_idle)
+            clients.history = "terminal"
+            with patch.object(app, "_report_input_error", wraps=app._report_input_error) as report:
+                await app.handle_message(FakeMessage("continue", message_id="H2"))
+            report.assert_awaited_once()
+            card, = [body for target, body in fx.channel.replies if target == "H2"]
+            button = _card_button_value(card, "释放会话")
+            self.assertEqual((len(cli.inputs), cli.closes), (1, 0))
+            event = direct_button_event(button)
+            direct_card_event(fx.channel, {}, message_id=event.message_id)
+            await app.handle_card_action(event)
+            self.assertEqual((len(cli.inputs), cli.closes), (1, 1))
+            self.assertIn((event.message_id, "已释放 Claude 会话连接。"), fx.channel.replies)
+
+    @requires_claude_sdk
+    async def test_divergence_reply_contains_sdk_failures_and_propagates_caller_cancellation(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+            await app.handle_message(FakeMessage("launch", message_id="H1"))
+            cli = clients.calls[-1]
+            cli.init()
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+            cli.result()
+            await self.until(lambda: ordinary._active[binding.id].last_assistant == clients.history)
+            for index, failure in enumerate((OSError(), asyncio.CancelledError(), None)):
+                clients.history = f"foreign-{index}"
+                entered = asyncio.Event()
+                async def fail_card(message, content, opts=None):
+                    _card_button_value(content, "释放会话")
+                    if failure is not None:
+                        raise failure
+                    entered.set()
+                    await asyncio.Future()
+                with patch.object(fx.channel, "reply", side_effect=fail_card) as reply:
+                    attempt = asyncio.create_task(app.handle_message(FakeMessage("continue", message_id="H2")))
+                    if failure is None:
+                        await asyncio.wait_for(entered.wait(), 2)
+                        attempt.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await attempt
+                    else:
+                        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
+                            await attempt
+                    reply.assert_awaited_once()
+            self.assertEqual(len(cli.inputs), 1)
+
+    async def test_codex_release_button_reports_original_error_without_feishu_lookups(self):
+        async with channel_fixture() as fx:
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            binding = (await fx.create_binding(scope)).binding
+            card = release_confirmation_card(scope, binding.id, ReleaseConfirmation(1, "turn", 0, 1))
+            event = direct_button_event(_card_button_value(card, "确认释放"))
+            direct_card_event(fx.channel, {}, message_id=event.message_id)
+            with patch.object(fx.channel, "fetch_message", wraps=fx.channel.fetch_message) as fetch:
+                await fx.app.handle_card_action(event)
+                fetch.assert_not_awaited()
+            self.assertEqual(fx.channel.chat_info_calls, [])
+            self.assertEqual(fx.channel.updates, [(event.message_id, error_card("当前实例不支持【确认释放 Claude 会话】。").card)])
+
+    @requires_claude_sdk
+    async def test_release_scope_validation_errors_reply_in_the_card_topic(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.TOPIC, "original")
+            binding = (await fx.create_binding(scope)).binding
+            card = release_confirmation_card(scope, binding.id, ReleaseConfirmation(1, "turn", 0, 1))
+            event = direct_button_event(_card_button_value(card, "确认释放"))
+            for topic, error in (("moved", None), ("original", OSError("chat lookup failed"))):
+                fx.channel.fetched_messages[event.message_id] = {"data": {"items": [{"chat_id": scope.chat_id, "thread_id": topic}]}}
+                with (patch.object(app._management, "release_current_binding") as release,
+                      patch.object(fx.channel, "get_chat_info", side_effect=error, wraps=fx.channel.get_chat_info),
+                      patch.object(fx.channel, "reply", wraps=fx.channel.reply) as reply):
+                    await app.handle_card_action(event)
+                release.assert_not_awaited()
+                target, _, opts = reply.await_args.args
+                self.assertEqual((target.message_id, opts.reply_to, opts.reply_in_thread), (event.message_id, event.message_id, True))
+            self.assertFalse(clients.calls)
+
+    @requires_claude_sdk
+    async def test_release_card_rechecks_owner_scope_and_exact_connection(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            await fx.create_binding(scope)
+            await app.handle_message(FakeMessage("work", message_id="H1"))
+            cli = clients.calls[-1]
+            cli.init()
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+            cli.result()
+            await self.until(lambda: cli.live.ordered_idle)
+            await app.handle_message(FakeMessage("/release", message_id="release"))
+            card = next(body for target, body in fx.channel.replies if target == "release")
+            value = _card_button_value(card, "确认释放")
+            event = direct_button_event(value)
+            with self.assertRaises(BackendUnsupported):
+                BackendPolicy("codex").require_card(value["intent"])
+            with self.assertRaises(BackendUnsupported):
+                app._policy.require_api("POST", "/sessions/release")
+            event.operator.open_id = "other"
+            await app.handle_card_action(event)
+            event.operator.open_id = "ou_user"
+            fx.channel.fetched_messages[event.message_id] = {"data": {"items": [{"chat_id": scope.chat_id, "thread_id": "foreign"}]}}
+            await app.handle_card_action(event)
+            self.assertEqual(cli.closes, 0)
+            direct_card_event(fx.channel, {}, message_id=event.message_id)
+            await app.handle_card_action(event)
+            await app.handle_card_action(event)
+            self.assertEqual(cli.closes, 1)
+            self.assertEqual(sum(body == "已释放 Claude 会话连接。" for _, body in fx.channel.replies), 1)
+
     async def test_grace_typed_gaps_and_local_forms(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             async def send(text):
@@ -997,7 +1203,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await send(body), GRACE)
             clock[0] = 2.
             for cmd in ("goal this", "side close", "fork", "usage", "compact", "cron", "archive", "delete",
-                        "model", "effort", "fast", "speed", "release", "threads archived", "quit", "plan"):
+                        "model", "effort", "fast", "speed", "threads archived", "quit", "plan"):
                 with self.subTest(command=cmd):
                     self.assertIn("试点暂不支持", await send("/" + cmd))
             self.assertIn("试点暂不支持", await send("$sample do this"))
@@ -1008,6 +1214,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("原生 Claude 设置", content)
                     self.assertIn("_progress_card", content)
             await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            self.assertIn("/release", await send("/help"))
+            self.assertIn("没有可释放", await send("/release"))
             self.assertIn("本地任务", json.dumps((await send("/status")).card, ensure_ascii=False))
             for cmd in ("/config", "/sessions"):
                 content = json.dumps((await send(cmd)).card, ensure_ascii=False)
@@ -1170,7 +1378,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                                 cli.result(result="launch-C")
                                 await self.until(lambda: "launch-C" in wire["H2"])
                                 if not cards:
-                                    self.assertIn(("H2", "launch-C\n\n后台任务 1 个运行中，可继续发送消息"), fx.channel.replies)
+                                    self.assertIn(("H2", f"launch-C\n\n后台任务 1 个运行中，可继续发送消息\n\n{CLAUDE_RELEASE_HINT}"), fx.channel.replies)
                                 for k in order:
                                     tasks.remove(k)
                                     membership()
@@ -1561,7 +1769,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("后台任务 1 个运行中", str(fx.channel.updates))
                 else:
                     self.assertTrue(any("first fragment" in str(body) for _, body in fx.channel.replies))
-                    self.assertIn(("H1", "physical one\n\n后台任务 1 个运行中，可继续发送消息"), fx.channel.replies)
+                    self.assertIn(("H1", f"physical one\n\n后台任务 1 个运行中，可继续发送消息\n\n{CLAUDE_RELEASE_HINT}"),
+                                  fx.channel.replies)
                 fx.channel.reply_results.append(SendResult.ok(message_id="wake"))
                 system("background_tasks_changed", tasks=[])
                 cli.init(user_message_uuids=[])
@@ -1707,9 +1916,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             fx.channel.send_results.append(SendResult.ok(message_id="first", chunk_ids=["first", "last"], raw=raw))
             cli.result(result="cron body", user_message_uuid=None, origin={"kind": "task-notification", "producer": "cron"})
             async with asyncio.timeout(5):
-                while not any(str(body) == "cron body" for _, body, _ in fx.channel.send_calls):
+                while not any(str(body) == f"cron body\n\n{CLAUDE_RELEASE_HINT}" for _, body, _ in fx.channel.send_calls):
                     await asyncio.sleep(.005)
-            (destination, _, opts), = [call for call in fx.channel.send_calls if str(call[1]) == "cron body"]
+            (destination, _, opts), = [call for call in fx.channel.send_calls if str(call[1]) == f"cron body\n\n{CLAUDE_RELEASE_HINT}"]
             self.assertEqual((destination, opts.reply_to, opts.reply_in_thread), (scope.chat_id, "om_root", True))
             for uid in ("result-a", "result-b"):
                 fx.channel.send_results.extend([OSError(), SendResult.ok(message_id="first", chunk_ids=["first", "last"], raw=raw)])
@@ -1813,7 +2022,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     release.set()
                 await asyncio.wait_for(second.wait(), 5)
             self.assertEqual([(body, opts.reply_to) for _, body, opts in fx.channel.send_calls if isinstance(body, str)],
-                             [("second cron", "root")])
+                             [(f"second cron\n\n{CLAUDE_RELEASE_HINT}", "root")])
 
     async def test_settlement_of_cancelled_reaction_cleanup_leaves_only_the_uncertain_id_for_close(self):
         from netizen_cli.bindings import BindingTaskFeedback

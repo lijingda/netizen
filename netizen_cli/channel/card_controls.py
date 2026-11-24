@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 import asyncio
 import logging
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 
 from ..bindings import (
@@ -37,6 +37,7 @@ from ..cards.controls import local_status_card
 from ..cards.defaults import decode_defaults_action
 from ..defaults import DefaultConfigurationError
 from ..runtime.contracts import (
+    ThreadActivityChanged,
     StopDisposition,
     ThreadDeleteUnavailable,
     ThreadDeleteTargetChanged,
@@ -243,6 +244,7 @@ class CardControlChannel(TurnFileChannel):
             CardControlName.PREPARE_EXACT_DELETE_BINDING: self._card_prepare_exact_delete_binding,
             CardControlName.DELETE_EXACT_BINDING: self._card_delete_exact_binding,
             CardControlName.STOP_EXACT_BINDING: self._card_stop_exact_binding,
+            CardControlName.CONFIRM_RELEASE: self._card_confirm_release,
             CardControlName.RECHECK_EXACT_TURN: self._card_recheck_exact_turn,
             CardControlName.PREPARE_ARCHIVED_DELETE_BINDING: self._card_prepare_archived_delete_binding,
             CardControlName.DELETE_ARCHIVED_BINDING: self._card_delete_archived_binding,
@@ -849,6 +851,20 @@ class CardControlChannel(TurnFileChannel):
             refreshed = False
         if not refreshed:
             await self._safe_reply_to_card(intent, success_notice)
+
+    async def _card_confirm_release(self, intent: CardControlIntent) -> None:
+        chat = intent.scope.chat_id
+        fetched = await self._channel.fetch_message(intent.source_id)
+        actual = scope_from_fetched_card(app_id=self._app_id, callback_chat_id=chat, fetched_message=fetched,
+                                        chat_type=_public_chat_kind(await self._channel.get_chat_info(chat)))
+        if actual != intent.scope:
+            raise CardActionError("卡片已离开原会话，请重新发送 /release。")
+        try:
+            await self._management.release_current_binding(target=CurrentBindingTarget(actual.key, cast(str, intent.binding_id)),
+                sender_id=intent.sender_id, revision=intent.expected_activity_revision, turn_id=intent.expected_turn_id)
+        except (NoCurrentBinding, CurrentBindingChanged, ThreadActivityChanged) as exc:
+            raise CardActionError("会话状态已变化，请重新发送 /release。") from exc
+        await self._safe_reply_to_card(intent, "已释放 Claude 会话连接。")
 
     async def _card_stop_exact_binding(self, intent: CardControlIntent) -> None:
         assert intent.binding_id is not None

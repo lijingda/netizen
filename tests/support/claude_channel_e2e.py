@@ -183,7 +183,8 @@ def install_tools(cwd):
                           ("foreground-b", "foreground-b-release")):
         script = cwd / ("fixture-" + mode)
         # exec preserves this PID, so the harness can follow the tool even if it is reparented.
-        body = f'i=0; while [ ! -e {release} ] && [ "$i" -lt 900 ]; do sleep .1; i=$((i+1)); done'
+        limit = 3600 if mode == "background" else 900
+        body = f'i=0; while [ ! -e {release} ] && [ "$i" -lt {limit} ]; do sleep .1; i=$((i+1)); done'
         script.write_text(f'#!/bin/sh\necho "$$" > fixture-{mode}.pid\n{body}\n')
         script.chmod(0o700)
 
@@ -238,12 +239,12 @@ class Driver:
         assert self.store.active_binding(SCOPE.key) is not None
         self.session = None
 
-    async def submit(self, label, scenario="text"):
+    async def submit(self, label, scenario="text", *, background_turns=3):
         before = len(self.clients.calls)
-        self.clients.turn_limit = 3 if scenario in ("foreground", "foreground-b", "background", "denied-touch") else 1
+        self.clients.turn_limit = 3 if scenario == "denied-touch" else 2 if scenario.startswith("foreground") else 1
         if scenario == "background":
             # One tool round and one answer per turn. Reserve H1, H2 and the wake.
-            self.clients.turn_limit, self.clients.expected_turns = 2, 3
+            self.clients.turn_limit, self.clients.expected_turns = 2, background_turns
         try:
             await self.send(label, self.prompt(label, scenario))
         finally:
@@ -318,7 +319,7 @@ class Driver:
         path.unlink()
         return proc
 
-    def release(self):
+    def release_foreground(self):
         (self.cwd / "fixture-release").touch()
 
     async def startup_grace(self):
@@ -353,10 +354,10 @@ class Driver:
         await self.terminal("resume")
         self.saw_exchange("resume", "ordinary")
 
-    async def handoff(self):
+    async def terminal_turn(self, label):
         limits = ["--max-turns", str(self.live.budget.reserve(1))] if self.live else []
         child = await asyncio.create_subprocess_exec(str(verified_claude_cli()), "-p", "--resume", self.session, *limits,
-            "--permission-mode", "auto", "--output-format", "json", self.prompt("handoff"), cwd=self.cwd,
+            "--permission-mode", "auto", "--output-format", "json", self.prompt(label), cwd=self.cwd,
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         try:
             self.cli_submissions += 1
@@ -366,11 +367,14 @@ class Driver:
             result = json.loads(output)
             assert result["session_id"] == self.session and not result["is_error"]
             self.cli_turns += result["num_turns"]
-            self.check_answer("handoff", result["result"])
+            self.check_answer(label, result["result"])
         finally:
             if child.returncode is None:
                 child.kill()
                 await child.wait()
+
+    async def handoff(self):
+        await self.terminal_turn("handoff")
         self.saw_exchange("handoff", "resume")
         await self.submit("after-cli")
         await self.terminal("after-cli")
@@ -382,7 +386,7 @@ class Driver:
         before = len(self.clients.calls)
         await self.send("busy-b", self.prompt("busy-b"))
         assert self.replies("busy-b") == [BUSY] and len(self.clients.calls) == before
-        self.release()
+        self.release_foreground()
         await self.terminal("busy-a")
         assert not running(tool)
         (self.cwd / "fixture-release").unlink()
@@ -451,11 +455,43 @@ class Driver:
             reminders = [opts.reply_to for _, _, opts in self.channel.send_calls if opts.reply_to.startswith(f"reply-{label}-")]
             assert reminders == [f"reply-{label}-{last_reply}"]
 
+    async def release(self):
+        gate = self.cwd / "background-release"
+        gate.unlink(missing_ok=True)
+        first = await self.submit("release-bg", "background", background_turns=2)
+        try:
+            shell = await self.ready_tool("background")
+            await self.background_idle_reply(first, "release-bg", 1)
+            await asyncio.sleep(180 if self.live else 2.55)
+            await self.send("idle-send", self.prompt("idle-send"))
+            assert not any(isinstance(r, OutboundCard) for r in self.replies("idle-send")), "false divergence after idle"
+            await self.background_idle_reply(first, "idle-send", 2)
+            assert running(shell)
+            await self.terminal_turn("terminal-turn")
+            await self.send("unsent", self.prompt("after-release"))
+            card, = self.replies("unsent")
+            assert _card_button_value(card, "释放会话") and len(first.inputs) == 2
+            await self.send("release-confirm", "/release")
+            preview, = self.replies("release-confirm")
+            await self.click(direct_button_event(_card_button_value(preview, "确认释放"), message_id="card-release-confirm"))
+            assert self.replies("card-release-confirm") == ["已释放 Claude 会话连接。"]
+            assert first.finished.is_set() and not running(shell)
+        finally:
+            gate.touch()
+        await self.submit("after-release")
+        await self.terminal("after-release")
+        self.saw_exchange("after-release", "terminal-turn")
+
     async def stop_listed_work(self):
         (self.cwd / "background-release").unlink(missing_ok=True)
         cli = await self.submit("stop-list", "background")
         shell = await self.ready_tool("background")
         await self.background_idle_reply(cli, "stop-list", 1)
+        await self.terminal_turn("foreign-stop")
+        before = len(self.rows())
+        await self.send("refused-foreground", self.prompt("second-foreground", "foreground"))
+        card, = self.replies("refused-foreground")
+        assert _card_button_value(card, "释放会话") and len(cli.inputs) == 1 and len(self.rows()) == before
         await self.send("second-foreground", self.prompt("second-foreground", "foreground"))
         await self.ready_tool("foreground")
         await self.send("esc", "/stop")
@@ -574,7 +610,7 @@ async def channel_driver(cwd, provider, live):
 
 EXPECTED_REQUESTS = {
     "startup_grace": 1, "ordinary": 1, "resume": 1, "handoff": 2, "busy": 3, "exact_stop": 3,
-    "background": 4, "stop_listed_work": 3, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2, "shutdown": 1,
+    "background": 4, "release": 5, "stop_listed_work": 4, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2, "shutdown": 1,
 }
 CASES = tuple(EXPECTED_REQUESTS)
 
@@ -605,7 +641,7 @@ async def run_cases(cwd, *, provider=None, live=None, report=print):
                     status = "skipped_mock_only"
                     continue
                 # exact_stop waits for two independent live tool launches and terminals.
-                seconds = (240 if name == "exact_stop" else 150) if live else 65
+                seconds = {"release": 360, "exact_stop": 240}.get(name, 150) if live else 65
                 async with asyncio.timeout(seconds):
                     await getattr(driver, name)()
                     await driver.reaped()

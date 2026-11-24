@@ -261,6 +261,7 @@ class CardControlName(str, Enum):
     ACTIVATE_BINDING = "binding.activate"
     ARCHIVE_EXACT_BINDING = "binding.archive.exact"
     STOP_EXACT_BINDING = "binding.stop.exact"
+    CONFIRM_RELEASE = "binding.release.confirm"
     RECHECK_EXACT_TURN = "binding.turn.recheck"
     SESSIONS_PAGE = "sessions.page"
     REFRESH_ARCHIVED_SESSIONS = "sessions.archived.refresh"

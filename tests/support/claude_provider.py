@@ -110,7 +110,7 @@ class Provider:
         if self.live_session_reply and any(t.get("name") == "Bash" for t in data.get("tools", [])):
             tool, scenario, label = self.live_session_reply(messages)
         content = ({"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex, "name": tool[0], "input": tool[1]}
-                   if tool else {"type": "text", "text": "fixture-reply-" + label})
+                   if tool else {"type": "text", "text": "" if scenario == "empty-answer" else "fixture-reply-" + label})
         if scenario == "inline-image":
             content["text"] += " ![pixel](result.png)"
         stop = "tool_use" if tool else "end_turn"

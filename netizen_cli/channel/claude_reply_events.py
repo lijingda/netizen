@@ -8,6 +8,7 @@ from dataclasses import replace
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from ..ordinary_sessions import (
+    CLAUDE_RELEASE_HINT,
     CliStateChanged,
     ConversationTarget,
     LogicalTerminal,
@@ -94,7 +95,11 @@ class ClaudeReplyEvents:
 
         def suffix() -> str:
             count = event.owned_tasks()
-            return f"\n\n后台任务 {count} 个运行中，可继续发送消息" if count else ""
+            text = f"\n\n后台任务 {count} 个运行中，可继续发送消息" if count else ""
+            state = event.state()
+            if count or state.tasks or state.crons:
+                text += f"\n\n{CLAUDE_RELEASE_HINT}"
+            return text
 
         display = RunDisplay(event.reply, event.publishable, lambda: event.state().line)
         return TurnResult(

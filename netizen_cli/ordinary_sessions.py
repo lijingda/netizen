@@ -14,7 +14,7 @@ from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
 from .runtime.contracts import (
-    ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
+    ActiveTurnSnapshot, ContextCursorCommit, ReleaseDisposition, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TerminalStateUnknown, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
 
@@ -71,6 +71,9 @@ class ConversationTarget:
     single_attempt: bool = False
 
 
+CLAUDE_RELEASE_HINT = "如需在终端继续这个会话，请先 /release"
+
+
 @dataclass(frozen=True, slots=True)
 class ClaudeCliState:
     idle: bool = False
@@ -82,9 +85,9 @@ class ClaudeCliState:
         if not self.idle:
             return "Claude：执行中"
         if self.tasks:
-            return f"Claude：空闲，后台任务 {self.tasks} 个运行中，可以发送新消息"
+            return f"Claude：空闲，后台任务 {self.tasks} 个运行中，可以发送新消息。{CLAUDE_RELEASE_HINT}"
         if self.crons:
-            return "Claude：空闲，定时任务已登记，可以发送新消息"
+            return f"Claude：空闲，定时任务已登记，可以发送新消息。{CLAUDE_RELEASE_HINT}"
         return "全部完成"
 
 
@@ -163,6 +166,22 @@ OrdinaryCompletionHandler = Callable[[OrdinaryEvent], Awaitable[None]]
 
 class OrdinaryInputRejected(RuntimeError):
     """The backend verified that this input was never submitted."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseConfirmation:
+    revision: int
+    turn_id: str
+    tasks: int
+    crons: int
+
+
+class OrdinarySessionDiverged(OrdinaryInputRejected):
+    def __init__(self, scope: FeishuScope, binding_id: str, confirmation: ReleaseConfirmation):
+        super().__init__("检测到该会话在其他 Claude 客户端有新进展，这条消息未发送。")
+        self.scope = scope
+        self.binding_id = binding_id
+        self.confirmation = confirmation
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +275,8 @@ class LocalSessionManagement(Protocol):
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding: ...
 
     def require_admission(self) -> None: ...
+    async def release_control(self, binding_id: str, *, scope_key: str, sender_id: str, revision: int | None,
+                              turn_id: str | None) -> ReleaseDisposition | ReleaseConfirmation: ...
     async def stop_control(self, binding_id: str, *, sender_id: str, revision: int | None, turn_id: str | None,
                            all_tasks: bool, acknowledge: Callable[[str], Awaitable[None]]) -> StopDisposition: ...
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot: ...
