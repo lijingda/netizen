@@ -25,12 +25,13 @@ from .app_values import (
 from .reply_events import (
     Activity,
     ActivityChanged,
+    DeliveryPolicy,
     PresentationKey,
     ReplyTarget,
     RunEnded,
-    TerminalStatus,
     TurnOpened,
     TurnResult,
+    terminal_view,
 )
 
 
@@ -65,12 +66,7 @@ class CodexReplyEvents:
 
         def observe() -> ActivityChanged | None:
             snapshot = read()
-            if snapshot is None or not key.matches(snapshot):
-                return None
-            parts = tuple(
-                target.partial(p, presentation_id=turn if goal else None) for p in snapshot.partial_answers
-            )
-            return ActivityChanged(target, snapshot, parts)
+            return ActivityChanged.from_snapshot(target, snapshot, presentation_id=turn if goal else None)
 
         def retain() -> bool:
             if key.side:
@@ -84,7 +80,8 @@ class CodexReplyEvents:
             )
 
         return TurnOpened(
-            target, feedback, observe, retain, reply, reply_partial, validate_reply, reuse_existing=goal
+            target, DeliveryPolicy.BOUNDED_FALLBACK, feedback, observe, retain,
+            reply, reply_partial, validate_reply, reuse_existing=goal,
         )
 
     @classmethod
@@ -97,13 +94,12 @@ class CodexReplyEvents:
         owner = outcome.side_id if isinstance(outcome, SideTurnOutcome) else outcome.binding_id
         key = PresentationKey(owner, outcome.thread_id, outcome.turn_id, side)
         target = ReplyTarget(key, outcome.origin, key)
-        status: TerminalStatus
-        if _task_has_error(outcome) or outcome.status not in {"interrupted", "completed"}:
-            status, content = "failed", _task_failure_text(outcome)
-        elif outcome.status == "interrupted":
-            status, content = "interrupted", _task_interruption_text(outcome)
-        else:
-            status, content = "completed", outcome.final_response or "任务已结束，未产生文本回复。"
+        status, content = terminal_view(
+            outcome.status, _task_has_error(outcome),
+            failure=lambda: _task_failure_text(outcome),
+            interruption=lambda: _task_interruption_text(outcome),
+            answer=outcome.final_response, empty="任务已结束，未产生文本回复。",
+        )
         if isinstance(native, OrdinaryConclusion):
             evidence = native.file_evidence
         else:
@@ -128,6 +124,7 @@ class CodexReplyEvents:
             physical_turn_id=(native.final_physical_turn_id or key.turn_id)
             if isinstance(native, GoalOutcome)
             else key.turn_id,
+            run_continues=False,
             allow_suppression=not isinstance(native, GoalOutcome)
             or (
                 native.error is None

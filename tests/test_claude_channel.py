@@ -57,16 +57,15 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch("netizen_cli.runtime.claude_ordinary.uuid4",
                                side_effect=(UUID(int=1), UUID(int=2))))
         def per_turn_headings(trace):
-            for i in (3, 5, 6, 7):
-                card = trace[i][1][1]
-                if i == 6:
-                    card = card["card"]
+            writes = [args[1] for op, args, _ in trace if op == "update_card" and args[0] == "first"]
+            self.assertEqual(len(writes), 2 if scenario == "late_first_receipt" else 3)
+            for card in writes:
                 for field in (card["header"]["title"], card["config"]["summary"]):
                     self.assertEqual(field["content"], "任务已完成")
                     field["content"] = "本轮已完成"
 
         return expect_presenter_trace(self, fx, scenario, reference=CLAUDE_FIXTURE,
-                                      expected_edits=per_turn_headings if scenario == "background_cards" else None)
+            expected_edits=per_turn_headings if scenario in {"background_cards", "late_first_receipt"} else None)
 
     async def until(self, predicate):
         async with asyncio.timeout(10):
@@ -935,7 +934,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     refreshed = []
                     refresh = human.reply.refresh
                     async def final(state):
-                        refreshed.append(state.line)
+                        refreshed.append(state)
                         if failure != "none":
                             raise asyncio.CancelledError() if failure == "cancelled" else OSError()
                         await refresh(state)
@@ -1444,6 +1443,79 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("设置已保存", fx.channel.replies[-1][1])
             self.assertEqual(len(clients.calls), 1)
 
+    async def test_late_first_receipt_keeps_heading_across_queued_wake_and_end(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        from netizen_cli.bindings import BindingTaskFeedback
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = fx.store.create_channel_binding(
+                scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT), project_alias="test", creator_id="ou_user",
+                task_feedback=BindingTaskFeedback(progress_card_enabled=True))
+            entered, release = asyncio.Event(), asyncio.Event()
+            original = fx.channel.reply
+            async def reply(*args, **kwargs):
+                if not entered.is_set():
+                    entered.set()
+                    await release.wait()
+                return await original(*args, **kwargs)
+            self.enterContext(patch.object(fx.channel, "reply", reply))
+            trace = self.freeze_trace(fx, "late_first_receipt")
+            fx.channel.reply_results.extend(SendResult.ok(message_id=mid) for mid in ("first", "wake"))
+            fx.channel.send_results.append(sent_result("reminder", chat_id="oc_direct", parent_id="wake", root_id="H1"))
+            await app.handle_message(FakeMessage("work", message_id="H1"))
+            cli = clients.calls[-1]
+            ex = ordinary._active[binding.id]
+            def system(kind, **data):
+                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+            try:
+                cli.init(uuid="human-physical")
+                await asyncio.wait_for(entered.wait(), 5)
+                cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
+                system("task_started", task_id="t", run_id="r", tool_use_id="tool")
+                system("background_tasks_changed", tasks=[{"task_id": "t", "run_id": "r"}])
+                cli.result(result="first answer")
+                await self.until(lambda: ex.admissible)
+                system("background_tasks_changed", tasks=[])
+                cli.init(user_message_uuids=[])
+                cli.result(user_message_uuid=None, uuid="wake-result", result="wake answer",
+                           origin={"kind": "task-notification", "producer": "session-task", "runId": "r"})
+                system("session_state_changed", state="idle")
+                await self.until(lambda: ex.human.terminal_sent)
+            finally:
+                release.set()
+            self.assertTrue(await ordinary.wait_idle(10))
+            card_calls = [(op, args[0] if op == "update_card" else args[0]["messageId"])
+                          for op, args, _ in trace if op in {"reply", "update_card"}]
+            self.assertEqual(card_calls, [("reply", "H1"), ("update_card", "first"),
+                                          ("reply", "H1"), ("update_card", "first")])
+            self.assertEqual(fx.channel.send_calls[-1][2].reply_to, "wake")
+
+    async def test_single_result_before_idle_keeps_whole_task_heading_on_every_result_write(self):
+        from claude_agent_sdk import SystemMessage
+        from netizen_cli.bindings import BindingTaskFeedback
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                project_alias="test", creator_id="ou_user", task_feedback=BindingTaskFeedback(progress_card_enabled=True))
+            self.freeze_trace(fx, "single_result_before_idle")
+            fx.channel.reply_results.append(SendResult.ok(message_id="first"))
+            fx.channel.send_results.append(sent_result("reminder", chat_id="oc_direct", parent_id="first", root_id="H1"))
+            await app.handle_message(FakeMessage("work", message_id="H1"))
+            cli = clients.calls[-1]
+            cli.init()
+            await self.until(lambda: bool(app._progress_cards._sessions))
+            cli.result(result="one answer", idle=False)
+            await self.until(lambda: bool(fx.channel.updates))
+            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+            self.assertTrue(await ordinary.wait_idle(10))
+            self.assertEqual(len(fx.channel.updates), 2)
+            for mid, card in fx.channel.updates:
+                self.assertEqual(mid, "first")
+                self.assertEqual(card["header"]["title"]["content"], "任务已完成")
+                self.assertEqual(card["config"]["summary"]["content"], "任务已完成")
+
     async def test_background_presentation_is_per_physical_result_and_mentions_last_reply_once(self):
         from netizen_cli.bindings import BindingTaskFeedback
         for cards in (False, True):
@@ -1451,8 +1523,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
                 # ADR 0106 section 4 covers only card.header.title.content and
                 # card.config.summary.content. In the decoded background_cards trace,
-                # writes 3, 5 and 7 update "first"; 6 sends the wake answer before
-                # logical completion. Write 8 is the verified whole-task redraw.
+                # writes 3, 5 and 7 update "first". The wake publishes with no owned
+                # work remaining and keeps its heading through the state-line update.
                 self.freeze_trace(fx, "background_cards" if cards else "background_plain")
                 clock[0] = 2.
                 scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)

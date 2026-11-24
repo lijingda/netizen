@@ -1038,5 +1038,756 @@
       ],
       {}
     ]
+  ],
+  "late_first_receipt": [
+    [
+      "add_reaction",
+      [
+        "H1",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "H1",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行 · Claude：执行中"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "div",
+                      "text": {
+                        "tag": "plain_text",
+                        "content": "过程信息：暂不可用"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        },
+        {
+          "reply_to": "H1",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": null,
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "first",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成 · 全部完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "plain_text",
+                      "content": "过程信息：暂不可用"
+                    }
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "first answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "H1",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务已完成"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": false,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 已完成 · 全部完成"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "div",
+                      "text": {
+                        "tag": "plain_text",
+                        "content": "过程信息：暂不可用"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "tag": "column_set",
+                  "element_id": "turnanswerv1",
+                  "flex_mode": "none",
+                  "background_style": "default",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "4px",
+                      "elements": [
+                        {
+                          "tag": "markdown",
+                          "content": "wake answer"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务已完成"
+              },
+              "template": "green",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        },
+        {
+          "reply_to": "H1",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": null,
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "first",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "plain_text",
+                      "content": "过程信息：暂不可用"
+                    }
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "first answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "H1",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_user",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "wake",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-fd9fb71c1398718bf5894f8e79c0707d",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "H1",
+        "reaction-1"
+      ],
+      {}
+    ]
+  ],
+  "single_result_before_idle": [
+    [
+      "add_reaction",
+      [
+        "H1",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "H1",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行 · Claude：执行中"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "div",
+                      "text": {
+                        "tag": "plain_text",
+                        "content": "过程信息：暂不可用"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        },
+        {
+          "reply_to": "H1",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": null,
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "first",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成 · Claude：执行中"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "plain_text",
+                      "content": "过程信息：暂不可用"
+                    }
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "one answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "first",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成 · 全部完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "plain_text",
+                      "content": "过程信息：暂不可用"
+                    }
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "one answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "H1",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_user",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "first",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-b84a364b1f252dd80e0662ed390dc294",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "H1",
+        "reaction-1"
+      ],
+      {}
+    ]
   ]
 }

@@ -13,7 +13,8 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 from ..external_calls import external_call
 from ..cards import turn_progress_card
 from ..cards.reply import feishu_answer_text
-from .reply_events import Activity, ActivityChanged, PartialAnswer, PresentationKey, ReplyTarget, TurnOpened
+from ..partial_answers import PartialAnswer
+from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, TurnOpened, TurnResult
 from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
 from .topics import BindingCardLocation, CardReplyLocation
@@ -50,12 +51,19 @@ class _CardUpdateAttempt:
         return self.result.success and (code is None or code == 0)
 
 
+def _exact(change: ActivityChanged | None, target: ReplyTarget) -> ActivityChanged | None:
+    if change and change.target == target and target.key.matches(change.snapshot):
+        return change
+    return None
+
+
 @dataclass(slots=True)
 class _PartialAnswerDelivery:
     target: ReplyTarget
     stopped: asyncio.Event
     reply_partial: Callable[[OutboundPost], Awaitable[SendResult]]
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
+    policy: DeliveryPolicy = DeliveryPolicy.BOUNDED_FALLBACK
     attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
     confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
     # A physical terminal inherits the running poll's mode and its last confirmed card.
@@ -75,6 +83,7 @@ class _TurnProgressCardSession:
     delivery: PhysicalDelivery | None = None
     reply_partial: Callable[[OutboundPost], Awaitable[SendResult]] | None = None
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
+    policy: DeliveryPolicy = DeliveryPolicy.BOUNDED_FALLBACK
     attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
     confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
     failed: bool = False
@@ -134,7 +143,7 @@ class _ReplyCardPresenter:
                 return None
             begin()
             return await self._attempt_update_message(message_id, card, binding_id=binding_id,
-                                                      operation_id=turn_id, location=location)
+                                                      operation_id=turn_id, location=location, policy=DeliveryPolicy.ITEM_RECEIPTS)
 
     def _sessions_for(self, key: PresentationKey) -> dict[tuple[str, str, str], _TurnProgressCardSession]:
         return self._side_sessions if key.side else self._sessions
@@ -148,37 +157,37 @@ class _ReplyCardPresenter:
         if event.reuse_existing and key.index in sessions:
             return True
         try:
-            initial = event.observe()
+            initial = _exact(event.observe(), target)
         except Exception:
-            logger.exception("failed to read initial progress-card activity")
+            logger.exception("failed to read initial progress-card activity", extra=key.log_context)
             return False
-        if initial is None or initial.target != target or not key.matches(initial.snapshot):
-            logger.error("failed to start progress card: exact Turn activity unavailable")
+        if initial is None:
+            logger.error("failed to start progress card: exact Turn activity unavailable", extra=key.log_context)
             return False
-        snapshot = initial.exact_snapshot()
+        snapshot = initial.snapshot
         message_id = None
         location = event.location
-        delivery = PhysicalDelivery() if location else None
+        delivery = PhysicalDelivery() if event.policy.confirms_items else None
         if event.feedback.progress_card_enabled:
             try:
                 card = turn_progress_card(snapshot=snapshot)
                 async with asyncio.timeout(self._operation_timeout_seconds):
-                    items = tuple(delivery.partial(p.item) for p in initial.partials if p.target == target) if delivery else ()
+                    items = tuple(delivery.partial(item) for item in snapshot.partial_answers) if delivery else ()
                     if delivery:
                         delivery.begin(items)
-                    result = await external_call(event.reply(card), isolate=location is not None)
-                    if event.validate_reply is None or await external_call(event.validate_reply(result), isolate=location is not None):
+                    result = await external_call(event.reply(card), isolate=event.policy.confirms_items)
+                    if event.validate_reply is None or await external_call(event.validate_reply(result), isolate=event.policy.confirms_items):
                         if location:
                             result = location.validate(result, card=True)
-                        message_id = _confirmed_reply_id(result) if location else _receipt_message_id(result)
+                        message_id = _confirmed_reply_id(result) if event.policy.confirms_items else _receipt_message_id(result)
                         if delivery:
                             delivery.record(items, receipt(result))
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("failed to send initial progress card")
+                logger.exception("failed to send initial progress card", extra=key.log_context)
             if message_id is None:
-                logger.error("failed to start progress card: reply message ID unavailable")
+                logger.error("failed to start progress card: reply message ID unavailable", extra=key.log_context)
         if self._closed or not event.retained() or not event.retain_after_send():
             return False
         previous = sessions.pop(key.index, None)
@@ -188,7 +197,7 @@ class _ReplyCardPresenter:
             return False
         session = _TurnProgressCardSession(
             target=target, message_id=message_id, stopped=asyncio.Event(), snapshot=snapshot, observe=event.observe,
-            location=location, delivery=delivery, reply_partial=event.reply_partial, validate_reply=event.validate_reply,
+            location=location, delivery=delivery, policy=event.policy, reply_partial=event.reply_partial, validate_reply=event.validate_reply,
             attempted_partials=set() if previous is None else previous.attempted_partials,
             confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
@@ -208,9 +217,9 @@ class _ReplyCardPresenter:
         session = self._sessions_for(target.key).get(target.key.index)
         if session is not None:
             try:
-                # A location-verified poll bounds its SDK call. Join that write before
+                # An item-receipted poll bounds its SDK call. Join that write before
                 # transferring its receipts and the message to the terminal writer.
-                async with asyncio.timeout(None if session.location else self._operation_timeout_seconds):
+                async with asyncio.timeout(None if session.policy.confirms_items else self._operation_timeout_seconds):
                     await self._stop_session(session)
             except TimeoutError:
                 # Cancellation affects only this local presentation task. Its
@@ -227,32 +236,32 @@ class _ReplyCardPresenter:
             confirmed_partials=set() if session is None else session.confirmed_partials,
             initial=(session.message_id, session.snapshot) if session else None,
             location=session.location if session else None,
+            policy=session.policy if session else DeliveryPolicy.BOUNDED_FALLBACK,
             text_only=bool(session and session.failed),
         )
 
     async def deliver_partial_answers(
         self,
         delivery: _PartialAnswerDelivery,
-        answers: tuple[PartialAnswer, ...],
+        result: TurnResult,
         *,
         timeout_seconds: float | None = None,
     ) -> bool:
         """Attempt each missing item once within one bounded terminal delivery."""
 
+        if result.target != delivery.target:
+            return False
         budget = self._operation_timeout_seconds if timeout_seconds is None else timeout_seconds
         if budget < 0:
             raise ValueError("partial-answer delivery timeout must be nonnegative")
         try:
             if budget > 0:
                 async with asyncio.timeout(budget):
-                    await self._deliver_partial_answers(delivery, answers, terminal=True)
+                    await self._deliver_partial_answers(delivery, result.partial_answers, terminal=True)
         except TimeoutError:
             logger.warning("terminal partial-answer delivery budget exhausted")
-        identities = {
-            (part.item.thread_id, part.item.turn_id, part.item.item_id)
-            for part in answers if part.target == delivery.target and part.item.text.strip()
-        }
-        return (not answers or bool(identities)) and identities <= delivery.confirmed_partials
+        identities = {(item.thread_id, item.turn_id, item.item_id) for item in result.partial_answers}
+        return (not result.partials or bool(identities)) and identities <= delivery.confirmed_partials
 
     def has_card(self, key: PresentationKey) -> bool:
         session = self._sessions_for(key).get(key.index)
@@ -268,16 +277,11 @@ class _ReplyCardPresenter:
         reply = session.reply_partial
         if reply is None:
             return
-        for part in answers:
-            answer = part.item
+        for answer in answers:
             if session.stopped.is_set() and not terminal:
                 return
             identity = (answer.thread_id, answer.turn_id, answer.item_id)
-            if (
-                part.target != session.target
-                or not answer.text.strip()
-                or identity in session.attempted_partials
-            ):
+            if identity in session.attempted_partials:
                 continue
             try:
                 post = OutboundPost(markdown=f"**阶段性答案**\n\n{feishu_answer_text(answer.text)}")
@@ -297,12 +301,12 @@ class _ReplyCardPresenter:
                 ledger.begin((item,))
             try:
                 async with asyncio.timeout(self._operation_timeout_seconds):
-                    result = await external_call(reply(post), isolate=session.location is not None)
+                    result = await external_call(reply(post), isolate=session.policy.confirms_items)
                     if ledger:
                         ledger.record((item,), receipt(result))
                     if not _CardUpdateAttempt("", result).confirmed:
                         continue
-                    if session.validate_reply is not None and not await external_call(session.validate_reply(result), isolate=session.location is not None):
+                    if session.validate_reply is not None and not await external_call(session.validate_reply(result), isolate=session.policy.confirms_items):
                         continue
                     session.confirmed_partials.add(identity)
             except asyncio.CancelledError:
@@ -346,7 +350,7 @@ class _ReplyCardPresenter:
             session.message_id,
             card,
             binding_id=session.target.key.owner_id,
-            operation_id=session.target.key.turn_id, publishable=publishable, location=session.location,
+            operation_id=session.target.key.turn_id, publishable=publishable, location=session.location, policy=session.policy,
         )
 
     async def abandon(
@@ -397,9 +401,8 @@ class _ReplyCardPresenter:
         if session.failed:
             return False
         try:
-            observed = session.observe()
-            snapshot = (observed.exact_snapshot() if observed and observed.target == session.target
-                        and session.target.key.matches(observed.snapshot) else None)
+            observed = _exact(session.observe(), session.target)
+            snapshot = observed.snapshot if observed else None
         except Exception:
             logger.exception(
                 "failed to read unavailable progress-card activity",
@@ -455,16 +458,16 @@ class _ReplyCardPresenter:
             if session.stopped.is_set():
                 return
             try:
-                change = session.observe()
+                change = _exact(session.observe(), session.target)
             except Exception:
                 logger.exception("failed to refresh running progress card", extra=log_context)
                 session.failed = True
                 return
-            if change is None or change.target != session.target or not session.target.key.matches(change.snapshot):
+            if change is None:
                 continue
-            snapshot = change.exact_snapshot()
+            snapshot = change.snapshot
             if session.message_id is None or session.failed:
-                await self._deliver_partial_answers(session, change.partials)
+                await self._deliver_partial_answers(session, snapshot.partial_answers)
                 if session.message_id is None:
                     session.snapshot = snapshot
                 continue
@@ -476,11 +479,11 @@ class _ReplyCardPresenter:
                 logger.exception("failed to render running progress card", extra=log_context)
                 session.failed = True
                 if session.delivery:
-                    await self._deliver_partial_answers(session, change.partials)
+                    await self._deliver_partial_answers(session, snapshot.partial_answers)
                     continue  # Preserve the last rendered card for the terminal freeze.
                 return
             if session.delivery:
-                items = tuple(session.delivery.partial(p.item) for p in change.partials if p.target == session.target)
+                items = tuple(session.delivery.partial(item) for item in snapshot.partial_answers)
                 if not await self._update(session, card, items):
                     # Never replay a running replacement with uncertain content.
                     return
@@ -503,14 +506,14 @@ class _ReplyCardPresenter:
             return False
         if not session.delivery:
             return await self.update_message(session.message_id, card, binding_id=session.target.key.owner_id,
-                                             operation_id=session.target.key.turn_id, location=session.location)
+                                             operation_id=session.target.key.turn_id, location=session.location, policy=session.policy)
         async with self._message_writer(session.message_id):
             if session.location and not session.location.can_write(session.message_id):
                 session.message_id = None
                 return False
             session.delivery.begin(items)
             attempt = await self._attempt_update_message(session.message_id, card, binding_id=session.target.key.owner_id,
-                                                        operation_id=session.target.key.turn_id, location=session.location)
+                                                        operation_id=session.target.key.turn_id, location=session.location, policy=session.policy)
             session.delivery.record(items, receipt(attempt.result))
         if session.location and not session.location.can_write(session.message_id):
             session.message_id = None
@@ -525,14 +528,15 @@ class _ReplyCardPresenter:
         operation_id: str,
         publishable: Callable[[], bool] = lambda: True,
         location: CardReplyLocation | None = None,
+        policy: DeliveryPolicy,
     ) -> bool:
         async with self._message_writer(message_id):
             if not publishable():
                 return False
             attempt = await self._attempt_update_message(
-                message_id, card, binding_id=binding_id, operation_id=operation_id, location=location,
+                message_id, card, binding_id=binding_id, operation_id=operation_id, location=location, policy=policy,
             )
-            return attempt.confirmed if location else attempt.updated
+            return attempt.confirmed if policy.confirms_items else attempt.updated
 
     def _message_writer(self, message_id: str) -> asyncio.Lock:
         # A waiter retains the same lock until its complete card replacement settles.
@@ -547,6 +551,7 @@ class _ReplyCardPresenter:
         operation_id: str,
         publishable: Callable[[], bool] = lambda: True,
         location: CardReplyLocation | None = None,
+        policy: DeliveryPolicy,
     ) -> _CardUpdateAttempt:
         # Retry only replacement of the same frozen card, never a new reply.
         # All attempts and delays share the existing terminal update budget.
@@ -560,7 +565,7 @@ class _ReplyCardPresenter:
                         return _CardUpdateAttempt(message_id, None)
                     attempt = await self._attempt_update_message(
                         message_id, card,
-                        binding_id=binding_id, operation_id=operation_id, location=location,
+                        binding_id=binding_id, operation_id=operation_id, location=location, policy=policy,
                     )
                     if attempt.updated or not attempt.message_id:
                         return attempt
@@ -588,6 +593,7 @@ class _ReplyCardPresenter:
         binding_id: str,
         operation_id: str,
         location: CardReplyLocation | None = None,
+        policy: DeliveryPolicy,
     ) -> _CardUpdateAttempt:
         if location and not location.can_write(message_id):
             return _CardUpdateAttempt("", None)
@@ -596,7 +602,7 @@ class _ReplyCardPresenter:
                 result = await external_call(self._channel.update_card(
                     message_id,
                     card.card,
-                ), isolate=location is not None)
+                ), isolate=policy.confirms_items)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -632,19 +638,11 @@ class _ReplyCardPresenter:
         if task is None or task is asyncio.current_task():
             return
         try:
-            await external_call(task, isolate=session.location is not None)
+            await external_call(task, isolate=session.policy.confirms_items)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
                 "progress card updater failed while stopping",
-                extra={
-                    "binding_id": getattr(session, "binding_id", None),
-                    "side_id": getattr(session, "side_id", None),
-                    "operation_id": getattr(
-                        session,
-                        "turn_id",
-                        getattr(session, "logical_turn_id", "unknown"),
-                    ),
-                },
+                extra=session.target.key.log_context,
             )

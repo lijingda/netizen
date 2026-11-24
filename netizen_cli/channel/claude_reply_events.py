@@ -14,12 +14,11 @@ from ..ordinary_sessions import (
     OrdinarySessionPort,
     PhysicalAnswer,
     PhysicalStarted,
-    ClaudeCliState,
-    RunCardState,
 )
 from .app_values import _task_has_error
 from .reply_events import (
     ActivityChanged,
+    DeliveryPolicy,
     ItemDelivery,
     PresentationKey,
     ReplyTarget,
@@ -29,12 +28,9 @@ from .reply_events import (
     TerminalStatus,
     TurnOpened,
     TurnResult,
+    terminal_view,
 )
 from .topics import CardReplyLocation
-
-
-def _card_state(state: ClaudeCliState, verified_status: str | None) -> RunCardState:
-    return RunCardState(state.line, verified_status, (state.idle, state.tasks, state.crons))
 
 
 class ClaudeReplyEvents:
@@ -51,14 +47,11 @@ class ClaudeReplyEvents:
 
         def observe() -> ActivityChanged | None:
             snapshot = ordinary.turn_activity(key.owner_id, thread_id=key.thread_id, turn_id=key.turn_id)
-            if snapshot is None or not key.matches(snapshot):
-                return None
-            return ActivityChanged(
-                target, snapshot, tuple(target.partial(p) for p in snapshot.partial_answers)
-            )
+            return ActivityChanged.from_snapshot(target, snapshot)
 
         return TurnOpened(
             target,
+            DeliveryPolicy.ITEM_RECEIPTS,
             event.feedback,
             observe,
             lambda: not ordinary.reply_blocked_by_lifecycle(key.owner_id),
@@ -82,13 +75,12 @@ class ClaudeReplyEvents:
             origin = replace(origin, single_attempt=True)
         run = replace(key, turn_id=event.logical_id) if event.logical_id else None
         target = ReplyTarget(key, origin, run)
-        status: TerminalStatus
-        if _task_has_error(event) or event.status not in {"completed", "interrupted"}:
-            status, body = "failed", event.error_detail or "Claude 本次执行失败。"
-        elif event.status == "interrupted":
-            status, body = "interrupted", "Claude 本次执行已停止。"
-        else:
-            status, body = "completed", event.final_response or ""
+        status, body = terminal_view(
+            event.status, _task_has_error(event),
+            failure=lambda: event.error_detail or "Claude 本次执行失败。",
+            interruption=lambda: "Claude 本次执行已停止。",
+            answer=event.final_response, empty="",
+        )
 
         async def send(
             content: str | OutboundPost | OutboundCard, operation: str | None, destination: CardReplyLocation
@@ -104,16 +96,7 @@ class ClaudeReplyEvents:
             count = event.owned_tasks()
             return f"\n\n后台任务 {count} 个运行中，可继续发送消息" if count else ""
 
-        def run_status() -> str | None:
-            if event.reply is None:
-                return status
-            # A queued older answer can reach Feishu after a later result has
-            # already proved the run terminal. Only its latest answer may inherit that proof.
-            if event.turn_id == event.reply.latest_answer_turn_id:
-                return event.reply.verified_status
-            return None
-
-        display = RunDisplay(event.reply, location, event.publishable, lambda: _card_state(event.state(), run_status()))
+        display = RunDisplay(event.reply, event.publishable, lambda: event.state().line)
         return TurnResult(
             target=target,
             status=status,
@@ -127,25 +110,19 @@ class ClaudeReplyEvents:
             file_binding_id=key.owner_id,
             physical_turn_id=key.turn_id,
             allow_suppression=False,
+            run_continues=event.run_continues,
             end=None,
-            items=ItemDelivery(display, send, suffix, event.delivery_deadline),
+            items=ItemDelivery(display, location, send, suffix, event.delivery_deadline),
         )
 
     @staticmethod
     def lifecycle(
-        event: CliStateChanged | LogicalTerminal, location: CardReplyLocation
+        event: CliStateChanged | LogicalTerminal, location: Callable[[], CardReplyLocation]
     ) -> RunEnded | RunState:
         run = PresentationKey(event.binding_id, event.thread_id, event.turn_id)
-        target = ReplyTarget(
-            replace(run, turn_id=event.reply.confirmed_turn_id or run.turn_id), event.origin, run
-        )
+        target = ReplyTarget(run, event.origin, run)
         state = event.current if isinstance(event, CliStateChanged) else event.state
-        display = RunDisplay(
-            event.reply,
-            location,
-            event.publishable,
-            lambda: _card_state(state(), event.reply.verified_status),
-        )
+        display = RunDisplay(event.reply, event.publishable, lambda: state().line)
         if isinstance(event, CliStateChanged):
             return RunState(target, display=display, background=event.background)
         status: TerminalStatus = (
@@ -155,4 +132,4 @@ class ClaudeReplyEvents:
             if event.status == "interrupted"
             else "failed"
         )
-        return RunEnded(target, status, event.mention_user_id, display)
+        return RunEnded(target, status, event.mention_user_id, display, location())

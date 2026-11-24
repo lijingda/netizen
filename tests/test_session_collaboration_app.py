@@ -36,6 +36,7 @@ from tests.support.channel_results import sent_result
 class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         fixture = await self.enterAsyncContext(channel_fixture())
+        self.fixture = fixture
         self.app, self.store = fixture.app, fixture.store
         self.channel, self.runtime = fixture.channel, fixture.runtime
         self.project = fixture.project
@@ -115,10 +116,10 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "om_root", chat_id="oc_source", thread_id="omt_created", root_id="om_root",
             ))
 
-    def target(self, *, topic=False):
+    def target(self, *, topic=False, feedback=BindingTaskFeedback()):
         scope = FeishuScope("cli_test", "oc_target", ScopeKind.TOPIC if topic else ScopeKind.GROUP,
                             "omt_target" if topic else None)
-        target = self.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_target")
+        target = self.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_target", task_feedback=feedback)
         self.runtime.materialize(target.id, "native-target", cwd=self.project)
         return self.store.get(target.id), scope
 
@@ -513,6 +514,35 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
                          "  <input>&lt;at id=all&gt;请核对&lt;/at&gt; &amp;amp; 保留原文\n&lt;/input&gt;</input>\n"
                          "</codex_delegation>")
         self.assertEqual(self.submissions[0]["origin"].message_id, "om_delivery")
+
+    async def test_session_agent_start_presents_at_verified_topic_anchor(self):
+        from netizen_cli.runtime.contracts import TurnOutcome
+        from tests.support.channel_results import completed_turn_result, turn_activity_snapshot
+        from tests.support.presenter_traces import expect_presenter_trace
+
+        self.enterContext(patch("netizen_cli.channel.session_tools.uuid.uuid4", return_value=uuid.UUID(int=1)))
+        del self.app._present_ordinary_receipt
+        target, scope = self.target(topic=True, feedback=BindingTaskFeedback(progress_card_enabled=True))
+        self.queue_target_message(topic=True)
+        self.channel.reply_results.append(sent_result("om_progress", chat_id=scope.chat_id,
+                                                    thread_id=scope.topic_id, parent_id="om_delivery"))
+        activity = turn_activity_snapshot(binding_id=target.id, thread_id="native-target", turn_id="turn-external")
+        self.runtime.turn_activity_values[target.id] = activity
+        trace = expect_presenter_trace(self, self.fixture, "session_agent_start")
+        await self.app.send_session_message("native-source", "native-target", "任务")
+        self.assertEqual(self.channel.replies[-1][0], "om_delivery")
+        options = next(args[2] for op, args, _ in trace if op == "reply")
+        self.assertEqual((options["reply_to"], options["reply_in_thread"], options["reply_target_gone"]),
+                         ("om_delivery", True, "fail"))
+        self.assertIn((target.id, activity.thread_id, activity.turn_id), self.app._progress_cards._sessions)
+        submitted = self.submissions[-1]
+        await self.app.handle_completion(TurnOutcome(target.id, activity.thread_id, activity.turn_id,
+            submitted["owner_id"], submitted["origin"], result=completed_turn_result(final_response="agent result"),
+            task_feedback=target.task_feedback, activity=activity, cwd=self.project))
+        self.assertEqual(len(self.channel.send_calls), 1)
+        self.assertEqual(self.channel.updates[-1][0], "om_progress")
+        self.assertIn("agent result", str(self.channel.updates[-1][1]))
+        self.assertFalse(self.app._progress_cards._sessions)
 
     async def test_topic_send_resolves_real_anchor_without_switching_or_replaying_input(self):
         self.target(topic=True)

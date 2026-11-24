@@ -85,7 +85,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
             return
         if isinstance(outcome, (CliStateChanged, LogicalTerminal)):
             if outcome.publishable():
-                lifecycle = ClaudeReplyEvents.lifecycle(outcome, self._physical_card_location(outcome.binding_id, outcome.origin))
+                lifecycle = ClaudeReplyEvents.lifecycle(outcome, lambda: self._physical_card_location(outcome.binding_id, outcome.origin))
                 if isinstance(lifecycle, RunEnded):
                     await self._present_run_end(lifecycle)
                 else:
@@ -314,7 +314,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
     async def _send_physical_partial(self, event: PhysicalStarted, post: OutboundPost, location: CardReplyLocation) -> SendResult:
         result = await self._physical_reply(event.origin, post, location)
         if target := _confirmed_reply_id(result, on_conflict=_message_id(event.origin)):
-            event.reply.confirmed(target, event.turn_id)
+            event.reply.confirmed(target)
         return result
 
     async def _goal_management_receipt(

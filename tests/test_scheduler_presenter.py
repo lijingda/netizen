@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
-from tests.support.reply_events import open_card, partial_events
+from tests.support.reply_events import open_card, terminal_answers
 from netizen_cli.cards import turn_progress_card
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.partial_answers import PartialAnswer
@@ -139,7 +139,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
                 reply_partial.assert_awaited_once_with(OutboundPost(markdown="**阶段性答案**\n\nscheduled partial"))
                 self.assertEqual(session.confirmed_partials, set())
                 self.assertIsNone(await self.finish())
-                self.assertFalse(await self.presenter.deliver_partial_answers(delivery, partial_events(delivery.target, (partial,))))
+                self.assertFalse(await self.presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, (partial,))))
                 reply_partial.assert_awaited_once()
                 self.assertEqual(self.presenter._sessions, {})
                 self.channel.update_card.assert_not_awaited()

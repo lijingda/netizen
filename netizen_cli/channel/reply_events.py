@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import InitVar, dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
@@ -10,13 +11,24 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from ..bindings import BindingTaskFeedback
 from ..file_evidence import FileEvidence
-from ..ordinary_sessions import LogicalReply, RunCardState
+from ..ordinary_sessions import LogicalReply
 from ..partial_answers import PartialAnswer as NativePartial
 from ..runtime.contracts import SideTurnActivitySnapshot, TurnActivitySnapshot
 from .topics import CardReplyLocation
 
 Activity = TurnActivitySnapshot | SideTurnActivitySnapshot
 TerminalStatus = Literal["completed", "interrupted", "failed"]
+
+
+def terminal_view(
+    status: str | None, has_error: bool, *, failure: Callable[[], str],
+    interruption: Callable[[], str], answer: str | None, empty: str,
+) -> tuple[TerminalStatus, str]:
+    if has_error or status not in {"completed", "interrupted"}:
+        return "failed", failure()
+    if status == "interrupted":
+        return "interrupted", interruption()
+    return "completed", answer or empty
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +41,15 @@ class PresentationKey:
     @property
     def index(self) -> tuple[str, str, str]:
         return self.owner_id, self.thread_id, self.turn_id
+
+    @property
+    def log_context(self) -> dict[str, str]:
+        return {
+            "side_id" if self.side else "binding_id": self.owner_id,
+            "thread_id": self.thread_id,
+            "turn_id": self.turn_id,
+            "operation_id": self.turn_id,
+        }
 
     def matches(self, snapshot: Activity) -> bool:
         if isinstance(snapshot, SideTurnActivitySnapshot):
@@ -46,6 +67,9 @@ class ReplyTarget:
         key = replace(self.key, thread_id=item.thread_id, turn_id=presentation_id or item.turn_id)
         return PartialAnswer(replace(self, key=key), item)
 
+    def exact_answers(self, partials: tuple[PartialAnswer, ...]) -> tuple[NativePartial, ...]:
+        return tuple(part.item for part in partials if part.target == self)
+
 
 @dataclass(frozen=True, slots=True)
 class PartialAnswer:
@@ -57,18 +81,35 @@ class PartialAnswer:
 class ActivityChanged:
     target: ReplyTarget
     snapshot: Activity
-    partials: tuple[PartialAnswer, ...]
+    partials: InitVar[tuple[PartialAnswer, ...]]
 
-    def exact_snapshot(self) -> Activity:
-        items = tuple(part.item for part in self.partials if part.target == self.target)
-        if items == self.snapshot.partial_answers:
-            return self.snapshot
-        return replace(self.snapshot, partial_answers=items)
+    def __post_init__(self, partials: tuple[PartialAnswer, ...]) -> None:
+        items = self.target.exact_answers(partials)
+        if items != self.snapshot.partial_answers:
+            object.__setattr__(self, "snapshot", replace(self.snapshot, partial_answers=items))
+
+    @classmethod
+    def from_snapshot(cls, target: ReplyTarget, snapshot: Activity | None, *,
+                      presentation_id: str | None = None) -> ActivityChanged | None:
+        if snapshot is None:
+            return None
+        return cls(target, snapshot, tuple(target.partial(p, presentation_id=presentation_id)
+                                           for p in snapshot.partial_answers))
+
+
+class DeliveryPolicy(Enum):
+    BOUNDED_FALLBACK = "bounded_fallback"
+    ITEM_RECEIPTS = "item_receipts"
+
+    @property
+    def confirms_items(self) -> bool:
+        return self is DeliveryPolicy.ITEM_RECEIPTS
 
 
 @dataclass(frozen=True, slots=True)
 class TurnOpened:
     target: ReplyTarget
+    policy: DeliveryPolicy
     feedback: BindingTaskFeedback
     observe: Callable[[], ActivityChanged | None]
     retain_after_send: Callable[[], bool]
@@ -83,15 +124,15 @@ class TurnOpened:
 @dataclass(frozen=True, slots=True)
 class RunDisplay:
     reply: LogicalReply | None
-    location: CardReplyLocation
     publishable: Callable[[], bool]
-    current: Callable[[], RunCardState]
+    current: Callable[[], str]
 
 
 @dataclass(frozen=True, slots=True)
 class ItemDelivery:
     """Receipt policy for content which can only be attempted once."""
     display: RunDisplay
+    location: CardReplyLocation
     send: Callable[[str | OutboundPost | OutboundCard, str | None, CardReplyLocation], Awaitable[SendResult]]
     plain_suffix: Callable[[], str]
     deadline: float | None
@@ -103,6 +144,7 @@ class RunEnded:
     status: TerminalStatus
     mention_user_id: str | None
     display: RunDisplay | None = None
+    location: CardReplyLocation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,9 +179,11 @@ class TurnResult:
     file_binding_id: str
     physical_turn_id: str
     allow_suppression: bool
+    run_continues: bool
     end: RunEnded | None
     receipt: DeliveryReceipt | None = None
     items: ItemDelivery | None = None
+    partial_answers: tuple[NativePartial, ...] = field(init=False)
 
     @property
     def origin(self) -> object:
@@ -157,6 +201,5 @@ class TurnResult:
     def mention_user_id(self) -> str | None:
         return self.end.mention_user_id if self.end else None
 
-    @property
-    def partial_answers(self) -> tuple[NativePartial, ...]:
-        return tuple(part.item for part in self.partials if part.target == self.target)
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "partial_answers", self.target.exact_answers(self.partials))

@@ -181,6 +181,7 @@ def reply_card_from_manifest(
     return reply_card(
         ReplyCardProjection(
             scope=scope,
+            run_continues=reply.run_continues,
             goal=reply.goal,
             activity=reply.activity,
             partial_answer=reply.partial_answer,
@@ -212,6 +213,8 @@ def _normalize_reply_projection(
     activity = _normalize_activity_module(projection.activity)
     partial_answer = _normalize_partial_answer_module(projection.partial_answer)
     result = projection.result
+    if type(projection.run_continues) is not bool:
+        raise ValueError("run_continues must be a boolean")
     if result is not None:
         _bounded_card_text(result.content, "result", 100_000)
         if (
@@ -243,9 +246,9 @@ def _normalize_reply_projection(
             raise ValueError("unsupported Reply Card file action version")
         if (
             files.action_version == TURN_FILE_ACTION_VERSION
-            and (goal is not None or partial_answer is not None)
+            and (goal is not None or partial_answer is not None or projection.run_continues)
         ):
-            raise ValueError("a Goal or Partial Answer + Files Reply Card requires v5 callbacks")
+            raise ValueError("these reply modules and heading require v5 file callbacks")
         if goal is not None and goal.binding_id != files.binding_id:
             raise ValueError("Goal and Files modules require the same binding_id")
         _optional_line_counts(
@@ -322,8 +325,6 @@ def _normalize_activity_module(
     if activity is None:
         return None
     terminal_status = _terminal_progress_status(activity.terminal_status)
-    if type(activity.turn_only) is not bool or (activity.turn_only and terminal_status != "completed"):
-        raise ValueError("only a completed Turn may have a per-turn completion heading")
     if activity.state_line is not None:
         _bounded_card_text(activity.state_line, "activity.state_line", 128)
     progress = _sanitize_turn_progress_manifest(activity.progress)
@@ -526,12 +527,14 @@ def turn_files_card(
     additions: int | None = None,
     deletions: int | None = None,
     completion_mention_user_id: str | None = None,
+    run_continues: bool = False,
     partial_answers: tuple[_PartialAnswerLike, ...] = (),
 ) -> OutboundCard:
     return reply_card(
         ReplyCardProjection(
             scope=scope,
             partial_answer=_partial_answer_module(partial_answers),
+            run_continues=run_continues,
             result=ReplyCardResultModule(
                 final_response,
                 completion_mention_user_id=completion_mention_user_id,
@@ -542,7 +545,7 @@ def turn_files_card(
                 items=tuple(_reply_file_item(item) for item in files),
                 page=page,
                 action_version=(
-                    REPLY_CARD_ACTION_VERSION if partial_answers
+                    REPLY_CARD_ACTION_VERSION if partial_answers or run_continues
                     else TURN_FILE_ACTION_VERSION
                 ),
                 additions=additions,
@@ -558,7 +561,7 @@ def turn_progress_card(
     final_response: str | None = None,
     files: tuple[TurnFile, ...] = (),
     terminal_status: str | None = None,
-    run_outcome: str | None = "completed",
+    run_continues: bool = False,
     collapsed: bool = False,
     scope: FeishuScope | None = None,
     binding_id: str | None = None,
@@ -578,8 +581,6 @@ def turn_progress_card(
     only Activity and partial answers, without inventing a result.
     """
 
-    # Legacy direct callers finish one complete run. The event presenter supplies
-    # its verified run outcome explicitly, including None while a run continues.
     normalized_terminal_status = _terminal_progress_status(terminal_status)
     if not include_result and (final_response is not None or files or completion_mention_user_id is not None):
         raise ValueError("a progress card without Result cannot contain a final response, Files or a completion mention")
@@ -603,7 +604,6 @@ def turn_progress_card(
         progress=_turn_progress_manifest(snapshot),
         state_line=getattr(snapshot, "state_line", None),
         terminal_status=normalized_terminal_status,
-        turn_only=normalized_terminal_status == "completed" and run_outcome != "completed",
         collapsed=collapsed,
         # v4 file callbacks freeze only the already-bounded progress manifest.
         # Preserve their established initial/paged behavior until that legacy
@@ -625,7 +625,7 @@ def turn_progress_card(
             turn_id=turn_id,
             items=tuple(_reply_file_item(item) for item in files),
             action_version=(
-                REPLY_CARD_ACTION_VERSION if partial_answer is not None or activity.state_line or activity.turn_only
+                REPLY_CARD_ACTION_VERSION if partial_answer is not None or activity.state_line or run_continues
                 else TURN_FILE_ACTION_VERSION
             ),
             additions=additions,
@@ -644,6 +644,7 @@ def turn_progress_card(
             partial_answer=partial_answer,
             result=result,
             files=files_module,
+            run_continues=run_continues,
         )
     )
 
@@ -853,7 +854,7 @@ def _reply_card_chrome(
         )
     if projection.activity is not None:
         title, template, summary = _progress_card_chrome(
-            projection.activity.terminal_status, projection.activity.turn_only
+            projection.activity.terminal_status, projection.run_continues
         )
         return title, None, template, summary
     if projection.files is not None:
@@ -863,11 +864,11 @@ def _reply_card_chrome(
             f"本轮文件 {visible.total_items} 个 · "
             f"第 {visible.page + 1}/{visible.total_pages} 页"
         )
-        title, template, summary = _progress_card_chrome("completed")
+        title, template, summary = _progress_card_chrome("completed", projection.run_continues)
         return title, subtitle, template, f"{summary} · 本轮文件 {visible.total_items} 个"
     if projection.result is None and projection.partial_answer is not None:
         return "任务执行中", None, "blue", "阶段性答案"
-    title, template, summary = _progress_card_chrome("completed")
+    title, template, summary = _progress_card_chrome("completed", projection.run_continues)
     return title, None, template, summary
 
 
@@ -1033,6 +1034,7 @@ def _goal_control_button(
 def _reply_card_manifest(projection: ReplyCardProjection) -> ReplyCardManifest:
     return ReplyCardManifest(
         goal=projection.goal,
+        run_continues=projection.run_continues,
         activity=projection.activity,
         partial_answer=projection.partial_answer,
         result=(
@@ -1052,9 +1054,9 @@ def _terminal_progress_status(value: str | None) -> str | None:
     return normalized
 
 
-def _progress_card_chrome(status: str | None, turn_only: bool = False) -> tuple[str, str, str]:
+def _progress_card_chrome(status: str | None, run_continues: bool = False) -> tuple[str, str, str]:
     if status == "completed":
-        title = "本轮已完成" if turn_only else "任务已完成"
+        title = "本轮已完成" if run_continues else "任务已完成"
         return title, "green", title
     if status == "interrupted":
         return "任务已中断", "orange", "任务已中断"
@@ -1791,10 +1793,11 @@ def _decode_reply_card_manifest(
     binding_id: str,
 ) -> ReplyCardManifest:
     required = {"goal", "activity", "result"}
-    if not isinstance(value, Mapping) or set(value) not in (
-        required, required | {"partial_answer"},
-    ):
+    if not isinstance(value, Mapping) or set(value) - {"partial_answer", "run_continues"} != required:
         raise CardActionError("组合回复清单字段不完整或包含未知字段。")
+    run_continues = value.get("run_continues", False)
+    if type(run_continues) is not bool:
+        raise CardActionError("组合回复清单的运行状态无效。")
     goal = _decode_reply_goal_module(value["goal"], binding_id=binding_id)
     activity = _decode_reply_activity_module(value["activity"])
     partial_answer = _decode_reply_partial_answer_module(value.get("partial_answer"))
@@ -1802,7 +1805,7 @@ def _decode_reply_card_manifest(
     if goal is None and activity is None and partial_answer is None and result is None:
         raise CardActionError("组合回复清单不能为空。")
     return ReplyCardManifest(
-        goal=goal, activity=activity, partial_answer=partial_answer, result=result,
+        goal=goal, activity=activity, partial_answer=partial_answer, result=result, run_continues=run_continues,
     )
 
 
@@ -1891,7 +1894,7 @@ def _decode_reply_goal_module(
 def _decode_reply_activity_module(value: Any) -> ReplyCardActivityModule | None:
     if value is None:
         return None
-    if not isinstance(value, Mapping) or set(value) - {"state_line", "turn_only"} != {
+    if not isinstance(value, Mapping) or set(value) - {"state_line"} != {
         "progress",
         "terminal_status",
         "collapsed",
@@ -1919,11 +1922,8 @@ def _decode_reply_activity_module(value: Any) -> ReplyCardActivityModule | None:
     state_line = value.get("state_line")
     if state_line is not None and (not isinstance(state_line, str) or not 0 < len(state_line) <= 128):
         raise CardActionError("Activity 状态文字无效。")
-    turn_only = value.get("turn_only", False)
-    if type(turn_only) is not bool or (turn_only and terminal_status != "completed"):
-        raise CardActionError("Activity 完成状态无效。")
     return ReplyCardActivityModule(
-        state_line=state_line, progress=progress, turn_only=turn_only,
+        state_line=state_line, progress=progress,
         terminal_status=terminal_status,
         collapsed=collapsed,
         hidden_steps=hidden_steps,
@@ -2362,6 +2362,8 @@ def _encode_reply_card_manifest(
             None if reply.result is None else {"content": reply.result.content}
         ),
     }
+    if reply.run_continues:
+        value["run_continues"] = True
     if reply.partial_answer is not None:
         value["partial_answer"] = {"contents": list(reply.partial_answer.contents)}
     return value
@@ -2400,7 +2402,6 @@ def _encode_reply_activity_module(
         "collapsed": activity.collapsed,
         "hidden_steps": activity.hidden_steps,
         **({"state_line": activity.state_line} if activity.state_line else {}),
-        **({"turn_only": True} if activity.turn_only else {}),
     }
 
 

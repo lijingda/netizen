@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 from lark_channel import Identity, OutboundCard, OutboundPost, SendResult
 
 from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
-from tests.support.reply_events import codex_result, open_card, partial_events
+from tests.support.reply_events import codex_result, open_card, terminal_answers
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.codex_runtime import (
@@ -74,7 +74,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                     target=ReplyTarget(PresentationKey(owner, thread, turn, side=side), None, None),
                     reply=reply)
                 confirmed = await presenter.deliver_partial_answers(
-                    delivery, partial_events(delivery.target, (first, first, answer(thread="wrong"), second)),
+                    delivery, terminal_answers(delivery.target, (first, first, answer(thread="wrong"), second)),
                 )
                 self.assertTrue(confirmed)
                 self.assertEqual(len(posts), 2)
@@ -104,7 +104,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         delivery = await presenter.prepare_partial_answers(
                     target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
                     reply=reply)
-        confirmed = await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, (partial,)))
+        confirmed = await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, (partial,)))
         self.assertFalse(confirmed)
         self.assertEqual(len(attempts), 1)
 
@@ -140,7 +140,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(delivery.attempted_partials, session.attempted_partials)
         self.assertIs(delivery.confirmed_partials, session.confirmed_partials)
         self.assertIn(("binding-one", "native-one", "turn-one"), presenter._sessions)
-        self.assertTrue(await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, partials)))
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials)))
         self.assertEqual(len(attempts), 2)
 
     async def test_formatting_failure_before_transport_can_be_retried_at_terminal(self):
@@ -154,12 +154,12 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
             origin=FakeMessage("work", message_id="om_origin"), progress_enabled=False, reply_partial=reply)
         session = presenter._sessions[("binding-one", "native-one", "turn-one")]
         with patch("netizen_cli.channel.reply_presenter.OutboundPost", side_effect=ValueError("format failed")):
-            await presenter._deliver_partial_answers(session, partial_events(session.target, (partial,)))
+            await presenter._deliver_partial_answers(session, (partial,))
         reply.assert_not_awaited()
         delivery = await presenter.prepare_partial_answers(
                     target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
                     reply=reply)
-        confirmed = await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, (partial,)))
+        confirmed = await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, (partial,)))
         self.assertTrue(confirmed)
         reply.assert_awaited_once()
 
@@ -182,11 +182,11 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                     origin=FakeMessage("work", message_id="om_origin"), progress_enabled=False,
                     reply_partial=reply, validate_reply=validate)
                 session = presenter._sessions[("binding-one", "native-one", "turn-one")]
-                await asyncio.wait_for(presenter._deliver_partial_answers(session, partial_events(session.target, (answer(),))), timeout=1)
+                await asyncio.wait_for(presenter._deliver_partial_answers(session, (answer(),)), timeout=1)
                 delivery = await presenter.prepare_partial_answers(
                     target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
                     reply=reply)
-                confirmed = await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, (answer(),)))
+                confirmed = await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, (answer(),)))
                 self.assertFalse(confirmed)
                 reply.assert_awaited_once()
 
@@ -249,7 +249,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         await open_card(presenter, runtime, **common, progress_enabled=False)
         first, second = answer(), answer("second", "two")
         session = presenter._sessions[("binding-one", "native-one", "turn-one")]
-        await presenter._deliver_partial_answers(session, partial_events(session.target, (first,)))
+        await presenter._deliver_partial_answers(session, (first,))
         await open_card(presenter, runtime, **common, progress_enabled=True,
             reply=AsyncMock(return_value=sent_result("om_card", chat_id="oc_direct")))
         delivery = await presenter.prepare_partial_answers(
@@ -263,7 +263,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         failed = await presenter.finish(key=PresentationKey('binding-one', 'native-one', 'turn-one'), activity=None, render=render)
         self.assertIsNone(failed)
         self.assertEqual(presenter._sessions, {})
-        self.assertTrue(await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, (first, second))))
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, (first, second))))
         self.assertEqual(reply.await_count, 2)
         self.assertEqual(reply.call_args.args[0].markdown, "**阶段性答案**\n\nsecond")
 
@@ -284,16 +284,16 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                     reply=reply)
         partials = (answer(), answer("second", "two"), answer("third", "three"))
         result = await asyncio.wait_for(
-            presenter.deliver_partial_answers(delivery, partial_events(delivery.target, partials), timeout_seconds=0.01), 1,
+            presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials), timeout_seconds=0.01), 1,
         )
         self.assertFalse(result)
         self.assertTrue(entered.is_set())
         self.assertEqual(len(posts), 1)
-        self.assertFalse(await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, partials), timeout_seconds=0))
+        self.assertFalse(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials), timeout_seconds=0))
         self.assertEqual(len(posts), 1)
-        self.assertTrue(await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, ()), timeout_seconds=0))
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, ()), timeout_seconds=0))
         self.assertFalse(await presenter.deliver_partial_answers(
-            delivery, partial_events(delivery.target, (answer(thread="wrong-thread"),)), timeout_seconds=0,
+            delivery, terminal_answers(delivery.target, (answer(thread="wrong-thread"),)), timeout_seconds=0,
         ))
         self.assertEqual(delivery.attempted_partials, {("native-one", "turn-one", "partial-one")})
         self.assertEqual(delivery.confirmed_partials, set())
@@ -308,10 +308,10 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                     reply=reply)
         first, second = answer(turn="physical-one"), answer("second", turn="physical-two")
         partials = (first, answer("wrong thread", thread="another-thread"), second, first)
-        self.assertTrue(await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, partials, goal=True)))
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials, goal=True)))
         self.assertEqual([call.args[0].markdown for call in reply.await_args_list],
             ["**阶段性答案**\n\nfirst stable answer", "**阶段性答案**\n\nsecond"])
-        self.assertTrue(await presenter.deliver_partial_answers(delivery, partial_events(delivery.target, partials, goal=True)))
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials, goal=True)))
         self.assertEqual(reply.await_count, 2)
 
 
@@ -665,7 +665,7 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
                     await open_card(self.app._progress_cards, self.runtime, binding_id=self.binding.id, **kwargs)
                     session = self.app._progress_cards._sessions[(self.binding.id, "native-one", "turn-one")]
                 self.channel.reply_results.append(SendResult(success=False))
-                await self.app._progress_cards._deliver_partial_answers(session, partial_events(session.target, (first,)))
+                await self.app._progress_cards._deliver_partial_answers(session, (first,))
                 self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_direct") for index in range(2))
                 await self.app.handle_completion(outcome)
                 self.assertEqual([self.post_text(message) for _, message in self.channel.replies], [
@@ -713,8 +713,9 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(presenter.close)
         first = answer("first turn answer", turn="physical-one")
         second = answer("second turn answer", turn="physical-two")
-        current = replace(turn_activity_snapshot(binding_id="binding-one", turn_id="logical-one"),
+        current = replace(goal_activity_snapshot(binding_id="binding-one"), logical_turn_id="logical-one",
                           partial_answers=(first,), revision=1)
+        runtime.goal_activity_values["binding-one"] = current
         updated = asyncio.Event()
         channel.reply_results.append(sent_result("om_reply", chat_id="oc_direct"))
 
@@ -727,11 +728,11 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(channel, "update_card", side_effect=update):
             self.assertTrue(await open_card(presenter, runtime, binding_id="binding-one", thread_id="native-one",
                 turn_id="logical-one", origin=FakeMessage("work", message_id="om_origin"),
-                snapshot_reader=lambda: current, logical_turn=True))
-            current = replace(current, partial_answers=(first, second), steps=(), revision=2)
+                logical_turn=True))
+            runtime.goal_activity_values["binding-one"] = replace(current, partial_answers=(first, second), steps=(), revision=2)
             await asyncio.wait_for(updated.wait(), 1)
             receipt = await presenter.finish(
-                key=PresentationKey("binding-one", "native-one", "logical-one"), activity=current,
+                key=PresentationKey("binding-one", "native-one", "logical-one"), activity=None,
                 render=lambda snapshot: turn_progress_card(snapshot=snapshot,
                     partial_answers=(first, second), final_response="final physical turn result",
                     terminal_status="completed", collapsed=True))
@@ -749,12 +750,12 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         presenter = presenter_for(channel, runtime)
         self.addAsyncCleanup(presenter.close)
         first = answer(turn="physical-one")
-        snapshot = replace(turn_activity_snapshot(binding_id="binding-one", turn_id="logical-one"),
-                           partial_answers=(first,))
+        runtime.goal_activity_values["binding-one"] = replace(goal_activity_snapshot(binding_id="binding-one"),
+            logical_turn_id="logical-one", partial_answers=(first,))
         channel.reply_results.append(sent_result("om_reply", chat_id="oc_direct"))
         options = dict(binding_id="binding-one", thread_id="native-one", turn_id="logical-one",
                        origin=FakeMessage("work", message_id="om_origin"),
-                       snapshot_reader=lambda: snapshot, logical_turn=True)
+                       logical_turn=True)
         self.assertTrue(await open_card(presenter, runtime, **options))
         self.assertTrue(await open_card(presenter, runtime, **options))
         self.assertEqual(len(channel.replies), 1)

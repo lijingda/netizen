@@ -34,7 +34,7 @@ def delivery_recorder(channel, stack):
             return await method(*args, **kwargs)
         return call
 
-    for name in ("reply", "send", "update_card", "upload_media", "add_reaction", "remove_reaction"):
+    for name in ("reply", "send", "update_card", "upload_media", "add_reaction", "remove_reaction", "fetch_message", "get_chat_info", "download_resource"):
         stack.enter_context(patch.object(channel, name, capture(getattr(channel, name))))
     return events
 

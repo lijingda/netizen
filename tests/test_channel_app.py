@@ -256,7 +256,6 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                 started = await open_card(self.presenter, self.runtime,
                     binding_id="binding-one", thread_id="native-one",
                     turn_id="goal-one", origin=prompt,
-                    snapshot_reader=lambda: self.projection(self.latest_revision),
                     logical_turn=True,
                 )
                 self.session = self.presenter._sessions[
@@ -265,7 +264,6 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(started)
 
     def publish_revision(self, revision):
-        self.latest_revision = revision
         steps = (
             TurnPlanStepSnapshot(f"revision {revision}", TurnPlanStepState.IN_PROGRESS),
         )
@@ -278,11 +276,10 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                 side_id="side-one", revision=revision, steps=steps,
             )
 
-    def projection(self, revision):
-        return channel_app._goal_reply_activity(goal_activity_snapshot(
-            binding_id="binding-one", revision=revision,
-            steps=(TurnPlanStepSnapshot(f"revision {revision}", TurnPlanStepState.IN_PROGRESS),),
-        ))
+        else:
+            self.runtime.goal_activity_values["binding-one"] = goal_activity_snapshot(
+                binding_id="binding-one", revision=revision, steps=steps,
+            )
 
     def assert_delivered_revision(self, revision):
         self.assertEqual(self.session.snapshot.revision, revision)
@@ -507,7 +504,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                         target = reply_presenter
                         method = "turn_progress_card"
                     elif kind == "goal":
-                        target, method = self, "projection"
+                        target, method = self.runtime, "goal_activity"
                     else:
                         target = self.runtime
                         method = "turn_activity" if kind == "ordinary" else "side_turn_activity"

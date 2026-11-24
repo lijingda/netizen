@@ -1,10 +1,9 @@
 """Construct exact Codex presentation events for synthetic Channel tests."""
 
-from dataclasses import replace
-
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.codex_reply_events import CodexReplyEvents
-from netizen_cli.channel.reply_events import ActivityChanged, PresentationKey
+from netizen_cli.channel.reply_events import PresentationKey, TurnResult
+from netizen_cli.file_evidence import FileEvidence
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.codex_replies import ordinary_conclusion
 from netizen_cli.runtime.contracts import TurnOutcome
@@ -16,8 +15,14 @@ def codex_result(outcome):
     return CodexReplyEvents.result(outcome)
 
 
-def partial_events(target, items, *, goal=False):
-    return tuple(target.partial(item, presentation_id=target.key.turn_id if goal else None) for item in items)
+def terminal_answers(target, items, *, goal=False):
+    return TurnResult(
+        target=target, status="completed", content="", final_response=None,
+        task_feedback=BindingTaskFeedback(), cwd=None, activity=None,
+        partials=tuple(target.partial(item, presentation_id=target.key.turn_id if goal else None) for item in items),
+        file_evidence=FileEvidence, file_binding_id=target.key.owner_id, physical_turn_id=target.key.turn_id,
+        allow_suppression=False, run_continues=False, end=None,
+    )
 
 
 async def open_card(
@@ -33,7 +38,6 @@ async def open_card(
     reply_partial=None,
     validate_reply=None,
     progress_enabled=True,
-    snapshot_reader=None,
     logical_turn=False,
 ):
     key = PresentationKey(side_id or binding_id, thread_id, turn_id, side=side_id is not None)
@@ -46,15 +50,4 @@ async def open_card(
         reply_partial=reply_partial or (lambda post: presenter._channel.reply(origin, post)),
         validate_reply=validate_reply,
     )
-    if snapshot_reader:
-
-        def observe():
-            snap = snapshot_reader()
-            if snap is None:
-                return None
-            return ActivityChanged(
-                event.target, snap, partial_events(event.target, snap.partial_answers, goal=logical_turn)
-            )
-
-        event = replace(event, observe=observe, retain_after_send=lambda: snapshot_reader() is not None)
     return await presenter.open(event)

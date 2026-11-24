@@ -14,6 +14,8 @@ from netizen_cli.cards import (
     decode_turn_file_action,
     reply_card,
     reply_card_from_manifest,
+    turn_files_card,
+    turn_files_card_from_manifest,
     turn_progress_card,
     turn_progress_card_from_manifest,
 )
@@ -204,22 +206,27 @@ class ProgressCardPresentationTest(unittest.TestCase):
         with self.assertRaises(TurnFileCardLimitError):
             self.render(snapshot, files=self.files)
 
-    def test_files_page_keeps_the_verified_completion_heading(self):
-        for status, title in ((None, "本轮已完成"), ("completed", "任务已完成")):
-            with self.subTest(run_outcome=status):
-                first = turn_progress_card(snapshot=self.snapshot(ProgressCardSettings()), files=self.files,
-                    final_response="答案", terminal_status="completed", run_outcome=status,
-                    scope=self.scope, binding_id="binding-123", turn_id="turn-123")
-                page = self.decode(self.page_value(first))
-                if page.reply:
-                    rebuilt = reply_card_from_manifest(scope=page.scope, binding_id=page.binding_id, turn_id=page.turn_id,
-                        manifest=page.files, reply=page.reply, page=page.page or 0)
-                else:
-                    rebuilt = turn_progress_card_from_manifest(scope=page.scope, binding_id=page.binding_id, turn_id=page.turn_id,
-                        final_response=page.answer or "", manifest=page.files, progress=page.progress, page=page.page or 0)
-                for card in (first, rebuilt):
-                    self.assertEqual(card.card["header"]["title"]["content"], title)
-                    self.assertEqual(card.card["config"]["summary"]["content"], title)
+    def test_files_page_keeps_the_heading_selected_at_publication(self):
+        for continues, title in ((True, "本轮已完成"), (False, "任务已完成")):
+            for has_activity in (True, False):
+                with self.subTest(run_continues=continues, activity=has_activity):
+                    args = dict(files=self.files, final_response="答案", run_continues=continues,
+                                scope=self.scope, binding_id="binding-123", turn_id="turn-123")
+                    first = (turn_progress_card(snapshot=self.snapshot(ProgressCardSettings()),
+                             terminal_status="completed", **args) if has_activity else turn_files_card(**args))
+                    page = self.decode(self.page_value(first))
+                    target = dict(scope=page.scope, binding_id=page.binding_id, turn_id=page.turn_id,
+                                  manifest=page.files, page=page.page or 0)
+                    if page.reply:
+                        rebuilt = reply_card_from_manifest(reply=page.reply, **target)
+                    elif page.progress:
+                        rebuilt = turn_progress_card_from_manifest(final_response=page.answer, progress=page.progress, **target)
+                    else:
+                        rebuilt = turn_files_card_from_manifest(final_response=page.answer, **target)
+                    for card in (first, rebuilt):
+                        self.assertEqual(card.card["header"]["title"]["content"], title)
+                        summary = title if has_activity else f"{title} · 本轮文件 {len(self.files)} 个"
+                        self.assertEqual(card.card["config"]["summary"]["content"], summary)
 
     def test_v4_and_v5_pagination_freeze_settings_and_order(self):
         settings = ProgressCardSettings(
