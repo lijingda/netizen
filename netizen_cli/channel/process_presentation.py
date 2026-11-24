@@ -163,6 +163,9 @@ class ProcessPresentation:
         if self.closed or self.closing:
             return
         self.closing = reason
+        if reason == "timeout" and self.created is None:
+            self.revoke()
+            return
         if self.created is None and self.task is None:
             self.closed = True
             self.ready.set()
@@ -174,13 +177,16 @@ class ProcessPresentation:
         if location is None or location.binding.retired or (location.scope.topic_id and not (location.root and location.parent)):
             logger.warning("process message target unavailable")
             return False
-        async with asyncio.timeout(CREATE_BUDGET):
+        async with asyncio.timeout(CREATE_BUDGET) as deadline:
             created = await external_call(self.port.create(location.scope.chat_id, location.parent, bool(location.scope.topic_id)))
             if not isinstance(created, Created):
                 if not isinstance(created, Rejected):
                     logger.warning("process message creation unconfirmed")
                 return False
-            if not await _verify(self.channel, location, created) or self.closed or not self.claim(self, created):
+            if self.closed or deadline.expired():
+                return False
+            verified = await _verify(self.channel, location, created)
+            if not verified or self.closed or deadline.expired() or not self.claim(self, created):
                 logger.warning("process message location unconfirmed")
                 return False
             self.created = created

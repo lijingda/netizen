@@ -48,6 +48,7 @@ from netizen_cli.group_access import GroupAccessRule, GroupAccessService
 from netizen_cli.schedules.models import ScheduleRule
 from netizen_cli.session_settings import SessionSettings
 from netizen_cli.partial_answers import PartialAnswer
+from netizen_cli.process_activity import ObservedProcessItem
 from netizen_cli.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
 
 from tests.support.channel_messages import FakeMessage, PNG
@@ -69,6 +70,7 @@ from tests.support.channel_results import (
 
 from tests.support.channel_fixtures import scheduled_channel_fixture
 from tests.support.presenter_traces import expect_presenter_trace
+from tests.support.process_transport import ProcessTransport
 
 
 class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
@@ -608,11 +610,29 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.channel.reply = sdk_reply
         return driver
 
-    async def finish_fixture(self, claim, request, content="验收成功"):
+    async def test_confirmed_process_never_confirms_an_unconfirmed_scheduled_answer(self):
+        claim, request = await self.completion_fixture()
+        wire = ProcessTransport([])
+        self.app._progress_cards._process_port = wire.port
+        mid = "synthetic-process-1"
+        self.channel.fetched_messages[mid] = {"code": 0, "data": {"items": [{
+            "message_id": mid, "chat_id": "oc_group", "thread_id": "omt_fresh",
+            "root_id": "om_root", "parent_id": "om_seed", "deleted": False,
+        }]}}
+        self.channel.reply_results.append(SendResult(success=False))
+        activity = turn_activity_snapshot(binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
+                                          turn_id="turn-initial")
+        await self.finish_fixture(claim, request, activity=replace(activity, process_items=(
+            ObservedProcessItem("read", "operation", "Read", 1_800_000_000),
+        )))
+        self.assertEqual(wire.completed, {mid})
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
+
+    async def finish_fixture(self, claim, request, content="验收成功", *, activity=None):
         await self.app.handle_completion(TurnOutcome(binding_id=request["binding"].id,
             thread_id="native-" + claim.run.id, turn_id="turn-initial",
             owner_id=request["owner_id"], origin=request["origin"],
-            cwd=request["cwd"],
+            cwd=request["cwd"], activity=activity,
             result=completed_turn_result(final_response=content)))
 
     async def finish_files_fixture(self, claim, request, *, inline_image=False):

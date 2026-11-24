@@ -26,6 +26,7 @@ from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from tests.support.channel_results import completed_turn_result, file_change_item, goal_activity_snapshot, side_turn_activity_snapshot, turn_activity_snapshot
 from tests.support.presenter_traces import delivery_recorder
+from tests.support.process_transport import ProcessTransport
 
 REFERENCE = Path(__file__).with_name("fixtures") / "short_turn_presenter_15548d5.json"
 
@@ -63,7 +64,7 @@ class ProcessActivityTest(unittest.TestCase):
         self.assertEqual({row.text for row in window.rows}, {"first", "new"})
 
 
-async def short_turn_trace(*, card, files, install=None):
+async def short_turn_trace(*, card, files, install=None, wire=None):
     async with channel_fixture() as fx:
         origin = await fx.new()
         binding = fx.store.active_binding(fx.app._scope(origin).key)
@@ -83,11 +84,14 @@ async def short_turn_trace(*, card, files, install=None):
             numbers = itertools.count(1)
             stack.enter_context(patch("secrets.token_hex", side_effect=lambda n: next(numbers).to_bytes(n, "big").hex()))
             events = delivery_recorder(fx.channel, stack, include_reads=True)
+            if wire is not None:
+                wire.events = events
+                fx.app._progress_cards._process_port = wire.port
             await fx.app.handle_completion(TurnOutcome(binding_id=binding.id, thread_id=activity.thread_id,
                 turn_id=activity.turn_id, owner_id="ou_user", origin=origin, activity=activity,
                 cwd=fx.project, result=completed_turn_result(*items, final_response="最终正文"),
                 task_feedback=BindingTaskFeedback(progress_card_enabled=card), partial_answers=(partial,)))
-        return json.loads(json.dumps(events, ensure_ascii=False).replace(str(fx.project_root.resolve()), "<root>"))
+        return json.loads(json.dumps(wire.content_trace() if wire else events, ensure_ascii=False).replace(str(fx.project_root.resolve()), "<root>"))
 
 
 class TerminalProcessDifferential(unittest.IsolatedAsyncioTestCase):
@@ -96,7 +100,14 @@ class TerminalProcessDifferential(unittest.IsolatedAsyncioTestCase):
         for card in (True, False):
             for files in (True, False):
                 with self.subTest(card=card, files=files):
-                    self.assertEqual(await short_turn_trace(card=card, files=files), expected[f"{card}/{files}"])
+                    wire = ProcessTransport([])
+                    self.assertEqual(await short_turn_trace(card=card, files=files, wire=wire), expected[f"{card}/{files}"])
+                    names = [op for op, _, _ in wire.events]
+                    self.assertEqual([name for name in names if name.startswith("process.")],
+                                     [] if card else ["process.create", "process.update", "process.complete"])
+                    if not card:
+                        self.assertLess(names.index("process.create"), names.index("reply"))
+                        self.assertEqual(wire.completed, {"synthetic-process-1"})
 
 
 

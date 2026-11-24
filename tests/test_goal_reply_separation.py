@@ -16,6 +16,7 @@ from netizen_cli.domain import (
     NativeCapability, ScopeKind,
 )
 from netizen_cli.partial_answers import PartialAnswer
+from netizen_cli.process_activity import ObservedProcessItem
 from netizen_cli.runtime.codex_contracts import ActiveGoalSnapshot, GoalOutcome
 from netizen_cli.runtime.contracts import GoalFinalizationStatus, GoalSubmission
 from tests.support.presenter_traces import expect_presenter_trace
@@ -238,11 +239,13 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app._progress_cards._sessions, {})
 
     async def test_plain_goal_delivers_rollover_partials_then_final(self):
-        expect_presenter_trace(self, self.fx, "goal_plain_rollover")
+        events = expect_presenter_trace(self, self.fx, "goal_plain_rollover")
+        first_row = ObservedProcessItem("first", "operation", "Read", 1_800_000_000)
+        self.activity = replace(self.activity, process_items=(replace(first_row, identity="final"),))
         first = PartialAnswer("native-one", "physical-first", "item", "first partial")
         second = PartialAnswer("native-one", "physical-final", "item", "second partial")
         self.runtime.goal_activity_values[self.binding.id] = replace(
-            self.activity, physical_turn_id=first.turn_id, partial_answers=(first,),
+            self.activity, physical_turn_id=first.turn_id, partial_answers=(first,), process_items=(first_row,),
         )
         await self.start()
         async with asyncio.timeout(5):
@@ -253,6 +256,8 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([post.markdown for _, post in self.channel.replies[1:3]],
                          ["**阶段性答案**\n\nfirst partial", "**阶段性答案**\n\nsecond partial"])
         self.assertIn("final answer", str(self.channel.replies[3][1]))
+        self.assertEqual(sum(event[0] == "process.create" for event in events), 1)
+        self.assertEqual(sum(event[0] == "process.complete" for event in events), 1)
 
     async def test_interrupted_goal_preserves_earlier_partial_without_files_or_mention(self):
         expect_presenter_trace(self, self.fx, "goal_interrupted")

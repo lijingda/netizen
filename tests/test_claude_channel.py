@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from itertools import product
 import json
 from unittest.mock import AsyncMock, PropertyMock, patch
@@ -47,7 +48,7 @@ async def owner_channel():
             bindings=fixture.store, projects=fixture.projects, management=management, policy=BackendPolicy("claude", "ou_user"))
         ordinary.open_admission()
         try:
-            yield app, fixture, clients, clock, ordinary
+            yield app, replace(fixture, app=app), clients, clock, ordinary
         finally:
             await ordinary.cancel_tasks()
             await app.close()
