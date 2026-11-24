@@ -246,6 +246,29 @@ The usage guides are not implementation guides.
   `LOCAL_ENVIRONMENT.md` when present; otherwise use an explicit target. Never
   copy its coordinates into tracked files/artifacts or treat it as runtime config.
 
+## Design principles
+
+Boundaries and examples are in the [design principles](docs/CONTRIBUTING.md#设计原则).
+
+- Decide from current state, not from the event or scenario that produced it.
+  Derive each output from independent state dimensions. Act only when the desired
+  result differs from the last confirmed one, and treat an unknown result as
+  different. Do not add "when X happens, also do Y" handlers.
+- Keep failures local. A failed attempt affects only that attempt; the next one
+  recomputes from fresh state, without retry timers or sticky failure counts.
+  Degrade the smallest scope that contains the problem (attempt, Turn, session,
+  instance) and notify once. Never resend a non-idempotent action whose result is
+  unknown.
+- Keep the normal path complete and send every anomaly through one generic
+  degraded path. When review keeps finding holes in edge cases, simplify the rule
+  instead of patching cases.
+- Base decisions on facts the native agent publicly reports, pinned by gates, and
+  compare like with like within one public view.
+- Test invariants with ordering explorers and mutation checks rather than one
+  test per scenario. Freeze decoded output before a behavior-preserving refactor.
+- Write the degraded path and the blocking bar into the spec before implementation
+  and review.
+
 ## Verification
 
 - Scale planning, tests, and review to the change. Preserve behavior coverage;
