@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from netizen_cli.bindings import BindingStore
-from netizen_cli.backends import BackendPolicy, KNOWN_BACKENDS
+from netizen_cli.backends import BackendPolicy, KNOWN_BACKENDS, OperationId, Provider
 from netizen_cli.lark_app import encode_lark_app
 from netizen_cli.projects import (
     ProjectDisabled,
@@ -22,9 +22,13 @@ class SettingsTest(unittest.TestCase):
     def test_claude_pilot_policy_defaults_to_an_explicit_gap(self):
         self.assertIn("claude", KNOWN_BACKENDS)
         policy = BackendPolicy("claude", owner_id="owner")
-        for op in ("stop", "list_bindings", "context", "worktrees"):
+        for op in ("stop", "list_bindings", "context", "worktrees", "progress"):
             self.assertIsNone(policy.operation_refusal(op, op))
-        for op in ("goal", "schedules", "progress", "unknown"):
+        with_progress = policy.bind(lambda provider: provider is Provider.REPLY_PROGRESS)
+        self.assertTrue(with_progress.allows(OperationId.PROGRESS, "api"))
+        without_progress = policy.bind(lambda provider: provider is not Provider.REPLY_PROGRESS)
+        self.assertFalse(without_progress.allows(OperationId.PROGRESS, "api"))
+        for op in ("goal", "schedules", "unknown"):
             self.assertIn(op, policy.operation_refusal(op, op))
             self.assertIsNone(BackendPolicy("codex").operation_refusal(op, op))
         self.assertIsNone(policy.sender_refusal("owner"))

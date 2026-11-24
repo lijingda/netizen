@@ -39,8 +39,8 @@ class ProgressCardFormPreservationTest(unittest.TestCase):
     @staticmethod
     def toggle(card, field, *, enabled):
         select = next(item for item in elements(card.card, "select_static") if item["name"] == field)
-        label = "开启" if enabled else "关闭"
-        return next(option["value"] for option in select["options"] if option["text"]["content"].startswith(label))
+        label = "卡片（默认）" if enabled else "过程消息"
+        return next(option["value"] for option in select["options"] if option["text"]["content"] == label)
 
     def defaults_card(self):
         record = {
