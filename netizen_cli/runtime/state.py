@@ -141,6 +141,7 @@ class _ActiveTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    process_available: bool = False
     process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
     activity_sequence: int = 0
     activity_segment: int = 0
@@ -202,6 +203,7 @@ class _ActiveGoal:
     plan_generated: bool = False
     plan_available: bool = True
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    process_available: bool = False
     process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
     activity_sequence: int = 0
     activity_segment: int = 0
@@ -289,6 +291,7 @@ class _ActiveSideTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    process_available: bool = False
     process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
     activity_sequence: int = 0
     activity_segment: int = 0

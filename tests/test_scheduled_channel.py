@@ -623,7 +623,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             initial = await submit(**kwargs)
             activity = turn_activity_snapshot(binding_id=initial.binding_id, thread_id=initial.thread_id,
                                               turn_id=initial.turn_id)
-            self.runtime.turn_activity_values[initial.binding_id] = replace(activity, process_items=(
+            self.runtime.turn_activity_values[initial.binding_id] = replace(activity, process_available=True, process_items=(
                 ObservedProcessItem("read", "operation", "Read", 1_800_000_000),
             ))
             return initial

@@ -200,7 +200,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(order=order, failure=failure):
                     clock = [T]
                     window = ProcessActivityWindow(lambda:clock[0])
-                    source = turn_activity_snapshot(binding_id="b")
+                    source = replace(turn_activity_snapshot(binding_id="b"), process_available=True, plan_available=False)
                     settings = ProgressCardSettings(operation_limit=1, operation_max_chars=5)
                     output = ProcessList()
                     for key in "ab":
@@ -212,7 +212,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(all(item.text.endswith("…") for item in output.desired))
                     if not failure:
                         output.confirmed(output.desired)
-                    output.observe(replace(source, plan_available=False, process_items=()),T+1)
+                    output.observe(replace(source, process_available=False, plan_available=True, process_items=()),T+1)
                     self.assertEqual(check_pairs(item_events(output.desired)), (initial,set()))
                     clock[0] -= 5
                     for key in order:

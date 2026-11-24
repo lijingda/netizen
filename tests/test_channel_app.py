@@ -8977,7 +8977,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "message_id": process_id, "chat_id": "oc-direct", "thread_id": record.topic_id,
             "root_id": record.root_message_id, "parent_id": prompt.id, "deleted": False,
         }]}}
-        activity = replace(side_turn_activity_snapshot(side_id=record.id), process_items=(
+        activity = replace(side_turn_activity_snapshot(side_id=record.id), process_available=True, process_items=(
             ObservedProcessItem("read", "operation", "Read", 1_800_000_000),
         ))
         self.runtime.side_turn_activity_values[record.id] = activity

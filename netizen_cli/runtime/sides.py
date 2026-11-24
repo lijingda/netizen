@@ -991,6 +991,7 @@ class SideRuntime(SubmissionRuntime):
                 if observation.retained_count >= SIDE_ACTIVITY_QUEUE_HIGH_WATER:
                     before = self._turn_activity_visible_state(active)
                     active.plan_available = False
+                    active.process_available = False
                     active.activity_observation_enabled = False
                     if self._turn_activity_visible_state(active) != before:
                         active.activity_revision += 1

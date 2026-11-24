@@ -41,6 +41,8 @@ class ProcessList:
         self.desired: Payload = ()
 
     def observe(self, snapshot: Activity, now: int) -> None:
+        if not snapshot.process_available:
+            return
         current = {}
         for row in snapshot.process_items:
             item = _item(row)
@@ -50,7 +52,7 @@ class ProcessList:
         # Only an available window proves that a missing running item has ended.
         for key, offered in self.running_offers.items():
             if key not in current:
-                current[key] = offered.finish(now) if snapshot.plan_available else offered
+                current[key] = offered.finish(now)
             if current[key].finished_at is not None:
                 self.running_offers[key] = current[key]
         running = build_items([item for item in current.values() if item.finished_at is None])
@@ -132,7 +134,7 @@ class ProcessPresentation:
         if self.terminal and not terminal:
             return
         self.terminal |= terminal
-        if self.closed or self.closing or snapshot is None or not self.key.matches(snapshot):
+        if self.closed or self.closing or snapshot is None or not snapshot.process_available or not self.key.matches(snapshot):
             return
         if not terminal and self.revision == snapshot.revision:
             return

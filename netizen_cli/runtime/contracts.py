@@ -438,6 +438,7 @@ class TurnActivitySnapshot:
 
     state_line: str | None = None
 
+    process_available: bool = field(default=False, repr=False, compare=False, kw_only=True)
     process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -468,6 +469,7 @@ class SideTurnActivitySnapshot:
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
+    process_available: bool = field(default=False, repr=False, compare=False, kw_only=True)
     process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -499,6 +501,7 @@ class GoalActivitySnapshot:
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
+    process_available: bool = field(default=False, repr=False, compare=False, kw_only=True)
     process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
