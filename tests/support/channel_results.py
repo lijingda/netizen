@@ -118,6 +118,7 @@ def turn_activity_snapshot(
         binding_id=binding_id,
         thread_id=thread_id,
         turn_id=turn_id,
+        physical_turn_id=turn_id,
         revision=revision,
         state=state,
         steer_count=0,

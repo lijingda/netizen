@@ -7,7 +7,6 @@ from time import time
 from dataclasses import replace
 
 
-from ..domain import ActiveState, GoalOperationState
 from ..process_activity import ProcessActivityWindow
 from ..partial_answers import PartialAnswer, partial_answers_from_items
 from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot
@@ -39,15 +38,6 @@ from .queries import NativeQueryRuntime
 
 
 logger = logging.getLogger(RUNTIME_LOGGER_NAME)
-
-
-def _process_available(active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal) -> bool:
-    if active.process_activity is None:
-        return False
-    if isinstance(active, _ActiveGoal):
-        return (active.handle is not None and active.handle.activity_attached
-                and not active.observation_unavailable and active.state is not GoalOperationState.UNKNOWN)
-    return active.activity_source is not None and active.state not in (ActiveState.CLOSING, ActiveState.OBSERVATION_UNAVAILABLE)
 
 
 class TurnActivityRuntime(NativeQueryRuntime):
@@ -117,6 +107,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             binding_id=active.binding_id,
             thread_id=active.handle.thread_id,
             turn_id=active.handle.id,
+            physical_turn_id=active.handle.id,
             revision=active.activity_revision,
             state=active.state,
             steer_count=active.steer_count,
@@ -124,8 +115,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_generated=active.plan_generated,
             plan_may_be_stale=active.plan_may_be_stale,
             steps=active.plan_steps,
-            process_available=_process_available(active),
-            process_items=active.process_activity.rows if active.process_activity else (),
+            process_items=active.process_activity.rows if active.process_activity is not None else None,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
@@ -172,8 +162,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_generated=active.plan_generated,
             plan_may_be_stale=active.plan_may_be_stale,
             steps=active.plan_steps,
-            process_available=_process_available(active),
-            process_items=active.process_activity.rows if active.process_activity else (),
+            process_items=active.process_activity.rows if active.process_activity is not None else None,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
@@ -194,7 +183,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             ) if settings.show_plan and active.plan_available else (),
             self._activity_commentary(active) if settings.show_commentary else (),
             self._activity_operations(active) if settings.show_operations else (),
-            _process_available(active), active.process_activity.revision if active.process_activity else 0,
+            active.process_activity.revision if active.process_activity is not None else None,
             tuple(active.partial_answers.values()),
         )
 
@@ -205,13 +194,9 @@ class TurnActivityRuntime(NativeQueryRuntime):
         before = self._turn_activity_visible_state(active)
         if not active.activity_observation_enabled:
             return None
-        if isinstance(active, _ActiveSideTurn) and active.completion_notification_seen:
-            # The exact completion notification hands the retained queue to handle.run().
-            return None
         observer = self._turn_plan_observer
         if observer is None:
             active.plan_available = False
-            active.activity_source = None
             active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
@@ -225,7 +210,6 @@ class TurnActivityRuntime(NativeQueryRuntime):
             )
         except Exception as error:
             active.plan_available = False
-            active.activity_source = None
             active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
@@ -238,7 +222,6 @@ class TurnActivityRuntime(NativeQueryRuntime):
                 },
             )
             return None
-        active.activity_source = observer
         active.plan_available = True
         active.plan_cursor = observation.next_cursor
         for request in observation.questions:
@@ -459,8 +442,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_available=active.plan_available,
             plan_generated=active.plan_generated,
             steps=active.plan_steps,
-            process_available=_process_available(active),
-            process_items=active.process_activity.rows if active.process_activity else (),
+            process_items=active.process_activity.rows if active.process_activity is not None else None,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
@@ -477,7 +459,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             if settings.show_plan and active.plan_available else (),
             self._activity_commentary(active) if settings.show_commentary else (),
             self._activity_operations(active) if settings.show_operations else (),
-            _process_available(active), active.process_activity.revision if active.process_activity else 0,
+            active.process_activity.revision if active.process_activity is not None else None,
             tuple(active.partial_answers.values()),
         )
 
@@ -490,7 +472,6 @@ class TurnActivityRuntime(NativeQueryRuntime):
             return
         before = self._goal_activity_visible_state(active)
         if projection is None:
-            active.activity_observation_enabled = False
             active.plan_available = False
             if self._goal_activity_visible_state(active) != before:
                 active.activity_revision += 1

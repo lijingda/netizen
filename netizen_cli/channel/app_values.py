@@ -447,7 +447,7 @@ def _goal_reply_activity(snapshot: GoalActivitySnapshot) -> TurnActivitySnapshot
         steer_count=0, plan_available=snapshot.plan_available,
         plan_generated=snapshot.plan_generated, plan_may_be_stale=False,
         physical_turn_id=snapshot.physical_turn_id,
-        process_available=snapshot.process_available, process_items=snapshot.process_items,
+        process_items=snapshot.process_items,
         steps=snapshot.steps, commentary=snapshot.commentary,
         operations=snapshot.operations, partial_answers=snapshot.partial_answers,
         progress_card_settings=snapshot.progress_card_settings,

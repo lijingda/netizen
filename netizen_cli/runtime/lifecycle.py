@@ -488,7 +488,6 @@ class ThreadLifecycleRuntime(TurnActivityRuntime):
         if state in {ThreadLifecycleState.ARCHIVING, ThreadLifecycleState.DELETING}:
             running = self._active.get(binding.id)
             if running is not None:
-                running.activity_source = None
                 running.activity_observation_enabled = False
             goal = self._goals.get(binding.id)
             if goal is not None:

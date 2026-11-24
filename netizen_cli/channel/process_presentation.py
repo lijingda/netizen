@@ -38,6 +38,7 @@ class ProcessList:
         self.pinned: dict[str, ProcessItem] = {}
         self.running_offers: dict[str, ProcessItem] = {}
         self._step_pins: dict[str, ProcessItem] = {}
+        self._physical_turn_id: str | None = None
         self._window: dict[str, ProcessItem] = {}
         self.desired: Payload = ()
 
@@ -53,15 +54,21 @@ class ProcessList:
         return ToolItem(row.identity, row.text, row.started_at, row.finished_at)
 
     def observe(self, snapshot: Activity, now: int) -> None:
-        if not snapshot.process_available:
+        physical = snapshot.physical_turn_id
+        same_window = physical is not None and physical == self._physical_turn_id and snapshot.process_items is not None
+        rollover = physical is not None and self._physical_turn_id is not None and physical != self._physical_turn_id
+        if physical is not None:
+            self._physical_turn_id = physical
+        rows = snapshot.process_items
+        if rows is None and not rollover:
             return
         # A new physical Turn may supply operations before its first checklist.
         # Only a known plan replaces the logical run's previous checklist.
-        has_plan = snapshot.plan_available and snapshot.plan_generated
+        has_plan = rows is not None and snapshot.plan_available and snapshot.plan_generated
         current: dict[str, ProcessItem] = {
             key: item for key, item in self._window.items() if isinstance(item, StepItem) and not has_plan
         }
-        for row in snapshot.process_items:
+        for row in rows or ():
             if row.kind == "step" and not has_plan:
                 continue
             item = self._item(row)
@@ -75,7 +82,11 @@ class ProcessList:
         self._window = current
         for key, offered in self.running_offers.items():
             observed = current.get(key)
-            self.running_offers[key] = offered.finish(now) if observed is None else observed
+            absence_proven = has_plan if isinstance(offered, StepItem) else (same_window or rollover)
+            if observed is not None:
+                self.running_offers[key] = observed
+            elif absence_proven:
+                self.running_offers[key] = offered.finish(now)
             if key in self._step_pins:
                 self._step_pins[key] = self.running_offers[key]
         self._select()
@@ -163,7 +174,7 @@ class ProcessPresentation:
         if self.terminal and not terminal:
             return
         self.terminal |= terminal
-        if self.closed or self.closing or snapshot is None or not snapshot.process_available or not self.key.matches(snapshot):
+        if self.closed or self.closing or snapshot is None or not self.key.matches(snapshot):
             return
         if not terminal and self.revision == snapshot.revision:
             return

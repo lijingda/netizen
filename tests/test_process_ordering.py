@@ -2,7 +2,6 @@
 
 import asyncio
 import itertools
-import json
 import unittest
 from dataclasses import replace
 from unittest.mock import AsyncMock, patch
@@ -23,44 +22,11 @@ from netizen_cli.turn_activity import (
     TurnPlanStepSnapshot, TurnPlanStepState,
 )
 from tests.support.channel_results import sent_result, turn_activity_snapshot
-from tests.support.process_transport import ProcessTransport
+from tests.support.process_transport import ProcessTransport, check_pairs
 from tests.test_process_presentation import process_port, process_snapshot
 
 
 T = 1_800_000_000
-
-
-def check_pairs(events):
-    """Independent wire oracle. Every event series in one replacement starts locally."""
-    started, ended, texts = {}, set(), set()
-    previous = 0
-    for frame in events:
-        data = json.loads(frame["content"])
-        kind = frame["event_type"]
-        assert kind == data.pop("type")
-        timestamp = int(frame["timestamp"])
-        assert previous <= timestamp
-        previous = timestamp
-        assert len(frame["content"]) <= 1800
-        if kind.startswith("TOOL_CALL_"):
-            key = ("tool", data["toolCallId"])
-        elif kind.startswith("STEP_"):
-            key = ("step", data["stepName"])
-        else:
-            key = ("text", data["messageId"])
-        if kind in {"TOOL_CALL_START", "STEP_STARTED", "TEXT_MESSAGE_START"}:
-            assert key not in started
-            started[key] = timestamp
-        elif kind == "TEXT_MESSAGE_CONTENT":
-            assert key in started and key not in texts and key not in ended
-            texts.add(key)
-        else:
-            assert kind in {"STEP_FINISHED", "TOOL_CALL_END", "TEXT_MESSAGE_END"}
-            assert key in started and key not in ended
-            assert key[0] != "text" or key in texts
-            ended.add(key)
-    assert len(started) <= 60
-    return started, ended
 
 
 class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
@@ -200,7 +166,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(order=order, failure=failure):
                     clock = [T]
                     window = ProcessActivityWindow(lambda:clock[0])
-                    source = replace(turn_activity_snapshot(binding_id="b"), process_available=True, plan_available=False)
+                    source = replace(turn_activity_snapshot(binding_id="b"), plan_available=False)
                     settings = ProgressCardSettings(operation_limit=1, operation_max_chars=5)
                     output = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
                     for key in "ab":
@@ -212,7 +178,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(all(item.text.endswith("…") for item in output.desired))
                     if not failure:
                         output.confirmed(output.desired)
-                    output.observe(replace(source, process_available=False, plan_available=True, process_items=()),T+1)
+                    output.observe(replace(source, plan_available=True, process_items=None),T+1)
                     self.assertEqual(check_pairs(item_events(output.desired)), (initial,set()))
                     clock[0] -= 5
                     for key in order:
@@ -321,6 +287,32 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("A", history[2])
         self.assertEqual(history[3]["A"], history[1]["A"])
 
+    def test_same_window_and_new_physical_turn_prove_distinct_ends(self):
+        key = PresentationKey("binding", "native-one", "goal")
+        model = ProcessList(key)
+        window = ProcessActivityWindow(lambda: T)
+        window.observe(TurnActivityEvent("read", Kind.COMMAND, Status.IN_PROGRESS, 0), ProgressCardSettings())
+        window.plan((TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS),))
+        first = replace(process_snapshot(1), physical_turn_id="A", process_items=window.rows, plan_generated=True)
+        def write(snap, now):
+            model.observe(snap, now)
+            payload = model.desired
+            model.offered(payload)
+            model.confirmed(payload)
+            return check_pairs(item_events(payload))
+        starts, ends = write(first, T)
+        self.assertEqual(len(starts), 2)
+        self.assertFalse(ends)
+        for candidate in (first, replace(first, process_items=None), replace(first, physical_turn_id=None, process_items=())):
+            self.assertEqual(write(replace(candidate, plan_available=False), T+1), (starts, set()))
+        second = replace(first, physical_turn_id="B", process_items=None, plan_generated=False)
+        after, ends = write(second, T+2)
+        self.assertEqual(after, starts)
+        self.assertEqual(ends, {k for k in starts if k[0] == "tool"})
+        after, ends = write(replace(second, process_items=(), plan_generated=True), T+3)
+        self.assertEqual(after, {("step", "Inspect"): T})
+        self.assertEqual(ends, set(after))
+
     def test_goal_checklist_across_three_rollovers_and_optional_polls(self):
         for cuts in itertools.product(("skip", "empty", "operation"), repeat=3):
             with self.subTest(cuts=cuts):
@@ -328,7 +320,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                 output = ProcessList(PresentationKey("binding", "native-one", "goal"))
                 def sample(window, *, plan=False, available=True, finished=False):
                     snap = replace(process_snapshot(1), physical_turn_id=physical, plan_generated=plan,
-                                   process_items=window.rows, process_available=available)
+                                   process_items=window.rows if available else None)
                     output.observe(snap, now)
                     payload = output.desired
                     starts, ends = check_pairs(item_events(payload))

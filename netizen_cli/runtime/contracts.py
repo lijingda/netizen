@@ -439,8 +439,8 @@ class TurnActivitySnapshot:
     state_line: str | None = None
     physical_turn_id: str | None = field(default=None, repr=False, compare=False, kw_only=True)
 
-    process_available: bool = field(default=False, repr=False, compare=False, kw_only=True)
-    process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
+    # None means this physical Turn has no process window. An empty tuple is an observed empty window.
+    process_items: tuple[ObservedProcessItem, ...] | None = field(default=None, repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.turn_id:
@@ -470,8 +470,12 @@ class SideTurnActivitySnapshot:
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
-    process_available: bool = field(default=False, repr=False, compare=False, kw_only=True)
-    process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
+    # None means this physical Turn has no process window. An empty tuple is an observed empty window.
+    process_items: tuple[ObservedProcessItem, ...] | None = field(default=None, repr=False, compare=False, kw_only=True)
+
+    @property
+    def physical_turn_id(self) -> str:
+        return self.turn_id
 
     def __post_init__(self) -> None:
         if not self.side_id or not self.thread_id or not self.turn_id:
@@ -502,8 +506,8 @@ class GoalActivitySnapshot:
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
-    process_available: bool = field(default=False, repr=False, compare=False, kw_only=True)
-    process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
+    # None means this physical Turn has no process window. An empty tuple is an observed empty window.
+    process_items: tuple[ObservedProcessItem, ...] | None = field(default=None, repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.logical_turn_id:

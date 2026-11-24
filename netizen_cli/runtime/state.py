@@ -33,7 +33,6 @@ from ..domain import (
 )
 from ..model_settings import TurnModelSettings
 from ..partial_answers import PartialAnswer
-from ..turn_plan_observer import TurnActivityObserver
 from ..process_activity import ProcessActivityWindow
 from ..progress_card_settings import ProgressCardSettings
 from .thread_naming import ThreadNamer
@@ -142,7 +141,6 @@ class _ActiveTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_source: TurnActivityObserver | None = field(default=None, repr=False)
     process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
     activity_sequence: int = 0
     activity_segment: int = 0
@@ -291,7 +289,6 @@ class _ActiveSideTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_source: TurnActivityObserver | None = field(default=None, repr=False)
     process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
     activity_sequence: int = 0
     activity_segment: int = 0

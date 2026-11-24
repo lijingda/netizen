@@ -196,7 +196,7 @@ class _Execution:
         return TurnActivitySnapshot(self.binding.id, self.session, turn_id, self.revision,
                                    ActiveState.RUNNING, 0, False, False, False, (), partial_answers=partials,
                                    progress_card_settings=feedback.progress_card_settings or ProgressCardSettings(),
-                                   state_line=state.line)
+                                   physical_turn_id=turn_id, state_line=state.line)
 
     @property
     def finishing(self) -> bool:

@@ -77,7 +77,7 @@ async def short_turn_trace(*, card, files, install=None, wire=None):
         ))
         window = ProcessActivityWindow(lambda: 1_800_000_000)
         window.plan(activity.steps)
-        activity = replace(activity, process_available=not card, process_items=window.rows if not card else ())
+        activity = replace(activity, process_items=window.rows if not card else None)
         partial = PartialAnswer(activity.thread_id, activity.turn_id, "partial-1", "阶段正文")
         items = (file_change_item("output.txt"),) if files else ()
         with ExitStack() as stack:
@@ -110,7 +110,7 @@ def process_snapshot(revision, *, binding="binding"):
     snapshot = turn_activity_snapshot(binding_id=binding, revision=revision)
     rows = tuple(ObservedProcessItem(str(n), "operation", str(n), 1_800_000_000)
                  for n in range(1, revision + 1))
-    return replace(snapshot, process_available=True, process_items=rows)
+    return replace(snapshot, process_items=rows)
 
 
 def process_port():
@@ -232,7 +232,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
                 window.observe(TurnActivityEvent("same-native-id", TurnActivityKind.TOOL, TurnActivityStatus.IN_PROGRESS, 0),
                                ProgressCardSettings())
                 return replace(goal_activity_snapshot(binding_id=binding.id, revision=n),
-                               physical_turn_id=f"physical-{n}", process_available=True, process_items=window.rows)
+                               physical_turn_id=f"physical-{n}", process_items=window.rows)
             first, last = sample(1), sample(2)
             fx.runtime.goal_activity_values[binding.id] = first
             submission = GoalSubmission(binding.id, "native-one", "goal-one", lambda: None)
@@ -258,7 +258,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
             presenter = fx.app._progress_cards
             presenter._process_port = port
             origin = FakeMessage("round", message_id="input", chat_id="chat", thread_id="topic")
-            activity = replace(side_turn_activity_snapshot(side_id="side"), process_available=True,
+            activity = replace(side_turn_activity_snapshot(side_id="side"),
                                process_items=process_snapshot(1).process_items)
             with patch.object(fx.channel, "fetch_message", AsyncMock(return_value={"code":0,"data":{"items":[{
                 "message_id":"process-mid","chat_id":"chat","thread_id":"topic","root_id":"wrong","parent_id":"input","deleted":False
