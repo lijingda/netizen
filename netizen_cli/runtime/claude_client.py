@@ -140,7 +140,7 @@ class LiveSession:
     reported_human: str | None = None
     ordered_idle: bool = False
     awaiting_boundary: bool = False
-    crons: bool = False
+    crons: int = 0
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     tasks: dict[str, str] = field(default_factory=dict)
     stop_requested: set[str] = field(default_factory=set)
@@ -155,7 +155,7 @@ class LiveSession:
     async def stop_hook(self, data: Any, callback_id: Any, context: Any) -> HookJSONOutput:
         try:
             validate_fields("Stop", data, self.session)
-            crons = bool(data["session_crons"])
+            crons = len(data["session_crons"])
             if self.crons != crons:
                 self.crons = crons
                 self.changed.set()

@@ -14,7 +14,7 @@ from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
 from .runtime.contracts import (
-    ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
+    ActiveTurnSnapshot, ContextCursorCommit, ReleaseDisposition, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TerminalStateUnknown, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
 
@@ -163,6 +163,14 @@ class OrdinaryInputRejected(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ReleaseConfirmation:
+    revision: int
+    turn_id: str
+    tasks: int
+    crons: int
+
+
+@dataclass(frozen=True, slots=True)
 class StopPreview:
     """Receipt text captured before the stop operation selects its target."""
 
@@ -253,6 +261,8 @@ class LocalSessionManagement(Protocol):
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding: ...
 
     def require_admission(self) -> None: ...
+    async def release_control(self, binding_id: str, *, scope_key: str, sender_id: str, revision: int | None,
+                              turn_id: str | None) -> ReleaseDisposition | ReleaseConfirmation: ...
     async def stop_control(self, binding_id: str, *, sender_id: str, revision: int | None, turn_id: str | None,
                            all_tasks: bool, acknowledge: Callable[[str], Awaitable[None]]) -> StopDisposition: ...
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot: ...

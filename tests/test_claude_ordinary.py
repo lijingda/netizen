@@ -10,9 +10,9 @@ from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.file_evidence import FileEvidence
 from netizen_cli.ordinary_sessions import (
-    ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, PhysicalAnswer, LogicalTerminal, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, PromptImage,
+    ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, PhysicalAnswer, LogicalTerminal, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, PromptImage, ReleaseConfirmation,
 )
-from netizen_cli.runtime.contracts import ContextCursorCommit, StopDisposition, TerminalStateUnknown, ThreadActivityChanged
+from netizen_cli.runtime.contracts import ContextCursorCommit, ReleaseDisposition, StopDisposition, TerminalStateUnknown, ThreadActivityChanged
 from tests.support import has_claude_sdk, requires_claude_sdk
 
 if has_claude_sdk:
@@ -101,6 +101,90 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         cli.result()
         await self.wait_until(lambda: cli.live.ordered_idle)
         return h1, cli
+
+    async def release_client(self, preview=None, **overrides):
+        arguments = dict(scope_key=self.binding.scope_key, sender_id="owner",
+                         revision=preview.revision if preview else None, turn_id=preview.turn_id if preview else None)
+        return await self.runtime.release_control(self.binding.id, **(arguments | overrides))
+
+    async def test_release_states_and_exact_confirmation(self):
+        self.assertEqual(await self.release_client(), ReleaseDisposition.NOT_SUBSCRIBED)
+        h1 = await self.submit()
+        cli = self.clients.calls[-1]
+        h1.release_receipt_attempt()
+        with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
+            await self.release_client()
+        self.assertEqual((cli.interrupts, cli.closes), (0, 0))
+        cli.init()
+        await self.cron(cli, True)
+        cli.result()
+        await self.wait_until(lambda: cli.live.ordered_idle)
+        preview = await self.release_client()
+        self.assertIsInstance(preview, ReleaseConfirmation)
+        self.assertEqual((preview.tasks, preview.crons), (0, 1))
+        for changed in ({"sender_id": "another"}, {"scope_key": "other-scope"}):
+            with self.assertRaises(OrdinaryInputRejected):
+                await self.release_client(preview, **changed)
+        await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id":"a"}, {"id":"b"}]}, None, None)
+        with self.assertRaises(ThreadActivityChanged):
+            await self.release_client(preview)
+        fresh = await self.release_client()
+        self.assertEqual(fresh.crons, 2)
+        self.assertEqual(await self.release_client(fresh), ReleaseDisposition.RELEASED)
+        with self.assertRaises(ThreadActivityChanged):
+            await self.release_client(fresh)
+        self.assertEqual(cli.closes, 1)
+        followup = await self.submit()
+        self.assertTrue(self.clients.calls[-1].resume)
+        self.assertEqual(followup.thread_id, h1.thread_id)
+        await self.finish(followup)
+
+    async def test_release_holds_admission_and_settles_background_run_once(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        h1 = await self.submit(origin="first")
+        cli = self.clients.calls[-1]
+        h1.release_receipt_attempt()
+        cli.init()
+        cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session,
+                                               user_message_uuid=h1.turn_id))
+        cli.stream.put_nowait(SystemMessage("task_started", {"session_id": cli.session,
+            "task_id": "task", "run_id": "run", "tool_use_id": "tool"}))
+        cli.stream.put_nowait(SystemMessage("background_tasks_changed", {"session_id": cli.session,
+            "tasks": [{"task_id": "task", "run_id": "run"}]}))
+        cli.result()
+        await self.wait_until(lambda: cli.live.ordered_idle)
+        preview = await self.release_client()
+        self.assertEqual((preview.tasks, preview.crons), (1, 0))
+        cli.close_gate.clear()
+        release = asyncio.create_task(self.release_client(preview))
+        try:
+            await asyncio.wait_for(cli.closing.wait(), 2)
+            self.assertFalse(release.done())
+            for operation in (self.submit, self.release_client, lambda: self.release_client(preview)):
+                with self.assertRaises((OrdinaryInputRejected, ThreadActivityChanged)):
+                    await operation()
+        finally:
+            cli.close_gate.set()
+        self.assertEqual(await release, ReleaseDisposition.RELEASED)
+        self.assertTrue(await self.runtime.wait_idle(2))
+        terminal, = (e for e in self.all_events if isinstance(e, LogicalTerminal))
+        self.assertEqual((terminal.origin, terminal.mention_user_id, terminal.state().line), ("first", None, "全部完成"))
+        self.assertEqual((cli.closes, cli.interrupts, self.notices), (1, 0, []))
+
+    async def test_release_without_work_and_disconnect_failure(self):
+        _, cli = await self.retain()
+        # A hook can remove the final cron just before the natural close handoff.
+        await self.cron(cli, False)
+        self.assertEqual(await self.release_client(), ReleaseDisposition.RELEASED)
+        _, other = await self.retain()
+        preview = await self.release_client()
+        other.failure = "close"
+        with self.assertRaisesRegex(OrdinaryInputRejected, CLOSE_FAILED):
+            await self.release_client(preview)
+        with self.assertRaisesRegex(OrdinaryInputRejected, CLOSE_FAILED):
+            await self.submit()
+        self.assertEqual(other.closes, 1)
+        self.assertEqual(self.notices, [])
 
     async def test_unwritten_init_on_either_side_of_rollback_degrades_before_result(self):
         for rollback_first in (False, True):
