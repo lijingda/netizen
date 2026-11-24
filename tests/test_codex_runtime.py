@@ -8606,14 +8606,21 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self._configure_feedback(before)
         self.assertEqual(self.store.get(binding.id), before)
 
-        control.handles[0].finish()
+        handle = control.handles[0]
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            while not handle.activity_attached:
+                await asyncio.sleep(0)
+        answer = PartialAnswer(handle.thread_id, handle.id, "answer", "visible partial")
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, partial_answer=answer))
+        handle.finish()
         await self.runtime.wait_idle()
 
         self.assertEqual(observer.calls, [])
-        self.assertIsNotNone(control.handles[0].activity_sink)
+        self.assertEqual(handle.wait_terminal_calls, 1)
+        self.assertFalse(handle.activity_attached)
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, GoalOutcome)
-        self.assertIsNotNone(outcome.activity)
+        self.assertEqual(outcome.partial_answers, (answer,))
 
     async def test_goal_questions_use_unique_tap_with_progress_off_and_exact_turn_dedup(
         self,
