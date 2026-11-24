@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 import asyncio
 import logging
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 
 from ..bindings import (
@@ -34,11 +34,9 @@ from ..cards import (
 )
 from .messages import public_chat_kind as _public_chat_kind
 from ..cards.controls import local_status_card
-from ..ordinary_sessions import ReleaseConfirmation
 from ..cards.defaults import decode_defaults_action
 from ..defaults import DefaultConfigurationError
 from ..runtime.contracts import (
-    ReleaseDisposition,
     ThreadActivityChanged,
     StopDisposition,
     ThreadDeleteUnavailable,
@@ -855,21 +853,11 @@ class CardControlChannel(TurnFileChannel):
             await self._safe_reply_to_card(intent, success_notice)
 
     async def _card_confirm_release(self, intent: CardControlIntent) -> None:
-        if not intent.binding_id or intent.expected_activity_revision is None or not intent.expected_turn_id:
-            raise CardActionError("释放确认缺少目标，请重新发送 /release。")
-        chat = intent.scope.chat_id
-        fetched = await self._channel.fetch_message(intent.source_id)
-        actual = scope_from_fetched_card(app_id=self._app_id, callback_chat_id=chat, fetched_message=fetched,
-                                        chat_type=_public_chat_kind(await self._channel.get_chat_info(chat)))
-        if actual != intent.scope:
-            raise CardActionError("卡片已离开原会话，请重新发送 /release。")
         try:
-            result = await self._management.release_current_binding(target=CurrentBindingTarget(actual.key, intent.binding_id),
+            await self._management.release_current_binding(target=CurrentBindingTarget(intent.scope.key, cast(str, intent.binding_id)),
                 sender_id=intent.sender_id, revision=intent.expected_activity_revision, turn_id=intent.expected_turn_id)
         except (NoCurrentBinding, CurrentBindingChanged, ThreadActivityChanged) as exc:
             raise CardActionError("会话状态已变化，请重新发送 /release。") from exc
-        if isinstance(result, ReleaseConfirmation) or result.disposition is not ReleaseDisposition.RELEASED:
-            raise CardActionError("会话状态已变化，请重新发送 /release。")
         await self._safe_reply_to_card(intent, "已释放 Claude 会话连接。")
 
     async def _card_stop_exact_binding(self, intent: CardControlIntent) -> None:

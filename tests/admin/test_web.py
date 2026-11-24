@@ -3340,6 +3340,13 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stop", native["actions"])
         self.assertIn("release", native["actions"])
 
+        # Even an otherwise releasable native row must respect this backend's API surface.
+        self.runner.application._backend_policy = BackendPolicy("claude", "ou_admin")
+        status, _, page = await self.json_get("/api/v1/sessions?inventoryState=active", session)
+        self.assertEqual(status, 200)
+        native = next(item for item in page["items"] if item["bindingId"] == "binding-native")
+        self.assertNotIn("release", native["actions"])
+
     async def test_persisted_paused_goal_is_not_reported_as_idle(self) -> None:
         self.runner.open_admission()
         session = await self.login()

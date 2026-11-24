@@ -2114,8 +2114,6 @@ class InstanceManagementService:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             if self.local is None:
-                if revision is not None or turn_id is not None:
-                    raise BackendUnsupported("确认释放 Claude 会话", detail=self.policy.refusal("确认释放 Claude 会话"))
                 return ReleasedBinding(binding, await self._runtime.release_exact(binding.id))
         outcome = await self.local.release_control(binding.id, scope_key=target.scope_key, sender_id=sender_id,
                                                    revision=revision, turn_id=turn_id)
@@ -2344,7 +2342,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> ReleasedBinding:
-        self.policy.require_api("POST", "/sessions/release")
+        self.policy.require(OperationId.RELEASE, "api")
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             self._require_runtime_precondition(binding.id, runtime_precondition)

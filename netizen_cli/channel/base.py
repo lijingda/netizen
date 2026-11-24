@@ -64,6 +64,7 @@ from ..runtime.contracts import (
 )
 from ..domain import (
     CardControlIntent,
+    CardControlName,
     ControlIntent,
     FeishuScope,
     MessageContextAnchor,
@@ -834,7 +835,7 @@ class ChannelState:
                     "私聊和私聊话题不支持补充群聊上下文，本次未执行。"
                 )
             return intent
-        return decode_button_action(
+        intent = decode_button_action(
             app_id=self._app_id,
             message_id=message_id,
             callback_chat_id=chat_id,
@@ -842,6 +843,13 @@ class ChannelState:
             tag=tag,
             value=getattr(action, "value", None),
         )
+        if intent.name is CardControlName.CONFIRM_RELEASE:
+            fetched = await self._channel.fetch_message(message_id)
+            actual = scope_from_fetched_card(app_id=self._app_id, callback_chat_id=chat_id, fetched_message=fetched,
+                                             chat_type=_public_chat_kind(await self._channel.get_chat_info(chat_id)))
+            if actual != intent.scope:
+                raise CardActionError("卡片已离开原会话，请重新发送 /release。")
+        return intent
 
     def _settings_card(
         self,

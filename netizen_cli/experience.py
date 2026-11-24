@@ -54,9 +54,11 @@ class CommandSpec:
 
     def has_capability(self, policy: BackendPolicy, capabilities: Collection[NativeCapability]) -> bool:
         operation = command_operation(self.name)
-        if operation is not None and policy.provider_for(operation) != OPERATIONS[operation].provider:
-            return True  # The command probe belongs to the original provider.
-        return self.requires is None or self.requires in capabilities
+        if operation is None:
+            return True
+        provider = policy.provider_for(operation, "command")
+        probe = self.requires if provider is OPERATIONS[operation].provider else None
+        return provider is not None and (probe is None or probe in capabilities)
 
 
 COMMAND_SPECS = (
