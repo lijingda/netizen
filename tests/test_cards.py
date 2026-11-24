@@ -2205,8 +2205,10 @@ class CardRendererTest(unittest.TestCase):
                 self.assertEqual(card["header"]["title"]["content"], title)
                 self.assertNotIn("turnanswerv1", [item.get("element_id") for item in _tagged_elements(card)])
 
-        with self.assertRaises(ValueError):
-            turn_progress_card(snapshot=snapshot, terminal_status="failed", final_response="失败", include_result=False)
+        files = (TurnFile(display_path="result.txt", resolved_path=Path("/tmp/result.txt"), size=1, media_kind="file"),)
+        for field, value in (("final_response", "失败"), ("files", files), ("completion_mention_user_id", "ou_user")):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "without Result"):
+                turn_progress_card(snapshot=snapshot, terminal_status="failed", include_result=False, **{field: value})
         with self.assertRaises(ValueError):
             turn_progress_card(snapshot=snapshot, final_response="尚未结束")
         with self.assertRaises(ValueError):
@@ -2224,14 +2226,7 @@ class CardRendererTest(unittest.TestCase):
                 snapshot=snapshot,
                 terminal_status="completed",
                 final_response="done",
-                files=(
-                    TurnFile(
-                        display_path="result.txt",
-                        resolved_path=Path("/tmp/result.txt"),
-                        size=1,
-                        media_kind="file",
-                    ),
-                ),
+                files=files,
             )
 
     def test_v4_page_update_preserves_answer_and_marks_missing_files(self) -> None:

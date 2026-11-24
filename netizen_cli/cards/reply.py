@@ -576,8 +576,8 @@ def turn_progress_card(
     """
 
     normalized_terminal_status = _terminal_progress_status(terminal_status)
-    if not include_result and final_response is not None:
-        raise ValueError("a progress card without Result cannot contain a final response")
+    if not include_result and (final_response is not None or files or completion_mention_user_id is not None):
+        raise ValueError("a progress card without Result cannot contain a final response, Files or a completion mention")
     partial_answer = _partial_answer_module(
         getattr(snapshot, "partial_answers", ())
         if partial_answers is None else partial_answers
