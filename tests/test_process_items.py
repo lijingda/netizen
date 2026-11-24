@@ -54,9 +54,17 @@ class ItemProjection(unittest.TestCase):
         running = tuple(ToolItem(str(i), "工具", T) for i in range(ITEM_LIMIT))
         self.assertEqual(set(build_items((*running, TextItem("text", "进展", T, T)))), set(running))
         with self.assertRaises(ValueError):
-            build_items((*running, StepItem("extra", "额外", T)))
-        with self.assertRaises(ValueError):
             build_items((running[0], running[0].finish(T)))
+
+    def test_running_overflow_keeps_oldest_and_admits_next_when_a_slot_opens(self):
+        # Items 59 and 60 straddle the window at the same second.
+        running = [ToolItem(f"tool-{i:02}", "运行", T + (i + 1) // 2) for i in range(62)]
+        self.assertEqual(build_items(running[::-1]), tuple(running[:60]))
+        final = finish_items(running[::-1], T + 100)
+        self.assertEqual(final, tuple(item.finish(T + 100) for item in running[:60]))
+
+        running[0] = running[0].finish(T + 100)
+        self.assertEqual(build_items(running[::-1]), tuple(running[1:61]))
 
     def test_window_rolls_between_writes_while_an_old_tool_waits_for_its_end(self):
         running = ToolItem("old-tool", "运行", T)

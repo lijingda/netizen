@@ -148,13 +148,12 @@ def _bounded_item(item: ProcessItem) -> ProcessItem:
 
 
 def build_items(items: Sequence[ProcessItem]) -> tuple[ProcessItem, ...]:
-    """Keep every running item and fill the remaining slots with the latest completions."""
+    """Keep the oldest running items and fill remaining slots with the latest completions."""
     if len({item.item_id for item in items}) != len(items):
         raise ValueError("duplicate Activity item identity")
-    running = [item for item in items if item.finished_at is None]
+    running = sorted((item for item in items if item.finished_at is None),
+                     key=lambda item: (item.started_at, item.item_id))[:ITEM_LIMIT]
     slots = ITEM_LIMIT - len(running)
-    if slots < 0:
-        raise ValueError("more than 60 running Activity items")
     finished = sorted((item for item in items if item.finished_at is not None),
                       key=lambda item: (item.finished_at or 0, item.started_at, item.item_id), reverse=True)
     kept = sorted(running + finished[:slots], key=lambda item: (item.started_at, item.item_id))

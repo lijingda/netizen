@@ -164,9 +164,8 @@ class ProcessMessageTransport(unittest.IsolatedAsyncioTestCase):
                 await pending
         self.assertEqual(len(self.server.updates), 1)
 
-    async def test_impossible_identity_and_running_overflow_never_reach_transport(self):
-        for items in ((ToolItem("x" * CONTENT_LIMIT, "工具", 1_800_000_000),),
-                      tuple(ToolItem(str(i), "工具", 1_800_000_000) for i in range(61))):
-            with self.assertRaises(ValueError):
-                await self.port.update("cot", "msg", items)
+    async def test_impossible_identity_never_reaches_transport(self):
+        items = (ToolItem("x" * CONTENT_LIMIT, "工具", 1_800_000_000),)
+        with self.assertRaises(ValueError):
+            await self.port.update("cot", "msg", items)
         self.assertEqual(self.server.updates, [])
