@@ -1867,7 +1867,7 @@ Admin 矩阵须从另一台受信内网主机，经 `/admin` 给出的实际端�
    | --- | --- | --- | --- |
    | G01 `/goal <objective>`、查询/刷新/控制 | 管理卡静态显示当前状态，仅查询/按钮时更新，无答案/文件；任务回复独立。 | 原生 Goal＋真实飞书卡 | [Goal][验收20] |
    | G02 普通 Prompt、准备期间 rollover，以及 starting/stopping/收尾/unknown/无安全 route | 仅 steer 捕获的 exact 物理 Turn，换轮拒绝、不重投/新建；不可用状态拒绝，`/config`/`/compact` 拒绝；仅 pause/clear 后当前 Turn 仍运行则仍可 exact steer。 | 原生 rollover＋准入竞态注入 | [Goal][验收20] |
-   | G03 Progress 开/关，至少两轮 rollover、重复及旧轮迟到事件 | 每个物理 Turn 独立卡或富文本，片段只追加到本轮。新 start 证明前轮为“本轮已完成”，四证最终读取补齐后为“任务已完成”，全程一次符合条件的提及。 | 原生多轮＋飞书展示/迟到事件注入 | [Goal][验收20]、[回复][验收15] |
+   | G03 Progress 开/关，至少两轮 rollover、重复及旧轮迟到事件 | 每个物理 Turn 独立卡或富文本，片段只追加到本轮。前轮终态与后轮 start 均已观测时显示“本轮已完成”，两者可乱序；卡片回执校验归属，前轮慢写独立于后轮。四证最终读取补齐后为“任务已完成”，全程一次符合条件的提及。 | 原生多轮＋飞书展示/迟到事件注入 | [Goal][验收20]、[回复][验收15] |
    | G04 pause/clear、同流与旧流结束后 resume、`/stop`，含已显式 clear | pause 只暂停续跑、clear 只移除 Goal，当前 Turn 和交付继续；同流 resume 不重复回复/route，旧流结束才新回复；stop 暂停 Goal、interrupt exact 当前 Turn、cleanup，已 clear 则只停止当前执行。 | 原生控制＋回复/route 记录 | [Goal][验收20] |
    | G05 paused/blocked/usage/budget limited 与 complete；已确认显式 clear | 前四类不自动 clear；logical stream、persisted Goal、exact final Turn、Thread idle 四证齐备，complete＋final completed 才自动 clear。已确认显式 clear 可 absent，仍核验当前执行/final Turn，不丢答案/文件。 | 原生四证与 Result/Files | [Goal][验收20] |
    | G06 管理卡更新失败、旧按钮、跨重启、不同 Goal/同秒同 objective-budget 重建 | 确定回执保留，不重做 mutation；未确认终态零完成提及。旧按钮核对原生稳定标记/当前状态，不依赖旧 owner；不同 Goal 拒绝，同秒完全相同重建接受 ADR 0084 有限歧义。 | 故障注入＋重启/真实卡 | [Goal][验收20] |
