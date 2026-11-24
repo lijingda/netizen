@@ -1952,6 +1952,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             def set_completion_handler(self, _handler: object) -> None:
                 return None
 
+            def set_goal_rollover_handler(self, _handler: object) -> None:
+                return None
+
             def set_question_handler(self, _handler: object) -> None:
                 return None
 

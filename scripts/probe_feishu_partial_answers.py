@@ -28,7 +28,7 @@ from netizen_cli.cards import decode_turn_file_action, reply_card, reply_card_fr
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.domain import (
     FeishuScope, ReplyCardActivityModule, ReplyCardFileItem, ReplyCardFilesModule,
-    ReplyCardGoalModule, ReplyCardPartialAnswerModule, ReplyCardProjection,
+    ReplyCardPartialAnswerModule, ReplyCardProjection,
     ReplyCardResultModule, ScopeKind, TurnCommentaryManifestEntry, TurnProgressManifest,
 )
 from netizen_cli.partial_answers import PartialAnswer
@@ -96,25 +96,15 @@ def _card_scenarios(scope: FeishuScope) -> list[tuple[str, list[tuple[str, Outbo
             ("initial_without_partial", initial), ("first_partial", first),
             ("second_partial", second), ("terminal_retains_partials", terminal),
         )]))
-    for progress in (True, False):
-        label = f"Goal／进度{'开启' if progress else '关闭'}"
-        goal = ReplyCardGoalModule(binding_id="partial-probe-goal", short_id="probe", project_alias="probe",
-            goal_generation="g" * 43, status="active", runtime_state="goal-running", token_budget=None, tokens_used=0,
-            objective=f"{_NOTICE}\n{label}：模拟两个物理 Turn 及手动恢复。", notice=_NOTICE)
-        initial = ReplyCardProjection(scope=scope, goal=goal, activity=_activity(label) if progress else None)
-        first = replace(initial, partial_answer=ReplyCardPartialAnswerModule(("【验收／模拟】Goal 第一物理 Turn 的稳定答案。",)))
-        rollover = replace(first, partial_answer=ReplyCardPartialAnswerModule((*first.partial_answer.contents,
-            "【验收／模拟】Goal 第二物理 Turn 的稳定答案；上一轮内容仍保留。")))
-        paused = replace(rollover, goal=replace(goal, status="paused", runtime_state="goal-paused"),
-            activity=_activity(label, terminal_status="interrupted") if progress else None,
-            result=ReplyCardResultModule(f"{_NOTICE}\n模拟暂停；阶段性内容仍保留。"))
-        resumed = replace(initial, goal=replace(goal, notice=f"{_NOTICE}\n模拟手动恢复：新执行段，阶段性模块已清空。"))
-        resumed_answer = replace(resumed, partial_answer=ReplyCardPartialAnswerModule((
-            "【验收／模拟】手动恢复后的新执行段答案；旧执行段两片已清空。",)))
+    for ordinal, continues in (("第一", True), ("第二", False)):
+        label = f"Goal／{ordinal}物理 Turn"
+        initial = ReplyCardProjection(activity=_activity(label))
+        partial = ReplyCardPartialAnswerModule((f"【验收／模拟】Goal {ordinal}物理 Turn 的稳定答案。",))
+        running = replace(initial, partial_answer=partial)
+        terminal = replace(running, activity=_activity(label, terminal_status="completed"),
+            result=ReplyCardResultModule(f"{_NOTICE}\n{ordinal}物理 Turn 的最终回复。"), run_continues=continues)
         scenarios.append((label, [(name, reply_card(projection)) for name, projection in (
-            ("initial_without_partial", initial), ("first_turn_partial", first),
-            ("automatic_rollover_retains_partials", rollover), ("pause_retains_partials", paused),
-            ("manual_resume_resets_partials", resumed), ("resumed_run_new_partial", resumed_answer),
+            ("initial_without_partial", initial), ("own_partial", running), ("terminal_with_own_answer", terminal),
         )]))
     files = ReplyCardProjection(scope=scope,
         partial_answer=ReplyCardPartialAnswerModule((_FILES_PARTIAL,)),

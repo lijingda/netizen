@@ -79,6 +79,7 @@ class GoalOutcome:
     partial_answers: tuple[PartialAnswer, ...] = ()
     cwd: Path | None = None
     run_continues: bool = False
+    earlier_delivery_incomplete: bool = False
     reply: LogicalReply | None = None
 
     def __post_init__(self) -> None:

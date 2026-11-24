@@ -350,20 +350,35 @@ async def goal_rollover_case(root: Path) -> dict[str, Any]:
     source_root = str(Path(__file__).resolve().parents[1])
     if source_root not in sys.path:
         sys.path.insert(0, source_root)
-    from netizen_cli.bindings import BindingStore
+    from netizen_cli.bindings import BindingStore, BindingTaskFeedback
     from netizen_cli.codex_runtime import CodexRuntime
     from netizen_cli.domain import FeishuScope, ScopeKind
     from netizen_cli.sdk_gap_adapter import AppServerGoalControl, GoalStatus
     from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup
+
+    from netizen_cli.channel_app import ChannelApplication
+    from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
+    from netizen_cli.projects import ProjectRegistry
+    from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+    from tests.support.channel_messages import FakeChannel, FakeMessage
+    from tests.support.channel_results import sent_result
+
+    def patch_file(name: str) -> dict[str, Any]:
+        return {"type": "response.output_item.done", "item": {
+            "type": "function_call", "call_id": "patch-" + name, "name": "exec_command",
+            "arguments": json.dumps({"cmd": f"apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: {name}\n+{name}\n*** End Patch\nPATCH"}),
+        }}
 
     complete_tool = {"type": "response.output_item.done", "item": {
         "type": "function_call", "call_id": "complete-goal", "name": "update_goal",
         "arguments": json.dumps({"status": "complete"}),
     }}
     replies = [
+        (200, response_events("patch-one", patch_file("first.txt"))),
         (200, response_events("goal-one",
             *message_events("goal-partial-one", "First goal stage.", "partial_answer"),
             *message_events("goal-draft-one", "First physical draft.", "final_answer"))),
+        (200, response_events("patch-two", patch_file("second.txt"))),
         (200, response_events("goal-two",
             *message_events("goal-partial-two", "Second goal stage.", "partial_answer"), complete_tool)),
         (200, response_events("goal-final",
@@ -371,21 +386,22 @@ async def goal_rollover_case(root: Path) -> dict[str, Any]:
     ]
     with mock_provider(replies) as provider:
         first_gate, final_gate = threading.Event(), threading.Event()
-        provider.response_gates = {1: first_gate, 3: final_gate}
+        provider.response_gates = {1: first_gate, 5: final_gate}
         cwd, env = isolated_config(root, provider)
         config_path = Path(env["CODEX_HOME"]) / "config.toml"
-        config_path.write_text("features.goals = true\n" + config_path.read_text())
+        config_path.write_text('features.goals = true\nsandbox_mode = "workspace-write"\n' + config_path.read_text())
         store = BindingStore(root / "channel.sqlite3")
         store.bootstrap_project(alias="goal-probe", cwd=str(cwd))
         binding = store.create_channel_binding(
-            scope=FeishuScope("probe-app", "probe-chat", ScopeKind.GROUP),
-            project_alias="goal-probe", creator_id="probe-owner",
+            scope=FeishuScope("probe-app", "oc_direct", ScopeKind.DIRECT),
+            project_alias="goal-probe", creator_id="ou_probe", task_feedback=BindingTaskFeedback(progress_card_enabled=True),
         )
         outcomes = []
         completed = asyncio.Event()
 
         async def on_completion(outcome: Any) -> None:
             outcomes.append(outcome)
+            await app.handle_completion(outcome)
             completed.set()
 
         try:
@@ -396,30 +412,38 @@ async def goal_rollover_case(root: Path) -> dict[str, Any]:
                     terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
                     on_completion=on_completion, automatic_thread_naming=False,
                 )
+                channel = FakeChannel()
+                origin = FakeMessage("/goal Complete the two scripted stages.", sender_id="ou_probe", message_id="om_goal")
+                channel.chat_types["oc_direct"] = "p2p"
+                channel.reply_results.extend(sent_result(mid, chat_id="oc_direct") for mid in ("om_management", "om_first", "om_final"))
+                channel.send_results.append(sent_result("om_reminder", chat_id="oc_direct", parent_id="om_final", root_id="om_goal"))
+                ordinary = CodexOrdinarySessions(runtime)
+                projects = ProjectRegistry(store=store, project_root=cwd, projects={"goal-probe": cwd})
+                management = InstanceManagementService(bindings=store, projects=projects,
+                    runtime=ManagementRuntimePort(runtime, ordinary=ordinary), scope_coordinator=ScopeCoordinator())
+                app = ChannelApplication(app_id="probe-app", channel=channel, runtime=runtime,
+                    ordinary=ordinary, bindings=store, projects=projects, management=management)
+                runtime.set_completion_handler(on_completion)
                 try:
-                    submission = await runtime.start_goal(
-                        binding=store.get(binding.id), cwd=cwd,
-                        objective="Complete the two scripted stages and mark the goal complete.",
-                        owner_id="probe-owner", origin=object(),
-                    )
-                    thread_id = submission.thread_id
-                    submission.release_receipt_attempt()
+                    await app.handle_message(origin)
+                    thread_id = store.get(binding.id).native_thread_id
+                    assert thread_id, channel.replies
                     first_gate.set()
                     async with asyncio.timeout(15):
                         while True:
                             active = runtime.goal_activity(binding.id)
-                            if active is not None and len(active.partial_answers) == 2 and len(provider.requests) == 3:
+                            if active and len(active.partial_answers) == 1 and len(provider.requests) == 5 and channel.updates:
                                 break
                             await asyncio.sleep(0.02)
                     partials = active.partial_answers
-                    assert [answer.text for answer in partials] == ["First goal stage.", "Second goal stage."], partials
-                    turn_ids = [answer.turn_id for answer in partials]
-                    assert len(set(turn_ids)) == 2 and active.physical_turn_id == turn_ids[1], active
-                    assert all(answer.thread_id == thread_id for answer in partials), partials
-                    assert submission.logical_turn_id == turn_ids[0], submission
+                    assert [answer.text for answer in partials] == ["Second goal stage."], partials
+                    turn_ids = [active.logical_turn_id, active.physical_turn_id]
+                    assert len(set(turn_ids)) == 2 and partials[0].turn_id == turn_ids[1], active
+                    assert partials[0].thread_id == thread_id
+                    assert not channel.send_calls, "intermediate mention"
                     assert not completed.is_set(), "physical rollover prematurely completed logical Goal"
-                    # The third model request proves the native update_goal tool executed.
-                    tool_outputs = [item for item in provider.requests[2]["body"]["input"]
+                    # The fifth model request proves the native update_goal tool executed.
+                    tool_outputs = [item for item in provider.requests[4]["body"]["input"]
                                     if item.get("type") == "function_call_output" and item.get("call_id") == "complete-goal"]
                     assert len(tool_outputs) == 1 and "complete" in str(tool_outputs[0]["output"]), tool_outputs
                     native_goal = await control.get(thread_id)
@@ -448,13 +472,30 @@ async def goal_rollover_case(root: Path) -> dict[str, Any]:
                         for turn in turns for item in turn["items"]
                         if item.get("type") == "agentMessage" and item.get("phase") == "partial_answer"
                     ]
-                    assert persisted_partials == [asdict(answer) for answer in partials], persisted_partials
-                    assert not provider.errors and not provider.replies and len(provider.requests) == 3, provider.errors
+                    assert [part["text"] for part in persisted_partials] == ["First goal stage.", "Second goal stage."]
+                    assert persisted_partials[-1] == asdict(partials[0]), persisted_partials
+                    results = [(mid, card) for mid, card in channel.updates
+                               if card["header"]["title"]["content"] in {"本轮已完成", "任务已完成"}]
+                    assert [mid for mid, _ in results] == ["om_first", "om_final"], results
+                    for i, (_, card) in enumerate(results):
+                        title = ("本轮已完成", "任务已完成")[i]
+                        assert card["header"]["title"]["content"] == card["config"]["summary"]["content"] == title
+                        body = json.dumps(card["body"], ensure_ascii=False)
+                        own = ("first.txt", "second.txt")[i]
+                        assert own in body and "turn-file.send" in body and "turn:v1:" + turn_ids[i] in body, body
+                        assert (cwd / own).read_text().strip() == own
+                        assert ("second.txt", "first.txt")[i] not in body, body
+                        assert ("First physical draft.", "Goal completed final.")[i] in body, body
+                        assert persisted_partials[i]["text"] in body and persisted_partials[1-i]["text"] not in body, body
+                    assert len(channel.send_calls) == 1, channel.send_calls
+                    _, reminder, options = channel.send_calls[0]
+                    assert options.reply_to == "om_final" and [u.open_id for u in reminder.mentions] == ["ou_probe"]
+                    assert not provider.errors and not provider.replies and len(provider.requests) == 5, provider.errors
                     return {
                         "scenario": "goal_partial_automatic_rollover", "passed": True,
                         "thread_id": thread_id, "physical_turn_ids": turn_ids,
                         "partial_answers": persisted_partials,
-                        "model_request_count": 3, "automatic_continuation": True,
+                        "model_request_count": len(provider.requests), "automatic_continuation": True,
                         "real_update_goal_complete_verified": True,
                         "production_goal_tap_and_runtime_retention": True,
                         "partials_observed_before_final": True,
@@ -462,12 +503,16 @@ async def goal_rollover_case(root: Path) -> dict[str, Any]:
                         "final_turn_id": outcome.final_physical_turn_id,
                         "four_proof_runtime_finalization": outcome.finalization.value,
                         "goal_absence_confirmed": True, "native_history_two_completed_turns": True,
+                        "physical_task_cards": len(results), "direct_files": ["first.txt", "second.txt"],
+                        "completion_mention_anchor": options.reply_to, "feishu_transport": "in-memory",
                         "feishu_delivery_tested": False,
                     }
                 finally:
                     first_gate.set()
                     final_gate.set()
                     await runtime.interrupt_all()
+                    await app.close()
+                    await management.close()
         finally:
             store.close()
 

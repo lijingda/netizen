@@ -490,7 +490,7 @@ mock provider 和真实 bundled App Server，均支持 `--case` / `--output`。�
   --config "$NETIZEN_ROOT/config.yaml" --chat-id "$probe_chat_id" --dry-run
 ```
 
-完整探针发送六张明确标注“验收／模拟”的卡、执行二十次更新，并发送五条富文本样例；
+完整探针发送六张明确标注“验收／模拟”的卡、执行十四次更新，并发送五条富文本样例；
 不创建真实任务，不提供真实 Goal/文件控制目标。`--only-rich-text` 只发送五条富文本，
 不重发卡片；没有自动重试未知投递。它分别记录 API ACK、exact 目的地回读、文件翻页
 manifest 的本地往返与可读正文核对，不把合成投影冒充原生端到端或用户真实点击。

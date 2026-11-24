@@ -274,7 +274,7 @@ class CompletionPresentationChannel(ChannelReplies):
         try:
             await self._complete_bounded_task(replace(outcome, bounded_delivery=ledger))
         finally:
-            if ledger.settle():
+            if ledger.settle() or outcome.earlier_delivery_incomplete:
                 await _best_effort_update(self._reply_to_origin(outcome.origin, INCOMPLETE))
 
     async def _complete_bounded_task(self, outcome: TurnResult) -> None:

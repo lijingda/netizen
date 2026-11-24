@@ -30,11 +30,11 @@ class PartialAnswerProbeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("partialanswerv1", initial)
             if scenario["scenario"].startswith("Goal"):
                 last = json.dumps(scenario["states"][-1]["card"], ensure_ascii=False)
-                self.assertIn("手动恢复后的新执行段答案", last)
-                self.assertNotIn("第一物理 Turn 的稳定答案", last)
-                self.assertNotIn("第二物理 Turn 的稳定答案", last)
-                paused = next(state for state in scenario["states"] if state["step"] == "pause_retains_partials")
-                self.assertNotIn("任务已完成", json.dumps(paused["card"], ensure_ascii=False))
+                first = "第一" in scenario["scenario"]
+                self.assertIn(("第一" if first else "第二") + "物理 Turn 的稳定答案", last)
+                self.assertNotIn(("第二" if first else "第一") + "物理 Turn 的稳定答案", last)
+                terminal = scenario["states"][-1]["card"]
+                self.assertEqual(terminal["header"]["title"]["content"], "本轮已完成" if first else "任务已完成")
         self.assertTrue(all(post["mentions"] == [] for post in result["posts"]))
         self.assertFalse(result["client_visual"])
         self.assertFalse(result["client_callback"])
@@ -65,8 +65,8 @@ class PartialAnswerProbeTest(unittest.IsolatedAsyncioTestCase):
                     app_id="cli_synthetic", app_secret="secret-not-for-output")), patch.object(probe, "FeishuChannel", return_value=channel) as factory:
                     result = await probe._probe(self.args())
                 self.assertTrue(result["success"])
-                self.assertEqual((result["sent_messages"], result["updated_messages"]), (11, 20))
-                self.assertEqual(channel.fetch_message.await_count, 31)
+                self.assertEqual((result["sent_messages"], result["updated_messages"]), (11, 14))
+                self.assertEqual(channel.fetch_message.await_count, 25)
                 self.assertTrue(all(op["exact_message_refetch"] for op in result["operations"]))
                 file_update = next(op for op in result["operations"] if op["scenario"] == "Files v5" and op["action"] == "update")
                 self.assertEqual(file_update["refetched_partial_preserved"], None if omit_body else True)

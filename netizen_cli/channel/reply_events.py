@@ -187,6 +187,7 @@ class TurnResult:
     run_reply: LogicalReply | None = None
     partial_answers: tuple[NativePartial, ...] = field(init=False)
     bounded_delivery: PhysicalDelivery | None = None
+    earlier_delivery_incomplete: bool = False
 
     @property
     def origin(self) -> object:

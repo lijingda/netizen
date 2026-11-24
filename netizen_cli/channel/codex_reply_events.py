@@ -129,6 +129,7 @@ class CodexReplyEvents:
             else key.turn_id,
             run_continues=continues,
             run_reply=native.reply if isinstance(native, GoalOutcome) else None,
+            earlier_delivery_incomplete=isinstance(native, GoalOutcome) and native.earlier_delivery_incomplete,
             allow_suppression=not isinstance(native, GoalOutcome)
             or (
                 native.error is None

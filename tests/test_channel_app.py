@@ -277,8 +277,9 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
             )
 
         else:
-            self.runtime.goal_activity_values["binding-one"] = goal_activity_snapshot(
-                binding_id="binding-one", revision=revision, steps=steps,
+            self.runtime.goal_activity_values["binding-one"] = replace(
+                goal_activity_snapshot(binding_id="binding-one", revision=revision, steps=steps),
+                physical_turn_id="goal-one",
             )
 
     def assert_delivered_revision(self, revision):

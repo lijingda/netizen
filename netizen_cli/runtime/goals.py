@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1047,6 +1048,7 @@ class GoalRuntime(TurnObservationRuntime):
                                 await active.delivery_task
                         except TimeoutError:
                             logger.warning("Goal rollover delivery budget exhausted")
+                            outcome = replace(outcome, earlier_delivery_incomplete=True)
                     await self._on_completion(outcome)
             except Exception:
                 logger.exception(
@@ -1069,6 +1071,9 @@ class GoalRuntime(TurnObservationRuntime):
     async def _retire_goal_presentation(active: _ActiveGoal) -> None:
         active.candidate = None
         active.rollovers.clear()
+        active.final_items = ()
+        active.final_response = None
+        active.partial_answers.clear()
         task = active.delivery_task
         if task is not None and not task.done():
             task.cancel()

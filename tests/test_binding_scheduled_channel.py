@@ -36,6 +36,7 @@ from netizen_cli.message_history import (
 )
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.progress_card_settings import ProgressCardSettings
+from netizen_cli.turn_activity import GoalTurnFacts, TurnActivityNotificationProjection
 from netizen_cli.group_access import GroupAccessRule, GroupAccessService
 from netizen_cli.schedules.models import ScheduleRule
 from tests.support.channel_cards import elements
@@ -640,7 +641,17 @@ class BindingScheduledChannelTest(BindingChannelCase):
         handle = control.handles[0]
         self.assertEqual(handle.steers[0][0], "goal-turn-1")
         self.assertEqual(self.store.schedules.get_run(first.run.id).initial_turn_id, "goal-turn-1")
+        async with asyncio.timeout(1):
+            while handle.activity_sink is None:
+                await asyncio.sleep(0)
+        handle.emit_activity(TurnActivityNotificationProjection(
+            turn_id=handle.id, turn_completed=True, goal_terminal=GoalTurnFacts(
+                handle.id, "completed", "第一轮结果", None, (), None, (), frozenset(),
+            ),
+        ))
         handle.rollover("physical-2")
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id="physical-2", turn_started=True))
+        await self.runtime._goals[binding.id].delivery_task
         second = self.next_claim(first.plan.id, due=220)
         self.queue_anchor(scope, "om_second")
 
@@ -651,7 +662,7 @@ class BindingScheduledChannelTest(BindingChannelCase):
         self.assertEqual(handle.steers[1][0], "physical-2")
         self.assertEqual(self.codex.turn_inputs, [])
         self.assertEqual(self.outcomes, [])
-        self.assertEqual(self.channel.replies, [])
+        self.assertEqual(self.channel.replies, [(human.id, "第一轮结果")])
         handle.finish(response="Goal 检查完成")
         self.assertTrue(await self.runtime.wait_idle(timeout=1))
         self.assertEqual(len(self.outcomes), 1)

@@ -146,6 +146,8 @@ class GoalOrderingTest(GoalPresentationCase):
 
     def assert_wire(self, row):
         writes = self.writes
+        if row.fault >= 0:
+            self.assertTrue(any(not w[5] for w in writes), "faulted write was never reached")
         confirmed = [w for w in writes if w[5]]
         notices = [w for w in confirmed if INCOMPLETE in w[2]]
         for i in range(row.turns):
@@ -221,9 +223,30 @@ for n, order in enumerate(itertools.permutations(("partial", "file", "body"))):
     for turns in (2, 3):
         install_case(f"ordering_{n}_{turns}", Schedule(
             turns, order, ("", "resume", "clear")[n % 3], ("history", "tap", "stop", "lost", "history", "tap")[n], n % 2 == 0))
-for progress, writes in ((True, 7), (False, 5)):
+for progress, writes in ((True, 6), (False, 5)):
     for position, state in itertools.product(range(writes), ("unknown", "rejected")):
         install_case(f"write_{int(progress)}_{position}_{state}", Schedule(progress=progress, fault=position, receipt=state))
 for name, expected in (("early", "published unresolved candidate"), ("files", "cross-turn content"),
                        ("mention", "intermediate mention"), ("history", "proved answer lost")):
     install_case("mutant_" + name, Schedule(), name, expected)
+
+
+class GoalDeliveryDeadlineTest(GoalPresentationCase):
+    async def test_slow_rollover_reserves_final_handoff_and_reports_missing_delivery(self):
+        entered = asyncio.Event()
+
+        async def stalled(event):
+            entered.set()
+            await asyncio.Event().wait()
+
+        self.runtime.set_goal_rollover_handler(stalled)
+        await self.start()
+        await self.answer("final_answer", "first")
+        await self.rollover()
+        await asyncio.wait_for(entered.wait(), 1)
+        with patch("netizen_cli.runtime.limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS", 1):
+            await self.finish(history_answer="final")
+        self.assertEqual(sum(content == INCOMPLETE for _, content in self.channel.replies), 1)
+        self.assertTrue(any(getattr(content, "markdown", content) == "final" for _, content in self.channel.replies))
+        self.assertIsNone(self.runtime.active_goal(self.target.id))
+        self.assertFalse(self.app._progress_cards._sessions)
