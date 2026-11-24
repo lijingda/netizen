@@ -12,6 +12,7 @@ from netizen_cli.backends import BackendPolicy, BackendUnsupported
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.channel.physical_delivery import INCOMPLETE
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.ordinary_sessions import CLAUDE_RELEASE_HINT
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from tests.support import has_claude_sdk, requires_claude_sdk
 
@@ -591,7 +592,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(clients.calls), 1)
             self.assertNotIn("card-V", writes)
             self.assertIn("card-H", writes)
-            self.assertEqual(plain, [("H2", "body-H2"), ("H3", "body-H3")])
+            self.assertEqual(plain, [("H2", f"body-H2\n\n{CLAUDE_RELEASE_HINT}"), ("H3", f"body-H3\n\n{CLAUDE_RELEASE_HINT}")])
 
     @requires_claude_sdk
     async def test_unconfirmed_partial_matching_the_prepared_body_is_never_replayed(self):
@@ -937,6 +938,38 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(fx.store.has_bindings(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key))
             self.assertEqual((clients.calls, fx.channel.reactions, fx.channel.fetch_quoted_calls), ([], [], []))
 
+    @requires_claude_sdk
+    async def test_release_card_rechecks_owner_scope_and_exact_connection(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            await fx.create_binding(scope)
+            await app.handle_message(FakeMessage("work", message_id="H1"))
+            cli = clients.calls[-1]
+            cli.init()
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+            cli.result()
+            await self.until(lambda: cli.live.ordered_idle)
+            await app.handle_message(FakeMessage("/release", message_id="release"))
+            card = next(body for target, body in fx.channel.replies if target == "release")
+            value = _card_button_value(card, "确认释放")
+            event = direct_button_event(value)
+            with self.assertRaises(BackendUnsupported):
+                BackendPolicy("codex").require_card(value["intent"])
+            with self.assertRaises(BackendUnsupported):
+                app._policy.require_api("POST", "/sessions/release")
+            event.operator.open_id = "other"
+            await app.handle_card_action(event)
+            event.operator.open_id = "ou_user"
+            fx.channel.fetched_messages[event.message_id] = {"data": {"items": [{"chat_id": scope.chat_id, "thread_id": "foreign"}]}}
+            await app.handle_card_action(event)
+            self.assertEqual(cli.closes, 0)
+            direct_card_event(fx.channel, {}, message_id=event.message_id)
+            await app.handle_card_action(event)
+            await app.handle_card_action(event)
+            self.assertEqual(cli.closes, 1)
+            self.assertEqual(sum(body == "已释放 Claude 会话连接。" for _, body in fx.channel.replies), 1)
+
     async def test_grace_typed_gaps_and_local_forms(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             async def send(text):
@@ -947,7 +980,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await send(body), GRACE)
             clock[0] = 2.
             for cmd in ("goal this", "side close", "fork", "usage", "compact", "cron", "archive", "delete",
-                        "model", "effort", "fast", "speed", "release", "threads archived", "quit", "plan"):
+                        "model", "effort", "fast", "speed", "threads archived", "quit", "plan"):
                 with self.subTest(command=cmd):
                     self.assertIn("试点暂不支持", await send("/" + cmd))
             self.assertIn("试点暂不支持", await send("$sample do this"))
@@ -958,6 +991,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("原生 Claude 设置", content)
                     self.assertIn("_progress_card", content)
             await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))
+            self.assertIn("/release", await send("/help"))
+            self.assertIn("没有可释放", await send("/release"))
             self.assertIn("本地任务", json.dumps((await send("/status")).card, ensure_ascii=False))
             for cmd in ("/config", "/sessions"):
                 content = json.dumps((await send(cmd)).card, ensure_ascii=False)
@@ -1120,7 +1155,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                                 cli.result(result="launch-C")
                                 await self.until(lambda: "launch-C" in wire["H2"])
                                 if not cards:
-                                    self.assertIn(("H2", "launch-C\n\n后台任务 1 个运行中，可继续发送消息"), fx.channel.replies)
+                                    self.assertIn(("H2", f"launch-C\n\n后台任务 1 个运行中，可继续发送消息\n\n{CLAUDE_RELEASE_HINT}"), fx.channel.replies)
                                 for k in order:
                                     tasks.remove(k)
                                     membership()
@@ -1552,9 +1587,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             fx.channel.send_results.append(SendResult.ok(message_id="first", chunk_ids=["first", "last"], raw=raw))
             cli.result(result="cron body", user_message_uuid=None, origin={"kind": "task-notification", "producer": "cron"})
             async with asyncio.timeout(5):
-                while not any(str(body) == "cron body" for _, body, _ in fx.channel.send_calls):
+                while not any(str(body) == f"cron body\n\n{CLAUDE_RELEASE_HINT}" for _, body, _ in fx.channel.send_calls):
                     await asyncio.sleep(.005)
-            (destination, _, opts), = [call for call in fx.channel.send_calls if str(call[1]) == "cron body"]
+            (destination, _, opts), = [call for call in fx.channel.send_calls if str(call[1]) == f"cron body\n\n{CLAUDE_RELEASE_HINT}"]
             self.assertEqual((destination, opts.reply_to, opts.reply_in_thread), (scope.chat_id, "om_root", True))
             for uid in ("result-a", "result-b"):
                 fx.channel.send_results.extend([OSError(), SendResult.ok(message_id="first", chunk_ids=["first", "last"], raw=raw)])
@@ -1647,7 +1682,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     release.set()
                 await asyncio.wait_for(second.wait(), 5)
             self.assertEqual([(body, opts.reply_to) for _, body, opts in fx.channel.send_calls if isinstance(body, str)],
-                             [("second cron", "root")])
+                             [(f"second cron\n\n{CLAUDE_RELEASE_HINT}", "root")])
 
     async def test_settlement_of_cancelled_reaction_cleanup_leaves_only_the_uncertain_id_for_close(self):
         from netizen_cli.bindings import BindingTaskFeedback

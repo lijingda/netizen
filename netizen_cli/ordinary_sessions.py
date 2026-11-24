@@ -71,6 +71,9 @@ class ConversationTarget:
     single_attempt: bool = False
 
 
+CLAUDE_RELEASE_HINT = "如需在终端继续这个会话，请先 /release"
+
+
 @dataclass(frozen=True, slots=True)
 class ClaudeCliState:
     idle: bool = False
@@ -82,9 +85,9 @@ class ClaudeCliState:
         if not self.idle:
             return "Claude：执行中"
         if self.tasks:
-            return f"Claude：空闲，后台任务 {self.tasks} 个运行中，可以发送新消息"
+            return f"Claude：空闲，后台任务 {self.tasks} 个运行中，可以发送新消息。{CLAUDE_RELEASE_HINT}"
         if self.crons:
-            return "Claude：空闲，定时任务已登记，可以发送新消息"
+            return f"Claude：空闲，定时任务已登记，可以发送新消息。{CLAUDE_RELEASE_HINT}"
         return "全部完成"
 
 

@@ -28,7 +28,8 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
-from ..cards.controls import local_status_card
+from ..cards.controls import local_status_card, release_confirmation_card
+from ..ordinary_sessions import ReleaseConfirmation
 from ..cards.status import (
     codex_context_line, codex_model_lines, decode_status_command, session_status_card,
 )
@@ -575,17 +576,28 @@ class CommandChannel(CardControlChannel):
     async def _command_release(self, message: Any, intent: ControlIntent) -> None:
         binding = self._bindings.active_binding(intent.scope.key)
         if binding is None:
-            await self._reply_no_current_binding(message, intent.scope)
+            if self._local_sessions is not None:
+                await self._reply(message, "当前没有可释放的 Claude 会话连接。")
+            else:
+                await self._reply_no_current_binding(message, intent.scope)
             return
         try:
             released = await self._management.release_current_binding(
                 target=CurrentBindingTarget(intent.scope.key, binding.id),
+                sender_id=intent.sender_id,
             )
         except (NoCurrentBinding, CurrentBindingChanged) as error:
             raise ThreadReleaseError(
                 "当前会话已切换，本次订阅释放未执行。"
             ) from error
+        if isinstance(released, ReleaseConfirmation):
+            await self._reply(message, release_confirmation_card(intent.scope, binding.id, released))
+            return
         disposition = released.disposition
+        if self._local_sessions is not None:
+            await self._reply(message, "已释放 Claude 会话连接。" if disposition is ReleaseDisposition.RELEASED
+                              else "当前没有可释放的 Claude 会话连接。")
+            return
         if disposition is ReleaseDisposition.NOT_MATERIALIZED:
             notice = "当前会话尚未开始，没有 Codex 会话订阅可释放。"
         elif disposition is ReleaseDisposition.NOT_SUBSCRIBED:
