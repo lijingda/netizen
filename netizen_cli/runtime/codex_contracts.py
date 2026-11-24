@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..ordinary_sessions import LogicalReply
 
 from ..bindings import BindingTaskFeedback
 from ..domain import GoalOperationState
@@ -74,6 +78,8 @@ class GoalOutcome:
     patch_children: TaskPatchChildren = TaskPatchChildren()
     partial_answers: tuple[PartialAnswer, ...] = ()
     cwd: Path | None = None
+    run_continues: bool = False
+    reply: LogicalReply | None = None
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -84,6 +90,12 @@ class GoalOutcome:
             or self.activity.logical_turn_id != self.logical_turn_id
         ):
             raise ValueError("Goal outcome activity belongs to another Goal run")
+
+
+@dataclass(frozen=True, slots=True)
+class GoalRollover:
+    previous: GoalOutcome
+    opening: GoalActivitySnapshot
 
 
 RuntimeOutcome = (

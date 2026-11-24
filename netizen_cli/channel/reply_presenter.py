@@ -114,6 +114,7 @@ class _PartialAnswerDelivery:
     freeze_snapshot: Activity | None = None
     text_only: bool = False
     location: CardReplyLocation | None = None
+    run_reply: LogicalReply | None = None
 
 
 @dataclass(slots=True)
@@ -338,6 +339,9 @@ class _ReplyCardPresenter:
                     else:
                         result = await send_card()
                         message_id = _receipt_message_id(result) if result is not None else None
+                        if event.run_reply and result is not None:
+                            items = tuple(("partial", item.item_id) for item in snapshot.partial_answers)
+                            record_sent_answer(event.run_reply, location, key.turn_id, items, result)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -368,6 +372,7 @@ class _ReplyCardPresenter:
         target: ReplyTarget,
         reply: Callable[[OutboundPost], Awaitable[SendResult]],
         validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None,
+        run_reply: LogicalReply | None = None,
     ) -> _PartialAnswerDelivery:
         """Quiesce running delivery and retain receipts before trying the terminal card."""
 
@@ -395,6 +400,7 @@ class _ReplyCardPresenter:
             freeze_snapshot=session.snapshot if session and session.writer else None,
             location=session.location if session else None,
             policy=session.policy if session else DeliveryPolicy.BOUNDED_FALLBACK,
+            run_reply=run_reply,
             text_only=bool(session and (session.failed or session.message_id is None)),
         )
 
@@ -435,7 +441,8 @@ class _ReplyCardPresenter:
         reply = session.reply_partial
         if reply is None:
             return
-        ledger, run_reply = (session.delivery, session.run_reply) if isinstance(session, _TurnProgressCardSession) else (None, None)
+        ledger = session.delivery if isinstance(session, _TurnProgressCardSession) else None
+        run_reply = session.run_reply
         for answer in answers:
             if session.stopped.is_set() and not terminal:
                 return
@@ -452,6 +459,9 @@ class _ReplyCardPresenter:
             # Mark before I/O: a timeout or cancellation may follow publication.
             # Even an SDK failure may hide a partially delivered long post.
             session.attempted_partials.add(identity)
+            item = ("partial", answer.item_id)
+            if run_reply:
+                run_reply.attempted = True
             if ledger:
                 item = ledger.partial(answer)
                 if ledger.items.get(item, "unattempted") != "unattempted":
@@ -469,7 +479,7 @@ class _ReplyCardPresenter:
                             continue
                     if session.validate_reply is not None and not await external_call(session.validate_reply(result), isolate=session.policy.confirms_items):
                         continue
-                    if ledger and session.location:
+                    if run_reply:
                         record_sent_answer(run_reply, session.location, answer.turn_id, (item,), result)
                     session.confirmed_partials.add(identity)
             except asyncio.CancelledError:
@@ -524,6 +534,11 @@ class _ReplyCardPresenter:
         session = self._sessions_for(key).pop(key.index, None)
         if session is not None:
             await self._stop_session(session)
+
+    async def abandon_run(self, run: PresentationKey) -> None:
+        for session in tuple(self._sessions_for(run).values()):
+            if session.target.run == run:
+                await self.abandon(key=session.target.key)
 
     async def abandon_thread(
         self,

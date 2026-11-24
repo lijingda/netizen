@@ -25,7 +25,7 @@ from tests.test_codex_runtime import FakeGoalControl
 REFERENCE = Path(__file__).parent / "fixtures" / "goal_presenter_e94430d.json"
 
 
-class GoalPresentationTraceTest(BindingChannelCase):
+class GoalPresentationCase(BindingChannelCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.control = FakeGoalControl(self.codex)
@@ -40,9 +40,6 @@ class GoalPresentationTraceTest(BindingChannelCase):
         # Exercise a fast rollover occurring entirely between presenter polls.
         self.app._progress_cards._poll_seconds = 60
         self.client = AsyncMock()
-        fixture = SimpleNamespace(channel=self.channel, project_root=self.cwd)
-        name = self._testMethodName.removeprefix("test_")
-        expect_presenter_trace(self, fixture, name, reference=REFERENCE)
 
     async def command(self, text, message_id, sender="ou_owner"):
         await self.app.handle_message(FakeMessage(text, message_id=message_id, sender_id=sender))
@@ -119,9 +116,16 @@ class GoalPresentationTraceTest(BindingChannelCase):
         await self.answer("final_answer", "second answer")
         await self.finish()
 
+class GoalPresentationTraceTest(GoalPresentationCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        fixture = SimpleNamespace(channel=self.channel, project_root=self.cwd)
+        name = self._testMethodName.removeprefix("test_")
+        expect_presenter_trace(self, fixture, name, reference=REFERENCE)
+
     async def test_multiturn_partials(self):
         await self.start()
-        self.reminder("om_reply_2")
+        self.reminder("om_reply_3")
         await self.two_answers()
 
     async def test_progress_off(self):
@@ -134,7 +138,7 @@ class GoalPresentationTraceTest(BindingChannelCase):
         await self.answer("final_answer", "first file")
         await self.rollover()
         await self.file("second.txt")
-        self.reminder("om_reply_2")
+        self.reminder("om_reply_3")
         await self.finish(history_answer="second file")
 
     async def test_pause_resume_same_stream(self):
@@ -194,6 +198,6 @@ class GoalPresentationTraceTest(BindingChannelCase):
         await self.app.dispatch_scheduled_run(claim)
         run = self.store.schedules.get_run(claim.run.id)
         self.assertEqual((run.disposition, run.initial_turn_id), ("steered", self.handle.id))
-        self.reminder("om_reply_2")
+        self.reminder("om_reply_3")
         await self.two_answers()
         self.assertEqual(self.outcomes[-1].origin.id, "om_goal")

@@ -20,13 +20,13 @@ INCOMPLETE = "部分内容未能确认送达。"
 logger = logging.getLogger(__name__)
 
 
-def record_sent_answer(reply: LogicalReply | None, location: CardReplyLocation, turn_id: str,
+def record_sent_answer(reply: LogicalReply | None, location: CardReplyLocation | None, turn_id: str,
                        items: tuple[Item, ...], result: SendResult) -> None:
     # An empty ID denotes a confirmed post with contradictory IDs. It may qualify
     # for the original-input exception, but is never evidence of content on that input.
     mid = _confirmed_reply_id(result, on_conflict="")
     if reply is not None and mid is not None:
-        reply.published(mid, turn_id, items, location.usable)
+        reply.published(mid, turn_id, items, location.usable if location else bool)
 
 
 @dataclass(slots=True)

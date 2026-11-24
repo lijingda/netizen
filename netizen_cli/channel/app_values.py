@@ -437,7 +437,7 @@ def _task_interruption_text(outcome: OrdinaryConclusion | SideTurnOutcome) -> st
 def _goal_reply_activity(snapshot: GoalActivitySnapshot) -> TurnActivitySnapshot:
     return TurnActivitySnapshot(
         binding_id=snapshot.binding_id, thread_id=snapshot.thread_id,
-        turn_id=snapshot.logical_turn_id, revision=snapshot.revision,
+        turn_id=snapshot.physical_turn_id or snapshot.logical_turn_id, revision=snapshot.revision,
         state=(
             ActiveState.OBSERVATION_UNAVAILABLE if snapshot.state is GoalOperationState.UNKNOWN
             else ActiveState.STOPPING if snapshot.state is GoalOperationState.PAUSING

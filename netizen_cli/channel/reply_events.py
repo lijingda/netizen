@@ -15,6 +15,7 @@ from ..ordinary_sessions import LogicalReply
 from ..partial_answers import PartialAnswer as NativePartial
 from ..runtime.contracts import SideTurnActivitySnapshot, TurnActivitySnapshot
 from .topics import CardReplyLocation
+from .physical_delivery import PhysicalDelivery
 
 Activity = TurnActivitySnapshot | SideTurnActivitySnapshot
 TerminalStatus = Literal["completed", "interrupted", "failed"]
@@ -63,8 +64,8 @@ class ReplyTarget:
     origin: object
     run: PresentationKey | None
 
-    def partial(self, item: NativePartial, *, presentation_id: str | None = None) -> PartialAnswer:
-        key = replace(self.key, thread_id=item.thread_id, turn_id=presentation_id or item.turn_id)
+    def partial(self, item: NativePartial) -> PartialAnswer:
+        key = replace(self.key, thread_id=item.thread_id, turn_id=item.turn_id)
         return PartialAnswer(replace(self, key=key), item)
 
     def exact_answers(self, partials: tuple[PartialAnswer, ...]) -> tuple[NativePartial, ...]:
@@ -89,11 +90,10 @@ class ActivityChanged:
             object.__setattr__(self, "snapshot", replace(self.snapshot, partial_answers=items))
 
     @classmethod
-    def from_snapshot(cls, target: ReplyTarget, snapshot: Activity | None, *,
-                      presentation_id: str | None = None) -> ActivityChanged | None:
+    def from_snapshot(cls, target: ReplyTarget, snapshot: Activity | None) -> ActivityChanged | None:
         if snapshot is None:
             return None
-        return cls(target, snapshot, tuple(target.partial(p, presentation_id=presentation_id)
+        return cls(target, snapshot, tuple(target.partial(p)
                                            for p in snapshot.partial_answers))
 
 
@@ -184,7 +184,9 @@ class TurnResult:
     end: RunEnded | None
     receipt: DeliveryReceipt | None = None
     items: ItemDelivery | None = None
+    run_reply: LogicalReply | None = None
     partial_answers: tuple[NativePartial, ...] = field(init=False)
+    bounded_delivery: PhysicalDelivery | None = None
 
     @property
     def origin(self) -> object:

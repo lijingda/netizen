@@ -298,21 +298,21 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivery.attempted_partials, {("native-one", "turn-one", "partial-one")})
         self.assertEqual(delivery.confirmed_partials, set())
 
-    async def test_goal_delivery_allows_multiple_physical_turns_but_requires_exact_thread(self):
+    async def test_goal_delivery_requires_both_physical_turn_and_thread(self):
         runtime = StubRuntime()
         presenter = presenter_for(FakeChannel(), runtime)
         self.addAsyncCleanup(presenter.close)
         reply = AsyncMock(return_value=sent_result("om_partial", chat_id="oc_direct"))
         delivery = await presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'logical-one'), None, None),
+                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'physical-one'), None, None),
                     reply=reply)
         first, second = answer(turn="physical-one"), answer("second", turn="physical-two")
         partials = (first, answer("wrong thread", thread="another-thread"), second, first)
-        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials, goal=True)))
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials)))
         self.assertEqual([call.args[0].markdown for call in reply.await_args_list],
-            ["**阶段性答案**\n\nfirst stable answer", "**阶段性答案**\n\nsecond"])
-        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials, goal=True)))
-        self.assertEqual(reply.await_count, 2)
+            ["**阶段性答案**\n\nfirst stable answer"])
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, partials)))
+        self.assertEqual(reply.await_count, 1)
 
 
 class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
@@ -439,7 +439,7 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("答案见阶段性答案", text)
         self.assertNotIsInstance(self.channel.replies[-1][1], OutboundCard)
 
-    async def test_goal_fallback_preserves_all_physical_turn_partials_without_management_card(self):
+    async def test_goal_fallback_preserves_own_physical_turn_partials_without_management_card(self):
         partials = (answer("earlier physical turn", turn="turn-old"),
                     answer("x" * 55_001, item="oversized", turn="turn-final"))
         self.channel.reply_results.extend(sent_result(f"om_answer_{index}", chat_id="oc_direct")
@@ -451,9 +451,9 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
             final_response="final answer", partial_answers=partials,
             task_feedback=BindingTaskFeedback(progress_card_enabled=True))
         await self.app.handle_completion(outcome)
-        self.assertEqual(len(self.channel.replies), 3)
-        self.assertEqual([post.markdown for _, post in self.channel.replies[:2]],
-                         ["**阶段性答案**\n\n" + partial.text for partial in partials])
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertEqual([post.markdown for _, post in self.channel.replies[:1]],
+                         ["**阶段性答案**\n\n" + partial.text for partial in partials[1:]])
         closing = self.channel.replies[-1][1]
         self.assertEqual(closing.markdown if isinstance(closing, OutboundPost) else closing, "final answer")
         self.assertEqual(self.channel.updates, [])
@@ -463,7 +463,7 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         first = answer(turn="physical-one")
         second = answer("next stable answer", turn="physical-two")
         self.runtime.goal_activity_values[self.binding.id] = replace(
-            goal_activity_snapshot(binding_id=self.binding.id), partial_answers=(first,), revision=2)
+            goal_activity_snapshot(binding_id=self.binding.id), logical_turn_id=first.turn_id, physical_turn_id=first.turn_id, partial_answers=(first,), revision=2)
         delivered = asyncio.Queue()
 
         async def reply(message, post, opts=None):
@@ -474,13 +474,14 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.channel, "reply", side_effect=reply):
             self.assertTrue(await self.app._present_running_goal(
                 binding=self.binding,
-                submission=GoalSubmission(self.binding.id, "native-one", "goal-one", lambda: None),
+                submission=GoalSubmission(self.binding.id, "native-one", first.turn_id, lambda: None),
                 origin=FakeMessage("work", message_id="om_origin")))
-            first_post = await asyncio.wait_for(delivered.get(), 1)
+            first_post = await asyncio.wait_for(delivered.get(), 4)
             self.runtime.goal_activity_values[self.binding.id] = replace(
                 self.runtime.goal_activity_values[self.binding.id],
                 physical_turn_id="physical-two", partial_answers=(first, second), revision=3)
-            second_post = await asyncio.wait_for(delivered.get(), 1)
+            await self.app._open_goal_turn(self.runtime.goal_activity_values[self.binding.id], BindingTaskFeedback(), FakeMessage("work", message_id="om_origin"), None)
+            second_post = await asyncio.wait_for(delivered.get(), 4)
         self.assertEqual(first_post.markdown, "**阶段性答案**\n\nfirst stable answer")
         self.assertEqual(second_post.markdown, "**阶段性答案**\n\nnext stable answer")
         self.assertEqual(delivered.qsize(), 0)
@@ -508,7 +509,7 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
                 await self.app.handle_completion(GoalOutcome(
                     binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
                     owner_id="ou_user", origin=origin, goal=native_goal(GoalStatus.COMPLETE),
-                    final_physical_turn_id="physical-last", final_turn_status="completed",
+                    final_physical_turn_id="goal-one", final_turn_status="completed",
                     final_response="confirmed final answer",
                 ))
                 closing = self.channel.replies[-1][1]
@@ -706,14 +707,14 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
 
 
 class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
-    async def test_logical_reply_keeps_rollover_answers_on_one_card_then_releases_session(self):
+    async def test_physical_card_rejects_another_turns_partial(self):
         from netizen_cli.cards import turn_progress_card
         channel, runtime = FakeChannel(), StubRuntime()
         presenter = presenter_for(channel, runtime, poll_seconds=0.001)
         self.addAsyncCleanup(presenter.close)
         first = answer("first turn answer", turn="physical-one")
         second = answer("second turn answer", turn="physical-two")
-        current = replace(goal_activity_snapshot(binding_id="binding-one"), logical_turn_id="logical-one",
+        current = replace(goal_activity_snapshot(binding_id="binding-one"), logical_turn_id="physical-one", physical_turn_id="physical-one",
                           partial_answers=(first,), revision=1)
         runtime.goal_activity_values["binding-one"] = current
         updated = asyncio.Event()
@@ -721,26 +722,27 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
 
         async def update(message_id, card):
             channel.updates.append((message_id, card))
-            if "second turn answer" in str(card):
+            if "first turn answer" in str(card):
                 updated.set()
             return sent_result(message_id, chat_id="oc_direct")
 
         with patch.object(channel, "update_card", side_effect=update):
             self.assertTrue(await open_card(presenter, runtime, binding_id="binding-one", thread_id="native-one",
-                turn_id="logical-one", origin=FakeMessage("work", message_id="om_origin"),
+                turn_id="physical-one", origin=FakeMessage("work", message_id="om_origin"),
                 logical_turn=True))
             runtime.goal_activity_values["binding-one"] = replace(current, partial_answers=(first, second), steps=(), revision=2)
             await asyncio.wait_for(updated.wait(), 1)
             receipt = await presenter.finish(
-                key=PresentationKey("binding-one", "native-one", "logical-one"), activity=None,
+                key=PresentationKey("binding-one", "native-one", "physical-one"), activity=None,
                 render=lambda snapshot: turn_progress_card(snapshot=snapshot,
-                    partial_answers=(first, second), final_response="final physical turn result",
+                    partial_answers=snapshot.partial_answers, final_response="final physical turn result",
                     terminal_status="completed", collapsed=True))
         self.assertTrue(receipt.confirmed)
         self.assertEqual(len(channel.replies), 1)
         card = channel.updates[-1][1]
         self.assertEqual(channel.updates[-1][0], "om_reply")
-        for text in (first.text, second.text, "final physical turn result"):
+        self.assertNotIn(second.text, str(card))
+        for text in (first.text, "final physical turn result"):
             self.assertIn(text, str(card))
         self.assertNotIn("暂停 Goal", str(card))
         self.assertEqual(presenter._sessions, {})
@@ -751,9 +753,9 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(presenter.close)
         first = answer(turn="physical-one")
         runtime.goal_activity_values["binding-one"] = replace(goal_activity_snapshot(binding_id="binding-one"),
-            logical_turn_id="logical-one", partial_answers=(first,))
+            logical_turn_id="physical-one", physical_turn_id="physical-one", partial_answers=(first,))
         channel.reply_results.append(sent_result("om_reply", chat_id="oc_direct"))
-        options = dict(binding_id="binding-one", thread_id="native-one", turn_id="logical-one",
+        options = dict(binding_id="binding-one", thread_id="native-one", turn_id="physical-one",
                        origin=FakeMessage("work", message_id="om_origin"),
                        logical_turn=True)
         self.assertTrue(await open_card(presenter, runtime, **options))
@@ -761,5 +763,5 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(channel.replies), 1)
         self.assertIn(first.text, str(channel.replies[0][1].card))
         self.assertEqual(len(presenter._sessions), 1)
-        await presenter.abandon(key=PresentationKey('binding-one', 'native-one', 'logical-one'))
+        await presenter.abandon(key=PresentationKey('binding-one', 'native-one', 'physical-one'))
         self.assertEqual(presenter._sessions, {})

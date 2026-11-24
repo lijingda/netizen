@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 import time
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from ..ordinary_sessions import LogicalReply
 
 from ..bindings import BindingTaskFeedback, SideTopicState
 from ..domain import ActiveState, GoalOperationState, MessageContextAnchor
@@ -353,6 +356,7 @@ class GoalSubmission:
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     continued: bool = False
+    reply: LogicalReply | None = None
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -476,7 +480,7 @@ class SideTurnActivitySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class GoalActivitySnapshot:
-    """Current-Turn Activity and accumulated answers for one exact Goal run."""
+    """Activity and stable answers from the current physical Goal Turn."""
 
     binding_id: str
     thread_id: str

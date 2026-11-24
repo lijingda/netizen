@@ -261,7 +261,7 @@ class GoalRuntime(TurnObservationRuntime):
             binding_id=binding.id,
             thread_id=thread.id,
             logical_turn_id=handle.id,
-            release_receipt_attempt=receipt_attempted.set,
+            release_receipt_attempt=receipt_attempted.set, reply=active.reply,
             task_feedback=active.task_feedback,
             feedback_revision=active.feedback_revision,
         )
@@ -330,7 +330,7 @@ class GoalRuntime(TurnObservationRuntime):
                     release_receipt_attempt=existing.receipt_attempted.set,
                     task_feedback=existing.task_feedback,
                     feedback_revision=existing.feedback_revision,
-                    continued=True,
+                    continued=True, reply=existing.reply,
                 )
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
@@ -439,7 +439,7 @@ class GoalRuntime(TurnObservationRuntime):
             binding_id=binding.id,
             thread_id=thread.id,
             logical_turn_id=handle.id,
-            release_receipt_attempt=receipt_attempted.set,
+            release_receipt_attempt=receipt_attempted.set, reply=active.reply,
             task_feedback=active.task_feedback,
             feedback_revision=active.feedback_revision,
         )
@@ -965,6 +965,7 @@ class GoalRuntime(TurnObservationRuntime):
             # cause the confirmed Result/Files to be discarded as stale.
             defer_slot_release_until_delivery = not retain_active
         except asyncio.CancelledError:
+            await self._retire_goal_presentation(active)
             raise
         except BaseException as caught:
             error = caught
@@ -1004,12 +1005,13 @@ class GoalRuntime(TurnObservationRuntime):
                 logical_turn_id=handle.id,
                 owner_id=active.owner_id,
                 origin=active.origin,
+                reply=active.reply,
                 cwd=active.cwd,
                 goal=persisted,
                 final_physical_turn_id=(
                     active.stream_terminal.final_physical_turn_id
                     if active.stream_terminal is not None
-                    else None
+                    else active.activity_turn_id
                 ),
                 final_turn_status=active.final_turn_status,
                 final_items=active.final_items,
@@ -1046,6 +1048,14 @@ class GoalRuntime(TurnObservationRuntime):
                 async with asyncio.timeout(
                     limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS
                 ):
+                    if active.delivery_task is not None:
+                        # Reserve half of the existing handoff window for the
+                        # final proof or observation notice on a slow transport.
+                        try:
+                            async with asyncio.timeout(limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS / 2):
+                                await active.delivery_task
+                        except TimeoutError:
+                            logger.warning("Goal rollover delivery budget exhausted")
                     await self._on_completion(outcome)
             except Exception:
                 logger.exception(
@@ -1053,6 +1063,7 @@ class GoalRuntime(TurnObservationRuntime):
                     extra={"logical_turn_id": handle.id},
                 )
         finally:
+            await self._retire_goal_presentation(active)
             if defer_slot_release_until_delivery:
                 async with self._lock(active.binding_id):
                     if self._goals.get(active.binding_id) is active:
@@ -1062,6 +1073,17 @@ class GoalRuntime(TurnObservationRuntime):
                             active.binding_id,
                             active.thread_id,
                         )
+
+    @staticmethod
+    async def _retire_goal_presentation(active: _ActiveGoal) -> None:
+        active.candidate = None
+        active.rollovers.clear()
+        task = active.delivery_task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        active.delivery_task = None
+        active.reply.retire()
 
     async def _clear_completed_goal(self, active: _ActiveGoal) -> None:
         """Clear one four-proof completed Goal exactly once and confirm absence."""
@@ -1169,6 +1191,25 @@ class GoalRuntime(TurnObservationRuntime):
                 response_materialization_retries -= 1
                 await asyncio.sleep(self._poll_interval_seconds)
                 continue
+            candidate = active.candidate
+            if candidate is not None:
+                if candidate.turn_id != terminal.final_physical_turn_id or candidate.status != turn_status:
+                    raise RuntimeError("Goal tap and final history disagree")
+                # History can omit completed items. Keep the exact tap evidence
+                # first, then the final native views, deduplicated by item ID.
+                history_files = {
+                    getattr(getattr(item, "root", item), "id", None)
+                    for item in items
+                    if getattr(getattr(item, "root", item), "type", None) in {"fileChange", "imageGeneration"}
+                    and _enum_value(getattr(getattr(item, "root", item), "status", None)) == "completed"
+                    and (getattr(getattr(item, "root", item), "type", None) != "imageGeneration"
+                         or getattr(getattr(item, "root", item), "saved_path", None))
+                }
+                items = (*tuple(item for item in candidate.file_items if item.id not in history_files), *items)
+                if final_response is None or (candidate.phase is not None and not any(
+                    _enum_value(getattr(getattr(item, "root", item), "phase", None)) == "final_answer" for item in items
+                )):
+                    final_response = candidate.final_response
             active.final_turn_status = turn_status
             active.final_items = items
             active.final_response = final_response

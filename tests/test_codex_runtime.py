@@ -8411,7 +8411,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.finish(response="done")
         await self.runtime.wait_idle()
 
-    async def test_goal_partial_answers_cross_rollover_but_not_manual_resume(self) -> None:
+    async def test_goal_partial_answers_are_scoped_to_the_observed_physical_turn(self) -> None:
         control = FakeGoalControl(self.codex)
         self.runtime._goal_control = control
         binding = self.binding()
@@ -8432,7 +8432,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, partial_answer=first))
         snapshot = self.runtime.goal_activity(binding.id)
         self.assertEqual(snapshot.physical_turn_id, "physical-two")
-        self.assertEqual(snapshot.partial_answers, (first, second))
+        self.assertEqual(snapshot.partial_answers, (second,))
         # Only the proven final physical Turn may contribute missing terminal items.
         self.codex.goal_turns[0][1].items = [ThreadItem.model_validate({
             "type": "agentMessage", "id": "unobserved-old", "phase": "partial_answer", "text": "old history",
@@ -8444,7 +8444,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.runtime.wait_idle(timeout=EXPECTED_PROGRESS_TIMEOUT))
         outcome = self.outcomes[-1]
         self.assertEqual(outcome.partial_answers, (
-            first, second, PartialAnswer(handle.thread_id, "physical-two", "last", "last stage"),
+            second, PartialAnswer(handle.thread_id, "physical-two", "last", "last stage"),
         ))
         self.assertEqual(outcome.final_response, "paused final")
         self.assertIsNone(outcome.activity)

@@ -260,18 +260,38 @@ class CompletionPresentationChannel(ChannelReplies):
         return await self._progress_cards.prepare_partial_answers(
             target=outcome.target, reply=reply,
             validate_reply=outcome.receipt.validate if outcome.receipt else None,
+            run_reply=outcome.run_reply,
         )
 
     async def _complete_task(self, outcome: TurnResult) -> None:
         if outcome.items:
             await self._deliver_with_receipts(outcome, outcome.items)
             return
+        if outcome.run_reply is None:
+            await self._complete_bounded_task(outcome)
+            return
+        ledger = PhysicalDelivery()
+        try:
+            await self._complete_bounded_task(replace(outcome, bounded_delivery=ledger))
+        finally:
+            if ledger.settle():
+                await _best_effort_update(self._reply_to_origin(outcome.origin, INCOMPLETE))
+
+    async def _complete_bounded_task(self, outcome: TurnResult) -> None:
         file_evidence = outcome.file_evidence
         silent = (outcome.allow_suppression and outcome.status == "completed"
                   and not outcome.final_response
                   and self._reply_suppression.is_suppressed(
-                      outcome.thread_id, outcome.turn_id, outcome.physical_turn_id,
+                      outcome.thread_id, outcome.target.run.turn_id if outcome.target.run else outcome.turn_id, outcome.physical_turn_id,
                   ))
+        ledger = outcome.bounded_delivery
+        if ledger:
+            for part in outcome.partial_answers:
+                ledger.partial(part)
+            if not silent:
+                ledger.expect(BODY)
+            if ledger.items and outcome.run_reply:
+                outcome.run_reply.attempted = True
         partial_delivery = await self._terminal_partials(outcome)
         if outcome.end:
             await self._present_run_end(outcome.end)
@@ -279,6 +299,8 @@ class CompletionPresentationChannel(ChannelReplies):
         prepared_response = None
         if not silent and outcome.status == "completed":
             task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence)
+            if ledger and has_file_evidence(task_files.evidence, task_files.summary):
+                ledger.expect(("files", ""))
         if outcome.task_feedback.progress_card_enabled:
             # A missing card stays silent; failure of an existing card uses
             # the original result fallback below. Successful updates return.
@@ -286,8 +308,13 @@ class CompletionPresentationChannel(ChannelReplies):
             attempt = await self._terminal_card_delivery(outcome, lambda: self._complete_task_progress_card(
                 outcome, task_files, prepared_response=prepared_response,
                 suppress_result=silent))
-            if attempt is not None and attempt.updated:
+            if attempt is not None and attempt.updated and (ledger is None or attempt.confirmed):
                 if attempt.confirmed:
+                    if outcome.run_reply is not None:
+                        items = tuple(ledger.items) if ledger else ()
+                        if ledger:
+                            ledger.record(items, "confirmed")
+                        outcome.run_reply.published(attempt.message_id, outcome.turn_id, items, bool)
                     await self._remind_task_completion(outcome, attempt.message_id)
                 return
             if outcome.receipt and attempt is not None:
@@ -544,7 +571,10 @@ class CompletionPresentationChannel(ChannelReplies):
             return
         try:
             result = await self._send_completion_reply(outcome.origin, card)
-            if result.success:
+            if outcome.bounded_delivery and receipt(result) == "confirmed":
+                outcome.bounded_delivery.record((BODY, ("files", "")), "confirmed")
+                record_sent_answer(outcome.run_reply, None, outcome.turn_id, (BODY,), result)
+            if result.success and (outcome.bounded_delivery is None or receipt(result) == "confirmed"):
                 return
             logger.warning("completed Turn file card was not confirmed", extra={"turn_id": outcome.turn_id})
         except asyncio.CancelledError:
@@ -579,10 +609,12 @@ class CompletionPresentationChannel(ChannelReplies):
                 _normalized_thread_text(name, max_chars=80)
                 or f"会话 {outcome.target.key.owner_id[:8]}"
             )
+        if outcome.run_reply and source_message_id is None:
+            card_message_id = outcome.run_reply.mention_target(card_message_id)
         await send_completion_mention(
             self._channel, scope=scope or self._scope(outcome.origin),
             card_message_id=card_message_id, user_id=user_id,
-            operation_id=outcome.turn_id,
+            operation_id=outcome.target.run.turn_id if outcome.target.run else outcome.turn_id,
             source_message_id=source_message_id,
             session_label=session_label,
         )
@@ -639,6 +671,8 @@ class CompletionPresentationChannel(ChannelReplies):
                         content = unconfirmed_content
                 if outcome.receipt:
                     outcome.receipt.partials(confirmed)
+                if outcome.bounded_delivery and confirmed:
+                    outcome.bounded_delivery.record(tuple(("partial", p.item_id) for p in outcome.partial_answers), "confirmed")
                 await final_reply(content)
         except TimeoutError:
             # A timed-out post may already have published SDK chunks. Do not
@@ -654,8 +688,14 @@ class CompletionPresentationChannel(ChannelReplies):
         allow_completion_mention: bool = True,
     ) -> None:
         mention = outcome.mention_user_id
+        def record(result: SendResult) -> None:
+            if outcome.bounded_delivery and receipt(result) == "confirmed":
+                outcome.bounded_delivery.record((BODY,), "confirmed")
+                record_sent_answer(outcome.run_reply, None, outcome.turn_id, (BODY,), result)
+
         await self._reply(
             outcome.origin if origin is None else origin,
             content,
             completion_mention_user_id=mention if allow_completion_mention else None,
+            on_result=record if outcome.bounded_delivery else None,
         )

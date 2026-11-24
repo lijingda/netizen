@@ -10,10 +10,10 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from ..bindings import BindingTaskFeedback
 from ..error_messages import describe_error
-from ..ordinary_sessions import OrdinaryConclusion, OrdinarySessionPort
+from ..ordinary_sessions import LogicalReply, OrdinaryConclusion, OrdinarySessionPort
 from ..runtime.codex_contracts import GoalOutcome
 from ..runtime.codex_replies import outcome_file_evidence
-from ..runtime.contracts import GoalFinalizationStatus, GoalStateUnknown, SideTurnOutcome
+from ..runtime.contracts import GoalActivitySnapshot, GoalFinalizationStatus, GoalStateUnknown, SideTurnOutcome
 from ..codex_runtime import CodexRuntime
 from .app_values import (
     _goal_reply_activity,
@@ -50,8 +50,12 @@ class CodexReplyEvents:
         reply_partial: Callable[[OutboundPost], Awaitable[SendResult]],
         validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None,
         goal: bool = False,
+        logical_turn_id: str | None = None,
+        opening: GoalActivitySnapshot | None = None,
+        run_reply: LogicalReply | None = None,
     ) -> TurnOpened:
-        target = ReplyTarget(key, origin, key)
+        run = replace(key, turn_id=logical_turn_id) if logical_turn_id else key
+        target = ReplyTarget(key, origin, run)
         owner, thread, turn = key.index
 
         def read() -> Activity | None:
@@ -60,13 +64,15 @@ class CodexReplyEvents:
                     owner, thread_id=thread, turn_id=turn, refresh_plan=False
                 )
             if goal:
-                snapshot = self.runtime.goal_activity(owner, thread_id=thread, logical_turn_id=turn)
+                snapshot = self.runtime.goal_activity(owner, thread_id=thread, logical_turn_id=run.turn_id)
+                if snapshot is None or (snapshot.physical_turn_id or run.turn_id) != turn:
+                    snapshot = opening
                 return _goal_reply_activity(snapshot) if snapshot is not None else None
             return self.ordinary.turn_activity(owner, thread_id=thread, turn_id=turn)
 
         def observe() -> ActivityChanged | None:
             snapshot = read()
-            return ActivityChanged.from_snapshot(target, snapshot, presentation_id=turn if goal else None)
+            return ActivityChanged.from_snapshot(target, snapshot)
 
         def retain() -> bool:
             if key.side:
@@ -81,7 +87,7 @@ class CodexReplyEvents:
 
         return TurnOpened(
             target, DeliveryPolicy.BOUNDED_FALLBACK, feedback, observe, retain,
-            reply, reply_partial, validate_reply, reuse_existing=goal,
+            reply, reply_partial, validate_reply, reuse_existing=goal, run_reply=run_reply,
         )
 
     @classmethod
@@ -93,7 +99,8 @@ class CodexReplyEvents:
         side = isinstance(outcome, SideTurnOutcome)
         owner = outcome.side_id if isinstance(outcome, SideTurnOutcome) else outcome.binding_id
         key = PresentationKey(owner, outcome.thread_id, outcome.turn_id, side)
-        target = ReplyTarget(key, outcome.origin, key)
+        run = replace(key, turn_id=native.logical_turn_id) if isinstance(native, GoalOutcome) and native.logical_turn_id else key
+        target = ReplyTarget(key, outcome.origin, run)
         status, content = terminal_view(
             outcome.status, _task_has_error(outcome),
             failure=lambda: _task_failure_text(outcome),
@@ -104,12 +111,8 @@ class CodexReplyEvents:
             evidence = native.file_evidence
         else:
             evidence = partial(outcome_file_evidence, native)
-        # The existing Goal tap attributes these items to this exact stream. Only
-        # their display key is shared; item identity retains the native physical ID.
-        parts = tuple(
-            target.partial(p, presentation_id=key.turn_id if isinstance(native, GoalOutcome) else None)
-            for p in outcome.partial_answers
-        )
+        parts = tuple(target.partial(p) for p in outcome.partial_answers)
+        continues = isinstance(native, GoalOutcome) and native.run_continues
         return TurnResult(
             target=target,
             status=status,
@@ -124,20 +127,19 @@ class CodexReplyEvents:
             physical_turn_id=(native.final_physical_turn_id or key.turn_id)
             if isinstance(native, GoalOutcome)
             else key.turn_id,
-            run_continues=False,
+            run_continues=continues,
+            run_reply=native.reply if isinstance(native, GoalOutcome) else None,
             allow_suppression=not isinstance(native, GoalOutcome)
             or (
                 native.error is None
                 and native.finalization_error is None
                 and native.finalization is not GoalFinalizationStatus.UNKNOWN
             ),
-            end=RunEnded(target, status, _outcome_completion_mention_user_id(outcome)),
+            end=None if continues else RunEnded(target, status, _outcome_completion_mention_user_id(outcome)),
         )
 
     @staticmethod
     def goal_conclusion(outcome: GoalOutcome) -> OrdinaryConclusion:
-        # The SDK logical stream is one reply lifecycle. Its identifier is only
-        # the presenter key; Files always retain the verified final physical ID.
         origin = outcome.origin
         terminal = outcome.final_physical_turn_id is not None and outcome.final_turn_status in {
             "completed",
@@ -162,10 +164,12 @@ class CodexReplyEvents:
                 notices.append(f"Goal 已完成，但自动结束结果未确认：{detail}")
             if notices:
                 response = "\n\n".join(filter(None, [response, *notices]))
+        turn_id = outcome.final_physical_turn_id or (outcome.activity.physical_turn_id if outcome.activity else None) or outcome.logical_turn_id or "goal"
+        activity = _goal_reply_activity(outcome.activity) if outcome.activity is not None else None
         return OrdinaryConclusion(
             binding_id=outcome.binding_id,
             thread_id=outcome.thread_id,
-            turn_id=outcome.logical_turn_id or outcome.final_physical_turn_id or "goal",
+            turn_id=turn_id,
             owner_id=outcome.owner_id,
             origin=origin,
             cwd=outcome.cwd,
@@ -179,6 +183,6 @@ class CodexReplyEvents:
                 else replace(outcome.task_feedback, completion_mention_enabled=False)
             ),
             feedback_revision=outcome.feedback_revision,
-            activity=None if outcome.activity is None else _goal_reply_activity(outcome.activity),
-            partial_answers=outcome.partial_answers,
+            activity=activity if activity and activity.turn_id == turn_id else None,
+            partial_answers=tuple(p for p in outcome.partial_answers if p.turn_id == turn_id and p.thread_id == outcome.thread_id),
         )

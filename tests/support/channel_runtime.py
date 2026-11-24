@@ -170,6 +170,9 @@ class StubRuntime:
     def set_completion_handler(self, handler) -> None:
         self.completion = handler
 
+    def set_goal_rollover_handler(self, handler) -> None:
+        self.goal_rollover_handler = handler
+
     def set_question_handler(self, handler) -> None:
         self.questions = handler
 

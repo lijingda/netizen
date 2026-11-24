@@ -134,15 +134,13 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def start_goal_reply(self, outcome, *, scope=None, binding=None):
         scope, binding = scope or self.scope, binding or self.binding
         snapshot = replace(goal_activity_snapshot(binding_id=binding.id),
-            thread_id=outcome.thread_id, logical_turn_id=outcome.logical_turn_id)
+            thread_id=outcome.thread_id, logical_turn_id=outcome.logical_turn_id,
+            physical_turn_id=outcome.final_physical_turn_id or outcome.logical_turn_id)
         self.runtime.goal_activity_values[binding.id] = snapshot
         if outcome.task_feedback.progress_card_enabled:
             self.channel.reply_results.append(sent_result("om_progress", chat_id=scope.chat_id,
                                                           thread_id=scope.topic_id))
-        self.assertTrue(await self.app._present_running_goal(
-            binding=binding, origin=outcome.origin,
-            submission=GoalSubmission(binding.id, outcome.thread_id, outcome.logical_turn_id,
-                lambda: None, task_feedback=outcome.task_feedback)))
+        self.assertTrue(await self.app._open_goal_turn(snapshot, outcome.task_feedback, outcome.origin, outcome.reply))
         return replace(outcome, activity=snapshot)
 
     def assert_reminder(self, *, enabled=True, card_id="om_progress", topic=False):
@@ -750,7 +748,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 ))
                 origin = self.runtime.resume_goal_calls[-1]["origin"]
                 await self.app.handle_completion(self.goal_outcome(
-                    origin=origin, final_items=(file_change_item(str(path)),), task_feedback=feedback,
+                    origin=origin, final_physical_turn_id="goal-one", final_items=(file_change_item(str(path)),), task_feedback=feedback,
                 ))
                 result = (OutboundCard(card=self.channel.updates[-1][1]) if progress
                           else self.channel.replies[-1][1])

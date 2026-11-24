@@ -18,7 +18,6 @@ from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.runtime.codex_contracts import GoalOutcome
 from netizen_cli.runtime.contracts import (
     GoalFinalizationStatus,
-    GoalSubmission,
     SideSessionSnapshot,
     SideSessionState,
     SideTurnOutcome,
@@ -135,13 +134,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 physical_turn_id=outcome.final_physical_turn_id,
             )
             self.runtime.goal_activity_values[self.binding.id] = snapshot
-            started = await self.app._present_running_goal(
-                binding=self.binding, origin=outcome.origin,
-                submission=GoalSubmission(
-                    self.binding.id, outcome.thread_id, outcome.logical_turn_id,
-                    lambda: None, task_feedback=outcome.task_feedback,
-                ),
-            )
+            started = await self.app._open_goal_turn(snapshot, outcome.task_feedback, outcome.origin, outcome.reply)
         else:
             snapshot = turn_activity_snapshot(
                 binding_id=self.binding.id, thread_id=outcome.thread_id, turn_id=outcome.turn_id,
@@ -180,12 +173,15 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 await self.suppress(outcome)
                 if isinstance(outcome, GoalOutcome):
                     turn_id = outcome.logical_turn_id
+                    await self.app._reactions.start(turn_id, self.origin.id, pulse_enabled=True)
                     failed = replace(outcome, final_physical_turn_id=None, error=UnformattableError())
                 else:
                     turn_id = outcome.turn_id
                     await self.app._reactions.start(turn_id, self.origin.id, pulse_enabled=True)
                     failed = replace(outcome, error=UnformattableError())
-                self.assertIn((self.binding.id, outcome.thread_id, turn_id), self.app._progress_cards._sessions)
+                self.assertIn((self.binding.id, outcome.thread_id, outcome.activity.turn_id
+                               if isinstance(outcome, TurnOutcome) else outcome.final_physical_turn_id),
+                              self.app._progress_cards._sessions)
                 pulse = self.app._reactions._pulses[turn_id]
                 running_ids = (pulse.typing_reaction_id, pulse.thinking_reaction_id)
                 self.channel.reactions.clear()
@@ -773,15 +769,14 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.channel.updates), int(progress))
                 self.assert_cleaned(outcome)
 
-    async def test_goal_silent_final_delivers_partial_answers_from_every_physical_turn(self):
+    async def test_goal_silent_final_delivers_only_current_physical_turn_partials(self):
         earlier = PartialAnswer("native-one", "goal-turn-one", "earlier", "retained earlier answer")
         current = PartialAnswer("native-one", "goal-turn-final", "current", "current physical Turn answer")
         outcome = self.goal_outcome(partial_answers=(earlier, current))
         await self.suppress(outcome)
         await self.app.handle_completion(outcome)
-        self.assertEqual(len(self.channel.replies), 2)
-        self.assertIn(earlier.text, self.channel.replies[0][1].markdown)
-        self.assertIn(current.text, self.channel.replies[1][1].markdown)
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertIn(current.text, self.channel.replies[0][1].markdown)
         self.assert_cleaned(outcome)
 
     async def test_goal_control_and_finalization_errors_restore_original_answer_and_files(self):

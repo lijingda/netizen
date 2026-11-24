@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import replace
 
 
 from ..partial_answers import PartialAnswer, partial_answers_from_items
-from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot
+from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot, GoalOutcome, GoalRollover
+from ..turn_patch_children import TaskPatchChildren
 from .contracts import (
+    GoalStateUnknown,
     SideSessionState,
     ActiveTurnSnapshot,
     TurnProgressSnapshot,
@@ -435,6 +438,32 @@ class TurnActivityRuntime(NativeQueryRuntime):
             tuple(active.partial_answers.values()),
         )
 
+    def _intermediate_goal_outcome(self, active: _ActiveGoal) -> GoalOutcome:
+        snapshot = self._goal_activity_snapshot(active)
+        facts = active.candidate
+        return GoalOutcome(
+            binding_id=active.binding_id, thread_id=active.thread_id, logical_turn_id=snapshot.logical_turn_id,
+            owner_id=active.owner_id, origin=active.origin, cwd=active.cwd, reply=active.reply, run_continues=True,
+            task_feedback=active.task_feedback, feedback_revision=active.feedback_revision,
+            final_physical_turn_id=snapshot.physical_turn_id, final_turn_status=facts.status if facts else None,
+            final_items=facts.file_items if facts else (), final_response=facts.final_response if facts else None,
+            turn_diff=facts.turn_diff if facts else None, activity=snapshot, partial_answers=snapshot.partial_answers,
+            patch_children=TaskPatchChildren(complete=facts is not None and not facts.has_child_work),
+            error=None if facts else GoalStateUnknown("未能确认本轮终态；本轮观察已停止。"),
+        )
+
+    async def _deliver_goal_rollovers(self, active: _ActiveGoal) -> None:
+        # No Feishu I/O runs in the native iterator. The receipt barrier orders
+        # even a rollover observed before the initial card send completes.
+        await active.receipt_attempted.wait()
+        handler = self._on_goal_rollover
+        while handler is not None and active.rollovers:
+            rollover = active.rollovers.popleft()
+            try:
+                await handler(rollover)
+            except Exception:
+                logger.exception("physical Goal presentation failed", extra={"turn_id": rollover.opening.physical_turn_id})
+
     def _apply_goal_activity_projection(
         self,
         active: _ActiveGoal,
@@ -455,9 +484,16 @@ class TurnActivityRuntime(NativeQueryRuntime):
         if projection.turn_started and turn_id != active.activity_turn_id:
             if turn_id in active.activity_turn_ids:
                 return
+            previous = self._intermediate_goal_outcome(active) if active.activity_turn_id and self._on_goal_rollover else None
             active.activity_turn_ids.add(turn_id)
             active.activity_turn_id = turn_id
             self._reset_activity(active)
+            active.partial_answers.clear()
+            active.candidate = None
+            if previous is not None:
+                active.rollovers.append(GoalRollover(previous, self._goal_activity_snapshot(active)))
+                if active.delivery_task is None or active.delivery_task.done():
+                    active.delivery_task = asyncio.create_task(self._deliver_goal_rollovers(active))
         if turn_id != active.activity_turn_id:
             # A late event from an earlier physical Turn can never repopulate
             # the new Turn's Activity Module.
@@ -471,6 +507,9 @@ class TurnActivityRuntime(NativeQueryRuntime):
             self._deliver_question(active, turn_id, projection.question)
         if projection.partial_answer is not None:
             self._apply_partial_answers(active, (projection.partial_answer,))
+        if projection.goal_terminal is not None and active.candidate is None:
+            active.candidate = projection.goal_terminal
+            self._apply_partial_answers(active, active.candidate.partial_answers)
         if self._goal_activity_visible_state(active) != before:
             active.activity_revision += 1
 

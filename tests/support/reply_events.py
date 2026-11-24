@@ -15,11 +15,11 @@ def codex_result(outcome):
     return CodexReplyEvents.result(outcome)
 
 
-def terminal_answers(target, items, *, goal=False):
+def terminal_answers(target, items):
     return TurnResult(
         target=target, status="completed", content="", final_response=None,
         task_feedback=BindingTaskFeedback(), cwd=None, activity=None,
-        partials=tuple(target.partial(item, presentation_id=target.key.turn_id if goal else None) for item in items),
+        partials=tuple(target.partial(item) for item in items),
         file_evidence=FileEvidence, file_binding_id=target.key.owner_id, physical_turn_id=target.key.turn_id,
         allow_suppression=False, run_continues=False, end=None,
     )

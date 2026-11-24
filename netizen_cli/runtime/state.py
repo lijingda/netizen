@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -32,10 +33,11 @@ from ..domain import (
     NativeCapability,
 )
 from ..model_settings import TurnModelSettings
+from ..ordinary_sessions import LogicalReply
 from ..partial_answers import PartialAnswer
 from ..progress_card_settings import ProgressCardSettings
 from .thread_naming import ThreadNamer
-from .codex_contracts import RuntimeOutcome, CompletionHandler
+from .codex_contracts import RuntimeOutcome, CompletionHandler, GoalRollover
 from .contracts import (
     NativeTurnHandle,
     NativeThread,
@@ -69,6 +71,7 @@ from ..sdk_gap_adapter import (
 )
 from ..terminal_cleanup import BackgroundTerminalInspector, TerminalCleanup
 from ..turn_activity import (
+    GoalTurnFacts,
     TurnActivityEntrySnapshot,
     TurnPlanStepSnapshot,
 )
@@ -187,6 +190,10 @@ class _ActiveGoal:
     goal_cleared: bool = False
     generation_created_at: int | None = None
     generation_token_budget: int | None = None
+    reply: LogicalReply = field(default_factory=LogicalReply)
+    candidate: GoalTurnFacts | None = None
+    rollovers: deque[GoalRollover] = field(default_factory=deque)
+    delivery_task: asyncio.Task[None] | None = None
     stream_terminal: GoalStreamTerminal | None = None
     final_turn_status: str | None = None
     final_items: tuple[object, ...] = ()
@@ -337,6 +344,7 @@ class RuntimeState:
     _background_terminal_inspector: BackgroundTerminalInspector | None
     _thread_delete_control: ThreadDeleteControl | None
     _progress_card_defaults: Callable[[], ProgressCardSettings]
+    _on_goal_rollover: Callable[[GoalRollover], Awaitable[None]] | None = None
     _on_completion: CompletionHandler
     _on_question: QuestionHandler | None
     _on_input_received: InputReceivedHandler | None
@@ -368,6 +376,9 @@ class RuntimeState:
 
     def set_completion_handler(self, handler: CompletionHandler) -> None:
         self._on_completion = handler
+
+    def set_goal_rollover_handler(self, handler: Callable[[GoalRollover], Awaitable[None]]) -> None:
+        self._on_goal_rollover = handler
 
     def set_question_handler(self, handler: QuestionHandler) -> None:
         self._on_question = handler

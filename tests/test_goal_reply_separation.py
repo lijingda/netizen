@@ -1,7 +1,6 @@
 """Goal management is static; each SDK logical execution uses ordinary replies."""
 from __future__ import annotations
 
-import asyncio
 import json
 import unittest
 from dataclasses import replace
@@ -16,9 +15,10 @@ from netizen_cli.domain import (
     NativeCapability, ScopeKind,
 )
 from netizen_cli.partial_answers import PartialAnswer
-from netizen_cli.runtime.codex_contracts import ActiveGoalSnapshot, GoalOutcome
+from netizen_cli.runtime.codex_contracts import ActiveGoalSnapshot, GoalOutcome, GoalRollover
 from netizen_cli.runtime.contracts import GoalFinalizationStatus, GoalSubmission
 from tests.support.presenter_traces import expect_presenter_trace
+from tests.test_goal_presentation_traces import REFERENCE
 from tests.support.channel_cards import _elements, direct_button_event
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -50,7 +50,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         self.binding = self.fx.store.get(binding.id)
         self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
         self.runtime.goal_snapshot_value = native_goal()
-        self.activity = goal_activity_snapshot(binding_id=binding.id)
+        self.activity = replace(goal_activity_snapshot(binding_id=binding.id), physical_turn_id="goal-one")
         self.runtime.goal_activity_values[binding.id] = self.activity
         self.feedback = BindingTaskFeedback()
         self.release_count = 0
@@ -67,7 +67,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         values = dict(
             binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
             owner_id="ou_user", origin=self.origin, goal=native_goal(GoalStatus.COMPLETE),
-            final_physical_turn_id="physical-final", final_turn_status="completed",
+            final_physical_turn_id=self.activity.physical_turn_id, final_turn_status="completed",
             final_response="final answer", task_feedback=self.feedback, activity=self.activity,
             finalization=GoalFinalizationStatus.CLEARED,
         )
@@ -188,33 +188,30 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         await self.start(progress=True)
         await self.assert_files_page()
 
-    async def test_rollover_partials_share_one_card_through_final_files_page(self):
-        expect_presenter_trace(self, self.fx, "goal_rollover_and_paging")
-        # Native item IDs can recur in the next physical Turn.
-        first = PartialAnswer("native-one", "physical-first", "item-1", "first partial")
-        second = PartialAnswer("native-one", "physical-final", "item-1", "second partial")
-        self.runtime.goal_activity_values[self.binding.id] = replace(
-            self.activity, physical_turn_id=first.turn_id, partial_answers=(first,),
-        )
-        await self.start(progress=True)
-        self.activity = replace(
-            self.activity, revision=2, physical_turn_id=second.turn_id, partial_answers=(first, second),
-        )
+    async def rollover(self, first, second):
+        previous = self.outcome(final_response="first final", partial_answers=(first,), run_continues=True)
+        self.activity = replace(self.activity, physical_turn_id=second.turn_id, partial_answers=(second,), revision=2)
         self.runtime.goal_activity_values[self.binding.id] = self.activity
-        async with asyncio.timeout(5):
-            while not self.channel.updates:
-                await asyncio.sleep(0.01)
-        self.assertEqual(self.channel.updates[0][0], "om_task")
-        for partial in (first, second):
-            self.assertIn(partial.text, rendered(self.channel.updates[0][1]))
-        await self.assert_files_page(partials=(first, second))
+        await self.app.handle_goal_rollover(GoalRollover(previous, self.activity))
 
-    async def assert_files_page(self, *, partials=()):
+    async def test_rollover_partials_stay_on_their_own_cards_through_file_paging(self):
+        expect_presenter_trace(self, self.fx, "goal_rollover_and_paging", reference=REFERENCE)
+        first = PartialAnswer("native-one", "goal-one", "item-1", "first partial")
+        second = PartialAnswer("native-one", "physical-final", "item-1", "second partial")
+        await self.start(progress=True)
+        self.channel.reply_results.append(sent_result("om_final", chat_id="oc_direct"))
+        await self.rollover(first, second)
+        self.assertEqual(self.channel.updates[0][0], "om_task")
+        self.assertIn(first.text, rendered(self.channel.updates[0][1]))
+        self.assertNotIn(second.text, rendered(self.channel.updates[0][1]))
+        await self.assert_files_page(partials=(second,), card_id="om_final")
+
+    async def assert_files_page(self, *, partials=(), card_id="om_task"):
         paths = [self.fx.project / f"goal-{index}.txt" for index in range(10)]
         for path in paths:
             path.write_text("content")
         self.channel.send_results.append(sent_result(
-            "om_reminder", chat_id="oc_direct", parent_id="om_task", root_id="om_goal",
+            "om_reminder", chat_id="oc_direct", parent_id=card_id, root_id="om_goal",
         ))
         await self.app.handle_completion(self.outcome(
             final_items=(file_change_item(*(str(p) for p in paths)),), cwd=self.fx.project,
@@ -222,11 +219,11 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         ))
         card = OutboundCard(card=self.channel.updates[-1][1])
         value = button(card, "turn-file.page")
-        self.assertEqual(value["turn_id"], "turn:v1:physical-final")
+        self.assertEqual(value["turn_id"], "turn:v1:" + self.activity.physical_turn_id)
         self.assertIsNone(value.get("reply", {}).get("goal"))
         self.runtime.goal_snapshot_calls.clear()
         intent = decode_turn_file_action(
-            app_id="cli_test", message_id="om_task", callback_chat_id="oc_direct",
+            app_id="cli_test", message_id=card_id, callback_chat_id="oc_direct",
             sender_id="ou_user", tag="button", form_value={"turn_file_page": "1"}, value=value,
         )
         await self.app._turn_file_action(intent)
@@ -237,26 +234,21 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(partial.text, rendered(self.channel.updates[-1][1]))
         self.assertEqual(self.app._progress_cards._sessions, {})
 
-    async def test_plain_goal_delivers_rollover_partials_then_final(self):
-        expect_presenter_trace(self, self.fx, "goal_plain_rollover")
-        first = PartialAnswer("native-one", "physical-first", "item", "first partial")
+    async def test_plain_goal_delivers_each_partial_and_final_once(self):
+        expect_presenter_trace(self, self.fx, "goal_plain_rollover", reference=REFERENCE)
+        first = PartialAnswer("native-one", "goal-one", "item", "first partial")
         second = PartialAnswer("native-one", "physical-final", "item", "second partial")
-        self.runtime.goal_activity_values[self.binding.id] = replace(
-            self.activity, physical_turn_id=first.turn_id, partial_answers=(first,),
-        )
         await self.start()
-        async with asyncio.timeout(5):
-            while len(self.channel.replies) < 2:
-                await asyncio.sleep(.01)
-        self.channel.reply_results.append(sent_result("om_partial_two", chat_id="oc_direct"))
-        await self.app.handle_completion(self.outcome(partial_answers=(first, second)))
-        self.assertEqual([post.markdown for _, post in self.channel.replies[1:3]],
-                         ["**阶段性答案**\n\nfirst partial", "**阶段性答案**\n\nsecond partial"])
-        self.assertIn("final answer", str(self.channel.replies[3][1]))
+        self.channel.reply_results.extend(sent_result(f"om_post_{i}", chat_id="oc_direct") for i in range(4))
+        await self.rollover(first, second)
+        await self.app.handle_completion(self.outcome(partial_answers=(second,)))
+        posts = [getattr(post, "markdown", post) for _, post in self.channel.replies[1:]]
+        self.assertEqual(posts, ["**阶段性答案**\n\nfirst partial", "first final",
+                                 "**阶段性答案**\n\nsecond partial", "final answer"])
 
     async def test_interrupted_goal_preserves_earlier_partial_without_files_or_mention(self):
-        expect_presenter_trace(self, self.fx, "goal_interrupted")
-        earlier = PartialAnswer("native-one", "physical-first", "item", "earlier partial")
+        expect_presenter_trace(self, self.fx, "goal_interrupted", reference=REFERENCE)
+        earlier = PartialAnswer("native-one", "goal-one", "item", "earlier partial")
         self.runtime.goal_activity_values[self.binding.id] = replace(
             self.activity, physical_turn_id=earlier.turn_id, partial_answers=(earlier,),
         )

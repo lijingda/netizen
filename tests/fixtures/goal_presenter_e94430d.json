@@ -839,6 +839,246 @@
       {}
     ],
     [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "本轮已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**最近操作**"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 修改文件 · 新增 first.txt"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "first file"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnfilesv4",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**本轮文件** · 共 1 个 · 第 1/1 页\n累计修改 <font color='green'>+1</font> <font color='red'>-0</font>\n<font color='grey'>行数累计成功的文件修改，重复修改会重复计数；统计不完整时省略总计或相应文件的数字。</font>\n<font color='grey'>点击“发送”后，文件将以图片或文件消息发送到本卡片话题。</font>"
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `first.txt`  <font color='green'>+1</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:00000000-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:goal-turn-1",
+                                      "path": "<root>/first.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "本轮已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
       "add_reaction",
       [
         "om_goal",
@@ -857,7 +1097,7 @@
     [
       "update_card",
       [
-        "om_reply_2",
+        "om_reply_3",
         {
           "schema": "2.0",
           "config": {
@@ -1039,11 +1279,11 @@
           ]
         },
         {
-          "reply_to": "om_reply_2",
+          "reply_to": "om_reply_3",
           "reply_in_thread": false,
           "receive_id": null,
           "receive_id_type": "chat_id",
-          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "uuid": "completion-b39066261b686928f5fe5edb356bb0cb",
           "reply_target_gone": "fail",
           "resolve_mentions_in_text": false
         }
@@ -1783,6 +2023,192 @@
       {}
     ],
     [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "本轮已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "first partial"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "first answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "本轮已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
       "add_reaction",
       [
         "om_goal",
@@ -1801,7 +2227,7 @@
     [
       "update_card",
       [
-        "om_reply_2",
+        "om_reply_3",
         {
           "schema": "2.0",
           "config": {
@@ -1860,10 +2286,6 @@
                       {
                         "tag": "markdown",
                         "content": "**阶段性答案**"
-                      },
-                      {
-                        "tag": "markdown",
-                        "content": "first partial"
                       },
                       {
                         "tag": "markdown",
@@ -1933,11 +2355,11 @@
           ]
         },
         {
-          "reply_to": "om_reply_2",
+          "reply_to": "om_reply_3",
           "reply_in_thread": false,
           "receive_id": null,
           "receive_id_type": "chat_id",
-          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "uuid": "completion-b39066261b686928f5fe5edb356bb0cb",
           "reply_target_gone": "fail",
           "resolve_mentions_in_text": false
         }
@@ -3389,22 +3811,6 @@
       {}
     ],
     [
-      "add_reaction",
-      [
-        "om_goal",
-        "DONE"
-      ],
-      {}
-    ],
-    [
-      "remove_reaction",
-      [
-        "om_goal",
-        "reaction-1"
-      ],
-      {}
-    ],
-    [
       "reply",
       [
         {
@@ -3419,6 +3825,34 @@
           "title": null,
           "mentions": []
         }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        "first answer"
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
       ],
       {}
     ],
@@ -4871,6 +5305,192 @@
       {}
     ],
     [
+      "update_card",
+      [
+        "om_reply_2",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "本轮已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "first partial"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "first answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "本轮已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
       "add_reaction",
       [
         "om_goal",
@@ -4889,7 +5509,7 @@
     [
       "update_card",
       [
-        "om_reply_2",
+        "om_reply_3",
         {
           "schema": "2.0",
           "config": {
@@ -4948,10 +5568,6 @@
                       {
                         "tag": "markdown",
                         "content": "**阶段性答案**"
-                      },
-                      {
-                        "tag": "markdown",
-                        "content": "first partial"
                       },
                       {
                         "tag": "markdown",
@@ -5021,13 +5637,2434 @@
           ]
         },
         {
-          "reply_to": "om_reply_2",
+          "reply_to": "om_reply_3",
           "reply_in_thread": false,
           "receive_id": null,
           "receive_id_type": "chat_id",
-          "uuid": "completion-9aa1c603866d28ce4a80716c44691d31",
+          "uuid": "completion-b39066261b686928f5fe5edb356bb0cb",
           "reply_target_gone": "fail",
           "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ]
+  ],
+  "goal_plain_rollover": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：10 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "goal_generation": "gDOzzyFemtX_fFCmKGkYsqmM4VR_HTXxsLiuRkV7Ab8",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "goal_generation": "gDOzzyFemtX_fFCmKGkYsqmM4VR_HTXxsLiuRkV7Ab8",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "11111111 · test"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "**阶段性答案**\n\nfirst partial",
+          "post": null,
+          "title": null,
+          "mentions": []
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        "first final"
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "**阶段性答案**\n\nsecond partial",
+          "post": null,
+          "title": null,
+          "mentions": []
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "post",
+          "markdown": "final answer",
+          "post": null,
+          "title": null,
+          "mentions": [
+            {
+              "open_id": "ou_user",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        }
+      ],
+      {}
+    ]
+  ],
+  "goal_interrupted": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：10 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "goal_generation": "gDOzzyFemtX_fFCmKGkYsqmM4VR_HTXxsLiuRkV7Ab8",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "goal_generation": "gDOzzyFemtX_fFCmKGkYsqmM4VR_HTXxsLiuRkV7Ab8",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "11111111 · test"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                },
+                {
+                  "tag": "column_set",
+                  "element_id": "partialanswerv1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "markdown",
+                          "content": "**阶段性答案**"
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "earlier partial"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "CrossMark"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_task",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已中断"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已中断"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "earlier partial"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。前台工具进程不受此接口保证，可能仍在运行。"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已中断"
+            },
+            "template": "orange",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ]
+  ],
+  "goal_rollover_and_paging": [
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "Goal 正在执行"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "column_set",
+                  "element_id": "goalmodulev1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "column_set",
+                          "background_style": "blue-50",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "padding": "8px",
+                              "elements": [
+                                {
+                                  "tag": "div",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "Goal 已启动。此卡为查询时的状态，可点击刷新查看最新状态。"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "**状态**：`goal-active`\n**Objective**：ship safely\n**Tokens**：10 / 未设置"
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "暂停 Goal"
+                                  },
+                                  "type": "primary",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.pause",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "goal_generation": "gDOzzyFemtX_fFCmKGkYsqmM4VR_HTXxsLiuRkV7Ab8",
+                                        "expected_goal_status": "active",
+                                        "nonce": "00000000000000000000000000000001"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "暂停 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "暂停后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "结束 Goal"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.clear",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "goal_generation": "gDOzzyFemtX_fFCmKGkYsqmM4VR_HTXxsLiuRkV7Ab8",
+                                        "expected_goal_status": "active"
+                                      }
+                                    }
+                                  ],
+                                  "confirm": {
+                                    "title": {
+                                      "tag": "plain_text",
+                                      "content": "结束 Goal"
+                                    },
+                                    "text": {
+                                      "tag": "plain_text",
+                                      "content": "移除目标并停止后续自动续跑；正在执行的任务会继续。"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "tag": "column_set",
+                          "flex_mode": "none",
+                          "columns": [
+                            {
+                              "tag": "column",
+                              "width": "weighted",
+                              "weight": 1,
+                              "elements": [
+                                {
+                                  "tag": "button",
+                                  "text": {
+                                    "tag": "plain_text",
+                                    "content": "刷新 Goal 状态"
+                                  },
+                                  "type": "default",
+                                  "behaviors": [
+                                    {
+                                      "type": "callback",
+                                      "value": {
+                                        "v": 4,
+                                        "intent": "goal.refresh",
+                                        "chat_id": "oc_direct",
+                                        "scope_kind": "direct",
+                                        "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                        "nonce": "00000000000000000000000000000002"
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "Codex Goal"
+              },
+              "subtitle": {
+                "tag": "plain_text",
+                "content": "11111111 · test"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "Typing"
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_task",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "本轮已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "first partial"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "first final"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "本轮已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "reply",
+      [
+        {
+          "messageId": "om_goal",
+          "chatId": "oc_direct",
+          "threadId": null
+        },
+        {
+          "kind": "card",
+          "card": {
+            "schema": "2.0",
+            "config": {
+              "update_multi": true,
+              "width_mode": "default",
+              "summary": {
+                "content": "任务正在执行，进度会逐步更新"
+              }
+            },
+            "body": {
+              "elements": [
+                {
+                  "tag": "collapsible_panel",
+                  "element_id": "turnprogressv1",
+                  "expanded": true,
+                  "border": {
+                    "color": "grey",
+                    "corner_radius": "8px"
+                  },
+                  "padding": "8px 12px 12px 12px",
+                  "vertical_spacing": "8px",
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "执行过程 · 正在执行"
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "down-small-ccm_outlined",
+                      "size": "16px 16px"
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180
+                  },
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：Codex 尚未生成"
+                    }
+                  ]
+                },
+                {
+                  "tag": "column_set",
+                  "element_id": "partialanswerv1",
+                  "flex_mode": "none",
+                  "background_style": "grey-50",
+                  "columns": [
+                    {
+                      "tag": "column",
+                      "width": "weighted",
+                      "weight": 1,
+                      "padding": "12px",
+                      "vertical_spacing": "8px",
+                      "elements": [
+                        {
+                          "tag": "markdown",
+                          "content": "**阶段性答案**"
+                        },
+                        {
+                          "tag": "markdown",
+                          "content": "second partial"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "direction": "vertical",
+              "padding": "12px 12px 20px 12px",
+              "vertical_spacing": "12px"
+            },
+            "header": {
+              "title": {
+                "tag": "plain_text",
+                "content": "任务进行中"
+              },
+              "template": "blue",
+              "icon": {
+                "tag": "standard_icon",
+                "token": "todo_colorful"
+              }
+            }
+          },
+          "card_id": null
+        }
+      ],
+      {}
+    ],
+    [
+      "add_reaction",
+      [
+        "om_goal",
+        "DONE"
+      ],
+      {}
+    ],
+    [
+      "remove_reaction",
+      [
+        "om_goal",
+        "reaction-1"
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_final",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "second partial"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "final answer"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnfilesv4",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**本轮文件** · 共 10 个 · 第 1/2 页\n累计修改 <font color='green'>+0</font> <font color='red'>-0</font>\n<font color='grey'>行数累计成功的文件修改，重复修改会重复计数；统计不完整时省略总计或相应文件的数字。</font>\n<font color='grey'>点击“发送”后，文件将以图片或文件消息发送到本卡片话题。</font>"
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-0.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-0.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-1.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-1.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-2.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-2.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-3.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-3.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-4.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-4.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-5.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-5.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-6.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-6.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-7.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-7.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "form",
+                "name": "turn_file_pagination",
+                "elements": [
+                  {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                      {
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                          {
+                            "tag": "select_static",
+                            "name": "turn_file_page",
+                            "required": true,
+                            "initial_option": "0",
+                            "placeholder": {
+                              "tag": "plain_text",
+                              "content": "选择页码"
+                            },
+                            "options": [
+                              {
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "第1页"
+                                },
+                                "value": "0"
+                              },
+                              {
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "第2页"
+                                },
+                                "value": "1"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                          {
+                            "tag": "button",
+                            "text": {
+                              "tag": "plain_text",
+                              "content": "跳转"
+                            },
+                            "type": "default",
+                            "behaviors": [
+                              {
+                                "type": "callback",
+                                "value": {
+                                  "v": 5,
+                                  "intent": "turn-file.page",
+                                  "chat_id": "oc_direct",
+                                  "scope_kind": "direct",
+                                  "page": 0,
+                                  "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                  "turn_id": "turn:v1:physical-final",
+                                  "pagination": "select",
+                                  "files": [
+                                    {
+                                      "path": "<root>/project/goal-0.txt",
+                                      "label": "goal-0.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-1.txt",
+                                      "label": "goal-1.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-2.txt",
+                                      "label": "goal-2.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-3.txt",
+                                      "label": "goal-3.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-4.txt",
+                                      "label": "goal-4.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-5.txt",
+                                      "label": "goal-5.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-6.txt",
+                                      "label": "goal-6.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-7.txt",
+                                      "label": "goal-7.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-8.txt",
+                                      "label": "goal-8.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-9.txt",
+                                      "label": "goal-9.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    }
+                                  ],
+                                  "a": 0,
+                                  "d": 0,
+                                  "reply": {
+                                    "goal": null,
+                                    "activity": {
+                                      "progress": {
+                                        "state": "running",
+                                        "steer_count": 0,
+                                        "plan_available": true,
+                                        "plan_generated": false,
+                                        "plan_may_be_stale": false,
+                                        "steps": [],
+                                        "commentary": [],
+                                        "operations": [],
+                                        "progress_card_settings": {
+                                          "show_commentary": true,
+                                          "show_operations": true,
+                                          "show_plan": true,
+                                          "commentary_limit": 4,
+                                          "operation_limit": 8,
+                                          "commentary_max_chars": 160,
+                                          "operation_max_chars": 120,
+                                          "organization": "content"
+                                        }
+                                      },
+                                      "terminal_status": "completed",
+                                      "collapsed": true,
+                                      "hidden_steps": 0
+                                    },
+                                    "result": {
+                                      "content": "final answer"
+                                    },
+                                    "partial_answer": {
+                                      "contents": [
+                                        "second partial"
+                                      ]
+                                    }
+                                  },
+                                  "nonce": "00000000000000000000000000000003"
+                                }
+                              }
+                            ],
+                            "name": "turn_file_jump",
+                            "form_action_type": "submit"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
+        }
+      ],
+      {}
+    ],
+    [
+      "send",
+      [
+        "oc_direct",
+        {
+          "kind": "text",
+          "text": "「会话 11111111」本轮任务已结束。",
+          "mentions": [
+            {
+              "open_id": "ou_user",
+              "union_id": null,
+              "user_id": null,
+              "display_name": null,
+              "is_bot": false,
+              "sender_type": null
+            }
+          ]
+        },
+        {
+          "reply_to": "om_final",
+          "reply_in_thread": false,
+          "receive_id": null,
+          "receive_id_type": "chat_id",
+          "uuid": "completion-299234b9612b8830c3ca92ebcb5d924c",
+          "reply_target_gone": "fail",
+          "resolve_mentions_in_text": false
+        }
+      ],
+      {}
+    ],
+    [
+      "update_card",
+      [
+        "om_final",
+        {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "summary": {
+              "content": "任务已完成"
+            }
+          },
+          "body": {
+            "elements": [
+              {
+                "tag": "collapsible_panel",
+                "element_id": "turnprogressv1",
+                "expanded": false,
+                "border": {
+                  "color": "grey",
+                  "corner_radius": "8px"
+                },
+                "padding": "8px 12px 12px 12px",
+                "vertical_spacing": "8px",
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "执行过程 · 已完成"
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "size": "16px 16px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：Codex 尚未生成"
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "partialanswerv1",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**阶段性答案**"
+                      },
+                      {
+                        "tag": "markdown",
+                        "content": "second partial"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnanswerv1",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "4px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "final answer"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "element_id": "turnfilesv4",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "12px",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "**本轮文件** · 共 10 个 · 第 2/2 页\n累计修改 <font color='green'>+0</font> <font color='red'>-0</font>\n<font color='grey'>行数累计成功的文件修改，重复修改会重复计数；统计不完整时省略总计或相应文件的数字。</font>\n<font color='grey'>点击“发送”后，文件将以图片或文件消息发送到本卡片话题。</font>"
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-8.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-8.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                          {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "padding": "8px",
+                            "vertical_spacing": "2px",
+                            "elements": [
+                              {
+                                "tag": "markdown",
+                                "content": "📄 `goal-9.txt`  <font color='green'>+0</font> <font color='red'>-0</font>"
+                              }
+                            ]
+                          },
+                          {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "padding": "8px",
+                            "elements": [
+                              {
+                                "tag": "button",
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "发送"
+                                },
+                                "type": "default",
+                                "behaviors": [
+                                  {
+                                    "type": "callback",
+                                    "value": {
+                                      "v": 5,
+                                      "intent": "turn-file.send",
+                                      "chat_id": "oc_direct",
+                                      "scope_kind": "direct",
+                                      "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                      "turn_id": "turn:v1:physical-final",
+                                      "path": "<root>/project/goal-9.txt"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "form",
+                "name": "turn_file_pagination",
+                "elements": [
+                  {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                      {
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                          {
+                            "tag": "select_static",
+                            "name": "turn_file_page",
+                            "required": true,
+                            "initial_option": "1",
+                            "placeholder": {
+                              "tag": "plain_text",
+                              "content": "选择页码"
+                            },
+                            "options": [
+                              {
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "第1页"
+                                },
+                                "value": "0"
+                              },
+                              {
+                                "text": {
+                                  "tag": "plain_text",
+                                  "content": "第2页"
+                                },
+                                "value": "1"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                          {
+                            "tag": "button",
+                            "text": {
+                              "tag": "plain_text",
+                              "content": "跳转"
+                            },
+                            "type": "default",
+                            "behaviors": [
+                              {
+                                "type": "callback",
+                                "value": {
+                                  "v": 5,
+                                  "intent": "turn-file.page",
+                                  "chat_id": "oc_direct",
+                                  "scope_kind": "direct",
+                                  "page": 1,
+                                  "binding_id": "binding:v1:11111111-0000-0000-0000-000000000001",
+                                  "turn_id": "turn:v1:physical-final",
+                                  "pagination": "select",
+                                  "files": [
+                                    {
+                                      "path": "<root>/project/goal-0.txt",
+                                      "label": "goal-0.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-1.txt",
+                                      "label": "goal-1.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-2.txt",
+                                      "label": "goal-2.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-3.txt",
+                                      "label": "goal-3.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-4.txt",
+                                      "label": "goal-4.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-5.txt",
+                                      "label": "goal-5.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-6.txt",
+                                      "label": "goal-6.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-7.txt",
+                                      "label": "goal-7.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-8.txt",
+                                      "label": "goal-8.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    },
+                                    {
+                                      "path": "<root>/project/goal-9.txt",
+                                      "label": "goal-9.txt",
+                                      "a": 0,
+                                      "d": 0
+                                    }
+                                  ],
+                                  "a": 0,
+                                  "d": 0,
+                                  "reply": {
+                                    "goal": null,
+                                    "activity": {
+                                      "progress": {
+                                        "state": "running",
+                                        "steer_count": 0,
+                                        "plan_available": true,
+                                        "plan_generated": false,
+                                        "plan_may_be_stale": false,
+                                        "steps": [],
+                                        "commentary": [],
+                                        "operations": [],
+                                        "progress_card_settings": {
+                                          "show_commentary": true,
+                                          "show_operations": true,
+                                          "show_plan": true,
+                                          "commentary_limit": 4,
+                                          "operation_limit": 8,
+                                          "commentary_max_chars": 160,
+                                          "operation_max_chars": 120,
+                                          "organization": "content"
+                                        }
+                                      },
+                                      "terminal_status": "completed",
+                                      "collapsed": true,
+                                      "hidden_steps": 0
+                                    },
+                                    "result": {
+                                      "content": "final answer"
+                                    },
+                                    "partial_answer": {
+                                      "contents": [
+                                        "second partial"
+                                      ]
+                                    }
+                                  },
+                                  "nonce": "00000000000000000000000000000006"
+                                }
+                              }
+                            ],
+                            "name": "turn_file_jump",
+                            "form_action_type": "submit"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px"
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务已完成"
+            },
+            "template": "green",
+            "icon": {
+              "tag": "standard_icon",
+              "token": "todo_colorful"
+            }
+          }
         }
       ],
       {}
