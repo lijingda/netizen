@@ -141,7 +141,7 @@ class _ReplyCardPresenter:
         self._process_port, self._process_location, self._clock = process_messages, process_location, clock
         self._process: dict[PresentationKey, ProcessPresentation] = {}
         self._claimed_cot_ids: set[str] = set()
-        self._process_tombstones: set[PresentationKey] = set()
+        self._process_tombstones: dict[PresentationKey, tuple[PresentationKey, str]] = {}
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
         self._sessions: dict[
@@ -179,10 +179,10 @@ class _ReplyCardPresenter:
         if self._process.get(state.key) is state:
             self._process.pop(state.key)
             if not state.terminal:
-                self._process_tombstones.add(state.key)
+                self._process_tombstones[state.key] = (state.run or state.key, state.binding_id)
 
     def process_result(self, key: PresentationKey, reason: Reason, activity: Activity | None, run_continues: bool) -> None:
-        self._process_tombstones.discard(key)
+        self._process_tombstones.pop(key, None)
         state = self._process.get(key)
         if state is None:
             return
@@ -195,12 +195,18 @@ class _ReplyCardPresenter:
             state.finish(state.verdict)
 
     def end_process_run(self, run: PresentationKey, reason: Reason) -> None:
+        confirmed = reason != "timeout"
+        if confirmed:
+            for key, (owner, _) in tuple(self._process_tombstones.items()):
+                if owner == run:
+                    del self._process_tombstones[key]
         for state in tuple(self._process.values()):
             if state.run == run:
+                state.terminal |= confirmed
                 state.finish(state.verdict or reason)
 
     def tombstone_unknown_process(self, key: PresentationKey) -> None:
-        self._process_tombstones.add(key)
+        self._process_tombstones.setdefault(key, (key, key.owner_id))
         if state := self._process.get(key):
             state.finish("timeout")
 
@@ -317,7 +323,9 @@ class _ReplyCardPresenter:
         return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners, release_cards=self._release_cards))
 
     async def retire_binding(self, binding_id: str) -> None:
-        self._process_tombstones.difference_update({key for key in self._process_tombstones if key.owner_id == binding_id})
+        for key, (_, owner_binding) in tuple(self._process_tombstones.items()):
+            if owner_binding == binding_id:
+                del self._process_tombstones[key]
         location = self._binding_locations.pop(binding_id, None)
         processes = []
         for key, process in tuple(self._process.items()):
@@ -584,10 +592,11 @@ class _ReplyCardPresenter:
     ) -> None:
         """Stop every ordinary/Goal presenter owned by one removed Thread."""
 
-        keys = {key for key in self._process.keys() | self._process_tombstones
+        keys = {key for key in self._process.keys() | self._process_tombstones.keys()
                 if (key.owner_id, key.thread_id) == (binding_id, thread_id)}
         processes = [self._process.pop(key) for key in keys if key in self._process]
-        self._process_tombstones.difference_update(keys)
+        for key in keys:
+            self._process_tombstones.pop(key, None)
         await self._cancel_processes(processes)
         ordinary_keys = tuple(
             key

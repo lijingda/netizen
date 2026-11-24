@@ -457,6 +457,33 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                 port.complete.assert_not_awaited()
                 self.assertNotIn(key, presenter._process)
 
+    async def test_bodyless_interruptions_release_each_closed_turn_key(self):
+        async with channel_fixture() as fx, asyncio.timeout(2):
+            presenter = fx.app._progress_cards
+            presenter._process_port = port = process_port()
+            port.create.return_value = Unknown()
+            origin = FakeMessage("prompt", message_id="in")
+            for n in range(4):
+                snap = replace(process_snapshot(1), turn_id=f"turn-{n}")
+                if n < 3:
+                    snap = replace(snap, process_items=())
+                key = PresentationKey(snap.binding_id, snap.thread_id, snap.turn_id)
+                reply = LogicalReply()
+                with patch.object(fx.app._ordinary, "turn_activity", return_value=snap):
+                    await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin, BindingTaskFeedback(),
+                        lambda: True, lambda: True, reply))
+                    state = presenter._process[key]
+                    if state.task:
+                        await state.task
+                        self.assertIn(key, presenter._process_tombstones)
+                    await fx.app.handle_ordinary_completion(LogicalTerminal(*key.index, "user", origin, "interrupted",
+                        reply, None, lambda: True))
+                    self.assertFalse(presenter._process)
+                    self.assertFalse(presenter._process_tombstones)
+                    self.assertEqual(port.create.await_count, int(n == 3))
+            port.update.assert_not_awaited()
+            port.complete.assert_not_awaited()
+
     async def test_terminal_only_claude_sample_cannot_spend_the_answer_deadline(self):
         async with channel_fixture() as fx:
             port = process_port()
