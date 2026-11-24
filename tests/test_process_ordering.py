@@ -401,6 +401,30 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
             await state.task
             port.complete.assert_awaited_once_with("cot", "process-mid", "done")
 
+    async def test_bodyless_logical_terminal_prevents_a_queued_first_create(self):
+        for publishable in (True, False):
+            async with channel_fixture() as fx, asyncio.timeout(2):
+                port = process_port()
+                presenter = fx.app._progress_cards
+                presenter._process_port = port
+                snap = process_snapshot(1)
+                key = PresentationKey(snap.binding_id, snap.thread_id, snap.turn_id)
+                origin = FakeMessage("prompt", message_id="in")
+                reply = LogicalReply()
+                with patch.object(fx.app._ordinary, "turn_activity", return_value=snap) as observe:
+                    await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
+                        BindingTaskFeedback(), lambda: True, lambda: True, reply))
+                    state = presenter._process[key]
+                    self.assertIsNotNone(state.task)
+                    port.create.assert_not_awaited()
+                    observe.return_value = None
+                    await fx.app.handle_ordinary_completion(LogicalTerminal(*key.index, "user", origin, "interrupted",
+                        reply, None, lambda: publishable))
+                    await state.task
+                port.create.assert_not_awaited()
+                port.complete.assert_not_awaited()
+                self.assertNotIn(key, presenter._process)
+
     async def test_terminal_only_claude_sample_cannot_spend_the_answer_deadline(self):
         async with channel_fixture() as fx:
             port = process_port()

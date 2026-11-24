@@ -91,6 +91,9 @@ class NativeReplyChannel(CompletionPresentationChannel):
                     await self._present_run_end(lifecycle)
                 else:
                     await self._present_run_state(lifecycle)
+            elif isinstance(outcome, LogicalTerminal):
+                key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+                self._progress_cards.end_process_run(key, "done" if outcome.status in ("completed", "interrupted") else "error")
             return
         if isinstance(outcome, DegradedTurn):
             key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
@@ -107,6 +110,10 @@ class NativeReplyChannel(CompletionPresentationChannel):
             if outcome.publishable():
                 location = self._physical_card_location(outcome.binding_id, outcome.origin)
                 await self._complete_task(ClaudeReplyEvents.result(outcome, location, self._physical_reply))
+            else:
+                key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+                confirmed = outcome.error_detail is None and outcome.status in ("completed", "interrupted")
+                self._progress_cards.process_result(key, "done" if confirmed else "error", outcome.activity, outcome.run_continues)
             return
         scheduled = outcome.origin if isinstance(outcome.origin, ScheduledOrigin) else None
         completion = _ScheduledCompletion()
@@ -200,12 +207,12 @@ class NativeReplyChannel(CompletionPresentationChannel):
     async def _projection_failed(self, outcome: TurnOutcome | GoalOutcome) -> None:
         turn_id = (outcome.turn_id if isinstance(outcome, TurnOutcome)
                    else outcome.logical_turn_id or outcome.final_physical_turn_id or "goal")
+        key = PresentationKey(outcome.binding_id, outcome.thread_id, turn_id)
+        self._progress_cards.end_process_run(key, "error")
         try:
             try:
                 await self._finish_task_reactions(outcome.origin, turn_id, constants.ERROR_REACTION)
             finally:
-                key = PresentationKey(outcome.binding_id, outcome.thread_id, turn_id)
-                self._progress_cards.end_process_run(key, "error")
                 await self._progress_cards.abandon(key=key)
         finally:
             if isinstance(outcome, TurnOutcome):

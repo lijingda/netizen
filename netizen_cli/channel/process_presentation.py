@@ -190,6 +190,8 @@ class ProcessPresentation:
             logger.warning("process message target unavailable")
             return False
         async with asyncio.timeout(self.timeout):
+            if self.terminal or self.closing or self.closed:
+                return False
             created = await external_call(self.port.create(location.scope.chat_id, location.parent, bool(location.scope.topic_id)))
         if not isinstance(created, Created):
             if not isinstance(created, Rejected):

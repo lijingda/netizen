@@ -223,6 +223,7 @@ class CompletionPresentationChannel(ChannelReplies):
         run = event.target.run
         if run is None:
             return
+        self._progress_cards.end_process_run(run, "error" if event.status == "failed" else "done")
         reaction = {"completed": constants.DONE_REACTION, "interrupted": constants.INTERRUPTED_REACTION,
                     "failed": constants.ERROR_REACTION}[event.status]
         display = event.display
@@ -248,7 +249,6 @@ class CompletionPresentationChannel(ChannelReplies):
                     user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
                 )
         finally:
-            self._progress_cards.end_process_run(run, "error" if event.status == "failed" else "done")
             self._progress_cards.retire_run(reply)
             reply.retire()
 
@@ -264,7 +264,7 @@ class CompletionPresentationChannel(ChannelReplies):
         )
 
     async def _complete_task(self, outcome: TurnResult) -> None:
-        self._progress_cards.process_result(outcome)
+        self._progress_cards.process_result(outcome.target.key, outcome.process_reason, outcome.activity, outcome.run_continues)
         if outcome.items:
             await self._deliver_with_receipts(outcome, outcome.items)
             return

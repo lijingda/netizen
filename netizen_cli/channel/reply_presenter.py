@@ -181,18 +181,17 @@ class _ReplyCardPresenter:
             if not state.terminal:
                 self._process_tombstones.add(state.key)
 
-    def process_result(self, result: TurnResult) -> None:
-        key = result.target.key
+    def process_result(self, key: PresentationKey, reason: Reason, activity: Activity | None, run_continues: bool) -> None:
         self._process_tombstones.discard(key)
         state = self._process.get(key)
         if state is None:
             return
-        state.verdict = result.process_reason
+        state.verdict = reason
         try:
-            state.sample(result.activity, terminal=True)
+            state.sample(activity, terminal=True)
         except Exception:
             logger.warning("process message result observation unavailable")
-        if not result.run_continues or state.task is None:
+        if not run_continues or state.task is None:
             state.finish(state.verdict)
 
     def end_process_run(self, run: PresentationKey, reason: Reason) -> None:
