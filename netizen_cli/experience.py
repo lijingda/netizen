@@ -52,6 +52,14 @@ class CommandSpec:
         operation = command_operation(self.name)
         return OPERATIONS[operation].command_probe if operation is not None else None
 
+    def has_capability(self, policy: BackendPolicy, capabilities: Collection[NativeCapability]) -> bool:
+        operation = command_operation(self.name)
+        if operation is None:
+            return True
+        provider = policy.provider_for(operation, "command")
+        probe = self.requires if provider is OPERATIONS[operation].provider else None
+        return provider is not None and (probe is None or probe in capabilities)
+
 
 COMMAND_SPECS = (
     CommandSpec(
@@ -402,7 +410,7 @@ def parse_message(
         raise InvalidInteraction(
             f"/{spec.name} 尚未开放：{spec.unavailable_reason}，本条消息未执行。"
         )
-    if spec.requires is not None and spec.requires not in capabilities:
+    if not spec.has_capability(policy, capabilities):
         assert spec.unavailable_reason is not None
         raise InvalidInteraction(
             f"/{spec.name} 尚未开放：{spec.unavailable_reason}，本条消息未执行。"
@@ -514,7 +522,7 @@ def command_help(
         spec
         for spec in COMMAND_SPECS
         if spec.intent is not None and policy.command_refusal(spec.name) is None
-        and (spec.requires is None or spec.requires in capabilities)
+        and spec.has_capability(policy, capabilities)
     )
     if policy.backend == "claude":
         return "Claude 会话：" + " · ".join(

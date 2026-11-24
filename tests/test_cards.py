@@ -182,6 +182,7 @@ class CardCodecTest(unittest.TestCase):
             CardControlName.SET_PROJECT_ENABLED,
             CardControlName.CONFIGURE_BINDING,
             CardControlName.STOP_EXACT_BINDING,
+            CardControlName.CONFIRM_RELEASE,
         }
         one_shot = {
             CardControlName.CREATE_BINDING,

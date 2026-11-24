@@ -27,13 +27,13 @@ from ..external_calls import ExternalCallCancelled, external_call
 from ..ordinary_sessions import (
     ClaudeCliState, CliStateChanged, ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted,
     LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
-    PreparedPrompt, SessionShutdownPort, StopPreview,
+    OrdinarySessionDiverged, PreparedPrompt, ReleaseConfirmation, SessionShutdownPort, StopPreview,
 )
 from .claude_delivery import AnchorDelivery
 from .claude_status import ClaudeObservations, DEFAULT_OBSERVATIONS, record_observation
-from .claude_client import ClaudeClient, ClaudeClients, LiveSession, live_messages, native_human, single_message, user_message
+from .claude_client import ClaudeClient, ClaudeClients, LiveSession, SessionReader, live_messages, native_human, single_message, user_message
 from .contracts import (
-    ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
+    ActiveTurnSnapshot, ContextCursorCommit, ReleaseDisposition, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     SubmitDisposition, TerminalStateUnknown, ThreadActivityChanged, TurnActivitySnapshot,
 )
 
@@ -127,7 +127,7 @@ class _Execution:
     live: LiveSession = field(init=False)
     humans: dict[str, _Human] = field(default_factory=dict)
     unwritten: set[str] = field(default_factory=set)
-    pending: _Human | None = None
+    reserved: _Human | None = None
     client: ClaudeClient | None = None
     task: asyncio.Task[None] | None = None
     writer: asyncio.Task[None] | None = None
@@ -143,6 +143,10 @@ class _Execution:
     stopping: bool = False
     closing: bool = False
     close_finished: bool = False
+    release_receipt: asyncio.Future[bool] | None = None
+    session_reader: SessionReader = field(default_factory=SessionReader)
+    history_reader: asyncio.Task[None] | None = None
+    last_assistant: str | None = None
     concluded: bool = False
     stop_receipt: asyncio.Event | None = None
     broken: bool = False
@@ -163,7 +167,12 @@ class _Execution:
                     raise OrdinaryInputRejected("本条消息的话题根与当前会话不一致，本条输入未发送。")
             elif anchor.topic_root_id:
                 self.conversation_source = anchor
-        self.humans[human.input_id] = self.pending = human
+        self.humans[human.input_id] = self.reserved = human
+
+    @property
+    def pending(self) -> _Human | None:
+        # A send checking history owns the input slot, but has no native turn to stop or release.
+        return self.humans.get(self.reserved.input_id) if self.reserved is not None else None
 
     def submitted(self, input_id: str | None) -> _Human | None:
         human = self.pending
@@ -177,7 +186,7 @@ class _Execution:
 
     def cli_state(self) -> ClaudeCliState:
         return ClaudeCliState(self.live.ordered_idle and self.pending is None and self.live.physical is None,
-                             len(self.live.tasks), self.live.crons)
+                             len(self.live.tasks), bool(self.live.crons))
 
     def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, final: str | None = None) -> TurnActivitySnapshot:
         partials = tuple(PartialAnswer(self.session, turn_id, key, text) for key, text in self.live.partials.items()
@@ -339,14 +348,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         else:
             self._advance(binding_id)
 
-    def _idle(self, binding_id: str, *, input: bool = False) -> None:
+    def _idle(self, binding_id: str, *, input: bool = False, reservation: _Human | None = None) -> None:
         self.require_admission()
         if binding_id in self._unavailable:
             raise OrdinaryInputRejected(CLOSE_FAILED)
         if binding_id in self._active and self._active[binding_id].closing:
             raise OrdinaryInputRejected("上一轮正在收尾，本条消息未发送。")
         active = self._active.get(binding_id)
-        if active is not None and not (input and active.admissible):
+        if active is not None and not (input and active.reserved is reservation and active.admissible):
             raise OrdinaryInputRejected("当前会话正在执行，本条消息未发送。")
 
     def _current(self, binding_id: str) -> ThreadBinding:
@@ -369,6 +378,41 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         async with self._lock(binding_id):
             self._idle(binding_id, input=True)
             return self._admission(self._current(binding_id))
+
+    async def _capture_history(self, execution: _Execution, cwd: Path) -> None:
+        try:
+            execution.last_assistant = await self._clients.last_assistant(execution.session, cwd, execution.session_reader)
+        except Exception:
+            execution.last_assistant = None  # A later send reports the unavailable baseline.
+
+    async def _submit_live(self, execution: _Execution, human: _Human, message: dict[str, Any],
+                           admission: SubmissionAdmission) -> None:
+        binding = human.binding
+        reader = execution.history_reader
+        previous = execution.last_assistant
+        current = previous
+        if previous is None:
+            logger.warning("Claude transcript check unavailable; admitting input", extra={"binding_id": binding.id})
+        else:
+            try:
+                current = await self._clients.last_assistant(execution.session, self._owned_cwds[binding.id], execution.session_reader)
+            except Exception:
+                logger.warning("Claude transcript read failed; admitting input", extra={"binding_id": binding.id})
+        # Controls and native wakes may proceed during the SDK read.
+        async with self._lock(binding.id):
+            self._idle(binding.id, input=True, reservation=human)
+            if (self._active.get(binding.id) is not execution or reader is not execution.history_reader
+                    or self._current(binding.id) != binding or self._admission(binding) != admission):
+                raise OrdinaryInputRejected(STALE)
+            if current != previous:
+                execution.last_assistant = current
+                self._reconcile(execution)
+                raise OrdinarySessionDiverged(execution.scope, binding.id, ReleaseConfirmation(
+                    execution.revision, execution.input_id, len(execution.live.tasks), execution.live.crons))
+            execution.reserve(human)
+            self._reconcile(execution)
+            execution.writer = asyncio.create_task(self._write_next(execution, human, message, execution.revision))
+            execution.live.changed.set()
 
     async def submit(
         self, *, binding: ThreadBinding, cwd: Path | None, input: PreparedPrompt, owner_id: str,
@@ -399,10 +443,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 execution.task.add_done_callback(self._tasks.pop)
             else:
                 execution = active
-                execution.reserve(human)
-                self._reconcile(execution)
-                execution.writer = asyncio.create_task(self._write_next(execution, human, message, execution.revision))
-                execution.live.changed.set()
+                execution.reserved = human
+        if active is not None:
+            try:
+                await self._submit_live(active, human, message, admission)
+            finally:
+                if active.reserved is human and active.pending is None:
+                    active.reserved = None
         try:
             return await asyncio.shield(human.ready)
         except asyncio.CancelledError as exc:
@@ -514,7 +561,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 execution.unwritten.add(human.input_id)
                 human.settle(execution.session, exc)
                 self._retire(execution, human)
-                execution.pending = None
+                execution.reserved = None
                 return
             if not await self._write(execution, human, message):
                 async with asyncio.timeout(self._remaining(_RECONCILE_SECONDS)):
@@ -551,6 +598,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if unknown:
             execution.fail()
         self._reconcile(execution)
+        if execution.history_reader:
+            execution.history_reader.cancel()
+            await asyncio.gather(execution.history_reader, return_exceptions=True)
         if execution.writer:
             execution.writer.cancel()
             await asyncio.gather(execution.writer, return_exceptions=True)
@@ -564,14 +614,23 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         await asyncio.wait([execution.close], timeout=self._remaining(_CLOSE_SECONDS))
         if not execution.close.done():
             self._unavailable.add(execution.binding.id)
+        released = execution.binding.id not in self._unavailable
+        if execution.release_receipt is not None:
+            execution.live.tasks.clear()
+            execution.live.crons = 0
+            for owned in execution.humans.values():
+                owned.stop_requested = True
+            self._complete_humans(execution)
         for owned in tuple(execution.humans.values()):
             error = (failure or LiveSubmissionUnknown(UNKNOWN)) if owned.written else (
                 failure if isinstance(failure, OrdinaryInputRejected) else OrdinaryInputRejected(START_CANCELLED))
             owned.settle(execution.session, error)
             if unknown:
                 self._retire(execution, owned)
-        execution.pending = None
+        execution.reserved = None
         execution.close_finished = True
+        if execution.release_receipt is not None and not released:
+            execution.release_receipt.set_result(False)
         self._reconcile(execution)
         try:
             await execution.delivery.drain()
@@ -580,7 +639,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 self._retire(execution, owned)
             await execution.delivery.join_cleanups()
             self._reconcile(execution)
-        if execution.binding.id in self._unavailable:
+        if execution.release_receipt is None and execution.binding.id in self._unavailable:
             await execution.delivery.notice(lambda: self._tell(human, CLOSE_FAILED))
 
     def _retire(self, execution: _Execution, human: _Human) -> None:
@@ -707,7 +766,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         live.partials.clear()
         live.candidate = None
         if submitted:
-            execution.pending = None
+            execution.reserved = None
         execution.concluded = True
         return submitted
 
@@ -720,6 +779,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if execution.close_finished and (execution.broken or not execution.delivery.queues):
             del self._active[binding_id]
             self._advance(binding_id)
+            if execution.release_receipt is not None and not execution.release_receipt.done():
+                execution.release_receipt.set_result(True)
             return None
         submitted = self._route_result(execution, result) if result else None
         live = execution.live
@@ -727,6 +788,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         force = execution.ending or execution.broken
         close = force or (idle and not live.tasks and not live.crons and execution.pending is None
                           and not execution.awaiting_task_stop)
+        if not idle and execution.history_reader:
+            execution.history_reader.cancel()
+            execution.history_reader = None
+            execution.last_assistant = None
+        elif idle and live.initialized and not close and (live.tasks or live.crons) and execution.history_reader is None:
+            execution.history_reader = asyncio.create_task(
+                self._capture_history(execution, self._owned_cwds[binding_id]))
         if handoff and close:
             execution.closing = True
             live.changed.set()
@@ -956,6 +1024,43 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 return None
             return StopPreview("正在请求停止当前 Claude 执行。" if execution.writing else "正在取消 Claude 会话启动。",
                                execution.revision, execution.input_id)
+
+    async def release_control(self, binding_id: str, *, scope_key: str, sender_id: str, revision: int | None,
+                              turn_id: str | None) -> ReleaseDisposition | ReleaseConfirmation:
+        if sender_id != self._owner:
+            raise OrdinaryInputRejected("这个 Claude 实例仅限所有者使用。")
+        async with self._lock(binding_id):
+            self.require_admission()
+            if self._current(binding_id).scope_key != scope_key:
+                raise OrdinaryInputRejected("会话位置已变化，请重新发送 /release。")
+            if binding_id in self._unavailable:
+                raise OrdinaryInputRejected(CLOSE_FAILED)
+            execution = self._active.get(binding_id)
+            if execution:
+                self._reconcile(execution)  # Include the latest native Stop hook snapshot.
+            confirmed = (revision, turn_id) != (None, None)
+            if confirmed and (execution is None or (revision, turn_id) != (execution.revision, execution.input_id)):
+                raise ThreadActivityChanged("会话状态已变化，请重新发送 /release。")
+            if execution is None:
+                return ReleaseDisposition.NOT_SUBSCRIBED
+            if execution.finishing:
+                raise OrdinaryInputRejected(self._closing_notice(execution))
+            if not execution.admissible:
+                raise OrdinaryInputRejected("Claude 正在执行，请等待完成或先 /stop。")
+            live = execution.live
+            if not confirmed and (live.tasks or live.crons):
+                return ReleaseConfirmation(execution.revision, execution.input_id, len(live.tasks), live.crons)
+            # Reserve the exact idle client before handing it to the existing disconnect path.
+            receipt = execution.release_receipt = asyncio.get_running_loop().create_future()
+            execution.ending = True
+            self._reconcile(execution)
+            live.changed.set()
+        await asyncio.wait([receipt], timeout=self._remaining(_CLOSE_SECONDS + _CONTROL_SECONDS))
+        if not receipt.done() and execution.close_finished:
+            raise OrdinaryInputRejected("Claude 会话连接已断开，上一轮的飞书反馈正在收尾，请稍后再发送。")
+        if not receipt.done() or not receipt.result():
+            raise OrdinaryInputRejected(CLOSE_FAILED)
+        return ReleaseDisposition.RELEASED
 
     @staticmethod
     def _closing_notice(execution: _Execution) -> str:

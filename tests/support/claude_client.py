@@ -92,6 +92,10 @@ class FakeClaudeClients:
         self.cwds = {}
         self.configure = None
         self.created = asyncio.Event()
+        self.history = "assistant"
+
+    async def last_assistant(self, session, cwd, reader):
+        return self.history
 
     def create(self, session_id, cwd, *, resume, live=None):
         client = FakeClaudeClient(session_id, cwd, resume)

@@ -198,7 +198,7 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
             fixture.runtime.available_capabilities = frozenset()
             allows = BackendPolicy.allows
             self.enterContext(patch.object(BackendPolicy, "allows",
-                lambda policy, operation: operation is not OperationId.DELETE and allows(policy, operation)))
+                lambda policy, operation, surface="command": operation is not OperationId.DELETE and allows(policy, operation, surface)))
         if manual_only:
             from netizen_cli.session_providers import SessionNames
             management.names = SessionNames(writer=management.names.writer)

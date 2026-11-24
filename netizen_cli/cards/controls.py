@@ -16,6 +16,7 @@ from ..session_views import SessionObservations, SessionStatusView
 from .status import render_session_status
 if TYPE_CHECKING:
     from ..management.service import BindingStatusProjection
+    from ..ordinary_sessions import ReleaseConfirmation
 from ..bindings import (
     ThreadBinding,
     BindingTaskFeedback,
@@ -1205,6 +1206,22 @@ def rename_binding_card(
     return OutboundCard(card=builder.to_dict())
 
 
+def release_confirmation_card(scope: FeishuScope, binding_id: str, confirmation: ReleaseConfirmation, *,
+                              diverged: bool = False) -> OutboundCard:
+    builder = _builder("会话在其他客户端有新进展" if diverged else "释放会话", "Claude Code")
+    if diverged:
+        builder.markdown("检测到该会话在其他 Claude 客户端有新进展，这条消息未发送。")
+    builder.markdown(f"释放会话将结束 {confirmation.tasks} 个后台任务。"
+                     f"已登记的 {confirmation.crons} 个会话 cron 将暂停，登记保留。")
+    if diverged:
+        builder.markdown("释放后请重新发送。继续使用当前连接时，后台任务完成后，终端里的新对话可能从会话历史中消失。"
+                         "如需继续使用 Netizen 当前的连接，直接重新发送即可。")
+    builder.raw(_callback_button(label="释放会话" if diverged else "确认释放", style="primary_filled", value=_envelope(
+        scope, CardControlName.CONFIRM_RELEASE, binding_id=_binding_reference(binding_id),
+        expected_activity_revision=confirmation.revision, expected_turn_id=_turn_reference(confirmation.turn_id))))
+    return OutboundCard(card=builder.to_dict())
+
+
 def archive_binding_card(
     *,
     scope: FeishuScope,
@@ -2141,6 +2158,7 @@ def decode_button_action(
             "expected_native_thread_id",
         },
         CardControlName.UNARCHIVE_BINDING: {"binding_id"},
+        CardControlName.CONFIRM_RELEASE: {"binding_id", "expected_activity_revision", "expected_turn_id"},
         CardControlName.ACTIVATE_BINDING: {"binding_id"},
         CardControlName.STOP_EXACT_BINDING: {
             "binding_id",
@@ -2323,6 +2341,8 @@ def decode_button_action(
         section = SettingsSection.PROJECTS
     if name is CardControlName.SIDE_CLOSE and scope.kind is not ScopeKind.TOPIC:
         raise CardActionError("Side 结束动作必须来自原 Side 话题。")
+    if name is CardControlName.CONFIRM_RELEASE and expected_turn_id is None:
+        raise CardActionError("确认释放缺少执行标识，请重新发送 /release。")
     if (
         name is CardControlName.RECHECK_EXACT_TURN
         and expected_turn_id is None

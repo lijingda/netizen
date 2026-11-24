@@ -58,7 +58,7 @@ from ..bindings import (
 )
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
-from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort
+from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort, ReleaseConfirmation
 from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
@@ -2106,12 +2106,18 @@ class InstanceManagementService:
         self,
         *,
         target: CurrentBindingTarget,
-    ) -> ReleasedBinding:
+        sender_id: str = "",
+        revision: int | None = None,
+        turn_id: str | None = None,
+    ) -> ReleasedBinding | ReleaseConfirmation:
         self.policy.require(OperationId.RELEASE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            disposition = await self._runtime.release_exact(binding.id)
-            return ReleasedBinding(binding=binding, disposition=disposition)
+            if self.local is None:
+                return ReleasedBinding(binding, await self._runtime.release_exact(binding.id))
+        outcome = await self.local.release_control(binding.id, scope_key=target.scope_key, sender_id=sender_id,
+                                                   revision=revision, turn_id=turn_id)
+        return outcome if isinstance(outcome, ReleaseConfirmation) else ReleasedBinding(binding, outcome)
 
     async def stop_claude_control(self, target: ExactBindingTarget, *, sender_id: str, revision: int | None,
                                   turn_id: str | None, all_tasks: bool,
@@ -2336,7 +2342,7 @@ class InstanceManagementService:
         target: ExactBindingTarget,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> ReleasedBinding:
-        self.policy.require(OperationId.RELEASE)
+        self.policy.require(OperationId.RELEASE, "api")
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             self._require_runtime_precondition(binding.id, runtime_precondition)

@@ -32,7 +32,7 @@ from .reply_presenter import (
     _CardUpdateAttempt,
     _PartialAnswerDelivery,
 )
-from ..ordinary_sessions import ClaudeInputAnchor, ClaudeCliState, CliStateChanged, ConversationTarget, DegradedTurn, LogicalTerminal, OrdinaryConclusion, OrdinaryEvent, PhysicalAnswer, PhysicalStarted
+from ..ordinary_sessions import CLAUDE_RELEASE_HINT, ClaudeInputAnchor, ClaudeCliState, CliStateChanged, ConversationTarget, DegradedTurn, LogicalTerminal, OrdinaryConclusion, OrdinaryEvent, PhysicalAnswer, PhysicalStarted
 from ..external_calls import external_call
 from ..file_evidence import FileEvidence
 from ..runtime.codex_replies import CodexFeatureEvent, outcome_file_evidence
@@ -342,6 +342,9 @@ class CompletionPresentationChannel(ChannelReplies):
             if content and ledger.items[BODY] == "unattempted":
                 if count := outcome.owned_tasks():
                     content += f"\n\n后台任务 {count} 个运行中，可继续发送消息"
+                state = outcome.state()
+                if count or state.tasks or state.crons:
+                    content += f"\n\n{CLAUDE_RELEASE_HINT}"
                 await self._send_physical_items(outcome, ledger, body_items, content, "final", location)
         finally:
             if first_id and last_snapshot and not any(value == "unknown" for value in ledger.items.values()):

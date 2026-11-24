@@ -5,11 +5,13 @@ import asyncio
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from threading import Thread
+from typing import Any, Protocol, TypeVar
+from weakref import ref
 
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, HookJSONOutput, HookMatcher, Message, ResultMessage,
-    StreamEvent, SystemMessage, TextBlock, ToolUseBlock, get_session_info,
+    StreamEvent, SystemMessage, TextBlock, ToolUseBlock, get_session_info, get_session_messages,
 )
 
 from .. import claude_installation
@@ -140,7 +142,7 @@ class LiveSession:
     reported_human: str | None = None
     ordered_idle: bool = False
     awaiting_boundary: bool = False
-    crons: bool = False
+    crons: int = 0
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     tasks: dict[str, str] = field(default_factory=dict)
     stop_requested: set[str] = field(default_factory=set)
@@ -155,7 +157,7 @@ class LiveSession:
     async def stop_hook(self, data: Any, callback_id: Any, context: Any) -> HookJSONOutput:
         try:
             validate_fields("Stop", data, self.session)
-            crons = bool(data["session_crons"])
+            crons = len(data["session_crons"])
             if self.crons != crons:
                 self.crons = crons
                 self.changed.set()
@@ -299,12 +301,69 @@ def native_human(frame: AssistantMessage | ResultMessage | StreamEvent) -> str |
     return frame.user_message_uuid or (ids[0] if ids else None)
 
 
+_T = TypeVar("_T")
+_SESSION_READ_SECONDS = 3.0
+
+
+class SessionReader:
+    """One synchronous public SDK read may remain in flight after its caller leaves."""
+    def __init__(self) -> None:
+        self._worker: Thread | None = None
+
+    async def read(self, operation: Callable[[], _T], *, timeout: float | None = None) -> _T:
+        if self._worker is not None and self._worker.is_alive():
+            raise TimeoutError("a Claude session read is still in flight")
+        waiter: asyncio.Future[_T] = asyncio.get_running_loop().create_future()
+        receiver = ref(waiter)  # An abandoned read must not retain its caller's event loop.
+
+        def post(complete: Callable[[asyncio.Future[_T]], None]) -> None:
+            target = receiver()
+            if target is None:
+                return
+            def publish() -> None:
+                if not target.done():
+                    complete(target)
+            try:
+                target.get_loop().call_soon_threadsafe(publish)
+            except RuntimeError:
+                pass  # The caller abandoned this read and its event loop closed.
+
+        def work() -> None:
+            try:
+                value = operation()
+            except Exception as exc:
+                def reject(future: asyncio.Future[_T], error: Exception = exc) -> None:
+                    future.set_exception(error)
+                post(reject)
+            else:
+                post(lambda future: future.set_result(value))
+
+        self._worker = Thread(target=work, name="claude-session-read", daemon=True)
+        self._worker.start()
+        async with asyncio.timeout(timeout):
+            return await waiter
+
+
+async def last_assistant(session: str, cwd: Path, reader: SessionReader | None = None) -> str | None:
+    def read() -> str | None:
+        rows = get_session_messages(session, directory=str(cwd))
+        assistant = next((m for m in reversed(rows) if m.type == "assistant"), None)
+        if assistant and (assistant.session_id != session or not _identifier(assistant.uuid)):
+            raise ValueError("invalid assistant identity")
+        return assistant.uuid if assistant else None
+
+    return await (reader or SessionReader()).read(read, timeout=_SESSION_READ_SECONDS)
+
+
 class ClaudeClients(Protocol):
+    async def last_assistant(self, session: str, cwd: Path, reader: SessionReader) -> str | None: ...
     def create(self, session_id: str, cwd: Path, *, resume: bool, live: LiveSession | None = None) -> ClaudeClient: ...
     async def session_cwd(self, session_id: str, candidates: tuple[Path, ...] = ()) -> Path | None: ...
 
 
 class BundledClaudeClients:
+    last_assistant = staticmethod(last_assistant)
+
     def __init__(self) -> None:
         self._cli = verified_claude_cli()
         if (claude_installation.SDK_VERSION, claude_installation.CLI_VERSION) != ("0.2.186", "2.1.329"):
@@ -320,7 +379,7 @@ class BundledClaudeClients:
         ))
 
     async def session_cwd(self, session_id: str, candidates: tuple[Path, ...] = ()) -> Path | None:
-        return await asyncio.to_thread(self._lookup_cwd, session_id, candidates)
+        return await SessionReader().read(lambda: self._lookup_cwd(session_id, candidates))
 
     @staticmethod
     def _lookup_cwd(session_id: str, candidates: tuple[Path, ...]) -> Path | None:

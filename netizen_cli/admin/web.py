@@ -1901,7 +1901,7 @@ class AdminWebApplication:
             if eligible:
                 actions[definition.action_key] = grants.add(definition.grant, target, preconditions)
         if native_state is NativeThreadCatalogState.ACTIVE:
-            if status.can_release and self._backend_policy.allows(OperationId.RELEASE):
+            if status.can_release and self._backend_policy.allows(OperationId.RELEASE, "api"):
                 actions["release"] = grants.add(
                     "sessions.release", target, preconditions
                 )
