@@ -939,6 +939,76 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((clients.calls, fx.channel.reactions, fx.channel.fetch_quoted_calls), ([], [], []))
 
     @requires_claude_sdk
+    async def test_release_settles_launcher_at_close_deadline_and_drains_before_readmission(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.runtime.claude_ordinary import CLOSE_FAILED
+        for late in (True, False):
+            with self.subTest(late=late):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                    binding = fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=True, reaction_pulse_enabled=True,
+                                                          completion_mention_enabled=True))
+                    fx.channel.reply_results.append(SendResult.ok(message_id="launcher"))
+                    await app.handle_message(FakeMessage("launch", message_id="H1"))
+                    cli = clients.calls[-1]
+                    cli.init()
+                    await self.until(lambda: bool(app._progress_cards._sessions))
+                    cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
+                    cli.stream.put_nowait(SystemMessage("task_started", dict(session_id=cli.session, task_id="A", run_id="R", tool_use_id="tool")))
+                    cli.stream.put_nowait(SystemMessage("background_tasks_changed", dict(session_id=cli.session, tasks=[dict(task_id="A", run_id="R")])))
+                    cli.result(result=None, reason=None)
+                    await self.until(lambda: "后台任务 1 个" in str(fx.channel.updates))
+                    await app.handle_message(FakeMessage("/release", message_id="command"))
+                    card, = [body for target, body in fx.channel.replies if target == "command"]
+                    event = direct_button_event(_card_button_value(card, "确认释放"))
+                    direct_card_event(fx.channel, {}, message_id=event.message_id)
+                    reaction = fx.channel.add_reaction
+                    entered, drain = asyncio.Event(), asyncio.Event()
+                    async def gated(message_id, emoji):
+                        if message_id == "H1" and emoji == "DONE":
+                            entered.set()
+                            await drain.wait()
+                        return await reaction(message_id, emoji)
+                    if late:
+                        cli.close_gate.clear()
+                    try:
+                        with patch.object(fx.channel, "add_reaction", side_effect=gated), \
+                             patch("netizen_cli.runtime.claude_ordinary._CLOSE_SECONDS", .1):
+                            callback = asyncio.create_task(app.handle_card_action(event))
+                            await asyncio.wait_for(entered.wait(), 2)
+                            self.assertIn("全部完成", str(fx.channel.updates[-1]))
+                            expected = CLOSE_FAILED if late else "已释放 Claude 会话连接。"
+                            if late:
+                                await asyncio.wait_for(asyncio.shield(callback), 2)
+                                self.assertIn((event.message_id, CLOSE_FAILED), fx.channel.replies)
+                                await app.handle_message(FakeMessage("before disconnect", message_id="blocked"))
+                                self.assertIn(("blocked", CLOSE_FAILED), fx.channel.replies)
+                                cli.close_gate.set()
+                                await self.until(lambda: binding.id not in ordinary._unavailable)
+                            else:
+                                self.assertFalse(callback.done())
+                            await app.handle_message(FakeMessage("before terminal delivery", message_id="draining"))
+                            self.assertIn("收尾", [body for target, body in fx.channel.replies if target == "draining"][0])
+                            self.assertEqual(len(clients.calls), 1)
+                    finally:
+                        drain.set()
+                        cli.close_gate.set()
+                    self.assertTrue(await ordinary.wait_idle(2))
+                    await asyncio.wait_for(callback, 2)
+                    self.assertEqual([body for target, body in fx.channel.replies if target == event.message_id], [expected])
+                    self.assertEqual(fx.channel.reactions.count(("H1", "DONE")), 1)
+                    self.assertFalse([body for _, body, _ in fx.channel.send_calls if body.mentions])
+                    await app.handle_message(FakeMessage("cold", message_id="H2"))
+                    cold = clients.calls[-1]
+                    self.assertTrue(cold.resume)
+                    cold.init()
+                    cold.result()
+                    self.assertTrue(await ordinary.wait_idle(2))
+
+    @requires_claude_sdk
     async def test_divergence_button_releases_without_delivering_rejected_message(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2.
@@ -951,7 +1021,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             cli.result()
             await self.until(lambda: cli.live.ordered_idle)
             clients.history = "terminal"
-            await app.handle_message(FakeMessage("continue", message_id="H2"))
+            with patch.object(app, "_report_input_error", wraps=app._report_input_error) as report:
+                await app.handle_message(FakeMessage("continue", message_id="H2"))
+            report.assert_awaited_once()
             card, = [body for target, body in fx.channel.replies if target == "H2"]
             button = _card_button_value(card, "释放会话")
             self.assertEqual((len(cli.inputs), cli.closes), (1, 0))

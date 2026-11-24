@@ -31,7 +31,8 @@ from .messages import _send_result_error_code
 from ..file_inputs import FileInputError
 from ..defaults import DefaultConfigurationError
 from ..backends import BackendUnsupported
-from ..ordinary_sessions import OrdinaryInputRejected
+from ..ordinary_sessions import OrdinaryInputRejected, OrdinarySessionDiverged
+from ..cards.controls import release_confirmation_card
 from ..runtime.contracts import (
     ContextBoundaryCommitFailed,
     GoalNotFound,
@@ -117,6 +118,9 @@ class ChannelReplies(ChannelState):
 
     async def _report_input_error(self, message: Any, error: Exception) -> None:
         """One user-visible failure policy for message, card and scheduled inputs."""
+        if isinstance(error, OrdinarySessionDiverged):
+            await self._reply(message, release_confirmation_card(error.scope, error.binding_id, error.confirmation, diverged=True))
+            return
         if self._local_sessions is not None and isinstance(error, (BackendUnsupported, OrdinaryInputRejected, TerminalStateUnknown, ThreadActivityChanged)):
             await self._reply(message, str(error) or "本次操作对应的执行已变化。")
             return

@@ -2,6 +2,9 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
+import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID
@@ -116,6 +119,106 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             messages.assert_called_once_with("s", directory=str(self.cwd))
             rows.clear()
             self.assertIsNone(await last_assistant("s", self.cwd))
+
+    async def test_wedged_sdk_read_has_one_worker_per_execution_and_releases(self):
+        from types import SimpleNamespace
+        gate = threading.Event()
+        workers = []
+        wedged_baseline = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        def history(session, *, directory):
+            if not workers:
+                workers.append(None)  # First execution has a baseline; its send-time check wedges.
+                return [SimpleNamespace(type="assistant", uuid="original", session_id=session)]
+            workers.append(threading.current_thread())
+            if len(workers) == 3:
+                loop.call_soon_threadsafe(wedged_baseline.set)
+            gate.wait()
+            return []
+        try:
+            with patch.object(self.clients, "last_assistant", new=last_assistant), \
+                 patch("netizen_cli.runtime.claude_client.get_session_messages", side_effect=history):
+                for count in (2, 3):
+                    # H2 in the second execution cancels an actively wedged idle capture.
+                    with patch("netizen_cli.runtime.claude_client._SESSION_READ_SECONDS", .1 if count == 2 else 30):
+                        _, cli = await self.retain()
+                        execution = self.runtime._active[self.binding.id]
+                        if count == 2:
+                            await self.wait_until(lambda: execution.history_reader.done())
+                        else:
+                            await asyncio.wait_for(wedged_baseline.wait(), 2)
+                            self.assertFalse(execution.history_reader.done())
+                        for _ in range(2):
+                            with self.assertLogs("netizen_cli.runtime.claude_ordinary", level="WARNING"):
+                                receipt = await self.submit()
+                            receipt.release_receipt_attempt()
+                            cli.init()
+                            cli.result()
+                            await self.wait_until(lambda: execution.admissible and execution.history_reader.done())
+                            self.assertEqual(len(workers), count)
+                    await self.release_client(await self.release_client())
+                    self.assertTrue(await self.runtime.wait_idle(1))
+                await self.runtime.cancel_tasks()
+                self.assertTrue(all(t.is_alive() and t.daemon for t in workers[1:]))
+        finally:
+            gate.set()
+            for worker in workers[1:]:
+                worker.join(1)
+
+    def test_process_exits_while_sdk_history_and_cwd_reads_are_wedged(self):
+        # Leave both fake filesystem calls blocked through asyncio.run and interpreter exit.
+        probe = """
+import asyncio
+from pathlib import Path
+from threading import Event
+from unittest.mock import patch
+from netizen_cli.runtime.claude_client import BundledClaudeClients, last_assistant
+
+async def probe():
+    gate = Event()
+    with patch("netizen_cli.runtime.claude_client._SESSION_READ_SECONDS", .1), \\
+         patch("netizen_cli.runtime.claude_client.get_session_messages", side_effect=lambda *a, **k: gate.wait()) as history, \\
+         patch("netizen_cli.runtime.claude_client.get_session_info", side_effect=lambda *a: gate.wait()) as info:
+        cwd = asyncio.wait_for(BundledClaudeClients().session_cwd("s"), .1)
+        results = await asyncio.gather(last_assistant("s", Path.cwd()), cwd, return_exceptions=True)
+        assert all(isinstance(r, TimeoutError) for r in results) and history.called and info.called
+
+asyncio.run(probe())
+"""
+        subprocess.run([sys.executable, "-c", probe], check=True, timeout=20)
+
+    async def test_release_can_finish_during_a_send_check_and_prevents_the_stale_write(self):
+        _, cli = await self.retain()
+        entered, proceed = asyncio.Event(), asyncio.Event()
+        async def delayed(*args):
+            entered.set()
+            await proceed.wait()
+            return "another"
+        with patch.object(self.clients, "last_assistant", side_effect=delayed):
+            attempt = asyncio.create_task(self.submit())
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                async with asyncio.timeout(1):
+                    self.assertEqual(await self.release_client(await self.release_client()), ReleaseDisposition.RELEASED)
+            finally:
+                proceed.set()
+            with self.assertRaises(OrdinaryInputRejected) as stale:
+                await attempt
+            self.assertNotIsInstance(stale.exception, OrdinarySessionDiverged)
+            self.assertEqual(len(cli.inputs), 1)
+
+    async def test_divergence_card_captures_the_pending_stop_hook_revision(self):
+        _, cli = await self.retain()
+        async def changed(*args):
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "a"}, {"id": "b"}]}, None, None)
+            return "foreign"
+        with patch.object(self.clients, "last_assistant", side_effect=changed):
+            with self.assertRaises(OrdinarySessionDiverged) as rejected:
+                await self.submit()
+        preview = rejected.exception.confirmation
+        self.assertEqual(preview.crons, 2)
+        self.assertEqual(preview, await self.release_client())
+        self.assertEqual(await self.release_client(preview), ReleaseDisposition.RELEASED)
 
     async def test_live_divergence_rejects_only_one_input_even_if_history_disappears(self):
         _, cli = await self.retain()

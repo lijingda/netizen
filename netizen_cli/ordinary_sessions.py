@@ -174,8 +174,10 @@ class ReleaseConfirmation:
 
 
 class OrdinarySessionDiverged(OrdinaryInputRejected):
-    def __init__(self, confirmation: ReleaseConfirmation):
+    def __init__(self, scope: FeishuScope, binding_id: str, confirmation: ReleaseConfirmation):
         super().__init__("检测到该会话在其他 Claude 客户端有新进展，这条消息未发送。")
+        self.scope = scope
+        self.binding_id = binding_id
         self.confirmation = confirmation
 
 

@@ -17,9 +17,8 @@ from ..bindings import (
 )
 from .question_inputs import CardAnswerOrigin
 from ..cards.defaults import defaults_card
-from ..cards.controls import release_confirmation_card
 from ..defaults import DefaultConfigurationError
-from ..ordinary_sessions import ClaudeInputAnchor, LiveSubmissionUnknown, OrdinaryInputRejected, OrdinarySessionDiverged
+from ..ordinary_sessions import ClaudeInputAnchor, LiveSubmissionUnknown, OrdinaryInputRejected
 from ..runtime.contracts import (
     ModelProviderRejected,
     ContextCursorCommit,
@@ -328,9 +327,6 @@ class PromptChannel(CompletionPresentationChannel):
         except BaseException as error:
             if not accepted:
                 await self._discard_unsubmitted_attachments(prepared, error, attempted=attempted)
-            if isinstance(error, OrdinarySessionDiverged):
-                await self._reply(message, release_confirmation_card(scope, binding.id, error.confirmation, diverged=True))
-                return
             raise
         finally:
             # The native RPC has consumed the input (or owns its in-flight
