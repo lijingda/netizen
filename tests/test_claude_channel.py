@@ -2776,6 +2776,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.sleep(.005)
                 await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
                 if cards and outcome == "confirmed":
+                    # H1's typing reaction can outlive its delivery queue.
+                    await self.until(lambda: ("H1", "reaction-1") in fx.channel.reaction_removals)
                     self.freeze_trace(fx, "ownerless_cron")
                 cli.init(user_message_uuids=[])
                 for i, block in enumerate((TextBlock("stage"), ToolUseBlock("tool", "Bash", {}))):

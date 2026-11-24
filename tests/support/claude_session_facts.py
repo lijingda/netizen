@@ -269,8 +269,8 @@ class NativeSession:
                 assert len(self.results) == (case == "overlap")
                 self.release("model")
             if case == "wake":
+                await self.until(lambda: self.system("background_tasks_changed")[-1].data["tasks"] == [])
                 empty = self.system("background_tasks_changed")[-1]
-                assert empty.data["tasks"] == []
                 states = [m.data["state"] for m in self.frames[:self.frames.index(empty)]
                           if isinstance(m, SystemMessage) and m.subtype == "session_state_changed"]
                 assert states[-1] == "idle"
