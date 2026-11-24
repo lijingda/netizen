@@ -2,6 +2,7 @@ import asyncio
 from itertools import product
 import json
 from unittest.mock import AsyncMock, PropertyMock, patch
+from uuid import UUID
 
 from lark_channel import SendResult
 from contextlib import asynccontextmanager
@@ -18,6 +19,8 @@ from tests.support import has_claude_sdk, requires_claude_sdk
 from tests.support.channel_cards import _card_button_value, _elements, direct_button_event, direct_card_event, form_values, elements
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
+from tests.support.channel_results import sent_result
+from tests.support.presenter_traces import CLAUDE_FIXTURE, expect_presenter_trace
 
 
 if has_claude_sdk:
@@ -50,6 +53,11 @@ async def owner_channel():
 
 
 class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
+    def freeze_trace(self, fx, scenario):
+        self.enterContext(patch("netizen_cli.runtime.claude_ordinary.uuid4",
+                               side_effect=(UUID(int=1), UUID(int=2))))
+        return expect_presenter_trace(self, fx, scenario, reference=CLAUDE_FIXTURE)
+
     async def until(self, predicate):
         async with asyncio.timeout(10):
             while not predicate():
@@ -1431,11 +1439,19 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         for cards in (False, True):
             async with owner_channel() as (app, fx, clients, clock, ordinary):
                 from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
+                # ADR 0106 section 4 covers only card.header.title.content and
+                # card.config.summary.content. In the decoded background_cards trace,
+                # writes 3, 5 and 7 update "first"; 6 sends the wake answer before
+                # logical completion. Write 8 is the verified whole-task redraw.
+                self.freeze_trace(fx, "background_cards" if cards else "background_plain")
                 clock[0] = 2.
                 scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
                 binding = fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
                     task_feedback=BindingTaskFeedback(progress_card_enabled=cards, reaction_pulse_enabled=True))
                 fx.channel.reply_results.append(SendResult.ok(message_id="first"))
+                if not cards:
+                    fx.channel.reply_results.append(SendResult.ok(message_id="first-body"))
+                fx.channel.send_results.append(sent_result("reminder", chat_id="oc_direct", parent_id="wake", root_id="H1"))
                 await app.handle_message(FakeMessage("work", message_id="H1"))
                 cli = clients.calls[-1]
                 def system(kind, **data):
@@ -1443,7 +1459,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 def assistant(block, mid, **fields):
                     cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session,
                         uuid=mid + str(type(block)), message_id=mid, **fields))
-                cli.init()
+                cli.init(uuid="human-physical")
+                await self.until(lambda: bool(app._progress_cards._sessions))
                 assistant(TextBlock("first fragment"), "model1")
                 assistant(ToolUseBlock("tool", "Bash", {}), "model1")
                 assistant(TextBlock("private child"), "nested", parent_tool_use_id="tool")
@@ -1462,6 +1479,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("后台任务 1 个运行中", str(fx.channel.updates))
                 else:
                     self.assertTrue(any("first fragment" in str(body) for _, body in fx.channel.replies))
+                    self.assertIn(("H1", "physical one\n\n后台任务 1 个运行中，可继续发送消息"), fx.channel.replies)
                 fx.channel.reply_results.append(SendResult.ok(message_id="wake"))
                 system("background_tasks_changed", tasks=[])
                 cli.init(user_message_uuids=[])
@@ -1479,6 +1497,28 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 wakes = [body for anchor, body in fx.channel.replies if anchor == "H1" and "physical two" in str(body)]
                 self.assertEqual(len(wakes), 1)
                 self.assertNotIn("first fragment", str(wakes[0]))
+                if not cards:
+                    self.assertEqual(wakes, ["physical two"])
+
+    @requires_claude_sdk
+    async def test_rejected_physical_body_issues_one_unconfirmed_notice(self):
+        from netizen_cli.bindings import BindingTaskFeedback
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            self.freeze_trace(fx, "rejected_body")
+            clock[0] = 2.
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                task_feedback=BindingTaskFeedback(progress_card_enabled=False))
+            fx.channel.reply_results.extend([SendResult(success=False, raw={"code": 99991400}),
+                                            sent_result("notice", chat_id=scope.chat_id)])
+            await app.handle_message(FakeMessage("work", message_id="H"))
+            cli = clients.calls[-1]
+            cli.init()
+            await self.until(lambda: bool(app._progress_cards._sessions))
+            cli.result(result="body")
+            self.assertTrue(await ordinary.wait_idle(5))
+            self.assertEqual(fx.channel.replies, [("H", "body"), ("H", INCOMPLETE)])
+            self.assertFalse(fx.channel.send_calls)
 
     async def test_terminal_and_unknown_are_text_only(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
@@ -1618,6 +1658,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 async with asyncio.timeout(5):
                     while ordinary._active[binding.id].humans:
                         await asyncio.sleep(.005)
+                await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
+                if cards:
+                    self.freeze_trace(fx, "ownerless_cron")
                 cli.init(user_message_uuids=[])
                 for i, block in enumerate((TextBlock("stage"), ToolUseBlock("tool", "Bash", {}))):
                     cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session, message_id="m", uuid=str(i)))
@@ -1635,6 +1678,14 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("stage", str(calls[0][1]))
                 self.assertIn("final text", str(calls[-1][1]))
                 self.assertEqual(len({opts.uuid for _, _, opts in calls}), count)
+                if cards:
+                    await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
+                    expect_presenter_trace(self, fx, "bodyless_anonymous_wake", reference=CLAUDE_FIXTURE)
+                    cli.init(user_message_uuids=[])
+                    cli.result(user_message_uuid=None, uuid="empty-wake", reason=None, result=None,
+                               origin={"kind": "task-notification", "producer": "session-task", "runId": "unknown"})
+                    await self.until(lambda: "empty-wake" in cli.live.seen
+                                     and not ordinary._active[binding.id].delivery.queues)
 
     async def test_queued_cron_answer_resolves_the_topic_root_at_channel_handoff(self):
         from netizen_cli.ordinary_sessions import PhysicalAnswer

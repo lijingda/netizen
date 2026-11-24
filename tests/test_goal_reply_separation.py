@@ -237,6 +237,44 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(partial.text, rendered(self.channel.updates[-1][1]))
         self.assertEqual(self.app._progress_cards._sessions, {})
 
+    async def test_plain_goal_delivers_rollover_partials_then_final(self):
+        expect_presenter_trace(self, self.fx, "goal_plain_rollover")
+        first = PartialAnswer("native-one", "physical-first", "item", "first partial")
+        second = PartialAnswer("native-one", "physical-final", "item", "second partial")
+        self.runtime.goal_activity_values[self.binding.id] = replace(
+            self.activity, physical_turn_id=first.turn_id, partial_answers=(first,),
+        )
+        await self.start()
+        async with asyncio.timeout(5):
+            while len(self.channel.replies) < 2:
+                await asyncio.sleep(.01)
+        self.channel.reply_results.append(sent_result("om_partial_two", chat_id="oc_direct"))
+        await self.app.handle_completion(self.outcome(partial_answers=(first, second)))
+        self.assertEqual([post.markdown for _, post in self.channel.replies[1:3]],
+                         ["**阶段性答案**\n\nfirst partial", "**阶段性答案**\n\nsecond partial"])
+        self.assertIn("final answer", str(self.channel.replies[3][1]))
+
+    async def test_interrupted_goal_preserves_earlier_partial_without_files_or_mention(self):
+        expect_presenter_trace(self, self.fx, "goal_interrupted")
+        earlier = PartialAnswer("native-one", "physical-first", "item", "earlier partial")
+        self.runtime.goal_activity_values[self.binding.id] = replace(
+            self.activity, physical_turn_id=earlier.turn_id, partial_answers=(earlier,),
+        )
+        await self.start(progress=True)
+        path = self.fx.project / "unfinished.txt"
+        path.touch()
+        await self.app.handle_completion(self.outcome(
+            final_turn_status="interrupted", final_items=(file_change_item(str(path)),), cwd=self.fx.project,
+            partial_answers=(earlier,), goal=native_goal(GoalStatus.PAUSED),
+            background_cleanup_requested=True, finalization=GoalFinalizationStatus.NOT_APPLICABLE,
+        ))
+        message_id, terminal = self.channel.updates[-1]
+        self.assertEqual(message_id, "om_task")
+        self.assertIn("中断", rendered(terminal))
+        self.assertIn(earlier.text, rendered(terminal))
+        self.assertNotIn("turn-file.send", rendered(terminal))
+        self.assertFalse(self.channel.send_calls)
+
     async def test_interrupted_final_turn_never_gets_files(self):
         path = self.fx.project / "interrupted.txt"
         path.write_text("unfinished")

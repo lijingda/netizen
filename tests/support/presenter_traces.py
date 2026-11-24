@@ -1,4 +1,4 @@
-"""Record calls at the public Feishu transport boundary for Codex differentials."""
+"""Record calls at the public Feishu transport boundary for presenter differentials."""
 
 import base64
 import itertools
@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "codex_presenter_a1b9eee.json"
+CLAUDE_FIXTURE = FIXTURE.with_name("claude_presenter_a1b9eee.json")
 
 
 def delivery_value(value):
@@ -44,7 +45,7 @@ def _encode_media(value):
     raise TypeError(f"Unexpected transport value {type(value).__name__}")
 
 
-def expect_presenter_trace(case, fixture, name):
+def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE):
     """Compare the complete ordered trace after the scenario finishes."""
     stack = case.enterContext(ExitStack())
     nonces = itertools.count(1)
@@ -55,7 +56,7 @@ def expect_presenter_trace(case, fixture, name):
         serialized = json.dumps(events, default=_encode_media, ensure_ascii=False)
         root = fixture.project_root
         actual = json.loads(serialized.replace(str(root.resolve()), "<root>").replace(str(root), "<root>"))
-        expected = json.loads(FIXTURE.read_text(encoding="utf-8"))[name]
+        expected = json.loads(reference.read_text(encoding="utf-8"))[name]
         case.assertEqual(expected, actual, name)
 
     case.addCleanup(compare)

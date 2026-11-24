@@ -7569,6 +7569,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_accepted_steer_keeps_original_turn_pulse_anchored(self) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_steer")
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -7608,6 +7609,12 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("om_original", "Typing"), self.channel.reactions)
         self.assertIn(("om_original", "THINKING"), self.channel.reactions)
         self.assertIn(("om_steer", "OnIt"), self.channel.reactions)
+        await self.app.handle_completion(TurnOutcome(
+            binding_id=binding.id, thread_id="native-one", turn_id="turn-one", owner_id="ou_owner",
+            origin=FakeMessage("work", message_id="om_original", sender_id="ou_owner"),
+            result=completed_turn_result(final_response="finished"),
+        ))
+        self.assertEqual(self.channel.replies, [("om_original", completion_post("finished", "ou_owner"))])
 
     async def test_failed_steer_has_no_confirmation_reaction(self) -> None:
         await self.fixture.new()
@@ -8179,6 +8186,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_turn_observation_unavailable_notice_preserves_exit_paths(
         self,
     ) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_observation_unavailable")
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
