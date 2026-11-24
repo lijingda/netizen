@@ -12474,6 +12474,48 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.resume_calls, [])
         self.assertEqual(len(self.codex.handles), 1)
 
+    async def test_parked_command_cannot_open_a_process_message_before_the_notice(self):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport
+
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.binding()
+        submission = await self.submit(binding)
+        observer.append_activity(thread_id=submission.thread_id, turn_id=submission.turn_id,
+            event=TurnActivityEvent("read", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 1, text="Read"))
+        self.codex.read_errors.extend(InternalRpcError(-32603, "history unavailable") for _ in range(4))
+        try:
+            async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+                while self.runtime.active_turn(binding.id).state is not ActiveState.OBSERVATION_UNAVAILABLE:
+                    await asyncio.sleep(0)
+            key = PresentationKey(binding.id, submission.thread_id, submission.turn_id)
+            origin = FakeMessage("work", message_id="in")
+            events = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime))
+            opened = events.opened(key, origin, BindingTaskFeedback(), reply=AsyncMock(), reply_partial=AsyncMock())
+            snapshot = opened.observe().snapshot
+            self.assertEqual(snapshot.state, ActiveState.OBSERVATION_UNAVAILABLE)
+            self.assertEqual(len(snapshot.process_items), 1)
+            self.assertFalse(self.outcomes)
+            async with channel_fixture() as fx:
+                wire = ProcessTransport([])
+                presenter = fx.app._progress_cards
+                presenter._process_port = wire.port
+                await presenter.open(opened)
+                writer = presenter._process[key]
+                if writer.task:
+                    await asyncio.wait_for(writer.ready.wait(), EXPECTED_PROGRESS_TIMEOUT)
+                self.assertFalse(wire.events)
+            self.assertFalse(snapshot.process_available)
+        finally:
+            submission.release_receipt_attempt()
+            await self.runtime.wait_idle()
+        self.assertIsInstance(self.outcomes[-1], TurnObservationUnavailableOutcome)
+
     async def _park_turn_for_recovery(self, binding):
         submission = await self.submit(binding)
         self.codex.read_errors.extend(

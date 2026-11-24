@@ -7,6 +7,7 @@ from time import time
 from dataclasses import replace
 
 
+from ..domain import ActiveState, GoalOperationState
 from ..process_activity import ProcessActivityWindow
 from ..partial_answers import PartialAnswer, partial_answers_from_items
 from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot
@@ -38,6 +39,14 @@ from .queries import NativeQueryRuntime
 
 
 logger = logging.getLogger(RUNTIME_LOGGER_NAME)
+
+
+def _process_available(active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal) -> bool:
+    if active.process_activity is None or not active.activity_observation_enabled:
+        return False
+    if isinstance(active, _ActiveGoal):
+        return not active.observation_unavailable and active.state is not GoalOperationState.UNKNOWN
+    return active.state not in (ActiveState.CLOSING, ActiveState.OBSERVATION_UNAVAILABLE)
 
 
 class TurnActivityRuntime(NativeQueryRuntime):
@@ -114,7 +123,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_generated=active.plan_generated,
             plan_may_be_stale=active.plan_may_be_stale,
             steps=active.plan_steps,
-            process_available=active.process_available and (active.activity_observation_enabled or active.terminal_observed),
+            process_available=_process_available(active),
             process_items=active.process_activity.rows if active.process_activity else (),
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
@@ -162,7 +171,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_generated=active.plan_generated,
             plan_may_be_stale=active.plan_may_be_stale,
             steps=active.plan_steps,
-            process_available=active.process_available and (active.activity_observation_enabled or active.terminal_observed),
+            process_available=_process_available(active),
             process_items=active.process_activity.rows if active.process_activity else (),
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
@@ -184,7 +193,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             ) if settings.show_plan and active.plan_available else (),
             self._activity_commentary(active) if settings.show_commentary else (),
             self._activity_operations(active) if settings.show_operations else (),
-            active.process_available, active.process_activity.revision if active.process_activity else 0,
+            _process_available(active), active.process_activity.revision if active.process_activity else 0,
             tuple(active.partial_answers.values()),
         )
 
@@ -195,10 +204,12 @@ class TurnActivityRuntime(NativeQueryRuntime):
         before = self._turn_activity_visible_state(active)
         if not active.activity_observation_enabled:
             return None
+        if isinstance(active, _ActiveSideTurn) and active.completion_notification_seen:
+            # The exact completion notification hands the retained queue to handle.run().
+            return None
         observer = self._turn_plan_observer
         if observer is None:
             active.plan_available = False
-            active.process_available = False
             active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
@@ -212,7 +223,6 @@ class TurnActivityRuntime(NativeQueryRuntime):
             )
         except Exception as error:
             active.plan_available = False
-            active.process_available = False
             active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
@@ -226,7 +236,6 @@ class TurnActivityRuntime(NativeQueryRuntime):
             )
             return None
         active.plan_available = True
-        active.process_available = not active.task_feedback.progress_card_enabled
         active.plan_cursor = observation.next_cursor
         for request in observation.questions:
             self._deliver_question(active, active.handle.id, request)
@@ -446,8 +455,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_available=active.plan_available,
             plan_generated=active.plan_generated,
             steps=active.plan_steps,
-            process_available=(active.process_available and not active.observation_unavailable
-                               and (active.activity_observation_enabled or active.terminal_observed)),
+            process_available=_process_available(active),
             process_items=active.process_activity.rows if active.process_activity else (),
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
@@ -465,7 +473,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             if settings.show_plan and active.plan_available else (),
             self._activity_commentary(active) if settings.show_commentary else (),
             self._activity_operations(active) if settings.show_operations else (),
-            active.process_available, active.process_activity.revision if active.process_activity else 0,
+            _process_available(active), active.process_activity.revision if active.process_activity else 0,
             tuple(active.partial_answers.values()),
         )
 
@@ -478,8 +486,8 @@ class TurnActivityRuntime(NativeQueryRuntime):
             return
         before = self._goal_activity_visible_state(active)
         if projection is None:
+            active.activity_observation_enabled = False
             active.plan_available = False
-            active.process_available = False
             if self._goal_activity_visible_state(active) != before:
                 active.activity_revision += 1
             return
@@ -497,7 +505,6 @@ class TurnActivityRuntime(NativeQueryRuntime):
             # A late event from an earlier physical Turn can never repopulate
             # the new Turn's Activity Module.
             return
-        active.process_available = not active.task_feedback.progress_card_enabled
         if projection.plan_updated:
             self._apply_plan(active, projection.steps)
             active.plan_generated = True

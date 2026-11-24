@@ -555,7 +555,6 @@ class TurnObservationRuntime(ThreadNamingRuntime):
             active.observation_error = describe_error(error)
             if active.state is not ActiveState.OBSERVATION_UNAVAILABLE:
                 active.state = ActiveState.OBSERVATION_UNAVAILABLE
-                active.process_available = False
                 active.activity_revision += 1
                 self._advance_admission_revision(active.binding_id)
             logger.warning(
