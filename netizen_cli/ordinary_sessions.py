@@ -109,10 +109,6 @@ class LogicalReply:
     messages: dict[str, _ReplyMessage] | None = field(default_factory=dict)
     unaddressed_confirmation: bool = False
 
-    def begin(self, items: tuple[tuple[str, str], ...]) -> None:
-        if any(kind in ("body", "partial") for kind, _ in items):
-            self.attempted = True
-
     def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], usable: Callable[[str], bool]) -> None:
         if self.messages is None:
             return

@@ -1755,6 +1755,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             (True, "rejected"), (True, "lost"), (True, "empty"), (False, "conflicting receipt")):
             with self.subTest(cards=cards, answer=case):
                 await self.exercise_answer_receipt(cards, case)
+        for outcome in ("rejected", "unknown", "confirmed"):
+            with self.subTest(replacement_receipt=outcome):
+                await self.exercise_replacement_receipt(outcome)
         # Hold the busy receipt across a bodyless wake, a cron change and the final idle.
         for fault in ("ok", "unknown", "fail"):
             with self.subTest(busy_receipt=fault):
@@ -2015,6 +2018,51 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(sum(content == INCOMPLETE for _, content in fx.channel.replies), 1)
                 self.assertEqual(mentions.assert_reminder(self), "posted" if final == "posted" else "card-A")
 
+    async def exercise_replacement_receipt(self, outcome):
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.physical_delivery import BODY, PhysicalDelivery
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                project_alias="test", creator_id="ou_user", task_feedback=BindingTaskFeedback(progress_card_enabled=True))
+            fx.channel.reply_results.append(SendResult.ok(message_id="first"))
+            replace_card, settle = fx.channel.update_card, PhysicalDelivery.settle
+            settles, writes = [], []
+            image_item = ("image", "img_sent")
+
+            def at_settle(ledger):
+                settles.append((dict(ledger.items), run_reply.attempted))
+                return settle(ledger)
+
+            async def update(mid, card):
+                if _has_card_answer(card):
+                    writes.append((mid, physical.items.get(BODY), physical.items.get(image_item), run_reply.attempted))
+                    if outcome == "rejected":
+                        return SendResult(success=False, raw={"code": 99991400})
+                    result = await replace_card(mid, card)
+                    if outcome == "unknown":
+                        raise TimeoutError("answer and image applied, receipt lost")
+                    return result
+                return await replace_card(mid, card)
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(PhysicalDelivery, "settle", at_settle))
+                stack.enter_context(patch.object(fx.channel, "update_card", update))
+                mentions = _MentionTrace(fx.channel, stack)
+                await app.handle_message(FakeMessage("work", message_id="H1"))
+                cli = clients.calls[-1]
+                run_reply = ordinary._active[binding.id].human.reply
+                cli.init()
+                await self.until(lambda: bool(app._progress_cards._sessions))
+                physical = next(iter(app._progress_cards._sessions.values())).delivery
+                cli.result(result="answer ![preview](img_sent)")
+                self.assertTrue(await ordinary.wait_idle(10))
+                self.assertEqual(writes[:1], [("first", "unknown", "unknown", True)])
+                self.assertEqual(settles, [({BODY: outcome, image_item: outcome}, True)])
+                self.assertEqual(sum(content == INCOMPLETE for _, content in fx.channel.replies), int(outcome != "confirmed"))
+                self.assertEqual(mentions.assert_reminder(self), "first" if outcome == "confirmed" else None)
+
     async def exercise_answer_receipt(self, cards, case):
         from dataclasses import replace
         from netizen_cli.bindings import BindingTaskFeedback
@@ -2151,9 +2199,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         first = CardReplyLocation(scope, "H1", "H1", binding)
         second = CardReplyLocation(scope, "H2", "H2", binding)
         reply = LogicalReply()
-        ledger = PhysicalDelivery(reply=reply)
+        ledger = PhysicalDelivery()
         for mid in ("older", "newer"):
-            ledger.begin((BODY,))
+            ledger.begin((BODY,), reply)
             receipt = first.validate(SendResult.ok(message_id=mid))
             record_sent_answer(reply, first, mid, (BODY,), receipt)
         row = reply.messages["newer"]

@@ -81,7 +81,8 @@ class _PublishedCard:
     content: ReplyCardProjection
     writer: _CardWriter
     tracks_run: bool
-    answer_items: tuple[Item, ...]
+    delivery: PhysicalDelivery
+    items: tuple[Item, ...]
 
 
 def render_run_card(content: ReplyCardProjection, line: str | None) -> OutboundCard:
@@ -120,6 +121,7 @@ class _TurnProgressCardSession:
     observe: Callable[[], ActivityChanged | None]
     location: CardReplyLocation | None = None
     delivery: PhysicalDelivery | None = None
+    run_reply: LogicalReply | None = None
     writer: _CardWriter | None = None
     reply_partial: Callable[[OutboundPost], Awaitable[SendResult]] | None = None
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
@@ -163,7 +165,8 @@ class _ReplyCardPresenter:
 
     async def publish_card(
         self, display: RunDisplay, message_id: str, key: PresentationKey, location: CardReplyLocation,
-        content: ReplyCardProjection, *, answer_items: tuple[Item, ...], confirmed: OutboundCard | None = None, tracks_run: bool = True,
+        content: ReplyCardProjection, *, delivery: PhysicalDelivery, items: tuple[Item, ...],
+        confirmed: OutboundCard | None = None, tracks_run: bool = True,
     ) -> bool:
         if not location.can_write(message_id):
             return False
@@ -171,7 +174,7 @@ class _ReplyCardPresenter:
         if confirmed is not None:
             writer.known = confirmed
         cards = self._published.setdefault(display.reply, {}) if display.reply else {}
-        cards[message_id] = _PublishedCard(key, location, content, writer, tracks_run, answer_items)
+        cards[message_id] = _PublishedCard(key, location, content, writer, tracks_run, delivery, items)
         return (await self._reconcile_cards(display, cards))[message_id]
 
     async def reconcile(self, display: RunDisplay) -> dict[str, bool]:
@@ -200,12 +203,12 @@ class _ReplyCardPresenter:
         session = self._sessions_for(key).pop(key.index, None)
         if session:
             await self._stop_session(session)
-            if session.message_id and session.location:
+            if session.message_id and session.location and session.delivery:
                 content = turn_progress_projection(snapshot=session.snapshot, terminal_status=status,
                     collapsed=True, include_result=status != "completed")
                 items = tuple(("partial", part.item_id) for part in session.snapshot.partial_answers)
                 await self.publish_card(display, session.message_id, key, session.location, content,
-                                        answer_items=(*items, BODY) if content.result else items)
+                                        delivery=session.delivery, items=(*items, BODY) if content.result else items)
 
     async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard]) -> dict[str, bool]:
         reply = display.reply
@@ -220,12 +223,12 @@ class _ReplyCardPresenter:
                 return render_run_card(view.content, display.current() if mid == newest() else None)
 
             async def write(card: OutboundCard) -> bool:
-                if reply:
-                    reply.begin(view.answer_items)
+                view.delivery.begin(view.items, reply)
                 attempt = await self._attempt_update_message(mid, card, binding_id=view.key.owner_id,
                     operation_id=view.key.turn_id, location=view.location, policy=DeliveryPolicy.ITEM_RECEIPTS)
+                view.delivery.record(view.items, receipt(attempt.result))
                 if attempt.confirmed and reply:
-                    reply.published(mid, view.key.turn_id, view.answer_items, view.location.usable)
+                    reply.published(mid, view.key.turn_id, view.items, view.location.usable)
                 return attempt.confirmed
 
             try:
@@ -282,14 +285,14 @@ class _ReplyCardPresenter:
         message_id = None
         writer = None
         location = event.location
-        delivery = PhysicalDelivery(reply=event.run_reply) if event.policy.confirms_items else None
+        delivery = PhysicalDelivery() if event.policy.confirms_items else None
         if event.feedback.progress_card_enabled:
             try:
                 card = turn_progress_card(snapshot=snapshot)
                 async with asyncio.timeout(self._operation_timeout_seconds):
                     items = tuple(delivery.partial(item) for item in snapshot.partial_answers) if delivery else ()
                     if delivery:
-                        delivery.begin(items)
+                        delivery.begin(items, event.run_reply)
                     result = await external_call(event.reply(card), isolate=event.policy.confirms_items)
                     if event.validate_reply is None or await external_call(event.validate_reply(result), isolate=event.policy.confirms_items):
                         if location:
@@ -317,7 +320,8 @@ class _ReplyCardPresenter:
             return False
         session = _TurnProgressCardSession(
             target=target, message_id=message_id, stopped=asyncio.Event(), snapshot=snapshot, observe=event.observe,
-            location=location, delivery=delivery, writer=writer, policy=event.policy, reply_partial=event.reply_partial, validate_reply=event.validate_reply,
+            location=location, delivery=delivery, run_reply=event.run_reply, writer=writer,
+            policy=event.policy, reply_partial=event.reply_partial, validate_reply=event.validate_reply,
             attempted_partials=set() if previous is None else previous.attempted_partials,
             confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
@@ -398,6 +402,7 @@ class _ReplyCardPresenter:
         reply = session.reply_partial
         if reply is None:
             return
+        ledger, run_reply = (session.delivery, session.run_reply) if isinstance(session, _TurnProgressCardSession) else (None, None)
         for answer in answers:
             if session.stopped.is_set() and not terminal:
                 return
@@ -414,12 +419,11 @@ class _ReplyCardPresenter:
             # Mark before I/O: a timeout or cancellation may follow publication.
             # Even an SDK failure may hide a partially delivered long post.
             session.attempted_partials.add(identity)
-            ledger = session.delivery if isinstance(session, _TurnProgressCardSession) else None
             if ledger:
                 item = ledger.partial(answer)
                 if ledger.items.get(item, "unattempted") != "unattempted":
                     continue
-                ledger.begin((item,))
+                ledger.begin((item,), run_reply)
             try:
                 async with asyncio.timeout(self._operation_timeout_seconds):
                     result = await external_call(reply(post), isolate=session.policy.confirms_items)
@@ -430,7 +434,7 @@ class _ReplyCardPresenter:
                     if session.validate_reply is not None and not await external_call(session.validate_reply(result), isolate=session.policy.confirms_items):
                         continue
                     if ledger and session.location:
-                        record_sent_answer(ledger.reply, session.location, answer.turn_id, (item,), result)
+                        record_sent_answer(run_reply, session.location, answer.turn_id, (item,), result)
                     session.confirmed_partials.add(identity)
             except asyncio.CancelledError:
                 raise
@@ -638,7 +642,7 @@ class _ReplyCardPresenter:
         assert writer is not None
 
         async def write(desired: OutboundCard) -> bool:
-            delivery.begin(items)
+            delivery.begin(items, session.run_reply)
             attempt = await self._attempt_update_message(mid, desired, binding_id=session.target.key.owner_id,
                 operation_id=session.target.key.turn_id, location=session.location, policy=session.policy)
             delivery.record(items, receipt(attempt.result))
@@ -647,8 +651,8 @@ class _ReplyCardPresenter:
         confirmed = await writer.reconcile(lambda: None if session.stopped.is_set() else card, write)
         if confirmed:
             delivery.record(items, "confirmed")
-            if delivery.reply and session.location:
-                delivery.reply.published(mid, session.target.key.turn_id, items, session.location.usable)
+            if session.run_reply and session.location:
+                session.run_reply.published(mid, session.target.key.turn_id, items, session.location.usable)
         if session.location and not session.location.can_write(mid):
             session.message_id = None
         return confirmed

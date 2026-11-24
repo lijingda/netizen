@@ -34,7 +34,6 @@ def record_sent_answer(reply: LogicalReply | None, location: CardReplyLocation, 
 
 @dataclass(slots=True)
 class PhysicalDelivery:
-    reply: LogicalReply | None = None
     items: dict[Item, Outcome] = field(default_factory=dict)
     partial_text: dict[Item, str] = field(default_factory=dict)
     prepared_images: set[Item] = field(default_factory=set)
@@ -56,10 +55,10 @@ class PhysicalDelivery:
                 return state
         return "unattempted"
 
-    def begin(self, items: tuple[Item, ...]) -> None:
+    def begin(self, items: tuple[Item, ...], reply: LogicalReply | None) -> None:
         # Mark before awaiting the Channel. Cancellation leaves an unknown outcome.
-        if self.reply:
-            self.reply.begin(items)
+        if reply and any(kind in ("body", "partial") for kind, _ in items):
+            reply.attempted = True
         self.record(items, "unknown")
 
     def record(self, items: tuple[Item, ...], outcome: Outcome) -> None:

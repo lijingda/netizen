@@ -84,7 +84,6 @@ class CompletionPresentationChannel(ChannelReplies):
         if not display.publishable():
             return
         ledger = self._progress_cards.physical_delivery(key)
-        ledger.reply = display.reply
         for part in outcome.partial_answers:
             ledger.partial(part)
         if outcome.content:
@@ -128,7 +127,6 @@ class CompletionPresentationChannel(ChannelReplies):
             # A Result can represent a running partial that the terminal snapshot coalesced.
             shown_partials = tuple(item for item, text in ledger.partial_text.items()
                                    if item in card_partials or (content and text == content))
-            answer_items = (BODY, *shown_partials) if content else shown_partials
             items = (*body_items, *shown_partials)
             try:
                 projection = turn_progress_projection(snapshot=snapshot, partial_answers=outcome.partial_answers,
@@ -138,19 +136,19 @@ class CompletionPresentationChannel(ChannelReplies):
             except Exception:
                 card = None
             if card and first_id and location.can_write(first_id):
-                if await self._progress_cards.publish_card(display, first_id, key, location, projection, answer_items=answer_items):
+                if await self._progress_cards.publish_card(display, first_id, key, location, projection, delivery=ledger, items=items):
                     ledger.record(items, "confirmed")
                 return
             if (card and not first_id and publishable()
                     and all(ledger.items[item] not in ("unknown", "rejected") for item in ledger.partial_text)):
-                ledger.begin(items)
+                ledger.begin(items, reply)
                 sent = await policy.send(card, None, location)
                 state = receipt(sent)
                 ledger.record(items, state)
                 if state == "confirmed":
-                    record_sent_answer(reply, location, key.turn_id, answer_items, sent)
+                    record_sent_answer(reply, location, key.turn_id, items, sent)
                     if reply and (mid := _confirmed_reply_id(sent)):
-                        await self._progress_cards.publish_card(display, mid, key, location, projection, answer_items=answer_items, confirmed=card)
+                        await self._progress_cards.publish_card(display, mid, key, location, projection, delivery=ledger, items=items, confirmed=card)
                     return
         # A fallback freezes the card at the last confirmed poll. Plain posts have
         # their own receipts, including attempts whose publication is uncertain.
@@ -174,7 +172,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
                     run_continues=outcome.run_continues, include_result=False, collapsed=True)
                 await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False,
-                    answer_items=tuple(("partial", part.item_id) for part in last_snapshot.partial_answers))
+                    delivery=ledger, items=tuple(("partial", part.item_id) for part in last_snapshot.partial_answers))
             else:
                 await self._progress_cards.reconcile(display)
 
@@ -183,7 +181,7 @@ class CompletionPresentationChannel(ChannelReplies):
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
-        ledger.begin(items)
+        ledger.begin(items, policy.display.reply)
         try:
             async with asyncio.timeout(self._progress_cards.operation_timeout):
                 result = await external_call(policy.send(content, operation, location))
