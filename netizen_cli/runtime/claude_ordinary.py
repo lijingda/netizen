@@ -189,13 +189,13 @@ class _Execution:
         return ClaudeCliState(self.live.ordered_idle and self.pending is None and self.live.physical is None,
                              len(self.live.tasks) if owner is None else self.live.task_count(owner), bool(self.live.crons))
 
-    def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, final: str | None = None) -> TurnActivitySnapshot:
+    def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, state: ClaudeCliState, final: str | None = None) -> TurnActivitySnapshot:
         partials = tuple(PartialAnswer(self.session, turn_id, key, text) for key, text in self.live.partials.items()
                          if text != final)
         return TurnActivitySnapshot(self.binding.id, self.session, turn_id, self.revision,
                                    ActiveState.RUNNING, 0, False, False, False, (), partial_answers=partials,
                                    progress_card_settings=feedback.progress_card_settings or ProgressCardSettings(),
-                                   state_line=self.cli_state(turn_id).line)
+                                   state_line=state.line)
 
     @property
     def finishing(self) -> bool:
@@ -754,7 +754,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         finish_presentation = direct and isinstance(source.origin, ClaudeInputAnchor)
         if frame.result or detail or live.partials or (status == "completed" and finish_presentation):
             turn_id = source.input_id if direct else frame.uuid
-            snapshot = execution.activity(turn_id, source.binding.task_feedback, final=body)
+            state = partial(execution.cli_state, human.input_id if human else "")
+            snapshot = execution.activity(turn_id, source.binding.task_feedback, state=state(), final=body)
             event = PhysicalAnswer(source.binding.id, execution.session,
                                    turn_id, self._owner,
                                    human.source if human else execution.scope, status, body, detail,
@@ -763,7 +764,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                    run_continues=human is not None and (
                                        live.has_work(human.input_id) or (execution.pending is human and submitted is not human)
                                    ),
-                                   state=execution.cli_state, owned_tasks=(lambda: live.task_count(human.input_id) if human else 0),
+                                   state=state, session_has_work=lambda: bool(live.tasks or live.crons),
                                    activity=snapshot, partial_answers=snapshot.partial_answers,
                                    wake=wake, reply=human.reply if human else None,
                                    publishable=execution.publication.valid)
@@ -1008,7 +1009,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if execution and execution.session == thread_id and not execution.broken:
             human = execution.humans.get(turn_id)
             if human and human.written and execution.live.init_human == turn_id:
-                return execution.activity(turn_id, human.binding.task_feedback)
+                return execution.activity(turn_id, human.binding.task_feedback, state=execution.cli_state(turn_id))
         return None
 
     def reply_blocked_by_lifecycle(self, binding_id: str) -> bool:

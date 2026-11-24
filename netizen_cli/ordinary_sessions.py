@@ -149,7 +149,7 @@ class PhysicalStarted:
 @dataclass(frozen=True, slots=True)
 class PhysicalAnswer(OrdinaryConclusion):
     run_continues: bool = False
-    owned_tasks: Callable[[], int] = lambda: 0
+    session_has_work: Callable[[], bool] = lambda: False
     logical_id: str | None = None
     state: Callable[[], ClaudeCliState] = ClaudeCliState
     wake: bool = False

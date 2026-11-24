@@ -95,14 +95,13 @@ class ClaudeReplyEvents:
             return await deliver(source, content, destination)
 
         def suffix() -> str:
-            count = event.owned_tasks()
+            count = event.state().tasks
             text = f"\n\n后台任务 {count} 个运行中，可继续发送消息" if count else ""
-            state = event.state()
-            if count or state.tasks or state.crons:
+            if count or event.session_has_work():
                 text += f"\n\n{CLAUDE_RELEASE_HINT}"
             return text
 
-        display = RunDisplay(event.reply, event.publishable, lambda: replace(event.state(), tasks=event.owned_tasks()).line)
+        display = RunDisplay(event.reply, event.publishable, lambda: event.state().line)
         return TurnResult(
             target=target,
             status=status,
