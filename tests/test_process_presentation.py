@@ -8,13 +8,46 @@ from unittest.mock import patch
 
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.partial_answers import PartialAnswer
+from netizen_cli.process_activity import ProcessActivityWindow
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.runtime.contracts import TurnOutcome
-from netizen_cli.turn_activity import TurnPlanStepSnapshot, TurnPlanStepState
+from netizen_cli.turn_activity import TurnActivityEvent, TurnActivityKind, TurnActivityStatus, TurnPlanStepSnapshot, TurnPlanStepState
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_results import completed_turn_result, file_change_item, turn_activity_snapshot
 from tests.support.presenter_traces import delivery_recorder
 
 REFERENCE = Path(__file__).with_name("fixtures") / "short_turn_presenter_15548d5.json"
+
+
+class ProcessActivityTest(unittest.TestCase):
+    def test_native_end_survives_eviction_and_ids_are_local_to_one_physical_turn(self):
+        settings = ProgressCardSettings(operation_limit=1)
+        window = ProcessActivityWindow()
+        next_turn = ProcessActivityWindow()
+        started = TurnActivityEvent("private-native-id", TurnActivityKind.TOOL, TurnActivityStatus.IN_PROGRESS, 0)
+        window.observe(started, settings)
+        next_turn.observe(started, settings)
+        row, = window.rows
+        self.assertNotIn(started.item_id, row.identity)
+        self.assertNotEqual(row.identity, next_turn.rows[0].identity)
+        for item_id in (started.item_id, "second"):
+            window.observe(TurnActivityEvent(item_id, started.kind, TurnActivityStatus.COMPLETED, 0), settings)
+        self.assertIsNotNone(row.finished_at)
+        self.assertNotIn(row, window.rows)
+        self.assertEqual(len(window.rows), 1)
+
+    def test_step_insertion_duplicate_and_rename(self):
+        window = ProcessActivityWindow()
+        def step(name, status=TurnPlanStepState.IN_PROGRESS):
+            return TurnPlanStepSnapshot(name, status)
+        window.plan((step("check"), step("check", TurnPlanStepState.COMPLETED)))
+        original, = window.rows
+        self.assertIsNone(original.finished_at)
+        window.plan((step("first"), step("check")))
+        self.assertIn(original, window.rows)
+        window.plan((step("first"), step("new")))
+        self.assertIsNotNone(original.finished_at)
+        self.assertEqual({row.text for row in window.rows}, {"first", "new"})
 
 
 async def short_turn_trace(*, card, files, install=None):

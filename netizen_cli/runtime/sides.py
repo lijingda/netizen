@@ -494,8 +494,7 @@ class SideRuntime(SubmissionRuntime):
                     raise SideSessionClosing(
                         "当前 Side Turn 正在停止，暂不接受新消息。"
                     )
-                if active.task_feedback.progress_card_enabled:
-                    self._refresh_turn_activity(active)
+                self._refresh_turn_activity(active)
                 stale_after_cursor = active.plan_cursor
                 self._notify_input_received(
                     active.handle.thread_id, active.handle.id, active.handle.id,
@@ -1064,11 +1063,7 @@ class SideRuntime(SubmissionRuntime):
                     self._sides.get(session.side_id) is session
                     and session.active is active
                 ):
-                    if active.task_feedback.progress_card_enabled:
-                        activity = self._side_turn_activity_snapshot(
-                            session.side_id,
-                            active,
-                        )
+                    activity = self._side_turn_activity_snapshot(session.side_id, active)
                     cleanup_debt = (
                         active.cleanup_required and not active.cleanup_succeeded
                     )

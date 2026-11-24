@@ -2498,7 +2498,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(outcome, SideTurnOutcome)
         self.assertIs(outcome.patch_children, children)
         self.assertFalse(outcome.task_feedback.progress_card_enabled)
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
         self.assertIsNone(outcome.error)
         collect.assert_awaited_once_with(
             self.codex,
@@ -2623,7 +2623,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             first, PartialAnswer(started.thread_id, started.turn_id, "p2", "after fallback"),
         ))
         self.assertEqual(outcome.final_response, "separate final")
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
         self.assertEqual(handle.run_calls, 1)
         self.assertEqual(handle.stream_calls, 0)
         self.assertFalse(any(include_turns for _, include_turns in self.codex.read_calls))
@@ -2725,7 +2725,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.task_feedback, BindingTaskFeedback(
             progress_card_settings=ProgressCardSettings(),
         ))
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
 
     async def test_side_questions_share_observer_with_or_without_progress(self) -> None:
         for progress_enabled in (False, True):
@@ -2779,9 +2779,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(handle.run_calls, 1)
                     self.assertEqual(handle.stream_calls, 0)
                     self.assertEqual(handler.await_count, turn_number + 1)
-                    self.assertEqual(
-                        self.outcomes[-1].activity is not None, progress_enabled,
-                    )
+                    self.assertIsNotNone(self.outcomes[-1].activity)
                 self.assertTrue(all(
                     thread_id == started.thread_id
                     for thread_id, _, _ in observer.calls
@@ -8447,7 +8445,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             first, second, PartialAnswer(handle.thread_id, "physical-two", "last", "last stage"),
         ))
         self.assertEqual(outcome.final_response, "paused final")
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
         resumed = await self.runtime.resume_goal(
             binding=self.store.get(binding.id), owner_id="ou_user", origin=object(),
         )
@@ -8487,7 +8485,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(control.handles[0].activity_sink)
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, GoalOutcome)
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
 
     async def test_goal_questions_use_unique_tap_with_progress_off_and_exact_turn_dedup(
         self,
@@ -8533,7 +8531,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([call.args[3] for call in handler.await_args_list], ["ou_user"] * 2)
         self.assertEqual(self.outcomes[-1].final_response, "final")
-        self.assertIsNone(self.outcomes[-1].activity)
+        self.assertIsNotNone(self.outcomes[-1].activity)
 
     async def test_goal_question_delivery_does_not_wait_for_initial_receipt(self) -> None:
         control = FakeGoalControl(self.codex)
@@ -8592,7 +8590,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(outcome, GoalOutcome)
         self.assertIs(outcome.patch_children, children)
         self.assertFalse(outcome.task_feedback.progress_card_enabled)
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
         self.assertEqual(outcome.final_physical_turn_id, "physical-final")
         self.assertEqual(outcome.final_items, tuple(handle.record.items))
         collect.assert_awaited_once_with(

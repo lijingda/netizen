@@ -52,6 +52,7 @@ from ..turn_activity import (
     ACTIVITY_PLAN_LIMIT,
     ACTIVITY_TEXT_LIMIT,
     TurnActivityKind,
+    activity_operation_label,
     TurnActivityStatus,
     normalize_activity_text_layout,
     sanitize_activity_operation_text,
@@ -1233,16 +1234,6 @@ def _turn_activity_elements(
 def _activity_operation_display(item: _TurnActivityEntryLike) -> str:
     kind = getattr(item.kind, "value", item.kind)
     status = getattr(item.status, "value", item.status)
-    labels = {
-        TurnActivityKind.COMMAND.value: "执行命令",
-        TurnActivityKind.TOOL.value: "调用工具",
-        TurnActivityKind.FILE_CHANGE.value: "修改文件",
-        TurnActivityKind.WEB_SEARCH.value: "搜索网页",
-        TurnActivityKind.IMAGE.value: "处理图片",
-        TurnActivityKind.SUBAGENT.value: "子任务",
-        TurnActivityKind.REVIEW.value: "代码审查",
-        TurnActivityKind.COMPACTION.value: "压缩上下文",
-    }
     icons = {
         TurnActivityStatus.IN_PROGRESS.value: "→",
         TurnActivityStatus.COMPLETED.value: "✓",
@@ -1250,17 +1241,7 @@ def _activity_operation_display(item: _TurnActivityEntryLike) -> str:
         TurnActivityStatus.DECLINED.value: "×",
         TurnActivityStatus.INTERRUPTED.value: "×",
     }
-    label = labels.get(kind, "执行操作")
-    if kind in ACTIVITY_DETAIL_KINDS and item.text:
-        label = item.text
-    count = item.count
-    if kind in {
-        TurnActivityKind.FILE_CHANGE.value,
-        TurnActivityKind.SUBAGENT.value,
-    } and count != 1:
-        label += f"（{max(0, count)} 项）"
-    if kind == TurnActivityKind.TOOL.value and item.text:
-        label += f"：{item.text}"
+    label = activity_operation_label(kind, item.text, item.count)
     return f"{icons.get(status, '→')} {label}"
 
 

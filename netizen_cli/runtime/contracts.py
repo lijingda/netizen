@@ -18,6 +18,7 @@ from ..domain import ActiveState, GoalOperationState, MessageContextAnchor
 from ..partial_answers import PartialAnswer
 from ..prompt_projection import ConversationInput
 from ..progress_card_settings import ProgressCardSettings
+from ..process_activity import ObservedProcessItem
 from ..turn_activity import TurnActivityEntrySnapshot, TurnPlanStepSnapshot
 from ..turn_patch_children import TaskPatchChildren
 
@@ -435,6 +436,8 @@ class TurnActivitySnapshot:
 
     state_line: str | None = None
 
+    process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
+
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.turn_id:
             raise ValueError("Turn activity identity must not be empty")
@@ -462,6 +465,8 @@ class SideTurnActivitySnapshot:
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
+
+    process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.side_id or not self.thread_id or not self.turn_id:
@@ -491,6 +496,8 @@ class GoalActivitySnapshot:
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
+
+    process_items: tuple[ObservedProcessItem, ...] = field(default=(), repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.logical_turn_id:

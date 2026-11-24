@@ -380,6 +380,30 @@ def project_plan_steps(items: object) -> tuple[TurnPlanStepSnapshot, ...]:
     return tuple(steps)
 
 
+def activity_operation_label(kind: str, text: str | None, count: int) -> str:
+    labels = {
+        TurnActivityKind.COMMAND.value: "执行命令",
+        TurnActivityKind.TOOL.value: "调用工具",
+        TurnActivityKind.FILE_CHANGE.value: "修改文件",
+        TurnActivityKind.WEB_SEARCH.value: "搜索网页",
+        TurnActivityKind.IMAGE.value: "处理图片",
+        TurnActivityKind.SUBAGENT.value: "子任务",
+        TurnActivityKind.REVIEW.value: "代码审查",
+        TurnActivityKind.COMPACTION.value: "压缩上下文",
+    }
+    label = labels.get(kind, "执行操作")
+    if kind in ACTIVITY_DETAIL_KINDS and text:
+        label = text
+    if kind in {
+        TurnActivityKind.FILE_CHANGE.value,
+        TurnActivityKind.SUBAGENT.value,
+    } and count != 1:
+        label += f"（{max(0, count)} 项）"
+    if kind == TurnActivityKind.TOOL.value and text:
+        label += f"：{text}"
+    return label
+
+
 def sanitize_activity_text(
     value: str, *, limit: int = ACTIVITY_TEXT_LIMIT,
 ) -> str | None:
