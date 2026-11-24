@@ -3,10 +3,12 @@ status: accepted
 date: 2026-09-02
 amends: 0024, 0027, 0047
 related: 0014, 0048, 0052
-amended_by: 0056
+amended_by: 0056, 0106
 ---
 
 # 在 Files 模块展示 exact Turn 行数统计
+
+> [ADR 0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 将 Goal 的文件来源扩展到每个成功的物理 Turn。
 
 后续 [ADR 0056](0056-count-successful-patches-in-task-files.md) 替换本文的统计事实源、
 累计口径和子任务/Side 范围；本文保留当时决策背景，Files 展示与 manifest 容量约定继续有效。

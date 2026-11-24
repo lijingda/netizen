@@ -452,15 +452,11 @@ continuation 的多个物理 Turn 合并为一个通知流。按
 [ADR 0084](adr/0084-separate-goal-controls-from-logical-turn-replies.md)，`/goal` 发送独立
 静态管理快照；刷新、pause/resume/clear 和命令进入同一 typed control 路由。管理卡显示
 objective、tokens used、可用预算及控制按钮，不自动刷新、不包含任务答案或 Files。
-切换 Scope 的 active Binding 不改变按钮的 exact Binding 目标。任务回复以整个 SDK
-logical stream 为单位复用普通回复链：过程卡、阶段性答案、终态、富文本和文件遵循普通
-任务的展示规则，不为每个物理 Turn 发新卡，也不强制开启过程卡。
-Goal Activity 不通过普通 queue observer 读取；Adapter 在现有 logical stream 的唯一消费链
-内先做安全 Tap，再把原通知交还 SDK。每次 exact `turn/started` 切换物理 Turn 时，Runtime
-原子替换 physical identity，并清空上一轮 checklist、commentary、operation 与 cursor；
-迟到旧 Turn 事件忽略。阶段性答案跨物理 Turn 保留，Activity 每轮重置，中间 Turn 不产生
-Result/Files；logical terminal 只用 exact 最终物理 Turn 的输出和 structured files，不回退、
-不拼接历史，也不扫描工作区。
+切换 Scope 的 active Binding 不改变按钮的 exact Binding 目标。每个已观测的物理 Turn 各有一张过程卡，关闭过程卡时按本轮发送阶段性富文本与最终回复或 Files 卡。
+按 [ADR 0106](adr/0106-present-each-physical-turn-as-one-feishu-presentation-turn.md)，唯一 Goal Tap
+在换轮前冻结已完成 Turn 的候选事实。下一次不同的 `turn/started` 证明前轮为中间轮，此时交付前轮结果，
+显示“本轮已完成”。新轮从自己的 Activity 和阶段性答案开始，迟到的旧事件按精确身份忽略。
+逻辑运行保留原发起人，到结束时完成一次表情与符合条件的提及。
 
 ### 普通会话生命周期
 
@@ -1197,7 +1193,9 @@ mutation 响应未知时槽位不释放，并按副作用范围 fail closed。�
 原 RUNNING 状态；取消等待、畸形或错误 physical-Turn receipt 仍保留 unknown 并关闭
 准入，详见[共享 steer 失败规则](#普通-turn-停止与压缩)。只有 SDK logical stream 正常终止、`goal/get` 为非 active、公开 Thread
 idle、完整 history 中 exact 最终物理 Turn terminal 四项同时成立，consumer 才冻结并
-投递一个逻辑终态；该 exact Turn 必须是完整 history 的最后一个物理 Turn。流已结束后，
+投递一个逻辑终态。该 exact Turn 必须是完整 history 的最后一个物理 Turn，且状态与流一致。
+最终读取先补齐候选中缺失的答案与文件，再交付这轮结果并显示“任务已完成”。观察失败、超时或证据
+不一致时，有界 handoff 释放未定候选，发出观察通知，保留执行隔离和此前交付的结果。流已结束后，
 若公开历史显示其后还有新 Turn，即使 Goal/Thread 仍 active，也按观测失配保留 unknown
 且只占用当前 Goal，不关闭实例 admission，不能用较新的历史 ID 替换流的终态或重新接管通知。
 纯观察失败与 mutation 结果未知分开：前者在下次消息准入或 `/goal` 查看时，等待原
@@ -1278,7 +1276,9 @@ Channel SDK 的卡片原始结构适配见 [ADR 0099](adr/0099-project-original-
 
 Activity observer 与 Goal Tap 只交付 sanitized Activity、[0071](adr/0071-answer-native-questions-through-binding-input.md)
 的 structured question 与 [0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)
-的稳定答案片段。Activity opaque item identity 只供进程内 lifecycle 合并，Channel Snapshot
+的稳定答案片段。Goal Tap 还按物理 Turn 冻结最终 agentMessage 文本与 phase、终态、成功的
+fileChange、生成图片的 saved_path 和同轮 diff。投影异常仍原样返回 SDK 通知，飞书 I/O 在消费链外。
+Activity opaque item identity 只供进程内 lifecycle 合并，Channel Snapshot
 移除它；问题保留 item identity 以生成原生回答格式。
 
 开放式 `CodexErrorInfo` 字符串/对象仍只做受限错误投影，unknown、损坏 known 与 HTTP
@@ -1471,8 +1471,8 @@ Turn、投递目标与任务反馈设置。`ActivityChanged`、`PartialAnswer` �
 
 物理 Turn 成功时，适配器在 Result 确认该输入仍有后续工作则显示“本轮已完成”，否则显示“任务已完成”。
 标题和折叠摘要在发布时固定，Files 翻页沿用回调中保存的选择。逻辑结束只更新最近一张已确认回复卡的状态行。
-Codex 普通 Turn 与 Side 一一映射。Goal 当前仍共用一条回复链和一张任务卡，阶段性答案按
-原物理身份去重，Files 仅取已核实的最终物理 Turn。Claude 的匿名唤醒和 cron 在 Result
+Codex 普通 Turn、Side 与每个已观测的 Goal 物理 Turn 均一一映射。阶段性答案按本轮条目去重，
+每轮成功结果只携带该轮的 Files。Claude 的匿名唤醒和 cron 在 Result
 确认归属时映射。成功且没有正文或片段的匿名 Turn 不新发消息。
 
 ### 当前物理 Turn 的结果静默
@@ -1517,8 +1517,8 @@ Agent 显式调用飞书发送工具不受该展示选择拦截。
 模型正文中的业务失败描述不替代原有运行状态判定。通知发送本身仍有界、最佳努力，
 不因失败重发结果或第二次 @。
 
-Goal 的选择不跨物理 Turn 继承，最终 Result/Files 只检查准确最终物理 Turn 的静默
-标记与原始 final；累计阶段性答案沿用原有展示逻辑。完成表情、折叠和提及仍只发生
+Goal 每个物理 Turn 按本轮的静默标记与原始 final 决定是否展示 Result/Files。每轮分别保留
+阶段性答案和折叠过程，完成表情与符合条件的提及只发生
 在现有逻辑收尾点，四项终态证据和独立 Goal 管理卡不变。静默标记只在进程内保留至
 现有回复生命周期结束，
 不写会话配置或数据库，不增加重启恢复、通知队列或 Goal 状态机。
@@ -1557,18 +1557,15 @@ sandbox/approval 决定。canonical 重复、缺失、目录和设备文件不�
 条目（含已删除文件）时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress Card
 开启时，completed 结果与文件条目进入已发送的同一张卡。
 
-Goal 复用普通任务的回复形态；满足四项终态证据后，只从 exact 最终成功 physical Turn 及其本轮
-新建子任务提取文件和累计统计，并只用该 Turn 的 final agent answer，不聚合更早 rollover
-Turn；阶段性答案独立按同次连续执行保留，不改变该文件边界。现有唯一 Goal notification Tap
-仍在 rollover 时清空旧 aggregate snapshot，只将 final physical Turn 的 latest diff 用于文件发现。
-最终 physical Turn 没有 final/文件时不从上一轮填充 Result/Files；已确认交付的阶段性答案
-仅由独立模块保留，并按下文收尾。成功 Side Turn 共用同一 patch 统计和子任务读取，
+Goal 每个成功物理 Turn 展示本轮已观测的直接文件、匹配的最新 diff 与成功 patch 的行数。
+中间轮只使用 Tap 已冻结的事实。最终轮可从四项终态证据的历史读取补齐答案、文件与可验证归属的后代统计。
+存在子任务而无法核实全部证据时，省略总计，保留本轮已知的文件与行数。每轮清单保留自己的物理来源和标题。成功 Side Turn 共用同一 patch 统计和子任务读取，
 也显示已知行数；不补读 Side aggregate diff 或更早 Side Turn，其 observer、唯一
 `handle.run()` consumer 和 4096 high-water 保持不变。compaction、失败和中断终态不进入
 本轮文件路径。
 
-不含 Partial Answer 的文件卡继续使用 v4 callback；Partial Answer
-与 Files 同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 400 个完整分页，展示总数、
+使用默认终态标题且不含 Partial Answer 的文件卡继续使用 v4 callback；携带阶段性答案或
+“本轮已完成”标题时使用 v5 完整组合 manifest。两版每页 8 个，最多 400 个完整分页，展示总数、
 页码、证据完整时的本轮累计 `+N -M`、脱敏逻辑位置与逐文件 `+N -M`；图片和统计未知的
 文件不显示数字，也不显示文件大小。Project 内文件使用 Project 相对路径，Project 外原生生成图使用
 `生成图片/<文件名>`，账号 home 内其他文件使用 `~/...`，其余位置只显示有界路径尾部。
@@ -1776,11 +1773,9 @@ completed `agentMessage` 中明确标记 `partial_answer` 的稳定正文作为�
 路径继续发送阶段性答案。最终无文件富文本/有文件卡片的选择不变，不因终态出现 Files
 重发先前已尝试的片段；独立最终 Files 卡只放 final 与 Files，不复制阶段性答案。
 
-Goal 管理卡不承载阶段性答案；回复按普通卡片或富文本机制交付。阶段性模块在同次
-连续 logical run 的自动物理 Turn rollover 中累计，Activity 仍按轮重置；暂停不停止
-当前回复，失败/中断和逻辑终态保留已展示片段。resume 复用原 logical run 时继续累计，
-只有新 logical run 才重置。最终 Result/Files 仍来自四证明锁定的
-exact 最终物理 Turn。重启、缓存丢失或外部重挂不恢复旧阶段性答案，不扫描旧卡、完整
+Goal 阶段性答案只追加到该片段所属物理 Turn 的卡片或富文本。管理卡独立。暂停与同流 resume
+保留当前展示和原发起人。流结束后的 resume 从新观察到的首轮开始，回复该次恢复消息。
+中断时保留本轮已有片段，显示中断状态，省略 Files。重启、缓存丢失或外部重挂不恢复旧阶段性答案，不扫描旧卡、完整
 Thread 或文件目录，不增加数据库历史。
 
 复用现有非消费 observer 和 Goal 唯一 logical stream tap，保留 exact Thread/physical
@@ -1815,7 +1810,7 @@ items；若先因 high-water 或 observer 异常降级，只能保留此前已�
 答案时，终态独立正文交付共用十秒预算，阶段性消息最多五秒且不超过本次预算的一半，
 为 final 留出时间；无阶段性答案的 final-only 路径沿用原预算。Goal 复用普通回复交付，
 外层仍受原生终态 handoff 总预算限制，不把旧 logical run 的结果交给新运行。Files
-manifest 保留 exact 最终物理 Turn，不恢复混合 Goal/答案控制卡。
+manifest 保留各自的 exact 物理 Turn，不恢复混合 Goal/答案控制卡。
 
 投递始终 best effort 且有界，不增加持久队列、后台补发、阶段性专用文本分段或数据库
 历史，不承诺任意长度答案必达。固定 Channel SDK 的 native Markdown post 在格式拒绝

@@ -169,8 +169,9 @@ The usage guides are not implementation guides.
   Turn evidence, not workspace scans.
   Partial Answers use the existing observation/consumption chain independently of
   Progress Card, never signal completion, and never create database answer history.
-  Preserve Goal's four-proof completion and exact final-Turn Result/Files handoff contract,
-  including confirmed explicit clear while the current Turn completes (ADR 0084).
+  Preserve Goal's four-proof logical completion and bounded final handoff, including confirmed
+  explicit clear while the current Turn completes. Bind each presentation's Partial Answers,
+  Result and Files to its exact physical Turn (ADR 0106).
 - Resolve a missing progress setting from the instance fallback only when capturing
   settings for execution; never persist the resolved fallback into a Binding,
   default rule or plan. Preserve all historical progress settings as explicit choices.

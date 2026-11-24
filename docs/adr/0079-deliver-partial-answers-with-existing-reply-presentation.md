@@ -4,10 +4,12 @@ date: 2026-10-10
 updated: 2026-10-17
 amends: 0047, 0048, 0052
 related: 0056, 0058, 0069, 0071, 0072, 0078
-amended_by: 0084
+amended_by: 0084, 0106
 ---
 
 # 在现有回复形态中交付阶段性答案
+
+> [ADR 0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 将 Goal 的阶段性答案限定在所属物理 Turn。
 
 > [ADR 0084](0084-separate-goal-controls-from-logical-turn-replies.md) 将 Goal 管理改为独立静态卡，任务回复复用普通逻辑流；pause/clear 不中断当前 Turn，`/stop` 仍暂停并中断。下文保留原决定的历史背景。
 

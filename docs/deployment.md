@@ -152,7 +152,7 @@ Reaction 中的 `OnIt` 失败时，已成功的 native steer 始终回退一条�
 Progress Card 中间投递失败时由既有轮询重试最新快照，连续三次失败停止轮询；读取或
 渲染失败仍立即停止。普通 Turn、Side 与 Goal 终态对身份有效的原卡独立尝试最多三次
 相同更新，失败间隔 0.5 秒，整组请求与间隔共用 5 秒预算。原卡不可用、终态渲染失败或
-重试耗尽时，普通/Side Turn 与 Goal logical run 都回退到无文件富文本/静态文本、
+重试耗尽时，普通/Side Turn 与每个 Goal 物理 Turn 都回退到无文件富文本/静态文本、
 有文件完成卡的标准路径，不能因为更新失败丢掉权威结果。Goal 管理快照独立于回复。
 
 引用功能发布后要用真实消息手工验收普通文本与飞书应用卡片。ADR 0099 的卡片用例应
@@ -440,7 +440,9 @@ Thread 可继续，默认仍为新 provider。另经生产 `fork_exact`、`creat
 `scripts/probe_sdk_native_boundaries.py`（外部 180 秒 deadline）。两者均可用 `--case`
 选取场景、`--output` 保存证据，使用临时 HOME/CODEX_HOME、回环 mock Responses provider
 和真正 bundled App Server，不使用真实模型账号。前者覆盖阶段性答案、命令/MCP 输出冷恢复，
-以及通过生产 Goal Tap/CodexRuntime 验证两轮自动 continuation、阶段性片段保留与四证明收尾；
+以及通过生产 Goal Tap/CodexRuntime 验证两轮自动 continuation、各轮独立答案和 Files、终态标题与一次结束提及。
+Tap 仅扩大投影至本轮最终文本与 phase、终态、成功 fileChange、图片 saved_path 和匹配的 diff，
+原始通知继续进入同一 SDK 消费链。最终轮仍须四证明收尾；
 后者覆盖 local/remote-v2 手动压缩成功和 provider 错误、用临时 rollout 元数据读取 FIFO
 阻塞 shutdown 验证超过 10 秒 idle closing（恢复原文件后释放）、慢
 required MCP 启动断连回收及压缩准备失败。后者直接使用公开 WebSocket wire，是测试 harness，不能
@@ -1123,7 +1125,7 @@ synthetic 门禁通过；真实飞书、目标平台启动迁移和交错操作�
 短文本，以实际结果卡作为回复锚点。私聊和群主线使用普通引用回复，已有话题保持原话题。
 测试者应先读过运行卡，再切离聊天，检查提及、未读标记与客户端通知，并确认普通引用
 回复没有创建话题或产生额外的话题通知；文件翻页和 Goal 控制重绘不再次通知。
-Goal 需分别验证进度卡开关两种配置：已有卡片更新后都应独立提醒。新发送的最终回复、
+Goal 需分别验证进度卡开关两种配置，中间轮无提及。最终卡更新成功后，独立提醒引用本运行最新已确认且可用的答案消息。新发送的最终回复、
 卡片不可用或更新失败后的新回复，以及 Goal 正文过长另行回复时，直接在新回复内提及，
 不再单独提醒；旧卡更新失败不消耗新回复的首次 @ 机会。
 现有本地测试和 SDK 出站序列化只能证明真实 at 节点与请求归属，
@@ -1865,7 +1867,7 @@ Admin 矩阵须从另一台受信内网主机，经 `/admin` 给出的实际端�
    | --- | --- | --- | --- |
    | G01 `/goal <objective>`、查询/刷新/控制 | 管理卡静态显示当前状态，仅查询/按钮时更新，无答案/文件；任务回复独立。 | 原生 Goal＋真实飞书卡 | [Goal][验收20] |
    | G02 普通 Prompt、准备期间 rollover，以及 starting/stopping/收尾/unknown/无安全 route | 仅 steer 捕获的 exact 物理 Turn，换轮拒绝、不重投/新建；不可用状态拒绝，`/config`/`/compact` 拒绝；仅 pause/clear 后当前 Turn 仍运行则仍可 exact steer。 | 原生 rollover＋准入竞态注入 | [Goal][验收20] |
-   | G03 Progress 开/关，至少两轮 rollover、重复及旧轮迟到事件 | 一个 logical stream：开启同一普通回复卡，关闭富文本/有文件完成卡；rollover 不新发卡，Activity 换轮、partial 累计且去重，Result/Files 仅 exact final physical Turn。 | 原生多轮＋飞书展示/迟到事件注入 | [Goal][验收20]、[回复][验收15] |
+   | G03 Progress 开/关，至少两轮 rollover、重复及旧轮迟到事件 | 每个物理 Turn 独立卡或富文本，片段只追加到本轮。新 start 证明前轮为“本轮已完成”，四证最终读取补齐后为“任务已完成”，全程一次符合条件的提及。 | 原生多轮＋飞书展示/迟到事件注入 | [Goal][验收20]、[回复][验收15] |
    | G04 pause/clear、同流与旧流结束后 resume、`/stop`，含已显式 clear | pause 只暂停续跑、clear 只移除 Goal，当前 Turn 和交付继续；同流 resume 不重复回复/route，旧流结束才新回复；stop 暂停 Goal、interrupt exact 当前 Turn、cleanup，已 clear 则只停止当前执行。 | 原生控制＋回复/route 记录 | [Goal][验收20] |
    | G05 paused/blocked/usage/budget limited 与 complete；已确认显式 clear | 前四类不自动 clear；logical stream、persisted Goal、exact final Turn、Thread idle 四证齐备，complete＋final completed 才自动 clear。已确认显式 clear 可 absent，仍核验当前执行/final Turn，不丢答案/文件。 | 原生四证与 Result/Files | [Goal][验收20] |
    | G06 管理卡更新失败、旧按钮、跨重启、不同 Goal/同秒同 objective-budget 重建 | 确定回执保留，不重做 mutation；未确认终态零完成提及。旧按钮核对原生稳定标记/当前状态，不依赖旧 owner；不同 Goal 拒绝，同秒完全相同重建接受 ADR 0084 有限歧义。 | 故障注入＋重启/真实卡 | [Goal][验收20] |
@@ -1983,7 +1985,7 @@ Admin 矩阵须从另一台受信内网主机，经 `/admin` 给出的实际端�
     | X01 普通持久 Turn：native diff/structured items 生成 Project 内/外文件、generated-images 的 PNG/JPEG/GIF/WebP，至少 18 个；diff 含 multi-hunk、非空新增/删除、纯 rename、binary、copy/mode-only/空文件 metadata、异常 hunk | 完整 hunk 与纯 rename 的整轮/逐文件 `+N -M` 正确；图片/binary/其他 metadata-only/异常不造数字。 | 真实 native diff/items | [文件证据][验收23] |
     | X02 100/400 个带逐文件 `a/d` 的 synthetic manifest，另造 401 个 | 100/400 真实目标应用完整 create/update，下方容量 probe 任一 count 非零即失败；401 本地明确拒绝、不截断，保留目标应用 96.9 KB 返回 230099/200800 的证据。 | synthetic 边界＋目标应用容量 probe | [文件容量][验收23] |
     | X03 Progress 开/关 × 有/无 Files、partial | 关闭时无文件仅富文本/静态文本，有文件仅一张“最终回复＋本轮文件”完成卡；开启时均更新最初运行卡，Files manifest 无 partial 用 v4、有 partial 用 v5。 | 真实飞书展示/更新 | [回复呈现][验收15] |
-    | X04 Goal resumed exact final physical Turn completed 并创建临时文件，前轮也有文件 | 最终文件进同一逻辑回复卡，按 partial 选 v5/v4，不聚合 rollover 旧轮；live Goal phase 用成功 `fileChange` 验证累计行数，唯一 notification stream 的 latest aggregate diff 仅验证文件发现，旧 snapshot 不泄漏。 | 必须原生 Goal live phase＋飞书卡 | [Goal Files][验收23] |
+    | X04 Goal resumed exact final physical Turn completed 并创建临时文件，前轮也有文件 | 每轮从唯一 Tap 的成功 fileChange、生成图片路径和匹配 diff 发现本轮直接文件，只累计成功 patch。后代统计只在最终轮核实，证据不足省略总计。分别翻页确认物理来源与标题，旧清单仍可解码。 | 必须原生 Goal live phase＋飞书卡 | [Goal Files][验收23] |
     | X05 Side exact completed Turn | structured items 进对应完成/进度卡并显示成功 patch 累计；不补 Side aggregate diff、旧 Side Turn 或无受支持 native 事实文件。 | 原生 Side＋飞书卡 | [Side Files][验收23] |
     | X06 child/fileChange SDK 合同变更：已登录新建 child 写文件、parent 再修改；child 运行中/不可读 | 累计双方成功 patch、排除继承历史并保留原生 parent 与 Turn/item 归属，不能当净 diff；子任务未终态/不可读只省略总计、保留已知逐文件数字，completion 不等待。下方独立 child probe 无 live 条件须记未验证，不以 synthetic 替代。 | 独立真实 child probe（非常规 phases） | [子任务统计][验收23] |
     | X07 文件列表/分页与 callback payload | Project 内相对路径、外脱敏逻辑位置；隐藏大小、按钮统一“发送”，每页 8 个完整翻页；正文无绝对路径/文件列表预览/diff/发送全部。v5 payload 每项明文 absolute path、已知统计成对 `a/d`；翻页保留整轮统计及 Activity/Partial Answer/Result。 | 卡片正文＋实际 payload | [文件卡][验收23] |

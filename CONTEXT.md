@@ -168,8 +168,8 @@ exact Turn 仍为 `inProgress`，或确认它已进入 Confirmed Turn Terminal�
 有界的 exact Turn 重读/恢复，仍无法建立 Authoritative Turn Observation 的
 Binding-local 情形。它不表示 Thread 历史损坏，也不改变持久 Thread 的归档或删除资格。
 
-**Turn File / 本轮文件**：一个已完成的 Ordinary/Side Turn，或 Goal 的 exact 最终
-physical Turn 及其本轮新建子任务，通过受支持的原生事实指向的当前文件。
+**Turn File / 本轮文件**：Ordinary、Side 或 Goal 的一个成功物理 Turn 有原生执行证据的文件。
+普通、Side 与 Goal 最终 Turn 还可包括已经核实归属的本轮新建子任务文件。
 会话实际工作目录只是相对路径解析基准，
 不是文件授权边界；自包含卡片在 callback payload 中携带 absolute path 与完整 manifest，
 切换 active Binding 或服务重启不改变已发送卡片的操作来源。
@@ -387,7 +387,7 @@ Activity、Partial Answer、Result 与 Files 四种。模块只投影已经确�
 不构成动态插件系统。
 
 **Partial Answer / 阶段性答案**：Codex 明确标记为稳定但非终态的答案片段，任务之后仍可能
-继续输出或执行工具。它是答案正文，不是 Activity 摘要，也不是任务完成或最终结果的证明。
+继续输出或执行工具。每个片段归属于一个物理 Turn，只追加到该 Turn 的展示中。它是答案正文，不是 Activity 摘要，也不是任务完成或最终结果的证明。
 
 **Progress Card / 进度卡**：Binding 可选开启 Activity Module 的用户设置。普通 Turn 或
 Goal 执行中展开有界活动投影；Side Turn 使用 Side 创建时冻结的选择。终态在同一 Reply

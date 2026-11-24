@@ -3,10 +3,12 @@ status: accepted
 date: 2026-09-01
 amends: 0020, 0047, 0048, 0049
 related: 0021, 0046, 0051
-amended_by: 0071, 0072, 0079, 0086
+amended_by: 0071, 0072, 0079, 0086, 0106
 ---
 
 # 用单一消费链投影安全的 Turn Activity
+
+> [ADR 0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 扩展 Goal Tap 的投影清单，每个已观测的物理 Turn 独立交付。
 
 > [ADR 0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md) 将固定的
 > 进展/操作容量改为会话展示设置，并增加按进展分段的时间组织与自包含分页快照。本文的

@@ -3,9 +3,12 @@ status: accepted
 date: 2026-09-05
 amends: 0024, 0027, 0048, 0053
 related: 0047, 0052
+amended_by: 0106
 ---
 
 # 按成功 patch 累计本轮文件行数
+
+> [ADR 0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 各个成功的 Goal 物理 Turn 分别累计直接 patch。后代统计仍由最终 Turn 核实归属。
 
 Files 用来展示本轮修改规模。借鉴 Codex App 完成卡的成功 `fileChange` 回退路径，
 Netizen 改为累计 patch 的新增/删除行数，不重建任务开始时的文件，也不承诺父子任务的

@@ -3,9 +3,12 @@ status: accepted
 date: 2026-10-17
 amends: 0014, 0047, 0069, 0079
 related: 0063, 0071
+amended_by: 0106
 ---
 
 # Goal 管理与逻辑 Turn 回复分离
+
+> [ADR 0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) 将任务回复分配到每个物理 Turn，逻辑运行负责生命周期信号。
 
 旧设计把 Goal 控制与任务答案放在同一张持续更新的卡片上，为旧按钮保留回答快照和
 运行所有权，增加内存积累与控制重绘覆盖答案的风险。原生 Goal 的暂停/清除并不停止
