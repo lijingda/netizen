@@ -202,7 +202,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                     window = ProcessActivityWindow(lambda:clock[0])
                     source = replace(turn_activity_snapshot(binding_id="b"), process_available=True, plan_available=False)
                     settings = ProgressCardSettings(operation_limit=1, operation_max_chars=5)
-                    output = ProcessList()
+                    output = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
                     for key in "ab":
                         window.observe(TurnActivityEvent(key, Kind.COMMAND, Status.IN_PROGRESS, 0, key*10), settings)
                     first = replace(source, process_items=window.rows)
@@ -230,7 +230,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
     def test_mutations_break_independent_pair_and_retention_oracles(self):
         import netizen_cli.process_messages as adapter
         original = adapter._events_for
-        payload = ProcessList()
+        payload = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
         payload.observe(process_snapshot(1),T)
         payload.offered(payload.desired)
         payload.observe(replace(process_snapshot(1), process_items=()),T+1)
@@ -238,7 +238,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(AssertionError):
                 check_pairs(item_events(payload.desired))
         with patch.object(ProcessList, "offered", return_value=None):
-            broken = ProcessList()
+            broken = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
             broken.observe(process_snapshot(1),T)
             required,_ = check_pairs(item_events(broken.desired))
             broken.offered(broken.desired)
@@ -253,7 +253,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         for n in range(63):
             window.observe(TurnActivityEvent(str(n),Kind.TOOL,Status.IN_PROGRESS,0),settings)
         snapshot = replace(process_snapshot(1),process_items=window.rows)
-        output = ProcessList()
+        output = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
         output.observe(snapshot,T)
         expected = sorted(row.identity for row in window.rows)
         self.assertEqual([item.item_id for item in output.desired], expected[:60])
@@ -271,7 +271,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(count=count):
                 window = ProcessActivityWindow(lambda: T)
                 settings = ProgressCardSettings(operation_limit=1)
-                output = ProcessList()
+                output = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
                 starts, ends = set(), set()
                 def observe(keys, status):
                     for key in keys:
@@ -306,11 +306,11 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
     def test_reappearing_steps_retain_original_start_and_stay_finished(self):
         clock = [T]
         window = ProcessActivityWindow(lambda: clock[0])
-        output = ProcessList()
+        output = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
         history = []
         for plan in ("A", "B", "BC", "AC"):
             window.plan(tuple(TurnPlanStepSnapshot(text, TurnPlanStepState.IN_PROGRESS) for text in plan))
-            output.observe(replace(process_snapshot(1), process_items=window.rows), clock[0])
+            output.observe(replace(process_snapshot(1), plan_generated=True, process_items=window.rows), clock[0])
             sent = output.desired
             history.append({item.text: (item.started_at, item.finished_at) for item in sent})
             output.offered(sent)
@@ -321,6 +321,38 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("A", history[2])
         self.assertEqual(history[3]["A"], history[1]["A"])
 
+    def test_goal_checklist_across_three_rollovers_and_optional_polls(self):
+        for cuts in itertools.product(("skip", "empty", "operation"), repeat=3):
+            with self.subTest(cuts=cuts):
+                now = T
+                output = ProcessList(PresentationKey("binding", "native-one", "goal"))
+                def sample(window, *, plan=False, available=True, finished=False):
+                    snap = replace(process_snapshot(1), physical_turn_id=physical, plan_generated=plan,
+                                   process_items=window.rows, process_available=available)
+                    output.observe(snap, now)
+                    payload = output.desired
+                    starts, ends = check_pairs(item_events(payload))
+                    step = ("step", "Inspect")
+                    self.assertEqual(starts[step], T)
+                    self.assertEqual(step in ends, finished)
+                    output.offered(payload)
+                    output.confirmed(payload)
+                for i, cut in enumerate(("initial", *cuts)):
+                    physical, now = f"physical-{i}", T + i
+                    window = ProcessActivityWindow(lambda: now)
+                    if cut == "empty":
+                        sample(window, available=False)
+                    elif cut == "operation":
+                        window.observe(TurnActivityEvent("op", Kind.TOOL, Status.IN_PROGRESS, 0), ProgressCardSettings())
+                        sample(window)
+                    window.plan((TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS),))
+                    sample(window, plan=True)
+                now += 1
+                window.plan(())
+                sample(window, plan=True, finished=True)
+                window.plan((TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS),))
+                sample(window, plan=True, finished=True)
+
     def test_visibility_and_step_text_identity(self):
         window = ProcessActivityWindow(lambda:T)
         settings = ProgressCardSettings(show_operations=False, commentary_max_chars=4)
@@ -329,8 +361,8 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         window.plan(tuple(TurnPlanStepSnapshot(name, status) for name,status in (
             ("same",TurnPlanStepState.PENDING),("same",TurnPlanStepState.IN_PROGRESS),
             ("done",TurnPlanStepState.COMPLETED))))
-        output = ProcessList()
-        output.observe(replace(process_snapshot(1),process_items=window.rows),T)
+        output = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
+        output.observe(replace(process_snapshot(1),plan_generated=True,process_items=window.rows),T)
         self.assertEqual({item.text for item in output.desired},{"hel…","done"})
         starts,ends = check_pairs(item_events(output.desired))
         self.assertEqual(starts.keys(),ends)

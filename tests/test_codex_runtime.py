@@ -5488,6 +5488,61 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.finish(response="done")
         self.assertTrue(await self.runtime.wait_idle(timeout=2))
 
+    async def test_goal_rollover_reuses_one_wire_step_after_an_empty_poll(self):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport
+        from tests.test_process_ordering import check_pairs
+
+        binding, handle, submission = await self.start_fake_goal()
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        opened = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime)).opened(
+            key, FakeMessage("go", message_id="in"), BindingTaskFeedback(), goal=True, reply=AsyncMock(), reply_partial=AsyncMock())
+        plan = (TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS),)
+        clock = [1_800_000_000]
+        async with channel_fixture() as fx, asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            wire = ProcessTransport([])
+            presenter = fx.app._progress_cards
+            presenter._process_port = wire.port
+            presenter._poll_seconds = .001
+            presenter._clock = lambda: clock[0]
+            polled = asyncio.Event()
+            def read():
+                polled.set()
+                return opened.observe()
+            def updates():
+                return [check_pairs(args[1]) for name, args, _ in wire.events if name == "process.update"]
+            with patch("netizen_cli.runtime.activity.time", side_effect=lambda: clock[0]):
+                handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, plan_updated=True, steps=plan))
+                await presenter.open(replace(opened, observe=read))
+                state = presenter._process[key]
+                await state.ready.wait()
+                self.assertEqual(updates(), [({("step", "Inspect"): clock[0]}, set())])
+                clock[0] += 1
+                handle.rollover("next")
+                handle.emit_activity(TurnActivityNotificationProjection(turn_id="next", turn_started=True))
+                polled.clear()
+                await polled.wait()
+                clock[0] += 1
+                handle.emit_activity(TurnActivityNotificationProjection(turn_id="next", plan_updated=True, steps=plan,
+                    event=TurnActivityEvent("read", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 1, text="Read")))
+                while len(updates()) < 2:
+                    await asyncio.sleep(0)
+                for starts, ends in updates():
+                    self.assertEqual(starts[("step", "Inspect")], 1_800_000_000)
+                    self.assertNotIn(("step", "Inspect"), ends)
+                presenter.end_process_run(key, "done")
+                await state.task
+                starts, ends = updates()[-1]
+                self.assertEqual(set(starts), ends)
+                self.assertEqual(starts[("step", "Inspect")], 1_800_000_000)
+                self.assertEqual(len(wire.completed), 1)
+        handle.finish(response="done")
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+
     async def test_delete_rejection_preserves_compaction_observer_and_reservation(self) -> None:
         binding = self.binding()
         first = await self.submit(binding)

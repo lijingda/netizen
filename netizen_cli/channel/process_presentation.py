@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Literal
 
 from ..domain import FeishuScope
 from ..external_calls import external_call
-from ..runtime.contracts import TurnActivitySnapshot
+from ..turn_activity import sanitize_activity_text
 from ..process_activity import ObservedProcessItem
 from ..process_messages import (
     ITEM_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
@@ -28,39 +30,48 @@ Reason = Literal["done", "error", "timeout"]
 Payload = tuple[ProcessItem, ...]
 
 
-def _item(row: ObservedProcessItem) -> ProcessItem:
-    if row.kind == "commentary":
-        assert row.finished_at is not None
-        return TextItem(row.identity, row.text, row.started_at, row.finished_at)
-    kind = StepItem if row.kind == "step" else ToolItem
-    return kind(row.identity, row.text, row.started_at, row.finished_at)
-
-
 class ProcessList:
     """Reserve a slot for each running START until its paired END is confirmed."""
 
-    def __init__(self) -> None:
+    def __init__(self, key: PresentationKey) -> None:
+        self.key = key
         self.pinned: dict[str, ProcessItem] = {}
         self.running_offers: dict[str, ProcessItem] = {}
         self._step_pins: dict[str, ProcessItem] = {}
-        self._physical_turn: str | None = None
         self._window: dict[str, ProcessItem] = {}
         self.desired: Payload = ()
+
+    def _item(self, row: ObservedProcessItem) -> ProcessItem:
+        if row.kind == "step":
+            text = sanitize_activity_text(row.text) or "未命名步骤"
+            name = json.dumps((self.key.side, *self.key.index, text), ensure_ascii=True)
+            identity = "step:" + sha256(name.encode("ascii")).hexdigest()
+            return StepItem(identity, text, row.started_at, row.finished_at)
+        if row.kind == "commentary":
+            assert row.finished_at is not None
+            return TextItem(row.identity, row.text, row.started_at, row.finished_at)
+        return ToolItem(row.identity, row.text, row.started_at, row.finished_at)
 
     def observe(self, snapshot: Activity, now: int) -> None:
         if not snapshot.process_available:
             return
-        physical = (snapshot.physical_turn_id if isinstance(snapshot, TurnActivitySnapshot) else None) or snapshot.turn_id
-        if physical != self._physical_turn:
-            self._physical_turn = physical
-            self._step_pins.clear()
-        current = {}
+        # A new physical Turn may supply operations before its first checklist.
+        # Only a known plan replaces the logical run's previous checklist.
+        has_plan = snapshot.plan_available and snapshot.plan_generated
+        current: dict[str, ProcessItem] = {
+            key: item for key, item in self._window.items() if isinstance(item, StepItem) and not has_plan
+        }
         for row in snapshot.process_items:
-            item = _item(row)
-            pinned = self._step_pins.get(row.identity) or self.running_offers.get(row.identity) or self.pinned.get(row.identity)
+            if row.kind == "step" and not has_plan:
+                continue
+            item = self._item(row)
+            key = item.item_id
+            if key in current:
+                continue
+            pinned = self._step_pins.get(key) or self.running_offers.get(key) or self.pinned.get(key)
             if pinned is not None:
                 item = pinned.finish(row.finished_at) if row.finished_at is not None else pinned
-            current[row.identity] = item
+            current[key] = item
         self._window = current
         for key, offered in self.running_offers.items():
             observed = current.get(key)
@@ -135,7 +146,7 @@ class ProcessPresentation:
         self.claimed_cot_ids, self.binding_id = claimed_cot_ids, binding_id
         self.clock, self.timeout, self.on_closed = clock, timeout, on_closed
         self.terminal = False
-        self.items = ProcessList()
+        self.items = ProcessList(key)
         self.writer = ReplacementWriter[Payload](lambda items: items)
         self.created: Created | None = None
         self.ready = asyncio.Event()
