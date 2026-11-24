@@ -8,6 +8,7 @@ from weakref import WeakValueDictionary
 from dataclasses import dataclass, field, replace
 import logging
 import os
+from functools import partial
 from pathlib import Path
 import time
 from typing import Any
@@ -184,9 +185,9 @@ class _Execution:
             raise ValueError("Claude attributed a Result to an unwritten input")
         return human
 
-    def cli_state(self) -> ClaudeCliState:
+    def cli_state(self, owner: str | None = None) -> ClaudeCliState:
         return ClaudeCliState(self.live.ordered_idle and self.pending is None and self.live.physical is None,
-                             len(self.live.tasks), bool(self.live.crons))
+                             len(self.live.tasks) if owner is None else self.live.task_count(owner), bool(self.live.crons))
 
     def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, final: str | None = None) -> TurnActivitySnapshot:
         partials = tuple(PartialAnswer(self.session, turn_id, key, text) for key, text in self.live.partials.items()
@@ -194,7 +195,7 @@ class _Execution:
         return TurnActivitySnapshot(self.binding.id, self.session, turn_id, self.revision,
                                    ActiveState.RUNNING, 0, False, False, False, (), partial_answers=partials,
                                    progress_card_settings=feedback.progress_card_settings or ProgressCardSettings(),
-                                   state_line=self.cli_state().line)
+                                   state_line=self.cli_state(turn_id).line)
 
     @property
     def finishing(self) -> bool:
@@ -814,15 +815,15 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         elif not waiting and execution.timer is not None:
             execution.timer.cancel()
             execution.timer = None
-        display = execution.cli_state()
         for human in execution.humans.values():
             if force or human.terminal_sent or human.status is None or not isinstance(human.origin, ClaudeInputAnchor):
                 continue
-            background = live.has_work(human.input_id)
+            display = execution.cli_state(human.input_id)
+            background = bool(display.tasks)
             if (display, background) != human.last_display:
                 human.last_display = (display, background)
                 self._queue(execution, human, CliStateChanged(binding_id, execution.session, human.source, human.input_id, background,
-                            human.reply, execution.cli_state, execution.publication.valid))
+                            human.reply, partial(execution.cli_state, human.input_id), execution.publication.valid))
         if idle and not force and not execution.closing:
             self._complete_humans(execution)
         if close and execution.close is None:
@@ -841,7 +842,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if human.binding.task_feedback.completion_mention_enabled and not human.stop_requested and human.status != "interrupted":
                 mention = valid_completion_mention_user_id(self._owner)
             self._queue(execution, human, LogicalTerminal(human.binding.id, execution.session, human.input_id, self._owner,
-                        human.source, human.status, human.reply, mention, lambda: not execution.broken, execution.cli_state))
+                        human.source, human.status, human.reply, mention, lambda: not execution.broken, partial(execution.cli_state, human.input_id)))
         live.prune({key for key, human in execution.humans.items() if not human.terminal_sent})
 
     async def _observe(self, execution: _Execution, client: ClaudeClient, cwd: Path, confirmed_write: bool) -> None:

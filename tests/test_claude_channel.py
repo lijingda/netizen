@@ -55,8 +55,9 @@ async def owner_channel():
 
 
 class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
-    def freeze_trace(self, fx, scenario):
-        self.enterContext(patch("netizen_cli.runtime.claude_ordinary.uuid4",
+    def freeze_trace(self, fx, scenario, *, case=None):
+        case = case or self
+        case.enterContext(patch("netizen_cli.runtime.claude_ordinary.uuid4",
                                side_effect=(UUID(int=1), UUID(int=2))))
         def expected_changes(trace):
             # PR 315, merged after the fixture was recorded on a1b9eee.
@@ -78,7 +79,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(field["content"], "任务已完成")
                         field["content"] = "本轮已完成"
 
-        return expect_presenter_trace(self, fx, scenario, reference=CLAUDE_FIXTURE,
+        return expect_presenter_trace(case, fx, scenario, reference=CLAUDE_FIXTURE,
                                      expected_edits=expected_changes)
 
     async def until(self, predicate):
@@ -113,13 +114,13 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         from netizen_cli.channel.reply_presenter import _TERMINAL_CARD_UPDATE_ATTEMPTS
                         fx.channel.card_update_results.extend(asyncio.CancelledError() for _ in range(_TERMINAL_CARD_UPDATE_ATTEMPTS))
                     body = "答" * {"oversize": 40_000, "body limit": 100_001}[case] if case in ("oversize", "body limit") else "the physical answer"
-                    from netizen_cli.channel.presentation import turn_progress_card
+                    from netizen_cli.channel.presentation import turn_progress_projection
                     def render(**fields):
                         if case == "invalid card" and fields.get("final_response"):
                             raise ValueError("synthetic pre-send validation")
-                        return turn_progress_card(**fields)
+                        return turn_progress_projection(**fields)
                     with (patch.object(fx.channel, "reply", side_effect=first),
-                          patch("netizen_cli.channel.presentation.turn_progress_card", side_effect=render)):
+                          patch("netizen_cli.channel.presentation.turn_progress_projection", side_effect=render)):
                         await app.handle_message(FakeMessage("work", message_id="H1"))
                         cli = clients.calls[-1]
                         self.assertFalse(fx.channel.replies or fx.channel.reactions)
@@ -828,12 +829,12 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
     @requires_claude_sdk
     async def test_card_fallback_freezes_the_first_card_with_the_physical_outcome(self):
         from netizen_cli.bindings import BindingTaskFeedback
-        from netizen_cli.channel.presentation import turn_progress_card
+        from netizen_cli.channel.presentation import turn_progress_projection
 
         def render(**fields):
             if fields.get("final_response"):
                 raise ValueError("terminal card validation failed")
-            return turn_progress_card(**fields)
+            return turn_progress_projection(**fields)
 
         cases = (("error_max_turns", "max_turns", True, "任务未完成"),
                  ("error_during_execution", "aborted_streaming", True, "任务已中断"),
@@ -850,7 +851,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     cli = clients.calls[-1]
                     cli.init()
                     await self.until(lambda: bool(app._progress_cards._sessions))
-                    with patch("netizen_cli.channel.presentation.turn_progress_card", side_effect=render):
+                    with patch("netizen_cli.channel.presentation.turn_progress_projection", side_effect=render):
                         cli.result(subtype, reason, is_error)
                         self.assertTrue(await ordinary.wait_idle(10))
                     self.assertIsInstance(fx.channel.replies[1][1], str)
@@ -931,31 +932,27 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(pulse.typing_reaction_id)
                     self.assertEqual(len(fx.channel.replies), 1)
                     human = ordinary._active[binding.id].human
-                    old = human.reply.refresh
-                    cleared = []
-                    async def cleanup(state):
-                        if state is None:
-                            cleared.append(human.reply.message_id)
-                            if failure != "none":
-                                raise asyncio.CancelledError() if failure == "cancelled" else OSError()
-                        await old(state)
-                    human.reply.refresh = cleanup
-                    system("background_tasks_changed", tasks=[])
-                    cli.init(user_message_uuids=[])
-                    cli.result(result="wake-answer", user_message_uuid=None, origin={"kind": "task-notification", "producer": "session-task", "runId": "R"}, idle=False)
-                    await self.until(lambda: bool(cleared))
-                    self.assertEqual(cleared, ["wake"])
-                    refreshed = []
-                    refresh = human.reply.refresh
-                    async def final(state):
-                        refreshed.append(state)
-                        if failure != "none":
-                            raise asyncio.CancelledError() if failure == "cancelled" else OSError()
-                        await refresh(state)
-                    human.reply.refresh = final
-                    system("session_state_changed", state="idle")
-                    self.assertTrue(await ordinary.wait_idle(10))
-                    self.assertIn("全部完成", refreshed)
+                    attempts = []
+                    update = fx.channel.update_card
+
+                    async def transport(mid, card):
+                        attempts.append((mid, card))
+                        if failure == "cancelled":
+                            raise asyncio.CancelledError()
+                        if failure == "error":
+                            raise OSError("replacement receipt lost")
+                        return await update(mid, card)
+
+                    with patch.object(fx.channel, "update_card", transport):
+                        system("background_tasks_changed", tasks=[])
+                        cli.init(user_message_uuids=[])
+                        cli.result(result="wake-answer", user_message_uuid=None,
+                                   origin={"kind": "task-notification", "producer": "session-task", "runId": "R"}, idle=False)
+                        await self.until(lambda: human.reply.message_id == "wake" and any(
+                            mid == "initial" and "Claude：" not in str(card) for mid, card in attempts))
+                        system("session_state_changed", state="idle")
+                        self.assertTrue(await ordinary.wait_idle(10))
+                    self.assertTrue(any(mid == "wake" and "全部完成" in str(card) for mid, card in attempts))
                     self.assertEqual(sum("wake-answer" in str(item) for _, item in fx.channel.replies), 1)
                     self.assertIn(("H1", constants.DONE_REACTION), fx.channel.reactions)
                     self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if body.mentions], ["wake"])
@@ -1651,139 +1648,210 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("设置已保存", fx.channel.replies[-1][1])
             self.assertEqual(len(clients.calls), 1)
 
-    async def test_late_first_receipt_keeps_heading_across_queued_wake_and_end(self):
+    @requires_claude_sdk
+    async def test_explore_card_reconciliation_orderings(self):
+        # The two golden rows retain the complete call order on the original main.
+        await self.exercise_card_order("before", "none", "single", reference="single_result_before_idle")
+        await self.exercise_card_order("end", "none", "final wake", reference="late_first_receipt")
+        # Hold the busy receipt across a bodyless wake, a cron change and the final idle.
+        for fault in ("ok", "unknown", "fail"):
+            with self.subTest(busy_receipt=fault):
+                await self.exercise_card_order("before", "wake", "bodyless", hold_busy=True, fault=fault)
+        await self.exercise_card_order("before", "wake", "bodyless", hold_busy=True, fault="unknown", repeated=True)
+        await self.exercise_card_order("before", "wake", "body", hold_busy=True, fault="fail", repeated=True)
+        for receipt, wake in product(("result", "wake"), ("body", "bodyless")):
+            await self.exercise_card_order(receipt, "before", wake, early_idle=True)
+
+        for receipt, cron, wake in product(("before", "result", "wake"), ("before", "wake", "result"), ("body", "bodyless")):
+            with self.subTest(receipt=receipt, cron=cron, wake=wake):
+                count = await self.exercise_card_order(receipt, cron, wake)
+                # Each replacement of an owned message may be rejected or may take
+                # effect with its receipt lost. The next native trigger is healthy.
+                for index, fault in product(range(count), ("unknown", "fail")):
+                    with self.subTest(write=index, outcome=fault):
+                        await self.exercise_card_order(receipt, cron, wake, at=index, fault=fault)
+
+    async def exercise_card_order(self, receipt, cron, wake, *, at=None, fault="ok", hold_busy=False,
+                                  repeated=False, early_idle=False, reference=None):
+        from contextlib import ExitStack
+        from dataclasses import replace
         from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        from lark_channel import OutboundCard
         from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.cards import turn_progress_card
+        from netizen_cli.ordinary_sessions import PhysicalAnswer
 
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2.
             binding = fx.store.create_channel_binding(
                 scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT), project_alias="test", creator_id="ou_user",
-                task_feedback=BindingTaskFeedback(progress_card_enabled=True))
-            entered, release = asyncio.Event(), asyncio.Event()
-            original = fx.channel.reply
-            async def reply(*args, **kwargs):
-                if not entered.is_set():
-                    entered.set()
-                    await release.wait()
-                return await original(*args, **kwargs)
-            self.enterContext(patch.object(fx.channel, "reply", reply))
-            trace = self.freeze_trace(fx, "late_first_receipt")
-            fx.channel.reply_results.extend(SendResult.ok(message_id=mid) for mid in ("first", "wake"))
-            fx.channel.send_results.append(sent_result("reminder", chat_id="oc_direct", parent_id="wake", root_id="H1"))
-            await app.handle_message(FakeMessage("work", message_id="H1"))
-            cli = clients.calls[-1]
-            ex = ordinary._active[binding.id]
-            def system(kind, **data):
-                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
-            try:
-                cli.init(uuid="human-physical")
-                await asyncio.wait_for(entered.wait(), 5)
-                cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
-                system("task_started", task_id="t", run_id="r", tool_use_id="tool")
-                system("background_tasks_changed", tasks=[{"task_id": "t", "run_id": "r"}])
-                cli.result(result="first answer")
-                await self.until(lambda: ex.admissible)
-                system("background_tasks_changed", tasks=[])
-                cli.init(user_message_uuids=[])
-                cli.result(user_message_uuid=None, uuid="wake-result", result="wake answer",
-                           origin={"kind": "task-notification", "producer": "session-task", "runId": "r"})
-                system("session_state_changed", state="idle")
-                await self.until(lambda: ex.human.terminal_sent)
-            finally:
-                release.set()
-            self.assertTrue(await ordinary.wait_idle(10))
-            card_calls = [(op, args[0] if op == "update_card" else args[0]["messageId"])
-                          for op, args, _ in trace if op in {"reply", "update_card"}]
-            self.assertEqual(card_calls, [("reply", "H1"), ("update_card", "first"),
-                                          ("reply", "H1"), ("update_card", "first")])
-            self.assertEqual(fx.channel.send_calls[-1][2].reply_to, "wake")
-
-    @requires_claude_sdk
-    async def test_lost_busy_card_receipt_restores_idle_after_bodyless_wake(self):
-        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
-        from netizen_cli.bindings import BindingTaskFeedback
-
-        async with owner_channel() as (app, fx, clients, clock, ordinary):
-            clock[0] = 2.
-            binding = fx.store.create_channel_binding(
-                scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT), project_alias="test",
-                creator_id="ou_user", task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+                task_feedback=BindingTaskFeedback(progress_card_enabled=True),
             )
-            fx.channel.reply_results.append(SendResult.ok(message_id="first"))
-            await app.handle_message(FakeMessage("work", message_id="H1"))
-            cli = clients.calls[-1]
-            execution = ordinary._active[binding.id]
+            fx.channel.reply_results.extend(SendResult.ok(message_id=mid) for mid in ("first", "wake"))
+            last_id = "first" if wake in ("single", "bodyless") else "wake"
+            fx.channel.send_results.append(sent_result("reminder", chat_id="oc_direct", parent_id=last_id, root_id="H1"))
+            opened, release_first, busy, release_busy = (asyncio.Event() for _ in range(4))
+            visible, known, physical = {}, {}, {}
+            attempts, redundant = [], []
+            unavailable = set()
+            send, update, complete = fx.channel.reply, fx.channel.update_card, app.handle_ordinary_completion
 
-            def system(kind, **data):
-                cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+            async def reply(*args, **kwargs):
+                if not isinstance(args[1], OutboundCard):
+                    fx.channel.reply_results.insert(0, SendResult.ok(message_id="notice"))
+                result = await send(*args, **kwargs)
+                if isinstance(args[1], OutboundCard):
+                    visible[result.message_id] = args[1].card
+                    if result.message_id == "first":
+                        opened.set()
+                        await release_first.wait()
+                    known[result.message_id] = args[1].card
+                return result
 
-            def activity_line(card):
-                return card["body"]["elements"][0]["header"]["title"]["content"]
+            async def replace_card(mid, card):
+                if known.get(mid) == card:
+                    redundant.append(mid)
+                edge = len(attempts)
+                attempts.append(mid)
+                known.pop(mid, None)
+                is_busy = (hold_busy and not busy.is_set() and cli.live.physical == "wake-physical"
+                           and "Claude：执行中" in str(card))
+                outcome = fault if edge == at or is_busy else "ok"
+                if repeated and is_busy:
+                    unavailable.add(mid)
+                if mid in unavailable:
+                    outcome = fault
+                if outcome != "fail":
+                    visible[mid] = card
+                if is_busy:
+                    busy.set()
+                    await release_busy.wait()
+                if outcome == "unknown":
+                    raise TimeoutError("applied replacement, lost receipt")
+                if outcome == "fail":
+                    return SendResult(success=False, raw={"code": 99991400})
+                known[mid] = card
+                return await update(mid, card)
 
-            cli.init()
-            await self.until(lambda: bool(app._progress_cards._sessions))
-            cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
-            system("task_started", task_id="t", run_id="r", tool_use_id="tool")
-            system("background_tasks_changed", tasks=[{"task_id": "t", "run_id": "r"}])
-            cli.result(result="first answer")
-            await self.until(lambda: execution.admissible and not execution.delivery.queues)
-            idle = f"执行过程 · 已完成 · Claude：空闲，后台任务 1 个运行中，可以发送新消息。{CLAUDE_RELEASE_HINT}"
-            busy = "执行过程 · 已完成 · Claude：执行中"
-            self.assertEqual(activity_line(fx.channel.updates[-1][1]), idle)
+            async def observe(event):
+                if isinstance(event, PhysicalAnswer):
+                    physical["first" if event.final_response in ("first answer", "one answer") else "wake"] = event
+                await complete(event)
 
-            applied, release = asyncio.Event(), asyncio.Event()
-            update = fx.channel.update_card
+            def assert_current(line):
+                for mid, event in physical.items():
+                    expected = turn_progress_card(
+                        snapshot=replace(event.activity, state_line=line if mid == last_id else None),
+                        partial_answers=event.partial_answers, final_response=event.final_response,
+                        terminal_status="completed", run_continues=(wake != "single" and (mid == "first" or wake == "body")),
+                        collapsed=True,
+                    ).card
+                    self.assertEqual(visible[mid], expected, mid)
+                    self.assertEqual(known.get(mid), expected, mid)
 
-            async def lose_busy_receipt(message_id, card):
-                receipt = await update(message_id, card)
-                if not applied.is_set() and activity_line(card) == busy:
-                    applied.set()
-                    await release.wait()
-                    raise TimeoutError("busy card applied, response lost")
-                return receipt
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(fx.channel, "reply", reply))
+                stack.enter_context(patch.object(fx.channel, "update_card", replace_card))
+                stack.enter_context(patch.object(app, "handle_ordinary_completion", observe))
+                if reference:
+                    case = unittest.TestCase()
+                    stack.callback(case.doCleanups)
+                    self.freeze_trace(fx, reference, case=case)
+                if receipt == "before":
+                    release_first.set()
+                await app.handle_message(FakeMessage("work", message_id="H1"))
+                cli = clients.calls[-1]
+                ex = ordinary._active[binding.id]
 
-            start = len(fx.channel.updates)
-            with patch.object(fx.channel, "update_card", lose_busy_receipt):
-                cli.init(user_message_uuids=[])
+                def system(kind, **data):
+                    cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+
+                async def set_cron(active):
+                    await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}] if active else []},
+                                             None, None)
+
                 try:
-                    await asyncio.wait_for(applied.wait(), 5)
-                    await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
-                    cli.result(user_message_uuid=None, uuid="wake-result", result=None, reason=None,
-                               origin={"kind": "task-notification", "producer": "session-task", "runId": "r"})
+                    cli.init(uuid="human-physical")
+                    await asyncio.wait_for(opened.wait(), 5)
+                    if receipt == "before":
+                        await self.until(lambda: bool(app._progress_cards._sessions))
+                    if wake != "single":
+                        cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
+                        system("task_started", task_id="t", run_id="r", tool_use_id="tool")
+                        system("background_tasks_changed", tasks=[{"task_id": "t", "run_id": "r"}])
+                    if early_idle:
+                        system("session_state_changed", state="idle")
+                    cli.result(result="one answer" if wake == "single" else "first answer", idle=False)
+                    if receipt == "result":
+                        release_first.set()
+                    if receipt in ("before", "result") and not hold_busy:
+                        await self.until(lambda: "first" in physical and not ex.delivery.queues)
+                    if wake == "single":
+                        self.assertEqual(visible["first"]["header"]["title"]["content"], "任务已完成")
+                        self.assertEqual(visible["first"]["config"]["summary"]["content"], "任务已完成")
                     system("session_state_changed", state="idle")
-                    await self.until(lambda: "wake-result" in cli.live.seen and execution.admissible)
+                    if wake != "single":
+                        await self.until(lambda: ex.admissible)
+                        if receipt in ("before", "result"):
+                            await self.until(lambda: not ex.delivery.queues)
+                        if cron == "before":
+                            await set_cron(True)
+                        if wake == "final wake":
+                            system("background_tasks_changed", tasks=[])
+                        cli.init(user_message_uuids=[], uuid="wake-physical")
+                        if hold_busy:
+                            await asyncio.wait_for(busy.wait(), 5)
+                        elif receipt not in ("wake", "end"):
+                            await self.until(lambda: cli.live.physical and not ex.delivery.queues)
+                        if receipt == "wake":
+                            release_first.set()
+                        if cron == "wake":
+                            await set_cron(True)
+                        if early_idle:
+                            system("session_state_changed", state="idle")
+                        cli.result(user_message_uuid=None, uuid="wake-result", result=None if wake == "bodyless" else "wake answer",
+                                   reason=None if wake == "bodyless" else "completed",
+                                   origin={"kind": "task-notification", "producer": "session-task", "runId": "r"})
+                        await self.until(lambda: "wake-result" in cli.live.seen)
+                        if cron == "result":
+                            await set_cron(True)
+                        system("session_state_changed", state="idle")
+                        await self.until(lambda: ex.human.terminal_sent if receipt == "end" else ex.admissible)
                 finally:
-                    release.set()
-                await self.until(lambda: not execution.delivery.queues)
+                    release_first.set()
+                    release_busy.set()
 
-            self.assertEqual([(mid, activity_line(card)) for mid, card in fx.channel.updates[start:]],
-                             [("first", busy), ("first", idle)])
-
-    async def test_single_result_before_idle_keeps_whole_task_heading_on_every_result_write(self):
-        from claude_agent_sdk import SystemMessage
-        from netizen_cli.bindings import BindingTaskFeedback
-
-        async with owner_channel() as (app, fx, clients, clock, ordinary):
-            clock[0] = 2.
-            fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
-                project_alias="test", creator_id="ou_user", task_feedback=BindingTaskFeedback(progress_card_enabled=True))
-            self.freeze_trace(fx, "single_result_before_idle")
-            fx.channel.reply_results.append(SendResult.ok(message_id="first"))
-            fx.channel.send_results.append(sent_result("reminder", chat_id="oc_direct", parent_id="first", root_id="H1"))
-            await app.handle_message(FakeMessage("work", message_id="H1"))
-            cli = clients.calls[-1]
-            cli.init()
-            await self.until(lambda: bool(app._progress_cards._sessions))
-            cli.result(result="one answer", idle=False)
-            await self.until(lambda: bool(fx.channel.updates))
-            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
-            self.assertTrue(await ordinary.wait_idle(10))
-            self.assertEqual(len(fx.channel.updates), 2)
-            for mid, card in fx.channel.updates:
-                self.assertEqual(mid, "first")
-                self.assertEqual(card["header"]["title"]["content"], "任务已完成")
-                self.assertEqual(card["config"]["summary"]["content"], "任务已完成")
+                if wake in ("body", "bodyless"):
+                    await self.until(lambda: not ex.delivery.queues)
+                    if repeated:
+                        # A run of lost receipts on the old card must not stop it or another card.
+                        for active in (False, True, False, True):
+                            offset = len(attempts)
+                            await set_cron(active)
+                            await self.until(lambda: bool(ex.human.last_display[0].crons) == active
+                                             and not ex.delivery.queues)
+                            self.assertEqual(attempts[offset:], ["first"])
+                            self.assertNotIn("first", known)
+                        unavailable.clear()
+                    # Cron is an independent natural trigger. With a task present the rendered
+                    # line is identical, so it repairs exactly the messages last left unknown.
+                    needed = {mid for mid in visible if mid not in known}
+                    before = len(attempts)
+                    await set_cron(False)
+                    await self.until(lambda: ex.human.last_display and not ex.human.last_display[0].crons
+                                     and not ex.delivery.queues)
+                    self.assertCountEqual(attempts[before:], needed)
+                    assert_current(f"Claude：空闲，后台任务 1 个运行中，可以发送新消息。{CLAUDE_RELEASE_HINT}")
+                    system("background_tasks_changed", tasks=[])
+                    system("session_state_changed", state="idle")
+                else:
+                    before = len(attempts)
+                self.assertTrue(await ordinary.wait_idle(10))
+                assert_current("全部完成")
+                self.assertEqual(redundant, [])
+                self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
+                                 [last_id])
+                return before
 
     async def test_background_presentation_is_per_physical_result_and_mentions_last_reply_once(self):
         from netizen_cli.bindings import BindingTaskFeedback

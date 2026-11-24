@@ -101,7 +101,7 @@ class ClaudeReplyEvents:
                 text += f"\n\n{CLAUDE_RELEASE_HINT}"
             return text
 
-        display = RunDisplay(event.reply, event.publishable, lambda: event.state().line)
+        display = RunDisplay(event.reply, event.publishable, lambda: replace(event.state(), tasks=event.owned_tasks()).line)
         return TurnResult(
             target=target,
             status=status,

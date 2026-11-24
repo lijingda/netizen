@@ -91,9 +91,8 @@ class ClaudeCliState:
         return "全部完成"
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, weakref_slot=True, eq=False)
 class LogicalReply:
-    refresh: Callable[[str | None], Awaitable[None]] | None = None
     attempted: bool = False
     message_id: str | None = None
 

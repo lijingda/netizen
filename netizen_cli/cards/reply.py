@@ -572,6 +572,31 @@ def turn_progress_card(
     partial_answers: tuple[_PartialAnswerLike, ...] | None = None,
     include_result: bool = True,
 ) -> OutboundCard:
+    return reply_card(turn_progress_projection(
+        snapshot=snapshot, final_response=final_response, files=files, terminal_status=terminal_status,
+        run_continues=run_continues, collapsed=collapsed, scope=scope, binding_id=binding_id, turn_id=turn_id,
+        additions=additions, deletions=deletions, completion_mention_user_id=completion_mention_user_id,
+        partial_answers=partial_answers, include_result=include_result,
+    ))
+
+
+def turn_progress_projection(
+    *,
+    snapshot: _TurnActivitySnapshotLike,
+    final_response: str | None = None,
+    files: tuple[TurnFile, ...] = (),
+    terminal_status: str | None = None,
+    run_continues: bool = False,
+    collapsed: bool = False,
+    scope: FeishuScope | None = None,
+    binding_id: str | None = None,
+    turn_id: str | None = None,
+    additions: int | None = None,
+    deletions: int | None = None,
+    completion_mention_user_id: str | None = None,
+    partial_answers: tuple[_PartialAnswerLike, ...] | None = None,
+    include_result: bool = True,
+) -> ReplyCardProjection:
     """Render one replaceable Phase 1 Turn progress card.
 
     The activity panel reads only the bounded, safety-projected status,
@@ -637,15 +662,9 @@ def turn_progress_card(
             final_response or _default_terminal_response(normalized_terminal_status),
             completion_mention_user_id=completion_mention_user_id,
         )
-    return reply_card(
-        ReplyCardProjection(
-            scope=scope,
-            activity=activity,
-            partial_answer=partial_answer,
-            result=result,
-            files=files_module,
-            run_continues=run_continues,
-        )
+    return ReplyCardProjection(
+        scope=scope, activity=activity, partial_answer=partial_answer, result=result,
+        files=files_module, run_continues=run_continues,
     )
 
 

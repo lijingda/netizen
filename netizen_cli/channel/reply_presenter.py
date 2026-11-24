@@ -5,16 +5,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from weakref import WeakValueDictionary
+from dataclasses import dataclass, field, replace
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from ..external_calls import external_call
-from ..cards import turn_progress_card
-from ..cards.reply import feishu_answer_text
+from ..cards import reply_card, turn_progress_card
+from ..domain import ReplyCardProjection
+from ..ordinary_sessions import LogicalReply
+from ..cards.reply import feishu_answer_text, turn_progress_projection
 from ..partial_answers import PartialAnswer
-from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, TurnOpened, TurnResult
+from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, RunDisplay, TerminalStatus, TurnOpened, TurnResult
 from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
 from .topics import BindingCardLocation, CardReplyLocation
@@ -51,6 +53,42 @@ class _CardUpdateAttempt:
         return self.result.success and (code is None or code == 0)
 
 
+class _CardWriter(asyncio.Lock):
+    """One replacement at a time. Only a confirmed payload can suppress a write."""
+
+    known: OutboundCard | None = None
+
+    async def reconcile(
+        self, desired: Callable[[], OutboundCard | None], write: Callable[[OutboundCard], Awaitable[bool]],
+    ) -> bool:
+        async with self:
+            delivered = False
+            while (card := desired()) is not None:
+                if self.known is not None and self.known.card == card.card:
+                    return True
+                self.known = None
+                if not await write(card):
+                    break
+                self.known = card
+                delivered = True
+            return delivered
+
+
+@dataclass(slots=True)
+class _PublishedCard:
+    key: PresentationKey
+    location: CardReplyLocation
+    content: ReplyCardProjection
+    writer: _CardWriter
+    tracks_run: bool
+
+
+def render_run_card(content: ReplyCardProjection, line: str | None) -> OutboundCard:
+    activity = content.activity
+    assert activity is not None
+    return reply_card(replace(content, activity=replace(activity, state_line=line)))
+
+
 def _exact(change: ActivityChanged | None, target: ReplyTarget) -> ActivityChanged | None:
     if change and change.target == target and target.key.matches(change.snapshot):
         return change
@@ -81,6 +119,7 @@ class _TurnProgressCardSession:
     observe: Callable[[], ActivityChanged | None]
     location: CardReplyLocation | None = None
     delivery: PhysicalDelivery | None = None
+    writer: _CardWriter | None = None
     reply_partial: Callable[[OutboundPost], Awaitable[SendResult]] | None = None
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
     policy: DeliveryPolicy = DeliveryPolicy.BOUNDED_FALLBACK
@@ -115,10 +154,69 @@ class _ReplyCardPresenter:
             tuple[str, str, str],
             _TurnProgressCardSession,
         ] = {}
-        self._writers: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._writers: WeakValueDictionary[str, _CardWriter] = WeakValueDictionary()
         self._card_owners: dict[str, CardReplyLocation] = {}
         self._binding_locations: dict[str, BindingCardLocation] = {}
+        self._published: WeakKeyDictionary[LogicalReply, dict[str, _PublishedCard]] = WeakKeyDictionary()
         self._closed = False
+
+    async def publish_card(
+        self, display: RunDisplay, message_id: str, key: PresentationKey, location: CardReplyLocation,
+        content: ReplyCardProjection, *, confirmed: OutboundCard | None = None, tracks_run: bool = True,
+    ) -> bool:
+        writer = self._message_writer(message_id)
+        if confirmed is not None:
+            writer.known = confirmed
+        cards = self._published.setdefault(display.reply, {}) if display.reply else {}
+        cards[message_id] = _PublishedCard(key, location, content, writer, tracks_run)
+        return (await self._reconcile_cards(display, cards))[message_id]
+
+    async def reconcile(self, display: RunDisplay) -> dict[str, bool]:
+        cards = self._published.get(display.reply, {}) if display.reply else {}
+        return await self._reconcile_cards(display, cards)
+
+    async def finish_initial_card(self, key: PresentationKey, display: RunDisplay, status: TerminalStatus) -> None:
+        session = self._sessions_for(key).pop(key.index, None)
+        if session:
+            await self._stop_session(session)
+            if session.message_id and session.location:
+                content = turn_progress_projection(snapshot=session.snapshot, terminal_status=status,
+                    collapsed=True, include_result=status != "completed")
+                await self.publish_card(display, session.message_id, key, session.location, content)
+
+    async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard]) -> dict[str, bool]:
+        reply = display.reply
+
+        def newest() -> str | None:
+            return next((mid for mid in reversed(cards) if cards[mid].tracks_run), None)
+
+        async def reconcile_message(mid: str, view: _PublishedCard) -> bool:
+            def desired() -> OutboundCard | None:
+                if cards.get(mid) is not view or not display.publishable() or not view.location.can_write(mid):
+                    return None
+                return render_run_card(view.content, display.current() if mid == newest() else None)
+
+            async def write(card: OutboundCard) -> bool:
+                attempt = await self._attempt_update_message(mid, card, binding_id=view.key.owner_id,
+                    operation_id=view.key.turn_id, location=view.location, policy=DeliveryPolicy.ITEM_RECEIPTS)
+                return attempt.confirmed
+
+            try:
+                current = await external_call(view.writer.reconcile(desired, write))
+                if current and mid == newest() and reply and reply.message_id is None:
+                    reply.confirmed(mid)
+                if view.writer.known is not None and mid != newest() and cards.get(mid) is view:
+                    cards.pop(mid)  # A confirmed, immutable card no longer needs a writer.
+                if not view.location.can_write(mid) and reply and reply.message_id == mid:
+                    reply.message_id = None
+                return current
+            except Exception:
+                logger.warning("optional reply update failed", extra=view.key.log_context)
+                return False
+
+        pending = tuple(cards.items())
+        results = await asyncio.gather(*(reconcile_message(mid, view) for mid, view in pending))
+        return {mid: result for (mid, _), result in zip(pending, results, strict=True)}
 
     def binding_location(self, binding_id: str) -> BindingCardLocation:
         return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners))
@@ -134,16 +232,6 @@ class _ReplyCardPresenter:
     def physical_delivery(self, key: PresentationKey) -> PhysicalDelivery:
         session = self._sessions_for(key).get(key.index)
         return session.delivery if session and session.delivery is not None else PhysicalDelivery()
-
-    async def write_physical_card(self, message_id: str, card: OutboundCard, *, binding_id: str, turn_id: str,
-                                  location: CardReplyLocation | None, publishable: Callable[[], bool],
-                                  begin: Callable[[], None]) -> _CardUpdateAttempt | None:
-        async with self._message_writer(message_id):
-            if not publishable() or (location and not location.can_write(message_id)):
-                return None
-            begin()
-            return await self._attempt_update_message(message_id, card, binding_id=binding_id,
-                                                      operation_id=turn_id, location=location, policy=DeliveryPolicy.ITEM_RECEIPTS)
 
     def _sessions_for(self, key: PresentationKey) -> dict[tuple[str, str, str], _TurnProgressCardSession]:
         return self._side_sessions if key.side else self._sessions
@@ -166,6 +254,7 @@ class _ReplyCardPresenter:
             return False
         snapshot = initial.snapshot
         message_id = None
+        writer = None
         location = event.location
         delivery = PhysicalDelivery() if event.policy.confirms_items else None
         if event.feedback.progress_card_enabled:
@@ -182,6 +271,9 @@ class _ReplyCardPresenter:
                         message_id = _confirmed_reply_id(result) if event.policy.confirms_items else _receipt_message_id(result)
                         if delivery:
                             delivery.record(items, receipt(result))
+                            if message_id:
+                                writer = self._message_writer(message_id)
+                                writer.known = card
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -197,7 +289,7 @@ class _ReplyCardPresenter:
             return False
         session = _TurnProgressCardSession(
             target=target, message_id=message_id, stopped=asyncio.Event(), snapshot=snapshot, observe=event.observe,
-            location=location, delivery=delivery, policy=event.policy, reply_partial=event.reply_partial, validate_reply=event.validate_reply,
+            location=location, delivery=delivery, writer=writer, policy=event.policy, reply_partial=event.reply_partial, validate_reply=event.validate_reply,
             attempted_partials=set() if previous is None else previous.attempted_partials,
             confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
@@ -446,15 +538,16 @@ class _ReplyCardPresenter:
     async def _poll(self, session: _TurnProgressCardSession) -> None:
         log_context = {"owner_id": session.target.key.owner_id, "turn_id": session.target.key.turn_id}
         failures = 0
+        observed_revision = session.snapshot.revision
+        read_now = False
         while not session.stopped.is_set():
-            try:
-                await asyncio.wait_for(
-                    session.stopped.wait(),
-                    timeout=self._poll_seconds,
-                )
-                return
-            except TimeoutError:
-                pass
+            if not read_now:
+                try:
+                    await asyncio.wait_for(session.stopped.wait(), timeout=self._poll_seconds)
+                    return
+                except TimeoutError:
+                    pass
+            read_now = False
             if session.stopped.is_set():
                 return
             try:
@@ -471,8 +564,9 @@ class _ReplyCardPresenter:
                 if session.message_id is None:
                     session.snapshot = snapshot
                 continue
-            if snapshot.revision == session.snapshot.revision:
+            if snapshot.revision == (observed_revision if session.delivery else session.snapshot.revision):
                 continue
+            observed_revision = snapshot.revision
             try:
                 card = turn_progress_card(snapshot=snapshot)
             except Exception:
@@ -484,9 +578,11 @@ class _ReplyCardPresenter:
                 return
             if session.delivery:
                 items = tuple(session.delivery.partial(item) for item in snapshot.partial_answers)
+                # A write may span several native changes. Sample again immediately;
+                # the same observed revision does not trigger a retry.
+                read_now = True
                 if not await self._update(session, card, items):
-                    # Never replay a running replacement with uncertain content.
-                    return
+                    continue
             elif not await self._update(session, card):
                 failures += 1
                 if failures >= _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES:
@@ -507,17 +603,22 @@ class _ReplyCardPresenter:
         if not session.delivery:
             return await self.update_message(session.message_id, card, binding_id=session.target.key.owner_id,
                                              operation_id=session.target.key.turn_id, location=session.location, policy=session.policy)
-        async with self._message_writer(session.message_id):
-            if session.location and not session.location.can_write(session.message_id):
-                session.message_id = None
-                return False
-            session.delivery.begin(items)
-            attempt = await self._attempt_update_message(session.message_id, card, binding_id=session.target.key.owner_id,
-                                                        operation_id=session.target.key.turn_id, location=session.location, policy=session.policy)
-            session.delivery.record(items, receipt(attempt.result))
-        if session.location and not session.location.can_write(session.message_id):
+        writer, delivery, mid = session.writer, session.delivery, session.message_id
+        assert writer is not None
+
+        async def write(desired: OutboundCard) -> bool:
+            delivery.begin(items)
+            attempt = await self._attempt_update_message(mid, desired, binding_id=session.target.key.owner_id,
+                operation_id=session.target.key.turn_id, location=session.location, policy=session.policy)
+            delivery.record(items, receipt(attempt.result))
+            return attempt.confirmed
+
+        confirmed = await writer.reconcile(lambda: None if session.stopped.is_set() else card, write)
+        if confirmed:
+            delivery.record(items, "confirmed")
+        if session.location and not session.location.can_write(mid):
             session.message_id = None
-        return attempt.confirmed
+        return confirmed
 
     async def update_message(
         self,
@@ -538,9 +639,9 @@ class _ReplyCardPresenter:
             )
             return attempt.confirmed if policy.confirms_items else attempt.updated
 
-    def _message_writer(self, message_id: str) -> asyncio.Lock:
+    def _message_writer(self, message_id: str) -> _CardWriter:
         # A waiter retains the same lock until its complete card replacement settles.
-        return self._writers.setdefault(message_id, asyncio.Lock())
+        return self._writers.setdefault(message_id, _CardWriter())
 
     async def _update_terminal_message(
         self,
