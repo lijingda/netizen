@@ -94,6 +94,20 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertEqual(version("openai-codex-cli-bin"), sdk)
         self.assertIn(f"openai-codex-cli-bin=={sdk}", constraints)
 
+    def test_macos_jobs_run_on_main_pushes_and_dispatch_only(self) -> None:
+        workflow = yaml.load(
+            (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        jobs = workflow["jobs"]
+        self.assertEqual(jobs["macos-arm64-check"]["if"], "github.event_name != 'pull_request'")
+        for job_name in ("artifact-installs", "native-isolated", "native-claude"):
+            with self.subTest(job=job_name):
+                os_matrix = jobs[job_name]["strategy"]["matrix"]["os"]
+                self.assertIn("github.event_name == 'pull_request'", os_matrix)
+                self.assertIn('\'["ubuntu-latest"]\'', os_matrix)
+                self.assertIn('\'["ubuntu-latest", "macos-15"]\'', os_matrix)
+
     def test_main_ci_runs_repository_gate_for_supported_python_versions(self) -> None:
         workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
         workflow = yaml.load(
