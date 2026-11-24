@@ -220,10 +220,12 @@ class _ReplyCardPresenter:
                 return render_run_card(view.content, display.current() if mid == newest() else None)
 
             async def write(card: OutboundCard) -> bool:
+                if reply:
+                    reply.begin(view.answer_items)
                 attempt = await self._attempt_update_message(mid, card, binding_id=view.key.owner_id,
                     operation_id=view.key.turn_id, location=view.location, policy=DeliveryPolicy.ITEM_RECEIPTS)
                 if attempt.confirmed and reply:
-                    reply.published(mid, view.key.turn_id, view.answer_items, view.location.binding.unusable)
+                    reply.published(mid, view.key.turn_id, view.answer_items, view.location.usable)
                 return attempt.confirmed
 
             try:
@@ -299,7 +301,7 @@ class _ReplyCardPresenter:
                                 writer = self._message_writer(message_id)
                                 writer.known = card
                                 if event.run_reply and location:
-                                    event.run_reply.published(message_id, key.turn_id, items, location.binding.unusable)
+                                    event.run_reply.published(message_id, key.turn_id, items, location.usable)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -646,7 +648,7 @@ class _ReplyCardPresenter:
         if confirmed:
             delivery.record(items, "confirmed")
             if delivery.reply and session.location:
-                delivery.reply.published(mid, session.target.key.turn_id, items, session.location.binding.unusable)
+                delivery.reply.published(mid, session.target.key.turn_id, items, session.location.usable)
         if session.location and not session.location.can_write(mid):
             session.message_id = None
         return confirmed

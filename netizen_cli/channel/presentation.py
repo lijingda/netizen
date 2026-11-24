@@ -89,8 +89,6 @@ class CompletionPresentationChannel(ChannelReplies):
             ledger.partial(part)
         if outcome.content:
             ledger.expect(BODY)
-        if display.reply and ledger.items:
-            display.reply.attempted = True
         try:
             async with asyncio.timeout_at(policy.deadline):
                 content = outcome.content
@@ -140,7 +138,6 @@ class CompletionPresentationChannel(ChannelReplies):
             except Exception:
                 card = None
             if card and first_id and location.can_write(first_id):
-                ledger.begin(items)
                 if await self._progress_cards.publish_card(display, first_id, key, location, projection, answer_items=answer_items):
                     ledger.record(items, "confirmed")
                 return
@@ -250,7 +247,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 location = event.location
                 assert location is not None
                 source_id = _message_id(event.target.origin)
-                anchor = reply.mention_target(source_id, location.usable)
+                anchor = reply.mention_target(source_id if location.usable(source_id) else None)
                 await send_completion_mention(
                     self._channel, scope=self._scope(event.target.origin), card_message_id=anchor,
                     user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,

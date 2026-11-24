@@ -94,13 +94,12 @@ class ClaudeCliState:
 @dataclass(slots=True)
 class _ReplyMessage:
     message_id: str
-    disqualified_ids: set[str] = field(repr=False)
+    location_usable: Callable[[str], bool] = field(repr=False)
     confirmed_answer_items: set[tuple[str, str, str]] = field(default_factory=set)
 
     @property
     def usable(self) -> bool:
-        # The Binding's ID set also catches a contradiction on a different send.
-        return self.message_id not in self.disqualified_ids
+        return self.location_usable(self.message_id)
 
 
 @dataclass(slots=True, weakref_slot=True, eq=False)
@@ -110,25 +109,27 @@ class LogicalReply:
     messages: dict[str, _ReplyMessage] | None = field(default_factory=dict)
     unaddressed_confirmation: bool = False
 
-    def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], disqualified_ids: set[str]) -> None:
+    def begin(self, items: tuple[tuple[str, str], ...]) -> None:
+        if any(kind in ("body", "partial") for kind, _ in items):
+            self.attempted = True
+
+    def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], usable: Callable[[str], bool]) -> None:
         if self.messages is None:
             return
         answers = {(turn_id, kind, item_id) for kind, item_id in items if kind in ("body", "partial")}
-        if answers:
-            self.attempted = True
         if mid:
-            message = self.messages.setdefault(mid, _ReplyMessage(mid, disqualified_ids))
+            message = self.messages.setdefault(mid, _ReplyMessage(mid, usable))
             message.confirmed_answer_items.update(answers)
         elif answers:
             self.unaddressed_confirmation = True
 
-    def mention_target(self, source: str, usable: Callable[[str], bool]) -> str | None:
+    def mention_target(self, verified_source: str | None) -> str | None:
         if self.messages is None:
             return None
         for message in reversed(self.messages.values()):
-            if message.usable and message.confirmed_answer_items and usable(message.message_id):
+            if message.usable and message.confirmed_answer_items:
                 return message.message_id
-        return source if (not self.attempted or self.unaddressed_confirmation) and usable(source) else None
+        return verified_source if not self.attempted or self.unaddressed_confirmation else None
 
     def retire(self) -> None:
         if self.messages is not None:

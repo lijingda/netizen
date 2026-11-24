@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, PropertyMock, patch
 from uuid import UUID
 
 from lark_channel import SendResult
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from types import SimpleNamespace
 import unittest
 
@@ -54,6 +54,10 @@ async def owner_channel():
             await management.close()
 
 
+def _has_card_answer(card):
+    return any(element.get("element_id") in {"turnanswerv1", "partialanswerv1"} for element in card["body"]["elements"])
+
+
 class _MentionTrace:
     """Infer the expected reminder from public Feishu calls in a direct-chat explorer row."""
 
@@ -63,23 +67,31 @@ class _MentionTrace:
         self.confirmed = set()
         self.disqualified = set()
         self.attempted = False
+        self.ambiguous_answer = False
 
         def watch(method, *, update):
             async def call(target, payload, *args, **kwargs):
                 card = getattr(payload, "card", payload)
                 if isinstance(card, dict):
-                    answer = any(element.get("element_id") in {"turnanswerv1", "partialanswerv1"}
-                                 for element in card["body"]["elements"])
+                    answer = _has_card_answer(card)
                 else:
                     answer = payload != INCOMPLETE
                 self.attempted |= answer
                 result = await method(target, payload, *args, **kwargs)
                 raw = result.raw or {}
                 data = raw.get("data") or {}
-                mid = target if update else result.message_id or data.get("message_id")
+                direct, nested = result.message_id, data.get("message_id")
+                mid = target if update else direct or nested
+                ids = {i for i in (mid, direct, nested, *(result.chunk_ids or ())) if i}
+                split_conflict = result.chunk_ids and mid and mid not in result.chunk_ids
+                confirmed = result.success and raw.get("code") in (None, 0)
                 if data.get("chat_id", "oc_direct") != "oc_direct":
-                    self.disqualified.update(i for i in (mid, result.message_id, data.get("message_id")) if i)
-                elif mid and result.success and raw.get("code", 0) == 0:
+                    self.disqualified.update(ids)
+                elif isinstance(card, dict) and len(ids) > 1:
+                    self.disqualified.update(ids)
+                elif confirmed and ((direct and nested and direct != nested) or split_conflict):
+                    self.ambiguous_answer |= answer
+                elif confirmed and mid:
                     if not update and mid not in self.published:
                         self.published.append(mid)
                     if answer:
@@ -93,12 +105,41 @@ class _MentionTrace:
     def assert_reminder(self, case):
         eligible = self.confirmed - self.disqualified
         anchor = next((mid for mid in reversed(self.published) if mid in eligible), None)
-        if anchor is None and not self.attempted:
+        if anchor is None and (not self.attempted or self.ambiguous_answer) and "H1" not in self.disqualified:
             anchor = "H1"
         actual = [(options.reply_to, [m.open_id for m in body.mentions])
                   for _, body, options in self.channel.send_calls if getattr(body, "mentions", ())]
-        case.assertEqual(actual, [(anchor, ["ou_user"])] if anchor else [])
+        case.assertEqual(actual, [(anchor, ["ou_user"])] if anchor else [], "completion mention anchor")
         return anchor
+
+
+@contextmanager
+def _mutate_mention(mutation):
+    from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
+    from netizen_cli.ordinary_sessions import LogicalReply
+
+    attempted = set()
+    update = _ReplyCardPresenter._attempt_update_message
+    async def attempt(presenter, mid, card, **kwargs):
+        location = kwargs.get("location")
+        if location and _has_card_answer(card.card):
+            attempted.add((location.usable, mid))
+        return await update(presenter, mid, card, **kwargs)
+
+    def select(reply, verified_source):
+        if reply.messages is None:
+            return None
+        rows = reply.messages.values() if mutation == "oldest" else reversed(reply.messages.values())
+        for row in rows:
+            unconfirmed = mutation == "count unconfirmed" and (row.location_usable, row.message_id) in attempted
+            if (row.usable or mutation == "ignore usable") and (row.confirmed_answer_items or unconfirmed):
+                return row.message_id
+        if mutation != "drop input exception" and (not reply.attempted or reply.unaddressed_confirmation):
+            return verified_source
+        return None
+
+    with patch.object(_ReplyCardPresenter, "_attempt_update_message", attempt), patch.object(LogicalReply, "mention_target", select):
+        yield
 
 
 class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
@@ -1710,6 +1751,10 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         for card_count in (1, 2):
             with self.subTest(confirmed_cards=card_count):
                 await self.exercise_disqualified_mention(card_count)
+        for cards, case in (*product((False, True), ("preparation error", "preparation deadline")),
+                            (True, "rejected"), (True, "lost"), (True, "empty"), (False, "conflicting receipt")):
+            with self.subTest(cards=cards, answer=case):
+                await self.exercise_answer_receipt(cards, case)
         # Hold the busy receipt across a bodyless wake, a cron change and the final idle.
         for fault in ("ok", "unknown", "fail"):
             with self.subTest(busy_receipt=fault):
@@ -1970,6 +2015,70 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(sum(content == INCOMPLETE for _, content in fx.channel.replies), 1)
                 self.assertEqual(mentions.assert_reminder(self), "posted" if final == "posted" else "card-A")
 
+    async def exercise_answer_receipt(self, cards, case):
+        from dataclasses import replace
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel import constants
+        from netizen_cli.ordinary_sessions import PhysicalAnswer
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT), project_alias="test",
+                creator_id="ou_user", task_feedback=BindingTaskFeedback(progress_card_enabled=cards))
+            body = "answer"
+            with ExitStack() as stack:
+                if cards:
+                    fx.channel.reply_results.append(SendResult.ok(message_id="first"))
+                if case.startswith("preparation"):
+                    body = "![picture](local.png)"
+                    if case == "preparation error":
+                        prepare = stack.enter_context(patch("netizen_cli.result_images.parse_markdown", side_effect=ValueError("parse failed")))
+                    else:
+                        complete = app.handle_ordinary_completion
+                        async def deadline(event):
+                            if isinstance(event, PhysicalAnswer):
+                                event = replace(event, delivery_deadline=asyncio.get_running_loop().time())
+                            await complete(event)
+                        async def wait_for_path(*args):
+                            await asyncio.Future()
+                        stack.enter_context(patch.object(app, "handle_ordinary_completion", deadline))
+                        local_io = SimpleNamespace(**vars(asyncio))
+                        local_io.to_thread = prepare = AsyncMock(side_effect=wait_for_path)
+                        stack.enter_context(patch("netizen_cli.result_images.asyncio", local_io))
+                elif case in ("lost", "rejected"):
+                    replace_card = fx.channel.update_card
+                    async def update(mid, card):
+                        if case == "lost":
+                            await replace_card(mid, card)
+                            raise TimeoutError("answer replacement receipt lost")
+                        return SendResult(success=False, raw={"code": 99991400})
+                    stack.enter_context(patch.object(fx.channel, "update_card", update))
+                elif case == "conflicting receipt":
+                    fx.channel.reply_results.append(SendResult.ok(message_id="top", raw={"code": 0, "data": {"message_id": "raw"}}))
+                elif case == "empty":
+                    body = None
+                mentions = _MentionTrace(fx.channel, stack)
+                await app.handle_message(FakeMessage("work", message_id="H1"))
+                cli = clients.calls[-1]
+                cli.init()
+                await self.until(lambda: bool(app._progress_cards._sessions))
+                cli.result(result=body, reason="completed" if body else None)
+                self.assertTrue(await ordinary.wait_idle(10))
+                if case.startswith("preparation"):
+                    prepare.assert_called_once()
+                unconfirmed = case in ("lost", "rejected")
+                self.assertEqual(mentions.attempted, unconfirmed or case == "conflicting receipt")
+                self.assertFalse(mentions.confirmed)
+                self.assertEqual(sum(content == INCOMPLETE for _, content in fx.channel.replies),
+                                 int(unconfirmed or case.startswith("preparation")))
+                self.assertIn(("H1", constants.DONE_REACTION), fx.channel.reactions)
+                self.assertEqual(mentions.assert_reminder(self), None if unconfirmed else "H1")
+                if unconfirmed:
+                    self.assertEqual(fx.channel.replies[0][1].card["header"]["title"]["content"], "任务进行中")
+                    self.assertEqual(bool(fx.channel.updates), case == "lost")
+                if cards and not unconfirmed:
+                    self.assertEqual(fx.channel.updates[-1][1]["header"]["title"]["content"], "任务已完成")
+
     async def exercise_disqualified_mention(self, card_count):
         from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
         from netizen_cli.bindings import BindingTaskFeedback
@@ -2020,6 +2129,39 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await ordinary.wait_idle(10))
                 self.assertEqual(mentions.disqualified, {bad_id})
                 self.assertEqual(mentions.assert_reminder(self), "card-A" if card_count == 2 else None)
+
+    @requires_claude_sdk
+    async def test_explorer_rejects_incorrect_mention_anchors(self):
+        for mutation, witness, args in (
+            ("oldest", self.exercise_card_order, ("before", "before", "body")),
+            ("ignore usable", self.exercise_disqualified_mention, (2,)),
+            ("count unconfirmed", self.exercise_answer_receipt, (True, "rejected")),
+            ("drop input exception", self.exercise_answer_receipt, (True, "empty")),
+        ):
+            with self.subTest(mutation=mutation), _mutate_mention(mutation), self.assertRaisesRegex(AssertionError, "completion mention anchor"):
+                await witness(*args)
+
+    def test_mention_rows_follow_current_card_ownership(self):
+        from netizen_cli.channel.physical_delivery import BODY, PhysicalDelivery, record_sent_answer
+        from netizen_cli.channel.topics import BindingCardLocation, CardReplyLocation
+        from netizen_cli.ordinary_sessions import LogicalReply
+
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = BindingCardLocation({})
+        first = CardReplyLocation(scope, "H1", "H1", binding)
+        second = CardReplyLocation(scope, "H2", "H2", binding)
+        reply = LogicalReply()
+        ledger = PhysicalDelivery(reply=reply)
+        for mid in ("older", "newer"):
+            ledger.begin((BODY,))
+            receipt = first.validate(SendResult.ok(message_id=mid))
+            record_sent_answer(reply, first, mid, (BODY,), receipt)
+        row = reply.messages["newer"]
+        self.assertEqual((row.usable, reply.mention_target("H1")), (True, "newer"))
+        self.assertTrue(second.validate(SendResult.ok(message_id="newer"), card=True).success)
+        self.assertEqual((row.usable, reply.mention_target("H1")), (False, "older"))
+        second.retire()
+        self.assertEqual((row.usable, reply.mention_target("H1")), (True, "newer"))
 
     @requires_claude_sdk
     async def test_explorer_rejects_a_queued_intermediate_view(self):

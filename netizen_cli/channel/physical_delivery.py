@@ -29,7 +29,7 @@ def record_sent_answer(reply: LogicalReply | None, location: CardReplyLocation, 
     # for the original-input exception, but is never evidence of content on that input.
     mid = _confirmed_reply_id(result, on_conflict="")
     if reply is not None and mid is not None:
-        reply.published(mid, turn_id, items, location.binding.unusable)
+        reply.published(mid, turn_id, items, location.usable)
 
 
 @dataclass(slots=True)
@@ -58,8 +58,8 @@ class PhysicalDelivery:
 
     def begin(self, items: tuple[Item, ...]) -> None:
         # Mark before awaiting the Channel. Cancellation leaves an unknown outcome.
-        if self.reply and any(kind in ("body", "partial") for kind, _ in items):
-            self.reply.attempted = True
+        if self.reply:
+            self.reply.begin(items)
         self.record(items, "unknown")
 
     def record(self, items: tuple[Item, ...], outcome: Outcome) -> None:
