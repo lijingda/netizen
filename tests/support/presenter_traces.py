@@ -24,7 +24,7 @@ def delivery_value(value):
     return value
 
 
-def delivery_recorder(channel, stack):
+def delivery_recorder(channel, stack, *, include_reads=False):
     events = []
 
     def capture(method):
@@ -34,7 +34,10 @@ def delivery_recorder(channel, stack):
             return await method(*args, **kwargs)
         return call
 
-    for name in ("reply", "send", "update_card", "upload_media", "add_reaction", "remove_reaction", "fetch_message", "get_chat_info", "download_resource"):
+    methods = ("reply", "send", "update_card", "upload_media", "add_reaction", "remove_reaction")
+    if include_reads:
+        methods += ("fetch_message", "get_chat_info", "download_resource")
+    for name in methods:
         stack.enter_context(patch.object(channel, name, capture(getattr(channel, name))))
     return events
 
@@ -50,7 +53,7 @@ def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE, expected_e
     stack = case.enterContext(ExitStack())
     nonces = itertools.count(1)
     stack.enter_context(patch("secrets.token_hex", side_effect=lambda n: next(nonces).to_bytes(n, "big").hex()))
-    events = delivery_recorder(fixture.channel, stack)
+    events = delivery_recorder(fixture.channel, stack, include_reads=True)
 
     def compare():
         serialized = json.dumps(events, default=_encode_media, ensure_ascii=False)
