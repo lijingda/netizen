@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -772,6 +772,14 @@ class FakeGoalHandle:
         )
         control.codex.goal_turns.append((self.thread_id, self.record))
 
+    @property
+    def activity_attached(self):
+        return self.activity_sink is not None
+
+    def fail_activity(self):
+        sink, self.activity_sink = self.activity_sink, None
+        sink(None)
+
     def current_physical_turn_id(self) -> str | None:
         return self.record.id if self.record.status.value == "inProgress" else None
 
@@ -811,6 +819,7 @@ class FakeGoalHandle:
             for update in self.activity_updates:
                 activity_sink(update)
         await self.terminal.wait()
+        self.activity_sink = None
         return GoalStreamTerminal(
             self.terminal_logical_turn_id or self.id,
             self.record.id,
@@ -5435,6 +5444,50 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handle.control.clear_calls, [submission.thread_id])
         self.assertIsNone(self.runtime.active_goal(binding.id))
 
+    async def test_rejected_delete_cannot_reattach_a_failed_goal_activity_tap(self):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport
+
+        binding, handle, submission = await self.start_fake_goal()
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        events = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime))
+        opened = events.opened(key, FakeMessage("go", message_id="in"), BindingTaskFeedback(), goal=True,
+                               reply=AsyncMock(), reply_partial=AsyncMock())
+        async with channel_fixture() as fx, asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            wire = ProcessTransport([])
+            presenter = fx.app._progress_cards
+            presenter._process_port = wire.port
+            polled = asyncio.Event()
+            observe = opened.observe
+            def read():
+                polled.set()
+                return observe()
+            presenter._poll_seconds = .001
+            await presenter.open(replace(opened, observe=read))
+            handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id,
+                event=TurnActivityEvent("read", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 1, text="Read")))
+            self.assertTrue(observe().snapshot.process_available)
+            handle.fail_activity()
+            self.delete_control.errors.append(ThreadDeleteRejected("fork references history"))
+            with self.assertRaises(ThreadLifecycleError):
+                await self.runtime.delete_exact(binding.id, expected_native_thread_id=submission.thread_id)
+            self.assertFalse(handle.activity_attached)
+            snapshot = observe().snapshot
+            self.assertEqual(len(snapshot.process_items), 1)
+            polled.clear()
+            await polled.wait()
+            writer = presenter._process[key]
+            if writer.task:
+                await writer.ready.wait()
+            self.assertFalse(wire.events)
+            self.assertFalse(snapshot.process_available)
+        handle.finish(response="done")
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+
     async def test_delete_rejection_preserves_compaction_observer_and_reservation(self) -> None:
         binding = self.binding()
         first = await self.submit(binding)
@@ -8422,7 +8475,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         answered = self.runtime.goal_activity(binding.id)
         self.assertEqual(answered.revision, hidden.revision + 1)
         self.assertEqual(answered.partial_answers, (answer,))
-        handle.activity_sink(None)
+        handle.fail_activity()
         unavailable = self.runtime.goal_activity(binding.id)
         self.assertFalse(unavailable.plan_available)
         self.assertEqual(unavailable.revision, answered.revision + 1)

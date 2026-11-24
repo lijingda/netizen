@@ -42,11 +42,12 @@ logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 
 
 def _process_available(active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal) -> bool:
-    if active.process_activity is None or not active.activity_observation_enabled:
+    if active.process_activity is None:
         return False
     if isinstance(active, _ActiveGoal):
-        return not active.observation_unavailable and active.state is not GoalOperationState.UNKNOWN
-    return active.state not in (ActiveState.CLOSING, ActiveState.OBSERVATION_UNAVAILABLE)
+        return (active.handle is not None and active.handle.activity_attached
+                and not active.observation_unavailable and active.state is not GoalOperationState.UNKNOWN)
+    return active.activity_source is not None and active.state not in (ActiveState.CLOSING, ActiveState.OBSERVATION_UNAVAILABLE)
 
 
 class TurnActivityRuntime(NativeQueryRuntime):
@@ -210,6 +211,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
         observer = self._turn_plan_observer
         if observer is None:
             active.plan_available = False
+            active.activity_source = None
             active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
@@ -223,6 +225,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             )
         except Exception as error:
             active.plan_available = False
+            active.activity_source = None
             active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
@@ -235,6 +238,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
                 },
             )
             return None
+        active.activity_source = observer
         active.plan_available = True
         active.plan_cursor = observation.next_cursor
         for request in observation.questions:

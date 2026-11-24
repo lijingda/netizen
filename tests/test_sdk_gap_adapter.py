@@ -823,10 +823,15 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 control = AppServerGoalControl(codex)
                 handle = await control.start("thread-goal", "ship safely")
 
+                attached = []
                 def broken_sink(_projection) -> None:
+                    attached.append(handle.activity_attached)
                     raise RuntimeError("display unavailable")
 
+                self.assertFalse(handle.activity_attached)
                 terminal = await handle.wait_terminal(broken_sink)
+                self.assertEqual(attached, [True])
+                self.assertFalse(handle.activity_attached)
             _close_probe_pipes(process)
             gc.collect()
 

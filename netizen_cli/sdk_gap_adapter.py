@@ -162,6 +162,9 @@ class GoalHandle(Protocol):
     @property
     def thread_id(self) -> str: ...
 
+    @property
+    def activity_attached(self) -> bool: ...
+
     def current_physical_turn_id(self) -> str | None: ...
 
     def is_finished(self) -> bool: ...
@@ -808,6 +811,10 @@ class _GoalActivityTap:
             [TurnActivityNotificationProjection | None], None
         ] | None = None
 
+    @property
+    def attached(self) -> bool:
+        return self._sink is not None
+
     def bind(
         self,
         sink: Callable[[TurnActivityNotificationProjection | None], None] | None,
@@ -979,6 +986,10 @@ class _AppServerGoalHandle:
     @property
     def thread_id(self) -> str:
         return self._state.thread_id
+
+    @property
+    def activity_attached(self) -> bool:
+        return self._activity_tap.attached
 
     def _bind_logical_turn(self, logical_turn_id: str) -> None:
         if self._logical_turn_id is not None:

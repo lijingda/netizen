@@ -663,6 +663,7 @@ class SideRuntime(SubmissionRuntime):
                 self._cancel_side_idle(session)
                 active = session.active
                 if active is not None:
+                    active.activity_source = None
                     active.activity_observation_enabled = False
                     if active.state is ActiveState.RUNNING:
                         active.state = ActiveState.STOPPING
@@ -991,6 +992,7 @@ class SideRuntime(SubmissionRuntime):
                 if observation.retained_count >= SIDE_ACTIVITY_QUEUE_HIGH_WATER:
                     before = self._turn_activity_visible_state(active)
                     active.plan_available = False
+                    active.activity_source = None
                     active.activity_observation_enabled = False
                     if self._turn_activity_visible_state(active) != before:
                         active.activity_revision += 1
