@@ -1063,6 +1063,8 @@ class SideRuntime(SubmissionRuntime):
                     self._sides.get(session.side_id) is session
                     and session.active is active
                 ):
+                    if active.terminal_observed and active.process_activity is not None:
+                        active.process_activity.close()
                     activity = self._side_turn_activity_snapshot(session.side_id, active)
                     cleanup_debt = (
                         active.cleanup_required and not active.cleanup_succeeded

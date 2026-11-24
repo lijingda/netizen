@@ -998,6 +998,8 @@ class GoalRuntime(TurnObservationRuntime):
 
         try:
             await active.receipt_attempted.wait()
+            if active.terminal_observed and active.process_activity is not None:
+                active.process_activity.close()
             outcome = GoalOutcome(
                 binding_id=active.binding_id,
                 thread_id=active.thread_id,

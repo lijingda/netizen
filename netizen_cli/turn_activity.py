@@ -416,7 +416,7 @@ def sanitize_activity_text(
     redacted = _ELAPSED.sub("[时间信息已隐藏]", redacted)
     redacted = _PERCENT.sub("[百分比已隐藏]", redacted)
     redacted = _ETA.sub("[时间估算已隐藏]", redacted)
-    return _bounded_activity_text(redacted, limit)
+    return bounded_activity_text(redacted, limit)
 
 
 def sanitize_activity_operation_text(
@@ -429,7 +429,7 @@ def sanitize_activity_operation_text(
         return None
     # Filter before truncation so a clipped credential never becomes visible.
     redacted = _redact_activity_credentials(normalized)
-    return _bounded_activity_text(" ".join(redacted.split()), limit)
+    return bounded_activity_text(" ".join(redacted.split()), limit)
 
 
 def _redact_activity_credentials(value: str) -> str:
@@ -445,7 +445,7 @@ def _redact_activity_credentials(value: str) -> str:
     return _KNOWN_TOKEN.sub("[敏感内容已隐藏]", value)
 
 
-def _bounded_activity_text(value: str, limit: int = ACTIVITY_TEXT_LIMIT) -> str:
+def bounded_activity_text(value: str, limit: int = ACTIVITY_TEXT_LIMIT) -> str:
     if len(value) > limit:
         return value[: limit - 1].rstrip() + "…"
     return value
@@ -637,7 +637,7 @@ def _operation_summary(label: str, *details: str | None, limit: int) -> str:
             safe = sanitize_activity_operation_text(detail, limit=limit)
             if safe:
                 parts.append(safe)
-    return _bounded_activity_text(" · ".join(parts), limit)
+    return bounded_activity_text(" · ".join(parts), limit)
 
 
 def _command_activity_summary(item: CommandExecutionThreadItem, *, limit: int) -> str:
@@ -663,7 +663,7 @@ def _command_activity_summary(item: CommandExecutionThreadItem, *, limit: int) -
     if item.exit_code is not None and item.exit_code != 0:
         suffix = f" · 退出码 {item.exit_code}"
         summary = (
-            _bounded_activity_text(summary, max(1, limit - len(suffix)))
+            bounded_activity_text(summary, max(1, limit - len(suffix)))
             + suffix
         )
     return summary

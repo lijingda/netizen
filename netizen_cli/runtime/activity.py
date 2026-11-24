@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from time import time
 from dataclasses import replace
 
 
@@ -285,7 +286,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
         if active.task_feedback.progress_card_enabled:
             return None
         if active.process_activity is None:
-            active.process_activity = ProcessActivityWindow()
+            active.process_activity = ProcessActivityWindow(time)
         return active.process_activity
 
     def _apply_plan(self, active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal, steps: tuple[TurnPlanStepSnapshot, ...]) -> None:
