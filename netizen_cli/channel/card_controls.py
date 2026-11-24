@@ -853,8 +853,14 @@ class CardControlChannel(TurnFileChannel):
             await self._safe_reply_to_card(intent, success_notice)
 
     async def _card_confirm_release(self, intent: CardControlIntent) -> None:
+        chat = intent.scope.chat_id
+        fetched = await self._channel.fetch_message(intent.source_id)
+        actual = scope_from_fetched_card(app_id=self._app_id, callback_chat_id=chat, fetched_message=fetched,
+                                        chat_type=_public_chat_kind(await self._channel.get_chat_info(chat)))
+        if actual != intent.scope:
+            raise CardActionError("卡片已离开原会话，请重新发送 /release。")
         try:
-            await self._management.release_current_binding(target=CurrentBindingTarget(intent.scope.key, cast(str, intent.binding_id)),
+            await self._management.release_current_binding(target=CurrentBindingTarget(actual.key, cast(str, intent.binding_id)),
                 sender_id=intent.sender_id, revision=intent.expected_activity_revision, turn_id=intent.expected_turn_id)
         except (NoCurrentBinding, CurrentBindingChanged, ThreadActivityChanged) as exc:
             raise CardActionError("会话状态已变化，请重新发送 /release。") from exc

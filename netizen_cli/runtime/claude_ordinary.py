@@ -127,7 +127,7 @@ class _Execution:
     live: LiveSession = field(init=False)
     humans: dict[str, _Human] = field(default_factory=dict)
     unwritten: set[str] = field(default_factory=set)
-    pending: _Human | None = None
+    reserved: _Human | None = None
     client: ClaudeClient | None = None
     task: asyncio.Task[None] | None = None
     writer: asyncio.Task[None] | None = None
@@ -167,7 +167,12 @@ class _Execution:
                     raise OrdinaryInputRejected("本条消息的话题根与当前会话不一致，本条输入未发送。")
             elif anchor.topic_root_id:
                 self.conversation_source = anchor
-        self.humans[human.input_id] = self.pending = human
+        self.humans[human.input_id] = self.reserved = human
+
+    @property
+    def pending(self) -> _Human | None:
+        # A send checking history owns the input slot, but has no native turn to stop or release.
+        return self.humans.get(self.reserved.input_id) if self.reserved is not None else None
 
     def submitted(self, input_id: str | None) -> _Human | None:
         human = self.pending
@@ -343,14 +348,14 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         else:
             self._advance(binding_id)
 
-    def _idle(self, binding_id: str, *, input: bool = False) -> None:
+    def _idle(self, binding_id: str, *, input: bool = False, reservation: _Human | None = None) -> None:
         self.require_admission()
         if binding_id in self._unavailable:
             raise OrdinaryInputRejected(CLOSE_FAILED)
         if binding_id in self._active and self._active[binding_id].closing:
             raise OrdinaryInputRejected("上一轮正在收尾，本条消息未发送。")
         active = self._active.get(binding_id)
-        if active is not None and not (input and active.admissible):
+        if active is not None and not (input and active.reserved is reservation and active.admissible):
             raise OrdinaryInputRejected("当前会话正在执行，本条消息未发送。")
 
     def _current(self, binding_id: str) -> ThreadBinding:
@@ -393,13 +398,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 current = await self._clients.last_assistant(execution.session, self._owned_cwds[binding.id], execution.session_reader)
             except Exception:
                 logger.warning("Claude transcript read failed; admitting input", extra={"binding_id": binding.id})
-        # Controls, other sends and native wakes may proceed during the SDK read.
+        # Controls and native wakes may proceed during the SDK read.
         async with self._lock(binding.id):
-            self._idle(binding.id, input=True)
+            self._idle(binding.id, input=True, reservation=human)
             if (self._active.get(binding.id) is not execution or reader is not execution.history_reader
                     or self._current(binding.id) != binding or self._admission(binding) != admission):
                 raise OrdinaryInputRejected(STALE)
-            if current != previous and current != execution.last_assistant:
+            if current != previous:
                 execution.last_assistant = current
                 self._reconcile(execution)
                 raise OrdinarySessionDiverged(execution.scope, binding.id, ReleaseConfirmation(
@@ -438,8 +443,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 execution.task.add_done_callback(self._tasks.pop)
             else:
                 execution = active
+                execution.reserved = human
         if active is not None:
-            await self._submit_live(active, human, message, admission)
+            try:
+                await self._submit_live(active, human, message, admission)
+            finally:
+                if active.reserved is human and active.pending is None:
+                    active.reserved = None
         try:
             return await asyncio.shield(human.ready)
         except asyncio.CancelledError as exc:
@@ -551,7 +561,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 execution.unwritten.add(human.input_id)
                 human.settle(execution.session, exc)
                 self._retire(execution, human)
-                execution.pending = None
+                execution.reserved = None
                 return
             if not await self._write(execution, human, message):
                 async with asyncio.timeout(self._remaining(_RECONCILE_SECONDS)):
@@ -617,7 +627,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             owned.settle(execution.session, error)
             if unknown:
                 self._retire(execution, owned)
-        execution.pending = None
+        execution.reserved = None
         execution.close_finished = True
         if execution.release_receipt is not None and not released:
             execution.release_receipt.set_result(False)
@@ -756,7 +766,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         live.partials.clear()
         live.candidate = None
         if submitted:
-            execution.pending = None
+            execution.reserved = None
         execution.concluded = True
         return submitted
 

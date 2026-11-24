@@ -207,6 +207,41 @@ asyncio.run(probe())
             self.assertNotIsInstance(stale.exception, OrdinarySessionDiverged)
             self.assertEqual(len(cli.inputs), 1)
 
+    async def test_overlapping_send_is_busy_until_the_reserved_history_check_finishes(self):
+        _, cli = await self.retain()
+        entered, proceed = asyncio.Event(), asyncio.Event()
+        overlap_started, first_done = asyncio.Event(), asyncio.Event()
+        original = self.clients.history
+        async def read(*args):
+            if entered.is_set():
+                await first_done.wait()
+                return original  # The visible leaf reverted between reads.
+            entered.set()
+            await proceed.wait()
+            return "foreign"
+        async def overlap():
+            overlap_started.set()
+            return await self.submit(origin="H3")
+        with patch.object(self.clients, "last_assistant", side_effect=read) as history:
+            first = asyncio.create_task(self.submit(origin="H2"))
+            first.add_done_callback(lambda _: first_done.set())
+            await asyncio.wait_for(entered.wait(), 1)
+            second = asyncio.create_task(overlap())
+            try:
+                await asyncio.wait_for(overlap_started.wait(), 1)
+                proceed.set()
+                with self.assertRaises(OrdinarySessionDiverged):
+                    await asyncio.wait_for(first, 1)
+                with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
+                    await asyncio.wait_for(second, 1)
+            finally:
+                proceed.set()
+                await asyncio.gather(first, second, return_exceptions=True)
+            history.assert_awaited_once()
+            with self.assertRaises(OrdinarySessionDiverged):
+                await self.submit(origin="resend")
+            self.assertEqual(len(cli.inputs), 1)
+
     async def test_divergence_card_captures_the_pending_stop_hook_revision(self):
         _, cli = await self.retain()
         async def changed(*args):

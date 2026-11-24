@@ -15,17 +15,18 @@ from netizen_cli.runtime.claude_client import BundledClaudeClients, last_assista
 from tests.support.claude_provider import blocks
 
 
-async def check_idle_history(session, cwd):
-    """Hold the CLI connected; do not let the driver start its next send yet."""
-    baseline = await last_assistant(session, cwd)
-    await check_send_after_hold(session, cwd, baseline)
-    return baseline
-
-
-async def check_send_after_hold(session, cwd, baseline):
+async def check_idle_history(session, cwd, *, case, result_uuid, role="retained", baseline=None):
+    """Only the retained client's ordered idle promises a quiet transcript."""
+    idle = f"case={case} role={role} result_uuid={result_uuid}"
+    print(f"Idle {idle} hold_seconds={0 if role == 'terminal' else 2.55}", flush=True)
+    if role == "terminal":
+        return None  # The foreign writer may already be processing its query.
+    if baseline is None:
+        baseline = await last_assistant(session, cwd)
     await asyncio.sleep(2.55)
     checked = await last_assistant(session, cwd)
-    assert checked == baseline, ("false divergence", baseline, checked)
+    assert checked == baseline, ("false divergence", idle, baseline, checked)
+    return baseline
 
 
 class NativeSession:
@@ -68,7 +69,7 @@ class NativeSession:
         return {}
 
     @asynccontextmanager
-    async def connected(self, *, resume=False):
+    async def connected(self, *, resume=False, role="retained"):
         self.frames.clear()
         self.client = BundledClaudeClients().create(self.session, self.cwd, resume=resume)
         self.client.options.hooks = {"Stop": [HookMatcher(hooks=[self.hook])]}
@@ -80,7 +81,9 @@ class NativeSession:
         async def read():
             async for frame in self.client.receive_messages():
                 if isinstance(frame, SystemMessage) and frame.subtype == "session_state_changed" and frame.data["state"] == "idle":
-                    self.idle_history = await check_idle_history(self.session, self.cwd)
+                    results = self.results
+                    self.idle_history = await check_idle_history(self.session, self.cwd, case=self.case, role=role,
+                                                                 result_uuid=results[-1].uuid if results else None)
                 self.frames.append(frame)
 
         reader = self.reader = asyncio.create_task(read())
@@ -145,7 +148,7 @@ class NativeSession:
         self.provider.live_session_reply = None
         terminal = NativeSession(self.cwd, self.provider, self.case)
         terminal.session = self.session
-        async with terminal.connected(resume=True):
+        async with terminal.connected(resume=True, role="terminal"):
             assert await terminal.client.get_server_info()  # CLI initialized without a human query.
             silent = await history()
             print("Pure headless resume changed visible history:", silent != original, flush=True)
@@ -224,7 +227,7 @@ class NativeSession:
             assert {m.task_id for m in self.system("task_updated") if m.status == "killed"} == {t.task_id for t in starts}
             assert {m.task_id for m in self.system("task_notification") if m.status == "stopped"} == {t.task_id for t in starts}
             assert self.idle_history is not None
-            await check_send_after_hold(self.session, self.cwd, self.idle_history)
+            await check_idle_history(self.session, self.cwd, case=case, result_uuid=self.results[-1].uuid, baseline=self.idle_history)
             return
         if case == "foreground_interrupt":
             await self.idle_after(1)

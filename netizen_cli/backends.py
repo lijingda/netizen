@@ -387,7 +387,7 @@ class BackendPolicy:
 
     def require(self, operation: OperationId, surface: Surface = "command") -> None:
         if not self.allows(operation, surface):
-            label = OPERATIONS[operation].label
+            label = "确认释放 Claude 会话" if (operation, surface) == (OperationId.RELEASE, "card") else OPERATIONS[operation].label
             raise BackendUnsupported(label, detail=self.refusal(label))
 
     def operation_refusal(self, operation: str, label: str) -> str | None:

@@ -119,7 +119,10 @@ class ChannelReplies(ChannelState):
     async def _report_input_error(self, message: Any, error: Exception) -> None:
         """One user-visible failure policy for message, card and scheduled inputs."""
         if isinstance(error, OrdinarySessionDiverged):
-            await self._reply(message, release_confirmation_card(error.scope, error.binding_id, error.confirmation, diverged=True))
+            try:
+                await self._reply(message, release_confirmation_card(error.scope, error.binding_id, error.confirmation, diverged=True))
+            except Exception:
+                logger.exception("failed to deliver Claude divergence card", extra={"message_id": _message_id(message)})
             return
         if self._local_sessions is not None and isinstance(error, (BackendUnsupported, OrdinaryInputRejected, TerminalStateUnknown, ThreadActivityChanged)):
             await self._reply(message, str(error) or "本次操作对应的执行已变化。")

@@ -138,10 +138,12 @@ class ObservedClient:
         from claude_agent_sdk import ResultMessage, SystemMessage
         from tests.support.claude_session_facts import check_idle_history
 
+        result_uuid = None
         async for msg in self.client.receive_messages():
             if isinstance(msg, SystemMessage) and msg.subtype == "session_state_changed" and msg.data["state"] == "idle":
                 try:
-                    await check_idle_history(msg.data["session_id"], Path(self.client.options.cwd))
+                    await check_idle_history(msg.data["session_id"], Path(self.client.options.cwd),
+                                             case="ordinary", result_uuid=result_uuid)
                 except Exception as error:
                     # The application contains reader failures; the native gate must surface them.
                     self.clients.history_error = error
@@ -149,6 +151,7 @@ class ObservedClient:
             if isinstance(msg, SystemMessage) and msg.subtype == "init":
                 self.modes.append((msg.data.get("permissionMode"), "AskUserQuestion" in msg.data.get("tools", [])))
             if isinstance(msg, ResultMessage):
+                result_uuid = msg.uuid
                 self.results.append((msg.subtype, msg.terminal_reason, msg.is_error,
                                      msg.user_message_uuid, tuple(msg.user_message_uuids or ())))
             yield msg
@@ -343,12 +346,14 @@ async def main_cases(cwd, provider, evidence):
         try:
             await limit.connect()
             await limit.query(single_message(user_message(PreparedPrompt("[[S:tool-error/limit]]"), str(uuid4()))))
+            result_uuid = None
             async for msg in limit.receive_messages():
                 if isinstance(msg, ResultMessage):
+                    result_uuid = msg.uuid
                     evidence.check("native max-turn terminal", (msg.subtype, msg.terminal_reason, msg.is_error)
                                    == ("error_max_turns", "max_turns", True))
                 if isinstance(msg, SystemMessage) and msg.subtype == "session_state_changed" and msg.data["state"] == "idle":
-                    await check_idle_history(limited_id, cwd)
+                    await check_idle_history(limited_id, cwd, case="max_turns", result_uuid=result_uuid)
                     break
         finally:
             await limit.disconnect()
