@@ -15,8 +15,8 @@ from netizen_cli.runtime.claude_client import BundledClaudeClients, last_assista
 from tests.support.claude_provider import blocks
 
 
-async def check_idle_history(session, cwd, *, case, result_uuid, role="retained", baseline=None):
-    """Only the retained client's ordered idle promises a quiet transcript."""
+async def check_idle_history(session, cwd, *, case, result_uuid, role="retained", baseline=None, activity_seen=None):
+    """The retained transcript must stay unchanged across a quiet hold."""
     idle = f"case={case} role={role} result_uuid={result_uuid}"
     print(f"Idle {idle} hold_seconds={0 if role == 'terminal' else 2.55}", flush=True)
     if role == "terminal":
@@ -25,7 +25,10 @@ async def check_idle_history(session, cwd, *, case, result_uuid, role="retained"
         baseline = await last_assistant(session, cwd)
     await asyncio.sleep(2.55)
     checked = await last_assistant(session, cwd)
-    assert checked == baseline, ("false divergence", idle, baseline, checked)
+    if activity_seen and activity_seen():
+        print(f"Skipping idle hold after native activity: {idle}", flush=True)
+    else:
+        assert checked == baseline, ("false divergence", idle, baseline, checked)
     return baseline
 
 
@@ -40,6 +43,8 @@ class NativeSession:
         self.cron_fired = False
         self.client = None
         self.idle_history = None
+        self.activity_count = 0
+        self.idle_activity = 0
         self.reader = None
 
     def reply(self, messages):
@@ -78,13 +83,28 @@ class NativeSession:
             self.client.options.permission_mode = None  # Standalone native permission control.
         await self.client.connect()
 
-        async def read():
-            async for frame in self.client.receive_messages():
+        frames = asyncio.Queue()
+
+        async def check_frames():
+            while (item := await frames.get()) is not None:
+                frame, activity = item
                 if isinstance(frame, SystemMessage) and frame.subtype == "session_state_changed" and frame.data["state"] == "idle":
-                    results = self.results
-                    self.idle_history = await check_idle_history(self.session, self.cwd, case=self.case, role=role,
-                                                                 result_uuid=results[-1].uuid if results else None)
+                    self.idle_history = await self.check_history(activity, role=role)
+                    self.idle_activity = activity
                 self.frames.append(frame)
+
+        async def read():
+            # Keep observing the SDK during each hold. Publish frames to the
+            # scenario in order, after the preceding idle check has finished.
+            async with asyncio.TaskGroup() as group:
+                group.create_task(check_frames())
+                async for frame in self.client.receive_messages():
+                    if (isinstance(frame, (AssistantMessage, ResultMessage)) or
+                            isinstance(frame, SystemMessage) and frame.subtype == "session_state_changed"
+                            and frame.data["state"] == "running"):
+                        self.activity_count += 1
+                    frames.put_nowait((frame, self.activity_count))
+                frames.put_nowait(None)
 
         reader = self.reader = asyncio.create_task(read())
         try:
@@ -95,6 +115,12 @@ class NativeSession:
             await self.client.disconnect()
             if not reader.cancelled():
                 reader.result()
+
+    async def check_history(self, activity, *, role="retained", baseline=None):
+        results = self.results
+        return await check_idle_history(self.session, self.cwd, case=self.case, role=role,
+                                        result_uuid=results[-1].uuid if results else None, baseline=baseline,
+                                        activity_seen=lambda: self.activity_count != activity)
 
     async def query(self, human):
         uid = self.h1 if human == "h1" else self.h2
@@ -227,7 +253,7 @@ class NativeSession:
             assert {m.task_id for m in self.system("task_updated") if m.status == "killed"} == {t.task_id for t in starts}
             assert {m.task_id for m in self.system("task_notification") if m.status == "stopped"} == {t.task_id for t in starts}
             assert self.idle_history is not None
-            await check_idle_history(self.session, self.cwd, case=case, result_uuid=self.results[-1].uuid, baseline=self.idle_history)
+            await self.check_history(self.idle_activity, baseline=self.idle_history)
             return
         if case == "foreground_interrupt":
             await self.idle_after(1)

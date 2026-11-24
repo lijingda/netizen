@@ -304,6 +304,34 @@ asyncio.run(probe())
         self.assertEqual((len(logs.records), len(cli.inputs)), (1, 2))
         submitted.release_receipt_attempt()
 
+    async def test_send_during_idle_capture_after_a_native_wake_writes_once(self):
+        from claude_agent_sdk import SystemMessage
+
+        _, cli = await self.retain()
+        execution = self.runtime._active[self.binding.id]
+        await self.wait_until(lambda: execution.last_assistant == self.clients.history)
+        reading, finish_read = asyncio.Event(), asyncio.Event()
+
+        async def history(*args):
+            if not reading.is_set():
+                reading.set()
+                await finish_read.wait()
+            return "wake-assistant"
+
+        with patch.object(self.clients, "last_assistant", side_effect=history) as reads:
+            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "running"}))
+            cli.init(user_message_uuids=[])
+            cli.result(user_message_uuid=None)
+            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+            await asyncio.wait_for(reading.wait(), 2)
+            try:
+                submitted = await asyncio.wait_for(self.submit(), 2)
+                submitted.release_receipt_attempt()
+                self.assertEqual([row["uuid"] for row in cli.inputs[1:]], [submitted.turn_id])
+                reads.assert_awaited_once()
+            finally:
+                finish_read.set()
+
     async def test_release_states_and_exact_confirmation(self):
         self.assertEqual(await self.release_client(), ReleaseDisposition.NOT_SUBSCRIBED)
         h1 = await self.submit()
