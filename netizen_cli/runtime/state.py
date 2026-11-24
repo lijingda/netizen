@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -37,7 +36,7 @@ from ..ordinary_sessions import LogicalReply
 from ..partial_answers import PartialAnswer
 from ..progress_card_settings import ProgressCardSettings
 from .thread_naming import ThreadNamer
-from .codex_contracts import RuntimeOutcome, CompletionHandler, GoalRollover
+from .codex_contracts import RuntimeOutcome, CompletionHandler, GoalOutcome
 from .contracts import (
     NativeTurnHandle,
     NativeThread,
@@ -82,6 +81,7 @@ from ..user_questions import (
     SideQuestionTarget,
 )
 
+from .claude_delivery import AnchorDelivery
 from . import limits
 from .native_values import (
     _model_provider_rejection,
@@ -174,6 +174,26 @@ class _ActiveCompaction:
 
 
 @dataclass(slots=True)
+class _GoalPhysicalTurn:
+    thread_id: str
+    turn_id: str
+    task_feedback: BindingTaskFeedback
+    revision: int = 1
+    facts: GoalTurnFacts | None = None
+    settled: bool = False
+    plan_generated: bool = False
+    plan_available: bool = True
+    plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    activity_sequence: int = 0
+    activity_segment: int = 0
+    activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
+    activity_commentary_order: list[str] = field(default_factory=list)
+    activity_operations: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
+    activity_operation_order: list[str] = field(default_factory=list)
+    partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class _ActiveGoal:
     binding_id: str
     thread_id: str
@@ -191,29 +211,15 @@ class _ActiveGoal:
     generation_created_at: int | None = None
     generation_token_budget: int | None = None
     reply: LogicalReply = field(default_factory=LogicalReply)
-    candidate: GoalTurnFacts | None = None
-    rollovers: deque[GoalRollover] = field(default_factory=deque)
-    delivery_task: asyncio.Task[None] | None = None
+    delivery: AnchorDelivery = field(default_factory=AnchorDelivery)
     stream_terminal: GoalStreamTerminal | None = None
     final_turn_status: str | None = None
     final_items: tuple[object, ...] = ()
     final_response: str | None = None
     feedback_revision: int = 1
-    activity_revision: int = 1
     activity_observation_enabled: bool = True
-    activity_turn_id: str | None = None
-    activity_turn_ids: set[str] = field(default_factory=set)
-    plan_cursor: int = 0
-    plan_generated: bool = False
-    plan_available: bool = True
-    plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_sequence: int = 0
-    activity_segment: int = 0
-    activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
-    activity_commentary_order: list[str] = field(default_factory=list)
-    activity_operations: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
-    activity_operation_order: list[str] = field(default_factory=list)
-    partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
+    turns: dict[str, _GoalPhysicalTurn] = field(default_factory=dict)
+    current_id: str | None = None
     question_ids: set[tuple[str, str]] = field(default_factory=set)
     pause_attempted: bool = False
     interrupt_acknowledged: bool = False
@@ -223,6 +229,12 @@ class _ActiveGoal:
     observation_unavailable: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
+
+
+    def physical(self, turn_id: str) -> _GoalPhysicalTurn:
+        if turn_id not in self.turns:
+            self.turns[turn_id] = _GoalPhysicalTurn(self.thread_id, turn_id, self.task_feedback)
+        return self.turns[turn_id]
 
 
 def _same_goal_generation(
@@ -344,7 +356,7 @@ class RuntimeState:
     _background_terminal_inspector: BackgroundTerminalInspector | None
     _thread_delete_control: ThreadDeleteControl | None
     _progress_card_defaults: Callable[[], ProgressCardSettings]
-    _on_goal_rollover: Callable[[GoalRollover], Awaitable[None]] | None = None
+    _on_goal_turn: Callable[[GoalOutcome, bool], Awaitable[None]] | None = None
     _on_completion: CompletionHandler
     _on_question: QuestionHandler | None
     _on_input_received: InputReceivedHandler | None
@@ -377,8 +389,8 @@ class RuntimeState:
     def set_completion_handler(self, handler: CompletionHandler) -> None:
         self._on_completion = handler
 
-    def set_goal_rollover_handler(self, handler: Callable[[GoalRollover], Awaitable[None]]) -> None:
-        self._on_goal_rollover = handler
+    def set_goal_turn_handler(self, handler: Callable[[GoalOutcome, bool], Awaitable[None]]) -> None:
+        self._on_goal_turn = handler
 
     def set_question_handler(self, handler: QuestionHandler) -> None:
         self._on_question = handler

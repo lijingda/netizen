@@ -728,8 +728,8 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         first, second = [p.goal_terminal for p in activity if p and p.goal_terminal]
-        self.assertEqual((first.turn_id, first.status, first.final_response, first.phase.value),
-                         ("turn-1", "completed", "first final", "final_answer"))
+        self.assertEqual((first.turn_id, first.status, first.final_response, first.answer.explicit),
+                         ("turn-1", "completed", "first final", True))
         self.assertEqual([item.id for item in first.file_items], ["patch", "image"])
         self.assertEqual(first.file_items[0].changes[0].path, "direct.txt")
         self.assertEqual(first.file_items[1].saved_path, "/tmp/art.png")
@@ -811,7 +811,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
             self.assertIs(await tap.next_notification(client, state), notification)
         self.assertEqual(client.next_goal_notification.await_count, len(notifications))
         answers = [p.partial_answer for p in projected if p.partial_answer is not None]
-        self.assertEqual([(a.turn_id, a.item_id) for a in answers], [("first", "a"), ("second", "b")])
+        self.assertEqual([(a.turn_id, a.item_id) for a in answers], [("first", "a"), ("first", "late"), ("second", "b")])
 
     async def test_goal_tap_projects_frozen_lengths_without_another_consumer(self) -> None:
         from openai_codex.generated.v2_all import ItemCompletedNotification, ThreadItem
@@ -852,7 +852,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         tap.bind(seen.append)
         with patch("netizen_cli.sdk_gap_adapter.project_turn_activity_notification", side_effect=ValueError("shape")):
             self.assertIs(await tap.next_notification(client, object()), raw)
-        self.assertEqual(seen, [None])
+        self.assertEqual([(p.turn_id, p.incomplete) for p in seen], [("one", True)])
         client.next_goal_notification.assert_awaited_once()
 
     async def test_goal_activity_sink_failure_does_not_break_unique_stream(self) -> None:

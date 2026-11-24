@@ -11,7 +11,6 @@ from lark_channel import (
     Identity,
     OutboundCard,
     OutboundPost,
-    SendResult,
 )
 
 from ..bindings import (
@@ -363,7 +362,6 @@ class ChannelReplies(ChannelState):
         *,
         completion_mention_user_id: str | None = None,
         on_sent: Callable[[str], None] | None = None,
-        on_result: Callable[[SendResult], None] | None = None,
     ) -> None:
         if isinstance(content, str) and completion_mention_user_id is not None:
             content = OutboundPost(
@@ -371,8 +369,6 @@ class ChannelReplies(ChannelState):
                 mentions=[Identity(open_id=completion_mention_user_id)],
             )
         result = await self._send_completion_reply(message, content)
-        if on_result:
-            on_result(result)
         if on_sent is not None:
             target = _confirmed_reply_id(result, on_conflict=_message_id(message))
             if target:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -50,13 +49,13 @@ from ..sdk_gap_adapter import (
 )
 from ..turn_patch_children import TaskPatchChildren, child_patch_item_id
 
+from ..partial_answers import merge_final_answer
 from . import limits
 from .native_values import (
     _enum_value,
     _thread_creation_cwd,
     _native_cwd,
     _thread_status_type,
-    _final_agent_response,
 )
 from .state import (
     RUNTIME_LOGGER_NAME,
@@ -196,7 +195,6 @@ class GoalRuntime(TurnObservationRuntime):
                 persisted=persisted,
                 task_feedback=self._capture_task_feedback(binding.task_feedback),
                 feedback_revision=binding.feedback_revision,
-                plan_available=True,
             )
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
@@ -328,7 +326,7 @@ class GoalRuntime(TurnObservationRuntime):
                     binding_id=binding.id,
                     thread_id=existing.thread_id,
                     logical_turn_id=existing.handle.id,
-                    release_receipt_attempt=existing.receipt_attempted.set,
+                    release_receipt_attempt=lambda: None,
                     task_feedback=existing.task_feedback,
                     feedback_revision=existing.feedback_revision,
                     continued=True, reply=existing.reply,
@@ -372,7 +370,6 @@ class GoalRuntime(TurnObservationRuntime):
                 generation_token_budget=persisted.token_budget,
                 task_feedback=self._capture_task_feedback(binding.task_feedback),
                 feedback_revision=binding.feedback_revision,
-                plan_available=True,
             )
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
@@ -966,7 +963,10 @@ class GoalRuntime(TurnObservationRuntime):
             # cause the confirmed Result/Files to be discarded as stale.
             defer_slot_release_until_delivery = not retain_active
         except asyncio.CancelledError:
-            await self._retire_goal_presentation(active)
+            await active.delivery.cancel()
+            active.turns.clear()
+            active.final_items, active.final_response, active.stream_terminal = (), None, None
+            active.reply.retire()
             raise
         except BaseException as caught:
             error = caught
@@ -999,64 +999,61 @@ class GoalRuntime(TurnObservationRuntime):
                         )
 
         try:
-            await active.receipt_attempted.wait()
-            outcome = GoalOutcome(
-                binding_id=active.binding_id,
-                thread_id=active.thread_id,
-                logical_turn_id=handle.id,
-                owner_id=active.owner_id,
-                origin=active.origin,
-                reply=active.reply,
-                cwd=active.cwd,
-                goal=persisted,
-                final_physical_turn_id=(
-                    active.stream_terminal.final_physical_turn_id
-                    if active.stream_terminal is not None
-                    else active.activity_turn_id
-                ),
-                final_turn_status=active.final_turn_status,
-                final_items=active.final_items,
-                final_response=active.final_response,
-                turn_diff=(
-                    active.stream_terminal.turn_diff
-                    if active.stream_terminal is not None
-                    else None
-                ) or (active.candidate.turn_diff if active.candidate else None),
-                error=error,
-                background_cleanup_requested=active.cleanup_succeeded,
-                task_feedback=active.task_feedback,
-                feedback_revision=active.feedback_revision,
-                activity=(
-                    self._goal_activity_snapshot(active)
-                    if active.task_feedback.progress_card_enabled
-                    else None
-                ),
-                partial_answers=tuple(active.partial_answers.values()),
-                finalization=finalization,
-                finalization_error=finalization_error,
-                patch_children=await self._goal_patch_children(active),
-            )
-            try:
-                async with asyncio.timeout(
-                    limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS
-                ):
-                    if active.delivery_task is not None:
-                        # Reserve half of the existing handoff window for the
-                        # final proof or observation notice on a slow transport.
-                        try:
-                            async with asyncio.timeout(limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS / 2):
-                                await active.delivery_task
-                        except TimeoutError:
-                            logger.warning("Goal rollover delivery budget exhausted")
-                            outcome = replace(outcome, earlier_delivery_incomplete=True)
-                    await self._on_completion(outcome)
-            except Exception:
-                logger.exception(
-                    "goal completion delivery failed",
-                    extra={"logical_turn_id": handle.id},
+            deadline = asyncio.get_running_loop().time() + limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS
+            active.delivery.finish_by(deadline)
+            async with asyncio.timeout_at(deadline):
+                try:
+                    async with asyncio.timeout(limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS / 2):
+                        await active.receipt_attempted.wait()
+                except TimeoutError:
+                    active.receipt_attempted.set()
+                turn_id = active.stream_terminal.final_physical_turn_id if active.stream_terminal else active.current_id
+                assert turn_id
+                turn = active.physical(turn_id)
+                for prior in active.turns.values():
+                    if prior is not turn and not prior.settled:
+                        self._present_goal_turn(active, prior)
+                await active.delivery.join_turn(turn_id)
+                outcome = GoalOutcome(
+                    binding_id=active.binding_id,
+                    thread_id=active.thread_id,
+                    logical_turn_id=handle.id,
+                    owner_id=active.owner_id,
+                    origin=active.origin,
+                    reply=active.reply, delivery=active.delivery, deadline=deadline,
+                    cwd=active.cwd,
+                    goal=persisted,
+                    final_physical_turn_id=(
+                        active.stream_terminal.final_physical_turn_id
+                        if active.stream_terminal is not None
+                        else active.current_id
+                    ),
+                    final_turn_status=active.final_turn_status,
+                    final_items=active.final_items,
+                    final_response=active.final_response,
+                    turn_diff=active.stream_terminal.turn_diff if active.stream_terminal else None,
+                    error=error,
+                    background_cleanup_requested=active.cleanup_succeeded,
+                    task_feedback=active.task_feedback,
+                    feedback_revision=active.feedback_revision,
+                    activity=(
+                        self._goal_activity_snapshot(active, turn)
+                        if active.task_feedback.progress_card_enabled
+                        else None
+                    ),
+                    partial_answers=tuple(turn.partial_answers.values()),
+                    finalization=finalization,
+                    finalization_error=finalization_error,
+                    patch_children=await self._goal_patch_children(active),
                 )
+                await self._on_completion(outcome)
+        except Exception:
+            logger.exception("goal completion delivery failed", extra={"logical_turn_id": handle.id})
         finally:
-            await self._retire_goal_presentation(active)
+            await active.delivery.cancel()
+            active.turns.clear()
+            active.final_items, active.final_response, active.stream_terminal = (), None, None
+            active.reply.retire()
             if defer_slot_release_until_delivery:
                 async with self._lock(active.binding_id):
                     if self._goals.get(active.binding_id) is active:
@@ -1067,20 +1064,6 @@ class GoalRuntime(TurnObservationRuntime):
                             active.thread_id,
                         )
 
-    @staticmethod
-    async def _retire_goal_presentation(active: _ActiveGoal) -> None:
-        active.candidate = None
-        active.rollovers.clear()
-        active.final_items = ()
-        active.final_response = None
-        active.partial_answers.clear()
-        task = active.delivery_task
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        active.delivery_task = None
-        active.reply.retire()
-
     async def _goal_patch_children(self, active: _ActiveGoal) -> TaskPatchChildren:
         terminal = active.stream_terminal
         if active.final_turn_status != "completed" or terminal is None:
@@ -1088,9 +1071,10 @@ class GoalRuntime(TurnObservationRuntime):
         children = await self._completion_patch_children(
             active.thread_id, terminal.final_physical_turn_id, active.final_items,
         )
-        if active.candidate:
+        candidate = active.physical(terminal.final_physical_turn_id).facts
+        if candidate:
             proven = {child_patch_item_id(item, active.thread_id) for item in active.final_items}
-            if active.candidate.child_patch_ids - proven:
+            if not candidate.complete or candidate.child_patch_ids - proven:
                 return TaskPatchChildren(children.batches, complete=False)
         return children
 
@@ -1179,7 +1163,10 @@ class GoalRuntime(TurnObservationRuntime):
             if turn_status != terminal.turn_status:
                 raise RuntimeError("Goal stream and persisted Turn status disagree")
             items = tuple(getattr(exact, "items", ()))
-            final_response = _final_agent_response(list(items))
+            turn = active.physical(terminal.final_physical_turn_id)
+            candidate = turn.facts
+            answer = merge_final_answer(candidate.answer if candidate else None, exact)
+            final_response = answer.text if answer else None
             if (
                 turn_status == "completed"
                 and final_response is None
@@ -1200,26 +1187,13 @@ class GoalRuntime(TurnObservationRuntime):
                 response_materialization_retries -= 1
                 await asyncio.sleep(self._poll_interval_seconds)
                 continue
-            candidate = active.candidate
-            if candidate is not None:
-                if candidate.turn_id != terminal.final_physical_turn_id or candidate.status != turn_status:
-                    raise RuntimeError("Goal tap and final history disagree")
-                # Keep both views. Path discovery takes their union, and exact
-                # patch IDs already deduplicate counts or mark conflicts unknown.
-                roots = tuple(getattr(item, "root", item) for item in items)
+            if candidate:
                 items = (*items, *candidate.file_items)
-                history_has_final = any(
-                    _enum_value(getattr(root, "phase", None)) == "final_answer"
-                    and isinstance(getattr(root, "text", None), str) and root.text
-                    for root in roots
-                )
-                if not final_response or (candidate.phase is not None and not history_has_final):
-                    final_response = candidate.final_response
             active.final_turn_status = turn_status
             active.final_items = items
             active.final_response = final_response
             self._supplement_partial_answers(
-                active, thread_id=active.thread_id,
+                turn, thread_id=active.thread_id,
                 turn_id=terminal.final_physical_turn_id, items=items,
             )
             return persisted
@@ -1227,6 +1201,8 @@ class GoalRuntime(TurnObservationRuntime):
     def _track_goal(self, active: _ActiveGoal) -> None:
         handle = active.handle
         assert handle is not None and handle.id is not None
+        active.current_id = handle.id
+        active.physical(handle.id)
         task = asyncio.create_task(
             self._consume_goal(active),
             name=f"codex-goal:{handle.id}",

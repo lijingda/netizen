@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..ordinary_sessions import LogicalReply
+    from .claude_delivery import AnchorDelivery
 
 from ..bindings import BindingTaskFeedback
 from ..domain import GoalOperationState
@@ -79,7 +80,8 @@ class GoalOutcome:
     partial_answers: tuple[PartialAnswer, ...] = ()
     cwd: Path | None = None
     run_continues: bool = False
-    earlier_delivery_incomplete: bool = False
+    delivery: AnchorDelivery | None = None
+    deadline: float | None = None
     reply: LogicalReply | None = None
 
     def __post_init__(self) -> None:
@@ -91,12 +93,6 @@ class GoalOutcome:
             or self.activity.logical_turn_id != self.logical_turn_id
         ):
             raise ValueError("Goal outcome activity belongs to another Goal run")
-
-
-@dataclass(frozen=True, slots=True)
-class GoalRollover:
-    previous: GoalOutcome
-    opening: GoalActivitySnapshot
 
 
 RuntimeOutcome = (

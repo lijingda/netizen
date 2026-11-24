@@ -31,6 +31,7 @@ class Schedule:
 class GoalOrderingTest(GoalPresentationCase):
     def observe_writes(self, row):
         self.writes = []
+        self.addressable = {}
         for method in ("reply", "update_card", "send"):
             original = getattr(self.channel, method)
 
@@ -52,7 +53,13 @@ class GoalOrderingTest(GoalPresentationCase):
                     return SendResult(success=False, raw={"code": 400 if row.receipt == "rejected" else -1})
                 if method == "send":
                     return sent_result("om_reminder", chat_id="oc_direct", parent_id=args[2].reply_to, root_id="om_goal")
-                return await original(*args, **kwargs)
+                sent = await original(*args, **kwargs)
+                address = mid or sent.message_id
+                if address and sent.success:
+                    self.addressable.setdefault(address, False)
+                    if "body[" in text or "part[" in text:
+                        self.addressable[address] = True
+                return sent
             self.enterContext(patch.object(self.channel, method, record))
         self.enterContext(patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", 0))
 
@@ -107,7 +114,7 @@ class GoalOrderingTest(GoalPresentationCase):
                 await self.notify("turn/started", TurnStartedNotification(
                     threadId=self.handle.thread_id, turn=Turn(id=physical, items=[], status="inProgress")))
                 if not row.slow:
-                    await self.runtime._goals[self.target.id].delivery_task
+                    await self.runtime._goals[self.target.id].delivery.drain()
                 continue
             if row.end == "lost":
                 self.codex.full_read_errors.append(OSError("lost final history"))
@@ -175,8 +182,8 @@ class GoalOrderingTest(GoalPresentationCase):
         self.assertEqual([w[4] for w in mentions], [] if row.end in {"stop", "lost"} else [["ou_owner"]],
                          "logical completion mention")
         if mentions and mentions[0][0] == "send":
-            final_mid = next(w[1] for w in reversed(confirmed) if w[0] == "update_card" and w[3] == "任务已完成")
-            self.assertEqual(self.reminder_anchor, final_mid, "completion mention anchor")
+            anchor = next(mid for mid in reversed(self.addressable) if self.addressable[mid])
+            self.assertEqual(self.reminder_anchor, anchor, "completion mention anchor")
 
     def mutate(self, mutation):
         if mutation == "early":
@@ -184,8 +191,8 @@ class GoalOrderingTest(GoalPresentationCase):
             def premature(active, projection):
                 apply(active, projection)
                 if projection and projection.goal_terminal:
-                    outcome = self.runtime._intermediate_goal_outcome(active)
-                    self.injections.append(asyncio.create_task(self.app._complete_goal(outcome)))
+                    self.runtime._present_goal_turn(active, active.physical(projection.turn_id))
+                    self.injections.append(asyncio.create_task(active.delivery.drain()))
             self.enterContext(patch.object(self.runtime, "_apply_goal_activity_projection", premature))
         elif mutation == "mention":
             project = CodexReplyEvents.result
@@ -203,8 +210,8 @@ class GoalOrderingTest(GoalPresentationCase):
                     prior = self.codex.goal_turns[0][1].items
                     active.final_items += tuple(prior)
                 else:
-                    active.final_response = active.candidate.final_response
-                    active.final_items = active.candidate.file_items
+                    active.final_response = active.physical(active.current_id).facts.final_response
+                    active.final_items = active.physical(active.current_id).facts.file_items
                 return result
             self.enterContext(patch.object(self.runtime, "_read_goal_terminal", change_history))
 
@@ -235,18 +242,256 @@ class GoalDeliveryDeadlineTest(GoalPresentationCase):
     async def test_slow_rollover_reserves_final_handoff_and_reports_missing_delivery(self):
         entered = asyncio.Event()
 
-        async def stalled(event):
-            entered.set()
-            await asyncio.Event().wait()
-
-        self.runtime.set_goal_rollover_handler(stalled)
+        send = self.channel.update_card
+        async def stalled(mid, card):
+            if "first" in str(card):
+                entered.set()
+                await asyncio.Event().wait()
+            return await send(mid, card)
+        self.enterContext(patch.object(self.channel, "update_card", stalled))
         await self.start()
         await self.answer("final_answer", "first")
-        await self.rollover()
+        await self.turn_event("completed", "completed")
+        self.handle.rollover("physical-two")
+        await self.turn_event("started", "inProgress")
         await asyncio.wait_for(entered.wait(), 1)
         with patch("netizen_cli.runtime.limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS", 1):
             await self.finish(history_answer="final")
         self.assertEqual(sum(content == INCOMPLETE for _, content in self.channel.replies), 1)
-        self.assertTrue(any(getattr(content, "markdown", content) == "final" for _, content in self.channel.replies))
+        self.assertTrue(any("final" in str(card) for _, card in self.channel.updates))
         self.assertIsNone(self.runtime.active_goal(self.target.id))
         self.assertFalse(self.app._progress_cards._sessions)
+
+
+class PhysicalTurnEvidenceTest(GoalPresentationCase):
+    """Exercise independent native evidence and presenter timing on the same Binding."""
+
+    def cards(self, mid):
+        return [json.dumps(card, ensure_ascii=False) for address, card in self.channel.updates if address == mid]
+
+    async def late_completion(self, discard=False):
+        from openai_codex.generated.v2_all import TurnCompletedNotification
+        await self.start()
+        first = self.handle.id
+        await self.answer("partial_answer", "early partial")
+        await self.answer("final_answer", "late completion body")
+        self.handle.rollover("second")
+        await self.turn_event("started", "inProgress")
+        apply = self.runtime._apply_goal_activity_projection
+        if discard:
+            def current_only(active, projection):
+                if projection.turn_id == active.current_id:
+                    apply(active, projection)
+            self.enterContext(patch.object(self.runtime, "_apply_goal_activity_projection", current_only))
+        await self.notify("turn/completed", TurnCompletedNotification(threadId=self.handle.thread_id,
+            turn=Turn(id=first, items=[], status="completed")))
+        await self.finish(history_answer="last body")
+        self.assertIn("late completion body", self.cards("om_reply_2")[-1], "late terminal lost")
+        self.assertNotIn("late completion body", self.cards("om_reply_3")[-1])
+
+    async def test_late_completion(self):
+        await self.late_completion()
+
+    async def test_mutant_drops_late_completion(self):
+        with self.assertRaisesRegex(AssertionError, "late terminal lost"):
+            await self.late_completion(discard=True)
+
+    async def history_conflict(self, view, expected, override=False):
+        from openai_codex.generated.v2_all import TurnCompletedNotification
+        await self.start()
+        first = ThreadItem.model_validate({"type": "agentMessage", "id": "a", "phase": "final_answer", "text": "older"})
+        latest = ThreadItem.model_validate({"type": "agentMessage", "id": "b", "phase": "final_answer", "text": "newer"})
+        await self.item(first)
+        await self.item(latest)
+        await self.notify("turn/completed", TurnCompletedNotification(threadId=self.handle.thread_id,
+            turn=Turn(id=self.handle.id, items=[first], itemsView="summary", status="completed")))
+        if override:
+            from netizen_cli.partial_answers import final_agent_answer
+            self.enterContext(patch("netizen_cli.runtime.goals.merge_final_answer",
+                                    side_effect=lambda observed, turn: final_agent_answer(turn.items)))
+        self.handle.finish()
+        self.handle.record.items_view = view
+        self.handle.record.items = [first]
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertIn(expected, self.cards("om_reply_2")[-1], "wrong final answer")
+        self.assertEqual(self.control.clear_calls, [self.handle.thread_id])
+
+    async def test_full_history_wins(self):
+        await self.history_conflict("full", "older")
+
+    async def test_summary_history_preserves_latest_answer(self):
+        await self.history_conflict("summary", "newer")
+
+    async def test_mutant_overrides_from_summary_history(self):
+        with self.assertRaisesRegex(AssertionError, "wrong final answer"):
+            await self.history_conflict("summary", "newer", override=True)
+
+    async def live_snapshot(self, static=False):
+        await self.start()
+        session = next(iter(self.app._progress_cards._sessions.values()))
+        opening = session.observe()
+        await self.answer("partial_answer", "append only")
+        await self.turn_event("completed", "completed")
+        self.handle.rollover("second")
+        await self.turn_event("started", "inProgress")
+        if static:
+            session.observe = lambda: opening
+        observed = session.observe().snapshot
+        self.assertEqual([p.text for p in observed.partial_answers], ["append only"], "snapshot rewound")
+        self.assertEqual(observed.turn_id, self.handle.id)
+        await self.finish(history_answer="end")
+
+    async def test_reader_keeps_exact_facts_after_rollover(self):
+        await self.live_snapshot()
+
+    async def test_mutant_static_opening_rewinds_snapshot(self):
+        with self.assertRaisesRegex(AssertionError, "snapshot rewound"):
+            await self.live_snapshot(static=True)
+
+    async def test_missing_start_leaves_previous_terminal_unknown(self):
+        await self.start()
+        await self.answer("partial_answer", "old partial")
+        await self.answer("final_answer", "unsettled answer")
+        self.handle.rollover("unannounced")
+        await self.answer("partial_answer", "new partial")
+        await self.finish(history_answer="proved")
+        old = self.cards("om_reply_2")[-1]
+        self.assertIn("终态未确认", old)
+        self.assertIn("old partial", old)
+        self.assertNotIn("unsettled answer", old)
+        self.assertIn("proved", self.cards("om_reply_3")[-1])
+        self.assertFalse(self.app._progress_cards._sessions)
+
+    async def test_incomplete_projection_preserves_later_answer_and_unknown_total(self):
+        await self.start()
+        with patch("netizen_cli.sdk_gap_adapter.project_turn_activity_notification", side_effect=ValueError("item")):
+            await self.file("unprojectable.txt")
+        await self.file("retained.txt")
+        await self.answer("final_answer", "still observed")
+        await self.rollover()
+        first = self.cards("om_reply_2")[-1]
+        self.assertIn("retained.txt", first)
+        self.assertIn("still observed", first)
+        self.assertNotIn("累计修改 <font", first)
+        await self.finish(history_answer="final")
+
+    async def test_conflicting_successful_patch_views_retain_both_paths(self):
+        await self.start()
+        await self.file("one.txt")
+        await self.file("two.txt")
+        await self.rollover()
+        first = self.cards("om_reply_2")[-1]
+        self.assertIn("one.txt", first)
+        self.assertIn("two.txt", first)
+        self.assertNotIn("累计修改 <font", first)
+        await self.finish(history_answer="final")
+
+    async def test_history_answer_in_tap_skips_materialization_retries(self):
+        await self.start()
+        await self.answer("final_answer", "already observed")
+        await self.turn_event("completed", "completed")
+        self.handle.finish()
+        self.handle.record.items.clear()
+        before = len(self.codex.read_calls)
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        self.assertEqual(sum(full for _, full in self.codex.read_calls[before:]), 1)
+        self.assertIn("already observed", self.cards("om_reply_2")[-1])
+
+    async def independent_results(self, cancelled):
+        await self.start(progress=False)
+        receipts = []
+        send = self.channel.reply
+        async def write(source, content, *args, **kwargs):
+            text = getattr(content, "markdown", content)
+            receipts.append(text)
+            if text == "body-1":
+                if cancelled:
+                    raise asyncio.CancelledError
+                await asyncio.Event().wait()
+            return await send(source, content, *args, **kwargs)
+        self.enterContext(patch.object(self.channel, "reply", write))
+        with patch("netizen_cli.runtime.limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS", 0.5):
+            for index in range(1, 4):
+                await self.answer("final_answer", f"body-{index}")
+                await self.turn_event("completed", "completed")
+                self.handle.rollover(f"p{index + 1}")
+                await self.turn_event("started", "inProgress")
+            await self.finish(history_answer="body-4")
+        for i in range(1, 5):
+            self.assertEqual(receipts.count(f"body-{i}"), 1, "unrelated write lost")
+        self.assertEqual(receipts.count(INCOMPLETE), 1)
+        self.assertIsNone(self.runtime.active_goal(self.target.id))
+
+    async def test_stalled_first_does_not_block_three_other_results(self):
+        await self.independent_results(False)
+
+    async def test_cancelled_first_does_not_block_three_other_results(self):
+        await self.independent_results(True)
+
+    async def reject_location(self, duplicate):
+        await self.start()
+        await self.answer("final_answer", "old content")
+        self.channel.reply_results.insert(0, sent_result(
+            "om_reply_2" if duplicate else "om_elsewhere", chat_id="oc_direct" if duplicate else "oc_other"))
+        await self.rollover()
+        await self.finish(history_answer="private final")
+        self.assertFalse(any("private final" in card for mid in ("om_elsewhere", "om_reply_2") for card in self.cards(mid)))
+        self.assertTrue(any("private final" in str(value) for _, value in self.channel.replies))
+        self.assertFalse(any(opts.reply_to == "om_elsewhere" for _, _, opts in self.channel.send_calls))
+
+    async def test_inconsistent_location_cannot_own_a_card(self):
+        await self.reject_location(False)
+
+    async def test_same_card_cannot_belong_to_two_turns(self):
+        await self.reject_location(True)
+
+    async def delayed_management(self, unknown):
+        self.create_target()
+        writing, release = asyncio.Event(), asyncio.Event()
+        management = self.app._goal_management_receipt
+        async def delayed(*args, notice, **kwargs):
+            if notice.startswith("Goal 已启动"):
+                writing.set()
+                await release.wait()
+            await management(*args, notice=notice, **kwargs)
+        self.enterContext(patch.object(self.app, "_goal_management_receipt", delayed))
+        command = asyncio.create_task(self.command("/goal ship", "om_goal"))
+        try:
+            async with asyncio.timeout(2):
+                await writing.wait()
+            await self.open_stream()
+            active = self.runtime._goals[self.target.id]
+            await self.command("/goal pause", "om_pause")
+            await self.command("/goal resume", "om_resume", sender="ou_other")
+            self.assertFalse(active.receipt_attempted.is_set(), "resumer released another start's receipt")
+            await self.answer("final_answer", "observed")
+            if unknown:
+                self.codex.full_read_errors.append(OSError("lost read"))
+            with patch("netizen_cli.runtime.limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS", .3):
+                async with asyncio.timeout(1):
+                    await self.finish(history_answer="proved")
+            self.assertFalse(active.turns)
+            self.assertIsNone(active.final_response)
+            if unknown:
+                self.assertIs(self.runtime.active_goal(self.target.id).state, GoalOperationState.UNKNOWN)
+                self.assertIn("观察已停止", str(self.channel.replies))
+            else:
+                self.assertIsNone(self.runtime.active_goal(self.target.id))
+        finally:
+            release.set()
+            await command
+        self.assertFalse(self.app._progress_cards._sessions)
+        self.assertFalse(self.app._reactions._pulses)
+
+    async def test_same_stream_resume_races_logical_end(self):
+        await self.delayed_management(False)
+
+    async def test_unknown_receipt_wait_retires_evidence_and_attempts_notice(self):
+        await self.delayed_management(True)
+
+    async def test_updated_codex_card_does_not_duplicate_result_in_text(self):
+        await self.start()
+        self.channel.card_update_results.append(SendResult(success=True, raw={"code": 100}))
+        await self.finish(history_answer="delivered once")
+        self.assertEqual(sum("delivered once" in card for card in self.cards("om_reply_2")), 1)
+        self.assertFalse(any("delivered once" in str(content) for _, content in self.channel.replies))

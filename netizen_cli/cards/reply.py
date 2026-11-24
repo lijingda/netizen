@@ -1068,7 +1068,7 @@ def _terminal_progress_status(value: str | None) -> str | None:
     if value is None:
         return None
     normalized = getattr(value, "value", value)
-    if normalized not in {"completed", "interrupted", "failed"}:
+    if normalized not in {"completed", "interrupted", "failed", "unknown"}:
         raise ValueError(f"unsupported terminal progress status: {normalized!r}")
     return normalized
 
@@ -1077,6 +1077,8 @@ def _progress_card_chrome(status: str | None, run_continues: bool = False) -> tu
     if status == "completed":
         title = "本轮已完成" if run_continues else "任务已完成"
         return title, "green", title
+    if status == "unknown":
+        return "本轮终态未确认", "orange", "本轮终态未确认"
     if status == "interrupted":
         return "任务已中断", "orange", "任务已中断"
     if status == "failed":
@@ -1137,6 +1139,8 @@ def _progress_status_label(
 ) -> str:
     if terminal_status == "completed":
         return "已完成"
+    if terminal_status == "unknown":
+        return "终态未确认"
     if terminal_status == "interrupted":
         return "已中断"
     if terminal_status == "failed":

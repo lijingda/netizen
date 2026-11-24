@@ -36,6 +36,7 @@ from netizen_cli.message_history import (
 )
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.progress_card_settings import ProgressCardSettings
+from netizen_cli.partial_answers import FinalAgentAnswer
 from netizen_cli.turn_activity import GoalTurnFacts, TurnActivityNotificationProjection
 from netizen_cli.group_access import GroupAccessRule, GroupAccessService
 from netizen_cli.schedules.models import ScheduleRule
@@ -646,12 +647,12 @@ class BindingScheduledChannelTest(BindingChannelCase):
                 await asyncio.sleep(0)
         handle.emit_activity(TurnActivityNotificationProjection(
             turn_id=handle.id, turn_completed=True, goal_terminal=GoalTurnFacts(
-                handle.id, "completed", "第一轮结果", None, (), None, (), frozenset(),
+                handle.id, "completed", FinalAgentAnswer("first-result", "第一轮结果", True), (), None, (), frozenset(),
             ),
         ))
         handle.rollover("physical-2")
         handle.emit_activity(TurnActivityNotificationProjection(turn_id="physical-2", turn_started=True))
-        await self.runtime._goals[binding.id].delivery_task
+        await self.runtime._goals[binding.id].delivery.drain()
         second = self.next_claim(first.plan.id, due=220)
         self.queue_anchor(scope, "om_second")
 

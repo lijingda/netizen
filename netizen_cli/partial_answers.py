@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from openai_codex.generated.v2_all import AgentMessageThreadItem, ThreadItem
@@ -52,3 +52,35 @@ def partial_answers_from_items(
             result.append(answer)
             seen.add(answer.item_id)
     return tuple(result)
+
+
+@dataclass(frozen=True, slots=True)
+class FinalAgentAnswer:
+    item_id: str | None
+    text: str
+    explicit: bool
+
+
+def final_agent_answer(items: Sequence[object]) -> FinalAgentAnswer | None:
+    fallback = None
+    for item in reversed(items):
+        root = getattr(item, "root", item)
+        text = getattr(root, "text", None)
+        if getattr(root, "type", None) != "agentMessage" or not isinstance(text, str):
+            continue
+        phase = getattr(root, "phase", None)
+        if getattr(phase, "value", phase) == "final_answer":
+            return FinalAgentAnswer(getattr(root, "id", None), text, True)
+        if phase is None and fallback is None:
+            fallback = FinalAgentAnswer(getattr(root, "id", None), text, False)
+    return fallback
+
+
+def merge_final_answer(observed: FinalAgentAnswer | None, turn: object) -> FinalAgentAnswer | None:
+    history = final_agent_answer(getattr(turn, "items", ()))
+    if history is None or observed is None:
+        return observed or history
+    view = getattr(turn, "items_view", "full")
+    if history.explicit != observed.explicit:
+        return history if history.explicit else observed
+    return history if getattr(view, "value", view) == "full" else observed

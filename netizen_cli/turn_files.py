@@ -591,12 +591,31 @@ def _summary_paths(summary: TurnDiffSummary) -> Iterator[OutputPath]:
         yield OutputPath(stats.path, deleted=stats.deleted, additions=stats.additions, deletions=stats.deletions)
 
 
+@dataclass(frozen=True, slots=True)
+class SavedImage:
+    id: str
+    saved_path: str
+    type: str = "imageGeneration"
+    status: str = "completed"
+
+
+def direct_file_item(item: object) -> object | None:
+    root = getattr(item, "root", item)
+    if _enum_value(getattr(root, "status", None)) == "completed":
+        if getattr(root, "type", None) == "fileChange":
+            return root
+        if getattr(root, "type", None) == "imageGeneration":
+            if path := _path_value(getattr(root, "saved_path", None)):
+                return SavedImage(getattr(root, "id", ""), path)
+    return None
+
+
 def _item_paths(items: Sequence[object]) -> Iterator[OutputPath]:
     for item in items:
-        root = getattr(item, "root", item)
-        item_type = getattr(root, "type", None)
-        status = _enum_value(getattr(root, "status", None))
-        if item_type == "fileChange" and status == "completed":
+        root = direct_file_item(item)
+        if isinstance(root, SavedImage):
+            yield OutputPath(root.saved_path, generated_image=True)
+        elif root is not None:
             for change in getattr(root, "changes", ()):
                 kind = getattr(getattr(change, "kind", None), "root", None)
                 change_type = getattr(kind, "type", None)
@@ -611,10 +630,7 @@ def _item_paths(items: Sequence[object]) -> Iterator[OutputPath]:
                     yield OutputPath(
                         raw_path, deleted=change_type == "delete",
                     )
-        elif item_type == "imageGeneration" and status == "completed":
-            saved_path = _path_value(getattr(root, "saved_path", None))
-            if saved_path is not None:
-                yield OutputPath(saved_path, generated_image=True)
+
 
 
 def _resolve_turn_file(

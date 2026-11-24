@@ -39,7 +39,7 @@ from openai_codex.generated.v2_all import (
 )
 from openai_codex.models import Notification
 
-from .partial_answers import PartialAnswer, project_partial_answer
+from .partial_answers import FinalAgentAnswer, PartialAnswer, project_partial_answer
 from .progress_card_settings import ProgressCardSettings
 from .user_questions import QuestionRequest, UserQuestion
 
@@ -186,23 +186,19 @@ class TurnActivityEntrySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class GoalSavedImage:
-    id: str
-    saved_path: str
-    type: str = "imageGeneration"
-    status: str = "completed"
-
-
-@dataclass(frozen=True, slots=True)
 class GoalTurnFacts:
     turn_id: str
     status: str
-    final_response: str | None
-    phase: MessagePhase | None
-    file_items: tuple[FileChangeThreadItem | GoalSavedImage, ...]
+    answer: FinalAgentAnswer | None
+    file_items: tuple[object, ...]
     turn_diff: str | None
     partial_answers: tuple[PartialAnswer, ...]
     child_patch_ids: frozenset[str]
+    complete: bool = True
+
+    @property
+    def final_response(self) -> str | None:
+        return self.answer.text if self.answer else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +213,7 @@ class TurnActivityNotificationProjection:
     partial_answer: PartialAnswer | None = None
 
     goal_terminal: GoalTurnFacts | None = None
+    incomplete: bool = False
 
     def __post_init__(self) -> None:
         if self.goal_terminal is not None and (not self.turn_completed or self.goal_terminal.turn_id != self.turn_id):

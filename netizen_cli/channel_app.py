@@ -174,6 +174,6 @@ class ChannelApplication(ChannelEntry):
         if runtime is None:
             return
         runtime.set_completion_handler(self.handle_completion)
-        runtime.set_goal_rollover_handler(self.handle_goal_rollover)
+        runtime.set_goal_turn_handler(self.handle_goal_turn)
         runtime.set_question_handler(self.handle_questions)
         runtime.set_input_received_handler(self._reply_suppression.discard_physical_turn)

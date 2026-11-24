@@ -131,14 +131,16 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             root_id="om_older_root", parent_id=card_id,
         ))
 
-    async def start_goal_reply(self, outcome, *, scope=None, binding=None):
+    async def start_goal_reply(self, outcome, *, scope=None, binding=None, card_id="om_progress"):
         scope, binding = scope or self.scope, binding or self.binding
+        # Each scenario starts a fresh run using the same fixture receipt ID.
+        self.app._progress_cards.retire_binding(binding.id)
         snapshot = replace(goal_activity_snapshot(binding_id=binding.id),
             thread_id=outcome.thread_id, logical_turn_id=outcome.logical_turn_id,
             physical_turn_id=outcome.final_physical_turn_id or outcome.logical_turn_id)
         self.runtime.goal_activity_values[binding.id] = snapshot
         if outcome.task_feedback.progress_card_enabled:
-            self.channel.reply_results.append(sent_result("om_progress", chat_id=scope.chat_id,
+            self.channel.reply_results.append(sent_result(card_id, chat_id=scope.chat_id,
                                                           thread_id=scope.topic_id))
         self.assertTrue(await self.app._open_goal_turn(snapshot, outcome.task_feedback, outcome.origin, outcome.reply))
         return replace(outcome, activity=snapshot)
@@ -670,14 +672,15 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         origin=origin, logical_turn_id=f"goal-{kind}-{progress}-{enabled}",
                         task_feedback=BindingTaskFeedback(progress_card_enabled=progress,
                                                           completion_mention_enabled=enabled))
-                    outcome = await self.start_goal_reply(outcome, scope=scope, binding=binding)
+                    card_id = f"om_progress_{kind.value}_{enabled}"
+                    outcome = await self.start_goal_reply(outcome, scope=scope, binding=binding, card_id=card_id)
                     if progress and enabled:
-                        self.queue_reminder(thread_id=scope.topic_id)
+                        self.queue_reminder(card_id, thread_id=scope.topic_id)
                     await self.app.handle_completion(outcome)
                     self.assertEqual(len(self.channel.replies), 1)
                     content = self.channel.updates[-1][1] if progress else self.channel.replies[-1][1]
                     self.assert_mention(content, enabled=enabled and not progress, text="Goal 结果正文")
-                    self.assert_reminder(enabled=enabled and progress, topic=kind is ScopeKind.TOPIC)
+                    self.assert_reminder(enabled=enabled and progress, card_id=card_id, topic=kind is ScopeKind.TOPIC)
 
     async def test_goal_uncertain_card_update_falls_back_once_without_updating_management(self):
         outcome = await self.start_goal_reply(self.goal_outcome(
@@ -735,7 +738,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 self.channel.replies.clear()
                 self.channel.updates.clear()
                 self.runtime.goal_snapshot_value = native_goal(GoalStatus.PAUSED)
-                self.runtime.goal_activity_values[self.binding.id] = goal_activity_snapshot(binding_id=self.binding.id)
+                self.runtime.goal_activity_values[self.binding.id] = replace(goal_activity_snapshot(binding_id=self.binding.id), physical_turn_id="goal-one")
                 feedback = BindingTaskFeedback(progress_card_enabled=progress, completion_mention_enabled=False)
                 self.runtime.goal_submission = GoalSubmission(
                     self.binding.id, "native-one", "goal-one", lambda: None, task_feedback=feedback,

@@ -1,6 +1,7 @@
 """Decoded Goal deliveries through the notification tap, Runtime and Channel."""
 from __future__ import annotations
 
+import asyncio
 import itertools
 import uuid
 from pathlib import Path
@@ -44,16 +45,22 @@ class GoalPresentationCase(BindingChannelCase):
     async def command(self, text, message_id, sender="ou_owner"):
         await self.app.handle_message(FakeMessage(text, message_id=message_id, sender_id=sender))
 
-    async def start(self, *, progress=True):
+    def create_target(self, progress=True):
         self.target = self.store.create_channel_binding(
             scope=self.scope, project_alias="work", creator_id="ou_owner",
             task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
         )
+
+    async def start(self, *, progress=True):
+        self.create_target(progress)
         await self.command("/goal ship safely", "om_goal")
         await self.open_stream()
 
     async def open_stream(self):
         self.handle = self.control.handles[-1]
+        async with asyncio.timeout(2):
+            while self.handle.activity_sink is None:
+                await asyncio.sleep(0)
         self.tap = _GoalActivityTap(self.handle.thread_id)
         self.tap.bind(self.handle.emit_activity)
         await self.turn_event("started", "inProgress")
@@ -93,6 +100,9 @@ class GoalPresentationCase(BindingChannelCase):
         await self.turn_event("completed", "completed")
         self.handle.rollover("physical-two")
         await self.turn_event("started", "inProgress")
+        # Freeze this trace at the boundary between the two physical results.
+        # The ordering explorer separately drives overlapping writes.
+        await self.runtime._goals[self.target.id].delivery.drain()
 
     async def finish(self, *, status=GoalStatus.COMPLETE, history_answer=None):
         await self.turn_event("completed", "completed")
@@ -121,7 +131,19 @@ class GoalPresentationTraceTest(GoalPresentationCase):
         await super().asyncSetUp()
         fixture = SimpleNamespace(channel=self.channel, project_root=self.cwd)
         name = self._testMethodName.removeprefix("test_")
-        expect_presenter_trace(self, fixture, name, reference=REFERENCE)
+        def reworked(expected):
+            if name in {"multiturn_partials", "scheduled_binding_input", "intermediate_and_final_files"}:
+                # P2 opens independently while P1 quiesces its running poll.
+                pos = next(i for i, entry in enumerate(expected) if entry[0] == "update_card")
+                expected[pos:pos + 2] = reversed(expected[pos:pos + 2])
+            if name == "observation_loss_mid_candidate":
+                card = next(args[1] for method, args, _ in expected if method == "update_card")
+                card["header"]["title"]["content"] = card["config"]["summary"]["content"] = "本轮终态未确认"
+                card["header"]["template"] = "orange"
+                for node in card["body"]["elements"]:
+                    if node.get("tag") == "collapsible_panel":
+                        node["header"]["title"]["content"] = node["header"]["title"]["content"].replace("未完成", "终态未确认")
+        expect_presenter_trace(self, fixture, name, reference=REFERENCE, expected_edits=reworked)
 
     async def test_multiturn_partials(self):
         await self.start()

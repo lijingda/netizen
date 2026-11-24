@@ -435,7 +435,7 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(self.channel.replies[0][1], OutboundPost)
         last = self.channel.replies[1][1]
         text = last.markdown if isinstance(last, OutboundPost) else last
-        self.assertIn("投递未确认", text)
+        self.assertEqual("部分内容未能确认送达。", text)
         self.assertNotIn("答案见阶段性答案", text)
         self.assertNotIsInstance(self.channel.replies[-1][1], OutboundCard)
 

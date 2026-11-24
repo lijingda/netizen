@@ -1,6 +1,8 @@
 """Exact, in-memory inputs to Feishu reply presentation."""
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import InitVar, dataclass, field, replace
 from enum import Enum
@@ -15,10 +17,9 @@ from ..ordinary_sessions import LogicalReply
 from ..partial_answers import PartialAnswer as NativePartial
 from ..runtime.contracts import SideTurnActivitySnapshot, TurnActivitySnapshot
 from .topics import CardReplyLocation
-from .physical_delivery import PhysicalDelivery
 
 Activity = TurnActivitySnapshot | SideTurnActivitySnapshot
-TerminalStatus = Literal["completed", "interrupted", "failed"]
+TerminalStatus = Literal["completed", "interrupted", "failed", "unknown"]
 
 
 def terminal_view(
@@ -100,10 +101,11 @@ class ActivityChanged:
 class DeliveryPolicy(Enum):
     BOUNDED_FALLBACK = "bounded_fallback"
     ITEM_RECEIPTS = "item_receipts"
+    BOUNDED_ITEM_RECEIPTS = "bounded_item_receipts"
 
     @property
     def confirms_items(self) -> bool:
-        return self is DeliveryPolicy.ITEM_RECEIPTS
+        return self is not DeliveryPolicy.BOUNDED_FALLBACK
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +128,7 @@ class TurnOpened:
 class RunDisplay:
     reply: LogicalReply | None
     publishable: Callable[[], bool]
-    current: Callable[[], str]
+    current: Callable[[], str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +139,8 @@ class ItemDelivery:
     send: Callable[[str | OutboundPost | OutboundCard, str | None, CardReplyLocation], Awaitable[SendResult]]
     plain_suffix: Callable[[], str]
     deadline: float | None
+    policy: DeliveryPolicy = DeliveryPolicy.ITEM_RECEIPTS
+    window: Callable[[float | None, bool], AbstractAsyncContextManager[object]] = lambda deadline, notice: asyncio.timeout_at(deadline)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +150,9 @@ class RunEnded:
     mention_user_id: str | None
     display: RunDisplay | None = None
     location: CardReplyLocation | None = None
+    session_label: str | None = None
+    source_only: bool = False
+    settle: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,10 +191,7 @@ class TurnResult:
     end: RunEnded | None
     receipt: DeliveryReceipt | None = None
     items: ItemDelivery | None = None
-    run_reply: LogicalReply | None = None
     partial_answers: tuple[NativePartial, ...] = field(init=False)
-    bounded_delivery: PhysicalDelivery | None = None
-    earlier_delivery_incomplete: bool = False
 
     @property
     def origin(self) -> object:

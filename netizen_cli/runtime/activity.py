@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import replace
+import asyncio
+
+from . import limits
 
 
 from ..partial_answers import PartialAnswer, partial_answers_from_items
-from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot, GoalOutcome, GoalRollover
+from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot, GoalOutcome
 from ..turn_patch_children import TaskPatchChildren
 from .contracts import (
-    GoalStateUnknown,
     SideSessionState,
     ActiveTurnSnapshot,
     TurnProgressSnapshot,
@@ -32,6 +33,7 @@ from .state import (
     RUNTIME_LOGGER_NAME,
     _ActiveTurn,
     _ActiveGoal,
+    _GoalPhysicalTurn,
     _ActiveSideTurn,
 )
 from .queries import NativeQueryRuntime
@@ -247,7 +249,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
 
     @staticmethod
     def _activity_commentary(
-        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+        active: _ActiveTurn | _ActiveSideTurn | _GoalPhysicalTurn,
     ) -> tuple[TurnActivityEntrySnapshot, ...]:
         return tuple(
             active.activity_commentary[item_id]
@@ -256,7 +258,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
 
     @staticmethod
     def _activity_operations(
-        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+        active: _ActiveTurn | _ActiveSideTurn | _GoalPhysicalTurn,
     ) -> tuple[TurnActivityEntrySnapshot, ...]:
         ordered: list[tuple[int, TurnActivityEntrySnapshot]] = []
         subagents: dict[
@@ -280,7 +282,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
 
     @staticmethod
     def _apply_activity_events(
-        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+        active: _ActiveTurn | _ActiveSideTurn | _GoalPhysicalTurn,
         events: tuple[TurnActivityEvent, ...],
     ) -> None:
         settings = active.task_feedback.progress_card_settings
@@ -319,11 +321,11 @@ class TurnActivityRuntime(NativeQueryRuntime):
 
     @staticmethod
     def _apply_partial_answers(
-        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+        active: _ActiveTurn | _ActiveSideTurn | _GoalPhysicalTurn,
         answers: tuple[PartialAnswer, ...],
     ) -> None:
-        if isinstance(active, _ActiveGoal):
-            thread_id, turn_id = active.thread_id, active.activity_turn_id
+        if isinstance(active, _GoalPhysicalTurn):
+            thread_id, turn_id = active.thread_id, active.turn_id
         else:
             thread_id, turn_id = active.handle.thread_id, active.handle.id
         for answer in answers:
@@ -336,7 +338,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
 
     def _supplement_partial_answers(
         self,
-        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+        active: _ActiveTurn | _ActiveSideTurn | _GoalPhysicalTurn,
         *,
         thread_id: str,
         turn_id: str,
@@ -355,19 +357,10 @@ class TurnActivityRuntime(NativeQueryRuntime):
             key = (answer.thread_id, answer.turn_id, answer.item_id)
             active.partial_answers.setdefault(key, answer)
         if len(active.partial_answers) != before:
-            active.activity_revision += 1
-
-    @staticmethod
-    def _reset_activity(active: _ActiveGoal) -> None:
-        active.plan_cursor = 0
-        active.activity_sequence = 0
-        active.activity_segment = 0
-        active.plan_generated = False
-        active.plan_steps = ()
-        active.activity_commentary.clear()
-        active.activity_commentary_order.clear()
-        active.activity_operations.clear()
-        active.activity_operation_order.clear()
+            if isinstance(active, _GoalPhysicalTurn):
+                active.revision += 1
+            else:
+                active.activity_revision += 1
 
     def is_compacting(self, binding_id: str) -> bool:
         return binding_id in self._compacting
@@ -391,6 +384,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
         *,
         thread_id: str | None = None,
         logical_turn_id: str | None = None,
+        physical_turn_id: str | None = None,
     ) -> GoalActivitySnapshot | None:
         """Return Goal Activity maintained by its unique stream consumer."""
 
@@ -398,120 +392,106 @@ class TurnActivityRuntime(NativeQueryRuntime):
         handle = active.handle if active is not None else None
         if active is None or handle is None or handle.id is None:
             return None
-        if active.terminal_observed:
+        if active.reply.messages is None or (active.terminal_observed and physical_turn_id is None):
             return None
         if thread_id is not None and active.thread_id != thread_id:
             return None
         if logical_turn_id is not None and handle.id != logical_turn_id:
             return None
-        return self._goal_activity_snapshot(active)
+        turn = active.turns.get(physical_turn_id or active.current_id or handle.id)
+        return self._goal_activity_snapshot(active, turn) if turn else None
 
-    def _goal_activity_snapshot(self, active: _ActiveGoal) -> GoalActivitySnapshot:
+    def _goal_activity_snapshot(self, active: _ActiveGoal, turn: _GoalPhysicalTurn) -> GoalActivitySnapshot:
         handle = active.handle
-        assert handle is not None and handle.id is not None
+        assert handle and handle.id
         return GoalActivitySnapshot(
             binding_id=active.binding_id,
             thread_id=active.thread_id,
             logical_turn_id=handle.id,
-            physical_turn_id=active.activity_turn_id,
-            revision=active.activity_revision,
+            physical_turn_id=turn.turn_id,
+            revision=turn.revision,
             state=active.state,
-            plan_available=active.plan_available,
-            plan_generated=active.plan_generated,
-            steps=active.plan_steps,
-            commentary=self._activity_commentary(active),
-            operations=self._activity_operations(active),
-            partial_answers=tuple(active.partial_answers.values()),
+            plan_available=turn.plan_available,
+            plan_generated=turn.plan_generated,
+            steps=turn.plan_steps,
+            commentary=self._activity_commentary(turn),
+            operations=self._activity_operations(turn),
+            partial_answers=tuple(turn.partial_answers.values()),
             progress_card_settings=active.task_feedback.progress_card_settings,
         )
 
-    def _goal_activity_visible_state(self, active: _ActiveGoal) -> tuple[object, ...]:
-        settings = active.task_feedback.progress_card_settings
+    def _goal_activity_visible_state(self, turn: _GoalPhysicalTurn) -> tuple[object, ...]:
+        settings = turn.task_feedback.progress_card_settings
         return (
-            active.state,
-            active.activity_turn_id,
-            active.plan_available,
-            (active.plan_generated, active.plan_steps)
-            if settings.show_plan and active.plan_available else (),
-            self._activity_commentary(active) if settings.show_commentary else (),
-            self._activity_operations(active) if settings.show_operations else (),
-            tuple(active.partial_answers.values()),
+            turn.plan_available,
+            (turn.plan_generated, turn.plan_steps)
+            if settings.show_plan and turn.plan_available else (),
+            self._activity_commentary(turn) if settings.show_commentary else (),
+            self._activity_operations(turn) if settings.show_operations else (),
+            tuple(turn.partial_answers.values()),
         )
 
-    def _intermediate_goal_outcome(self, active: _ActiveGoal) -> GoalOutcome:
-        snapshot = self._goal_activity_snapshot(active)
-        facts = active.candidate
-        return GoalOutcome(
+    def _present_goal_turn(self, active: _ActiveGoal, turn: _GoalPhysicalTurn, *, opened: bool = False) -> None:
+        handler = self._on_goal_turn
+        if handler is None:
+            return
+        snapshot = self._goal_activity_snapshot(active, turn)
+        facts = turn.facts
+        outcome = GoalOutcome(
             binding_id=active.binding_id, thread_id=active.thread_id, logical_turn_id=snapshot.logical_turn_id,
-            owner_id=active.owner_id, origin=active.origin, cwd=active.cwd, reply=active.reply, run_continues=True,
+            owner_id=active.owner_id, origin=active.origin, cwd=active.cwd, reply=active.reply, delivery=active.delivery, run_continues=True,
             task_feedback=active.task_feedback, feedback_revision=active.feedback_revision,
-            final_physical_turn_id=snapshot.physical_turn_id, final_turn_status=facts.status if facts else None,
+            final_physical_turn_id=turn.turn_id, final_turn_status=facts.status if facts else None,
             final_items=facts.file_items if facts else (), final_response=facts.final_response if facts else None,
             turn_diff=facts.turn_diff if facts else None, activity=snapshot, partial_answers=snapshot.partial_answers,
-            patch_children=TaskPatchChildren(complete=facts is not None and not facts.child_patch_ids),
-            error=None if facts else GoalStateUnknown("未能确认本轮终态；本轮观察已停止。"),
+            patch_children=TaskPatchChildren(complete=bool(facts and facts.complete and not facts.child_patch_ids)),
         )
-
-    async def _deliver_goal_rollovers(self, active: _ActiveGoal) -> None:
-        # No Feishu I/O runs in the native iterator. The receipt barrier orders
-        # even a rollover observed before the initial card send completes.
-        await active.receipt_attempted.wait()
-        handler = self._on_goal_rollover
-        while handler is not None and active.rollovers:
-            rollover = active.rollovers.popleft()
-            try:
-                await handler(rollover)
-            except Exception:
-                logger.exception("physical Goal presentation failed", extra={"turn_id": rollover.opening.physical_turn_id})
+        async def present() -> None:
+            if opened:
+                deadline = asyncio.get_running_loop().time() + limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS
+                async with active.delivery.window(deadline):
+                    await handler(outcome, opened)
+            else:
+                await handler(outcome, opened)
+        active.delivery.enqueue(turn.turn_id, [active.receipt_attempted], None, present, binding_id=active.binding_id)
 
     def _apply_goal_activity_projection(
-        self,
-        active: _ActiveGoal,
-        projection: TurnActivityNotificationProjection | None,
+        self, active: _ActiveGoal, projection: TurnActivityNotificationProjection | None,
     ) -> None:
-        if not active.activity_observation_enabled:
+        if not active.activity_observation_enabled or not active.current_id:
             return
-        before = self._goal_activity_visible_state(active)
-        if projection is None:
-            active.plan_available = False
-            if self._goal_activity_visible_state(active) != before:
-                active.activity_revision += 1
+        turn_id = projection.turn_id if projection else active.current_id
+        if not turn_id:
             return
-        turn_id = projection.turn_id
-        if turn_id is None:
+        if turn_id not in active.turns:
+            previous = active.turns[active.current_id]
+            if previous.facts and not previous.settled:
+                previous.settled = True
+                self._present_goal_turn(active, previous)
+            active.current_id = turn_id
+            self._present_goal_turn(active, active.physical(turn_id), opened=True)
+        turn = active.turns[turn_id]
+        if turn.settled:
             return
-        active.plan_available = True
-        if projection.turn_started and turn_id != active.activity_turn_id:
-            if turn_id in active.activity_turn_ids:
-                return
-            previous = self._intermediate_goal_outcome(active) if active.activity_turn_id and self._on_goal_rollover else None
-            active.activity_turn_ids.add(turn_id)
-            active.activity_turn_id = turn_id
-            self._reset_activity(active)
-            active.partial_answers.clear()
-            active.candidate = None
-            if previous is not None:
-                active.rollovers.append(GoalRollover(previous, self._goal_activity_snapshot(active)))
-                if active.delivery_task is None or active.delivery_task.done():
-                    active.delivery_task = asyncio.create_task(self._deliver_goal_rollovers(active))
-        if turn_id != active.activity_turn_id:
-            # A late event from an earlier physical Turn can never repopulate
-            # the new Turn's Activity Module.
-            return
-        if projection.plan_updated:
-            active.plan_steps = projection.steps
-            active.plan_generated = True
-        if projection.event is not None:
-            self._apply_activity_events(active, (projection.event,))
-        if projection.question is not None:
-            self._deliver_question(active, turn_id, projection.question)
-        if projection.partial_answer is not None:
-            self._apply_partial_answers(active, (projection.partial_answer,))
-        if projection.goal_terminal is not None and active.candidate is None:
-            active.candidate = projection.goal_terminal
-            self._apply_partial_answers(active, active.candidate.partial_answers)
-        if self._goal_activity_visible_state(active) != before:
-            active.activity_revision += 1
+        before = self._goal_activity_visible_state(turn)
+        turn.plan_available = projection is not None and not projection.incomplete
+        if projection:
+            if projection.plan_updated:
+                turn.plan_steps, turn.plan_generated = projection.steps, True
+            if projection.event:
+                self._apply_activity_events(turn, (projection.event,))
+            if projection.question and turn_id == active.current_id:
+                self._deliver_question(active, turn_id, projection.question)
+            if projection.partial_answer:
+                self._apply_partial_answers(turn, (projection.partial_answer,))
+            if projection.goal_terminal and turn.facts is None:
+                turn.facts = projection.goal_terminal
+                self._apply_partial_answers(turn, turn.facts.partial_answers)
+                if turn_id != active.current_id:
+                    turn.settled = True
+                    self._present_goal_turn(active, turn)
+        if self._goal_activity_visible_state(turn) != before:
+            turn.revision += 1
 
     def binding_runtime_snapshot(self, binding_id: str) -> BindingRuntimeSnapshot:
         """Return all process-local management state without consuming native data."""

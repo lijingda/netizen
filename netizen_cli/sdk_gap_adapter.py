@@ -13,7 +13,7 @@ import logging
 import asyncio
 import inspect
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
@@ -27,11 +27,11 @@ from openai_codex.models import Notification
 from pydantic import ValidationError
 
 from .domain import GoalStatus
-from .partial_answers import PartialAnswer, project_partial_answer
+from .partial_answers import FinalAgentAnswer, PartialAnswer, final_agent_answer, merge_final_answer, project_partial_answer
 from .progress_card_settings import ProgressCardSettings
+from .turn_files import direct_file_item
 from .turn_patch_children import child_patch_item_id
 from .turn_activity import (
-    GoalSavedImage,
     GoalTurnFacts,
     TurnActivityNotificationProjection,
     project_turn_activity_notification,
@@ -785,214 +785,93 @@ class AppServerGoalControl:
         )
 
 
+@dataclass(slots=True)
+class _ObservedTurn:
+    files: list[object] = field(default_factory=list)
+    partials: dict[str, PartialAnswer] = field(default_factory=dict)
+    children: set[str] = field(default_factory=set)
+    answer: FinalAgentAnswer | None = None
+    diff: str | None = None
+    terminal: bool = False
+    complete: bool = True
+
+    def item(self, item: _generated.ThreadItem, thread: str, turn: str) -> None:
+        if evidence := direct_file_item(item):
+            self.files.append(evidence)
+        if partial := project_partial_answer(item.root, thread_id=thread, turn_id=turn):
+            self.partials.setdefault(partial.item_id, partial)
+        if child_patch_item_id(item, thread):
+            self.children.add(item.root.id)
+        else:
+            self.children.discard(item.root.id)
+
+
 class _GoalActivityTap:
-    """Freeze exact physical Turn evidence in the sole Goal consumer."""
-    _terminal: bool
-    _child_work: set[str]
-
-    __slots__ = (
-        "_thread_id",
-        "_turn_id",
-        "_completed_turn_id",
-        "_started_turn_ids",
-        "_terminal", "_answer", "_phase", "_files", "_partials", "_child_work",
-        "_turn_diff",
-        "_diff_enabled",
-        "_sink",
-        "_progress_card_settings",
-    )
-
     def __init__(self, thread_id: str) -> None:
-        self._thread_id = thread_id
-        self._turn_id: str | None = None
-        self._completed_turn_id: str | None = None
-        self._started_turn_ids: set[str] = set()
-        self._reset_facts()
-        self._turn_diff: str | None = None
-        self._diff_enabled = True
-        self._progress_card_settings = ProgressCardSettings()
-        self._sink: Callable[
-            [TurnActivityNotificationProjection | None], None
-        ] | None = None
+        self.thread = thread_id
+        self.turns: dict[str, _ObservedTurn] = {}
+        self.bind(None)
 
-    def bind(
-        self,
-        sink: Callable[[TurnActivityNotificationProjection | None], None] | None,
-        *,
-        progress_card_settings: ProgressCardSettings = ProgressCardSettings(),
-    ) -> None:
-        self._sink = sink
-        self._progress_card_settings = progress_card_settings
+    def bind(self, sink: Callable[[TurnActivityNotificationProjection | None], None] | None, *,
+             progress_card_settings: ProgressCardSettings = ProgressCardSettings()) -> None:
+        self.sink = sink
+        self.settings = progress_card_settings
+        if sink is None:
+            self.turns.clear()
 
     async def next_notification(self, client: Any, state: Any) -> Any:
         notification = await client.next_goal_notification(state)
+        payload = getattr(notification, "payload", None)
+        turn = getattr(payload, "turn", None)
+        turn_id = getattr(payload, "turn_id", None) or getattr(turn, "id", None)
+        observed = None
         try:
-            self._project(notification)
+            if type(notification) is not Notification or getattr(payload, "thread_id", None) != self.thread or not isinstance(turn_id, str) or not turn_id:
+                return notification
+            if notification.method not in {"turn/started", "turn/completed", "item/started", "item/completed", "turn/plan/updated", "turn/diff/updated"}:
+                return notification
+            if turn_id not in self.turns:
+                self.turns[turn_id] = _ObservedTurn()
+            observed = self.turns[turn_id]
+            if observed.terminal:
+                return notification
+            projection = project_turn_activity_notification(notification, expected_thread_id=self.thread,
+                expected_turn_id=turn_id, progress_card_settings=self.settings)
+            if notification.method == "turn/diff/updated" and type(payload) is _generated.TurnDiffUpdatedNotification:
+                observed.diff = payload.diff
+            if notification.method == "item/started" and type(payload) is _generated.ItemStartedNotification:
+                if child := child_patch_item_id(payload.item, self.thread):
+                    observed.children.add(child)
+            if notification.method == "item/completed" and type(payload) is _generated.ItemCompletedNotification:
+                observed.item(payload.item, self.thread, turn_id)
+                answer = final_agent_answer((payload.item,))
+                if answer and (answer.explicit or observed.answer is None or not observed.answer.explicit):
+                    observed.answer = answer
+            if projection.turn_completed and type(payload) is _generated.TurnCompletedNotification:
+                for item in payload.turn.items:
+                    observed.item(item, self.thread, turn_id)
+                status = payload.turn.status.value
+                facts = GoalTurnFacts(turn_id, status, merge_final_answer(observed.answer, payload.turn),
+                    tuple(observed.files) if status == "completed" else (), observed.diff if status == "completed" else None,
+                    tuple(observed.partials.values()), frozenset(observed.children), observed.complete)
+                projection = replace(projection, goal_terminal=facts)
+                self.turns[turn_id] = _ObservedTurn(diff=observed.diff, terminal=True)
+            if self.sink and projection.turn_id:
+                self.sink(projection)
         except Exception as error:
+            if observed:
+                observed.complete = False
             logger.warning("Goal notification projection unavailable (%s)", type(error).__name__)
-            if self._sink is not None:
+            if self.sink:
                 try:
-                    self._sink(None)
+                    self.sink(TurnActivityNotificationProjection(turn_id=turn_id, incomplete=True) if observed else None)
                 except Exception:
-                    self._sink = None
+                    logger.warning("Goal activity sink unavailable")
         return notification
 
-    def _project(self, notification: Any) -> None:
-        if (
-            type(notification) is Notification
-            and notification.method == "turn/started"
-            and type(notification.payload) is _generated.TurnStartedNotification
-            and notification.payload.thread_id == self._thread_id
-        ):
-            turn_id = notification.payload.turn.id
-            if turn_id in self._started_turn_ids:
-                return
-            self._started_turn_ids.add(turn_id)
-            self._turn_id = turn_id
-            self._reset_facts()
-        self._capture_turn_diff(notification)
-        sink = self._sink
-        if sink is None:
-            return
-        projection = project_turn_activity_notification(
-            notification, expected_thread_id=self._thread_id, expected_turn_id=self._turn_id,
-            progress_card_settings=self._progress_card_settings,
-        )
-        payload = notification.payload
-        if projection.turn_id and projection.turn_id == self._turn_id:
-            if self._terminal:
-                return
-            if notification.method == "item/started" and type(payload) is _generated.ItemStartedNotification:
-                child_id = child_patch_item_id(payload.item, self._thread_id)
-                if child_id:
-                    self._child_work.add(child_id)
-            if notification.method == "item/completed" and type(payload) is _generated.ItemCompletedNotification:
-                self._observe_item(payload.item)
-            if projection.turn_completed and type(payload) is _generated.TurnCompletedNotification:
-                status = payload.turn.status.value
-                if status in {"completed", "interrupted", "failed"}:
-                    for item in payload.turn.items:
-                        self._observe_item(item)
-                    facts = GoalTurnFacts(
-                        projection.turn_id, status, self._answer, self._phase,
-                        tuple(self._files.values()) if status == "completed" else (),
-                        self.final_turn_diff(projection.turn_id) if status == "completed" else None,
-                        tuple(self._partials.values()), frozenset(self._child_work),
-                    )
-                    self._terminal = True
-                    projection = replace(projection, goal_terminal=facts)
-        if not (
-            projection.turn_started
-            or projection.turn_completed
-            or projection.plan_updated
-            or projection.event is not None
-            or projection.question is not None
-            or projection.partial_answer is not None
-        ):
-            return
-        try:
-            sink(projection)
-        except Exception as diagnostic_error:
-            logger.warning(
-                "Goal activity sink disabled after failure",
-                extra={
-                    "thread_id": self._thread_id,
-                    "turn_id": self._turn_id,
-                    "error_type": type(diagnostic_error).__name__,
-                },
-            )
-            # Activity is display-only. A projection consumer can disable
-            # itself but must never interrupt the one Goal notification stream.
-            self._sink = None
-        return
-
-    def _reset_facts(self) -> None:
-        self._terminal = False
-        self._answer: str | None = None
-        self._phase: _generated.MessagePhase | None = None
-        self._files: dict[str, _generated.FileChangeThreadItem | GoalSavedImage] = {}
-        self._partials: dict[str, PartialAnswer] = {}
-        self._child_work = set()
-
-    def _observe_item(self, wrapped: _generated.ThreadItem) -> None:
-        item = wrapped.root
-        if type(item) is _generated.AgentMessageThreadItem:
-            if item.phase is _generated.MessagePhase.final_answer or (item.phase is None and self._phase is None):
-                self._answer, self._phase = item.text, item.phase
-            elif self._turn_id is not None:
-                partial = project_partial_answer(item, thread_id=self._thread_id, turn_id=self._turn_id)
-                if partial is not None:
-                    self._partials.setdefault(partial.item_id, partial)
-        elif type(item) is _generated.FileChangeThreadItem and item.status.value == "completed":
-            self._files[item.id] = item.model_copy(deep=True)
-        elif type(item) is _generated.ImageGenerationThreadItem and item.status == "completed" and item.saved_path:
-            self._files[item.id] = GoalSavedImage(item.id, item.saved_path.root)
-        elif type(item) in {_generated.CollabAgentToolCallThreadItem, _generated.SubAgentActivityThreadItem}:
-            if child_patch_item_id(item, self._thread_id):
-                self._child_work.add(item.id)
-            else:
-                self._child_work.discard(item.id)
-
-    def final_turn_diff(self, physical_turn_id: str) -> str | None:
-        if (
-            self._diff_enabled
-            and self._turn_id == physical_turn_id
-            and self._completed_turn_id == physical_turn_id
-        ):
-            return self._turn_diff
-        return None
-
-    def _capture_turn_diff(self, notification: Any) -> None:
-        if not self._diff_enabled:
-            return
-        if type(notification) is not Notification:
-            self._disable_diff()
-            return
-        payload = notification.payload
-        if notification.method == "turn/started":
-            if type(payload) is not _generated.TurnStartedNotification:
-                self._disable_diff()
-                return
-            turn_id = getattr(payload.turn, "id", None)
-            if (
-                payload.thread_id != self._thread_id
-                or not isinstance(turn_id, str)
-                or not turn_id
-            ):
-                self._disable_diff()
-                return
-            self._turn_id = turn_id
-            self._completed_turn_id = None
-            self._turn_diff = None
-            return
-        if notification.method == "turn/diff/updated":
-            if type(payload) is not _generated.TurnDiffUpdatedNotification:
-                self._disable_diff()
-                return
-            if payload.thread_id != self._thread_id:
-                self._disable_diff()
-                return
-            if self._turn_id is None:
-                self._disable_diff()
-                return
-            if payload.turn_id == self._turn_id:
-                self._turn_diff = payload.diff
-            return
-        if notification.method == "turn/completed":
-            if type(payload) is not _generated.TurnCompletedNotification:
-                self._disable_diff()
-                return
-            turn_id = getattr(payload.turn, "id", None)
-            if payload.thread_id != self._thread_id:
-                self._disable_diff()
-                return
-            if turn_id == self._turn_id:
-                self._completed_turn_id = turn_id
-
-    def _disable_diff(self) -> None:
-        self._diff_enabled = False
-        self._turn_diff = None
-        self._completed_turn_id = None
+    def final_turn_diff(self, turn_id: str) -> str | None:
+        turn = self.turns.get(turn_id)
+        return turn.diff if turn and turn.terminal else None
 
 
 class _AppServerGoalHandle:
@@ -1096,19 +975,19 @@ class _AppServerGoalHandle:
         try:
             async for _notification in self._stream:
                 pass
+            final_turn = getattr(self._state, "completed_turn", None)
+            physical_turn_id = getattr(final_turn, "id", None)
+            status = getattr(getattr(final_turn, "status", None), "value", None)
+            if not isinstance(physical_turn_id, str) or not isinstance(status, str):
+                raise GoalControlError("Goal 通知流结束但缺少最终物理 Turn。")
+            return GoalStreamTerminal(
+                logical_turn_id,
+                physical_turn_id,
+                status,
+                self._activity_tap.final_turn_diff(physical_turn_id),
+            )
         finally:
             self._activity_tap.bind(None)
-        final_turn = getattr(self._state, "completed_turn", None)
-        physical_turn_id = getattr(final_turn, "id", None)
-        status = getattr(getattr(final_turn, "status", None), "value", None)
-        if not isinstance(physical_turn_id, str) or not isinstance(status, str):
-            raise GoalControlError("Goal 通知流结束但缺少最终物理 Turn。")
-        return GoalStreamTerminal(
-            logical_turn_id,
-            physical_turn_id,
-            status,
-            self._activity_tap.final_turn_diff(physical_turn_id),
-        )
 
     async def pause(self) -> GoalPauseAck:
         """Stop the logical operation: pause continuation, then interrupt its Turn."""

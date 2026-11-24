@@ -105,6 +105,7 @@ class _ReplyMessage:
 
 @dataclass(slots=True, weakref_slot=True, eq=False)
 class LogicalReply:
+    mention_attempted: bool = False
     attempted: bool = False
     # Insertion order is publication order. Replacing an existing message never promotes it.
     messages: dict[str, _ReplyMessage] | None = field(default_factory=dict)

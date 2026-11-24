@@ -170,8 +170,8 @@ class StubRuntime:
     def set_completion_handler(self, handler) -> None:
         self.completion = handler
 
-    def set_goal_rollover_handler(self, handler) -> None:
-        self.goal_rollover_handler = handler
+    def set_goal_turn_handler(self, handler) -> None:
+        self.goal_turn_handler = handler
 
     def set_question_handler(self, handler) -> None:
         self.questions = handler
@@ -359,13 +359,14 @@ class StubRuntime:
         *,
         thread_id: str | None = None,
         logical_turn_id: str | None = None,
+        physical_turn_id: str | None = None,
         refresh_plan: bool = False,
     ) -> GoalActivitySnapshot | None:
         self.goal_activity_calls.append(
             (binding_id, thread_id, logical_turn_id, refresh_plan)
         )
         snapshot = self.goal_activity_values.get(binding_id)
-        if snapshot is None:
+        if snapshot is None or (physical_turn_id and (snapshot.physical_turn_id or logical_turn_id) != physical_turn_id):
             return None
         if thread_id is not None and snapshot.thread_id != thread_id:
             return None

@@ -15,7 +15,7 @@ from netizen_cli.domain import (
     NativeCapability, ScopeKind,
 )
 from netizen_cli.partial_answers import PartialAnswer
-from netizen_cli.runtime.codex_contracts import ActiveGoalSnapshot, GoalOutcome, GoalRollover
+from netizen_cli.runtime.codex_contracts import ActiveGoalSnapshot, GoalOutcome
 from netizen_cli.runtime.contracts import GoalFinalizationStatus, GoalSubmission
 from tests.support.presenter_traces import expect_presenter_trace
 from tests.test_goal_presentation_traces import REFERENCE
@@ -122,6 +122,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
     async def test_pause_and_clear_only_control_goal_and_keep_live_reply(self):
         for action in ("pause", "clear"):
             with self.subTest(action=action):
+                self.app._progress_cards.retire_binding(self.binding.id)
                 self.channel.replies.clear()
                 self.channel.updates.clear()
                 self.runtime.goal_snapshot_value = native_goal()
@@ -163,7 +164,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         await self.start(progress=True)
         await self.app.handle_completion(self.outcome(goal=native_goal(GoalStatus.PAUSED), finalization=GoalFinalizationStatus.NOT_APPLICABLE))
         self.runtime.goal_snapshot_value = native_goal(GoalStatus.PAUSED)
-        self.runtime.goal_activity_values[self.binding.id] = replace(self.activity, logical_turn_id="goal-two")
+        self.runtime.goal_activity_values[self.binding.id] = replace(self.activity, logical_turn_id="goal-two", physical_turn_id="goal-two")
         self.runtime.goal_submission = self.submission("goal-two")
         self.channel.reply_results.append(sent_result("om_task_two", chat_id="oc_direct"))
         await self.app.handle_message(FakeMessage("/goal resume", message_id="om_resume"))
@@ -192,7 +193,8 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         previous = self.outcome(final_response="first final", partial_answers=(first,), run_continues=True)
         self.activity = replace(self.activity, physical_turn_id=second.turn_id, partial_answers=(second,), revision=2)
         self.runtime.goal_activity_values[self.binding.id] = self.activity
-        await self.app.handle_goal_rollover(GoalRollover(previous, self.activity))
+        await self.app.handle_goal_turn(previous, False)
+        await self.app.handle_goal_turn(replace(previous, final_physical_turn_id=self.activity.physical_turn_id, activity=self.activity), True)
 
     async def test_rollover_partials_stay_on_their_own_cards_through_file_paging(self):
         expect_presenter_trace(self, self.fx, "goal_rollover_and_paging", reference=REFERENCE)
@@ -247,7 +249,8 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
             if continues:
                 self.activity = replace(self.activity, physical_turn_id="second")
                 self.runtime.goal_activity_values[self.binding.id] = self.activity
-                await self.app.handle_goal_rollover(GoalRollover(result, self.activity))
+                await self.app.handle_goal_turn(result, False)
+                await self.app.handle_goal_turn(replace(result, final_physical_turn_id=self.activity.physical_turn_id, activity=self.activity), True)
             else:
                 await self.app.handle_completion(result)
             card = OutboundCard(card=self.channel.updates[-1][1]) if progress else self.channel.replies[-1][1]

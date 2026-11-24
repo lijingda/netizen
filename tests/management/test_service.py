@@ -2698,7 +2698,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             def set_completion_handler(self, _handler) -> None:
                 pass
 
-            def set_goal_rollover_handler(self, _handler) -> None:
+            def set_goal_turn_handler(self, _handler) -> None:
                 pass
 
             def set_question_handler(self, _handler) -> None:

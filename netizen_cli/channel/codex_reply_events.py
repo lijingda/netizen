@@ -13,7 +13,7 @@ from ..error_messages import describe_error
 from ..ordinary_sessions import LogicalReply, OrdinaryConclusion, OrdinarySessionPort
 from ..runtime.codex_contracts import GoalOutcome
 from ..runtime.codex_replies import outcome_file_evidence
-from ..runtime.contracts import GoalActivitySnapshot, GoalFinalizationStatus, GoalStateUnknown, SideTurnOutcome
+from ..runtime.contracts import GoalFinalizationStatus, GoalStateUnknown, SideTurnOutcome
 from ..codex_runtime import CodexRuntime
 from .app_values import (
     _goal_reply_activity,
@@ -22,6 +22,7 @@ from .app_values import (
     _task_has_error,
     _task_interruption_text,
 )
+from .topics import CardReplyLocation
 from .reply_events import (
     Activity,
     ActivityChanged,
@@ -51,8 +52,8 @@ class CodexReplyEvents:
         validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None,
         goal: bool = False,
         logical_turn_id: str | None = None,
-        opening: GoalActivitySnapshot | None = None,
         run_reply: LogicalReply | None = None,
+        location: CardReplyLocation | None = None,
     ) -> TurnOpened:
         run = replace(key, turn_id=logical_turn_id) if logical_turn_id else key
         target = ReplyTarget(key, origin, run)
@@ -64,9 +65,7 @@ class CodexReplyEvents:
                     owner, thread_id=thread, turn_id=turn, refresh_plan=False
                 )
             if goal:
-                snapshot = self.runtime.goal_activity(owner, thread_id=thread, logical_turn_id=run.turn_id)
-                if snapshot is None or (snapshot.physical_turn_id or run.turn_id) != turn:
-                    snapshot = opening
+                snapshot = self.runtime.goal_activity(owner, thread_id=thread, logical_turn_id=run.turn_id, physical_turn_id=turn)
                 return _goal_reply_activity(snapshot) if snapshot is not None else None
             return self.ordinary.turn_activity(owner, thread_id=thread, turn_id=turn)
 
@@ -86,8 +85,8 @@ class CodexReplyEvents:
             )
 
         return TurnOpened(
-            target, DeliveryPolicy.BOUNDED_FALLBACK, feedback, observe, retain,
-            reply, reply_partial, validate_reply, reuse_existing=goal, run_reply=run_reply,
+            target, DeliveryPolicy.BOUNDED_ITEM_RECEIPTS if location else DeliveryPolicy.BOUNDED_FALLBACK, feedback, observe, retain,
+            reply, reply_partial, validate_reply, reuse_existing=goal, run_reply=run_reply, location=location, retained=retain if goal else lambda: True,
         )
 
     @classmethod
@@ -107,6 +106,10 @@ class CodexReplyEvents:
             interruption=lambda: _task_interruption_text(outcome),
             answer=outcome.final_response, empty="任务已结束，未产生文本回复。",
         )
+        if isinstance(native, GoalOutcome) and native.final_turn_status is None:
+            status = "unknown"
+            if native.run_continues:
+                content = "本轮终态未确认。"
         if isinstance(native, OrdinaryConclusion):
             evidence = native.file_evidence
         else:
@@ -128,8 +131,6 @@ class CodexReplyEvents:
             if isinstance(native, GoalOutcome)
             else key.turn_id,
             run_continues=continues,
-            run_reply=native.reply if isinstance(native, GoalOutcome) else None,
-            earlier_delivery_incomplete=isinstance(native, GoalOutcome) and native.earlier_delivery_incomplete,
             allow_suppression=not isinstance(native, GoalOutcome)
             or (
                 native.error is None

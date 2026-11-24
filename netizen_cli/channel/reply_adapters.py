@@ -20,12 +20,11 @@ from ..bindings import (
 )
 from ..domain import (
     FeishuScope,
-    GoalOperationState,
     ScheduledOrigin,
     ScopeKind,
 )
 from ..error_messages import describe_error
-from ..progress_card_settings import ProgressCardSettings
+from ..runtime import limits
 from ..management import (
     ExactBindingTarget,
 )
@@ -41,7 +40,7 @@ from ..ordinary_sessions import (
     PhysicalAnswer,
     PhysicalStarted,
 )
-from ..runtime.codex_contracts import GoalOutcome, GoalRollover
+from ..runtime.codex_contracts import GoalOutcome
 from ..runtime.codex_replies import CodexFeatureEvent
 from ..runtime.contracts import (
     CompactionOutcome,
@@ -54,7 +53,6 @@ from ..runtime.contracts import (
     TurnOutcome,
 )
 from ..schedules.models import ScheduleNotFound
-from . import constants
 from .app_values import (
     _ClaudeReplyTarget,
     _message_id,
@@ -66,7 +64,7 @@ from .base import (
 from .claude_reply_events import ClaudeReplyEvents
 from .codex_reply_events import CodexReplyEvents
 from .presentation import CompletionPresentationChannel
-from .reply_events import DeliveryReceipt, PresentationKey, ReplyTarget, RunEnded, RunState, TurnResult
+from .reply_events import DeliveryPolicy, ItemDelivery, RunDisplay, DeliveryReceipt, PresentationKey, ReplyTarget, RunEnded, RunState, TurnOpened, TurnResult
 from .topics import CardReplyLocation
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
@@ -175,22 +173,15 @@ class NativeReplyChannel(CompletionPresentationChannel):
             except ScheduleNotFound:
                 pass  # A completed receipt may have allowed normal pruning.
 
-    async def _projection_failed(self, outcome: TurnOutcome | GoalOutcome) -> None:
-        turn_id = (outcome.turn_id if isinstance(outcome, TurnOutcome)
-                   else outcome.logical_turn_id or outcome.final_physical_turn_id or "goal")
+    async def _projection_failed(self, outcome: TurnOutcome) -> None:
         try:
-            try:
-                if not isinstance(outcome, GoalOutcome) or not outcome.run_continues:
-                    await self._finish_task_reactions(outcome.origin, turn_id, constants.ERROR_REACTION)
-            finally:
-                key = PresentationKey(outcome.binding_id, outcome.thread_id, turn_id)
-                if isinstance(outcome, GoalOutcome):
-                    await self._progress_cards.abandon_run(key)
-                else:
-                    await self._progress_cards.abandon(key=key)
+            await self._fail_run(PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id), outcome.origin)
         finally:
-            if isinstance(outcome, TurnOutcome):
-                self._finish_ordinary_completion(outcome)
+            self._finish_ordinary_completion(outcome)
+
+    async def _fail_run(self, run: PresentationKey, origin: object) -> None:
+        await self._present_run_end(RunEnded(ReplyTarget(run, origin, run), "failed", None))
+        await self._progress_cards.abandon_run(run)
 
     async def _archive_scheduled_completion(self, outcome: OrdinaryConclusion) -> None:
         origin = outcome.origin
@@ -238,7 +229,13 @@ class NativeReplyChannel(CompletionPresentationChannel):
             await self._complete_side_lifecycle(outcome)
             return
         if isinstance(outcome, GoalOutcome):
-            await self._complete_goal(outcome)
+            try:
+                event = self._codex_result(outcome)
+            except Exception:
+                run_id = outcome.logical_turn_id or outcome.final_physical_turn_id or "goal"
+                await self._fail_run(PresentationKey(outcome.binding_id, outcome.thread_id, run_id), outcome.origin)
+                raise
+            await self._complete_goal(outcome, event)
             return
         if isinstance(outcome, CompactionOutcome):
             if outcome.error is not None:
@@ -293,52 +290,52 @@ class NativeReplyChannel(CompletionPresentationChannel):
             notice_is_error=True,
         )
 
-    async def _complete_goal(self, outcome: GoalOutcome) -> None:
-        try:
-            event = self._codex_result(outcome)
-        except BaseException:
-            await self._projection_failed(outcome)
-            raise
-        await self._complete_task(event)
+    async def _complete_goal(self, outcome: GoalOutcome, event: TurnResult) -> None:
+        location = self._physical_card_location(outcome.binding_id, outcome.origin)
+        reply = outcome.reply or LogicalReply()
+        display = RunDisplay(reply, lambda: reply.messages is not None, lambda: None)
+        deadline = outcome.deadline or asyncio.get_running_loop().time() + limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS
+        policy = ItemDelivery(display, location, lambda content, op, dest: self._physical_reply(outcome.origin, content, dest),
+                              lambda: "", deadline, DeliveryPolicy.BOUNDED_ITEM_RECEIPTS,
+                              outcome.delivery.window if outcome.delivery else lambda bound, notice: asyncio.timeout_at(bound))
+        end = event.end
+        if end:
+            end = replace(end, display=display, location=location, session_label=await self._completion_session_label(event) if end.mention_user_id else None,
+                          settle=outcome.delivery.drain if outcome.delivery and not outcome.run_continues else None)
+        await self._complete_task(replace(event, items=policy, end=end))
 
-    async def _present_running_goal(
-        self,
-        *,
-        binding: ThreadBinding,
-        submission: GoalSubmission,
-        origin: object,
-    ) -> bool:
+    async def _present_running_goal(self, *, binding: ThreadBinding, submission: GoalSubmission, origin: object) -> bool:
         if submission.continued:
             return True
-
         key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
-        await self._reactions.start(key.turn_id, _message_id(origin), pulse_enabled=submission.task_feedback.reaction_pulse_enabled)
-        # The SDK returns start/resume only after observing its first physical
-        # start. Its logical ID is this first physical ID, even after a fast rollover.
-        opening = GoalActivitySnapshot(
-            binding.id, key.thread_id, key.turn_id, key.turn_id, 1, GoalOperationState.RUNNING,
-            True, False, (), progress_card_settings=submission.task_feedback.progress_card_settings or ProgressCardSettings(),
-        )
-        return await self._open_goal_turn(opening, submission.task_feedback, origin, submission.reply)
-
-    async def handle_goal_rollover(self, rollover: GoalRollover) -> None:
-        previous = rollover.previous
-        try:
-            await self._complete_goal(previous)
-        except Exception:
-            logger.exception("could not close intermediate Goal presentation")
-        await self._open_goal_turn(rollover.opening, previous.task_feedback, previous.origin, previous.reply)
-
-    async def _open_goal_turn(self, opening: GoalActivitySnapshot, feedback: BindingTaskFeedback,
-                              origin: object, reply: LogicalReply | None) -> bool:
-        assert opening.physical_turn_id is not None
-        key = PresentationKey(opening.binding_id, opening.thread_id, opening.physical_turn_id)
-        event = CodexReplyEvents(self._runtime, self._ordinary).opened(
-            key, origin, feedback, goal=True, logical_turn_id=opening.logical_turn_id, opening=opening,
-            run_reply=reply, reply=lambda card: self._channel.reply(origin, card),
-            reply_partial=lambda post: self._reply_to_origin(origin, post),
-        )
+        event = self._goal_opened(key, origin, submission.task_feedback, key.turn_id, submission.reply)
+        if self._runtime.goal_activity(binding.id, thread_id=key.thread_id, logical_turn_id=key.turn_id) is None:
+            return False
+        await self._reactions.start(key.turn_id, _message_id(origin),
+            pulse_enabled=submission.task_feedback.reaction_pulse_enabled, retained=event.retained)
         return await self._progress_cards.open(event)
+
+    async def handle_goal_turn(self, outcome: GoalOutcome, opened: bool) -> None:
+        if opened:
+            assert outcome.activity
+            await self._open_goal_turn(outcome.activity, outcome.task_feedback, outcome.origin, outcome.reply)
+        else:
+            await self._complete_goal(outcome, self._codex_result(outcome))
+
+    async def _open_goal_turn(self, snapshot: GoalActivitySnapshot, feedback: BindingTaskFeedback,
+                              origin: object, reply: LogicalReply | None) -> bool:
+        assert snapshot.physical_turn_id
+        key = PresentationKey(snapshot.binding_id, snapshot.thread_id, snapshot.physical_turn_id)
+        return await self._progress_cards.open(self._goal_opened(key, origin, feedback, snapshot.logical_turn_id, reply))
+
+    def _goal_opened(self, key: PresentationKey, origin: object, feedback: BindingTaskFeedback,
+                     logical_id: str, reply: LogicalReply | None) -> TurnOpened:
+        location = self._physical_card_location(key.owner_id, origin)
+        return CodexReplyEvents(self._runtime, self._ordinary).opened(
+            key, origin, feedback, goal=True, logical_turn_id=logical_id, location=location, run_reply=reply,
+            reply=lambda card: self._channel.reply(origin, card),
+            reply_partial=lambda post: self._physical_reply(origin, post, location),
+        )
 
     async def _goal_management_receipt(
         self, binding: ThreadBinding, scope: FeishuScope, origin: object, *,

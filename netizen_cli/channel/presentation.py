@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lark_channel import (
+    Identity,
     OutboundCard,
     OutboundPost,
     SendResult,
@@ -50,7 +51,7 @@ from .completion_mentions import send_completion_mention
 from .messages import _confirmed_reply_id
 from .physical_delivery import BODY, INCOMPLETE, Item, PhysicalDelivery, record_sent_answer
 from .replies import ChannelReplies
-from .reply_events import ItemDelivery, RunEnded, RunState, TurnResult
+from .reply_events import DeliveryPolicy, ItemDelivery, RunEnded, RunState, TurnResult
 from .reply_presenter import (
     _CardUpdateAttempt,
     _PartialAnswerDelivery,
@@ -86,39 +87,57 @@ class CompletionPresentationChannel(ChannelReplies):
         ledger = self._progress_cards.physical_delivery(key)
         for part in outcome.partial_answers:
             ledger.partial(part)
-        if outcome.content:
+        ledger.bounded_fallback = policy.policy is DeliveryPolicy.BOUNDED_ITEM_RECEIPTS
+        silent = self._result_suppressed(outcome)
+        content = "" if silent else outcome.content
+        if content and not (outcome.status == "completed" and outcome.partial_answers and not outcome.final_response):
             ledger.expect(BODY)
         try:
-            async with asyncio.timeout_at(policy.deadline):
-                content = outcome.content
-                if outcome.status == "completed":
+            async with policy.window(policy.deadline, False):
+                files = _TaskFiles()
+                if not silent and outcome.status == "completed":
+                    if ledger.bounded_fallback:
+                        files = self._prepare_task_files(outcome.cwd, outcome.file_evidence)
+                        if has_file_evidence(files.evidence, files.summary):
+                            ledger.expect(("files", ""))
+                    if content and outcome.partial_answers and not outcome.final_response:
+                        content = ("本轮" if outcome.run_continues else "任务") + "已完成，答案见阶段性答案。"
                     content = await self._prepare_task_result_images(outcome, ledger=ledger) or content
                 if display.publishable():
-                    await self._deliver_receipted_items(outcome, policy, content, ledger)
+                    await self._deliver_receipted_items(outcome, policy, content, ledger, files)
         except Exception as error:
             logger.warning("item delivery ended without full confirmation (%s)", type(error).__name__)
         if ledger.settle() and display.publishable():
             try:
-                async with asyncio.timeout(5):
+                notice_deadline = asyncio.get_running_loop().time() + 5
+                if ledger.bounded_fallback and policy.deadline is not None:
+                    notice_deadline = min(notice_deadline, policy.deadline)
+                async with policy.window(notice_deadline, True):
                     sent = await external_call(policy.send(INCOMPLETE, "notice", policy.location))
                 if receipt(sent) != "confirmed":
                     logger.warning("incomplete delivery notice was rejected")
             except Exception:
                 logger.warning("incomplete delivery notice was not confirmed")
 
-    async def _deliver_receipted_items(self, outcome: TurnResult, policy: ItemDelivery, content: str, ledger: PhysicalDelivery) -> None:
+    async def _deliver_receipted_items(self, outcome: TurnResult, policy: ItemDelivery, content: str, ledger: PhysicalDelivery, task_files: _TaskFiles) -> None:
         display = policy.display
         reply = display.reply
-        snapshot = outcome.activity
         key = outcome.target.key
         partials = await self._terminal_partials(outcome)
+        snapshot = outcome.activity or partials.freeze_snapshot
         await self._progress_cards.abandon(key=key)
         if not display.publishable():
             return
         status = outcome.status
         publishable = display.publishable
         first_id = partials.message_id
-        body_items = ((BODY, *ledger.prepared_images) if content else ())
+        files: tuple[TurnFile, ...] = ()
+        scope = None
+        if ("files", "") in ledger.items:
+            scope, files, _ = self._task_completion_files(outcome, task_files)
+        body_items: tuple[Item, ...] = ((BODY, *ledger.prepared_images) if content else ())
+        if files:
+            body_items += (("files", ""),)
         matching_items = tuple(item for item, text in ledger.partial_text.items() if content and text == content)
         location = partials.location or policy.location
         in_card_mode = outcome.task_feedback.progress_card_enabled and not partials.text_only
@@ -131,19 +150,22 @@ class CompletionPresentationChannel(ChannelReplies):
             try:
                 projection = turn_progress_projection(snapshot=snapshot, partial_answers=outcome.partial_answers,
                     final_response=content or None, include_result=bool(content), terminal_status=status,
-                    run_continues=outcome.run_continues, collapsed=True)
+                    run_continues=outcome.run_continues, collapsed=True, files=files,
+                    scope=scope, binding_id=outcome.file_binding_id if files else None,
+                    turn_id=outcome.turn_id if files else None, additions=task_files.summary.additions,
+                    deletions=task_files.summary.deletions)
                 card = render_run_card(projection, display.current())
             except Exception:
                 card = None
             if card and first_id and location.can_write(first_id):
-                if await self._progress_cards.publish_card(display, first_id, key, location, projection, delivery=ledger, items=items):
+                if await self._progress_cards.publish_card(display, first_id, key, location, projection, delivery=ledger, items=items, rendered=card):
                     ledger.record(items, "confirmed")
                     return
-                if not any(ledger.items.get(item) == "rejected" and ledger.can_post(item) for item in items):
+                if not ledger.bounded_fallback and not any(ledger.items.get(item) == "rejected" and ledger.can_post(item) for item in items):
                     return
             if (card and not first_id and publishable()
                     and all(ledger.items[item] not in ("unknown", "rejected") for item in ledger.partial_text)):
-                state, sent = await ledger.send(items, reply, policy.send(card, None, location))
+                state, sent = await ledger.send(items, reply, external_call(policy.send(card, None, location)))
                 if state == "confirmed" and sent is not None:
                     record_sent_answer(reply, location, key.turn_id, items, sent)
                     if reply and (mid := _confirmed_reply_id(sent)):
@@ -163,32 +185,50 @@ class CompletionPresentationChannel(ChannelReplies):
                         and ledger.can_post(item)):
                     post = OutboundPost(markdown=f"**阶段性答案**\n\n{feishu_answer_text(fragment.text)}")
                     await self._send_receipted_items(outcome, policy, ledger, (item,), post, f"partial/{index}", location)
+            if (content and not outcome.final_response and outcome.status == "completed" and outcome.partial_answers
+                    and any(ledger.items[item] != "confirmed" for item in ledger.partial_text)):
+                if not files:
+                    return
+                content = "本轮已结束。"
             matching = ledger.partial_receipt(matching_items)
             if matching in ("confirmed", "unknown") or (matching == "rejected" and ledger.posted.intersection(matching_items)):
                 ledger.record(body_items, matching)
             elif content and ledger.can_post(BODY):
                 content += policy.plain_suffix()
-                await self._send_receipted_items(outcome, policy, ledger, (*body_items, *matching_items), content, "final", location)
+                mention = outcome.mention_user_id
+                message: str | OutboundPost | OutboundCard = content
+                if files and scope:
+                    message = turn_files_card(scope=scope, binding_id=outcome.file_binding_id, turn_id=outcome.turn_id,
+                        final_response=content, files=files, additions=task_files.summary.additions,
+                        deletions=task_files.summary.deletions, completion_mention_user_id=mention, run_continues=outcome.run_continues)
+                elif mention:
+                    message = OutboundPost(markdown=content, mentions=[Identity(open_id=mention)])
+                if reply and mention:
+                    reply.mention_attempted = True
+                sent = await self._send_receipted_items(outcome, policy, ledger, (*body_items, *matching_items), message, "final", location)
+                if isinstance(message, OutboundCard) and not sent and ledger.bounded_fallback:
+                    await self._send_receipted_items(outcome, policy, ledger, (BODY,), content, "fallback", location)
         finally:
-            if first_id and last_snapshot:
+            if first_id and last_snapshot and (not ledger.bounded_fallback or not outcome.final_response):
                 frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
                     run_continues=outcome.run_continues, include_result=False, collapsed=True)
                 shown = tuple(("partial", part.item_id) for part in last_snapshot.partial_answers)
                 items = (*shown, *body_items) if any(item in matching_items for item in shown) else shown
                 await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False,
                     delivery=ledger, items=items)
-            else:
+            elif not ledger.bounded_fallback:
                 await self._progress_cards.reconcile(display)
 
     async def _send_receipted_items(self, outcome: TurnResult, policy: ItemDelivery, ledger: PhysicalDelivery, items: tuple[Item, ...],
-                                   content: str | OutboundPost, operation: str, location: CardReplyLocation) -> None:
+                                   content: str | OutboundPost | OutboundCard, operation: str, location: CardReplyLocation) -> bool:
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
-            return
-        _, result = await ledger.send(items, policy.display.reply, external_call(policy.send(content, operation, location)),
+            return False
+        state, result = await ledger.send(items, policy.display.reply, external_call(policy.send(content, operation, location)),
                                       post=True, timeout=self._progress_cards.operation_timeout)
         if result is not None:
             record_sent_answer(policy.display.reply, location, outcome.turn_id, items, result)
+        return state == "confirmed"
 
     async def _terminal_card_delivery(self, outcome: TurnResult,
                                       deliver: Callable[[], Awaitable[_CardUpdateAttempt | None]]) -> _CardUpdateAttempt | None:
@@ -219,12 +259,12 @@ class CompletionPresentationChannel(ChannelReplies):
             logger.exception("failed to park unavailable Turn progress card")
         await self._reply(event.target.origin, event.notice)
 
-    async def _present_run_end(self, event: RunEnded) -> None:
+    async def _present_run_end(self, event: RunEnded, result: Callable[[], Awaitable[None]] | None = None) -> None:
         run = event.target.run
         if run is None:
             return
         reaction = {"completed": constants.DONE_REACTION, "interrupted": constants.INTERRUPTED_REACTION,
-                    "failed": constants.ERROR_REACTION}[event.status]
+                    "failed": constants.ERROR_REACTION, "unknown": constants.ERROR_REACTION}[event.status]
         display = event.display
         if display is None:
             await self._finish_task_reactions(event.target.origin, run.turn_id, reaction)
@@ -233,19 +273,27 @@ class CompletionPresentationChannel(ChannelReplies):
         if reply is None:
             return
         try:
+            if result:
+                await self._finish_task_reactions(event.target.origin, run.turn_id, reaction)
+                await result()
+                if event.settle:
+                    await event.settle()
             await _best_effort_update(self._progress_cards.finish_run(display, event.status))
             if not display.publishable():
                 return
-            await _best_effort_update(self._reactions.freeze(run.turn_id))
-            await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
-            if event.mention_user_id and display.publishable():
+            if result is None:
+                await _best_effort_update(self._reactions.freeze(run.turn_id))
+                await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
+            if event.mention_user_id and not reply.mention_attempted and display.publishable():
                 location = event.location
                 assert location is not None
                 source_id = _message_id(event.target.origin)
-                anchor = reply.mention_target(source_id if location.usable(source_id) else None)
+                source = source_id if location.usable(source_id) else None
+                anchor = source if event.source_only else reply.mention_target(source)
                 await send_completion_mention(
                     self._channel, scope=self._scope(event.target.origin), card_message_id=anchor,
                     user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
+                    session_label=event.session_label,
                 )
         finally:
             self._progress_cards.retire_run(reply)
@@ -260,38 +308,23 @@ class CompletionPresentationChannel(ChannelReplies):
         return await self._progress_cards.prepare_partial_answers(
             target=outcome.target, reply=reply,
             validate_reply=outcome.receipt.validate if outcome.receipt else None,
-            run_reply=outcome.run_reply,
         )
 
-    async def _complete_task(self, outcome: TurnResult) -> None:
-        if outcome.items:
-            await self._deliver_with_receipts(outcome, outcome.items)
-            return
-        if outcome.run_reply is None:
-            await self._complete_bounded_task(outcome)
-            return
-        ledger = PhysicalDelivery()
-        try:
-            await self._complete_bounded_task(replace(outcome, bounded_delivery=ledger))
-        finally:
-            if ledger.settle() or outcome.earlier_delivery_incomplete:
-                await _best_effort_update(self._reply_to_origin(outcome.origin, INCOMPLETE))
+    def _result_suppressed(self, outcome: TurnResult) -> bool:
+        return (outcome.allow_suppression and outcome.status == "completed" and not outcome.final_response
+                and self._reply_suppression.is_suppressed(outcome.thread_id,
+                    outcome.target.run.turn_id if outcome.target.run else outcome.turn_id, outcome.physical_turn_id))
 
-    async def _complete_bounded_task(self, outcome: TurnResult) -> None:
+    async def _complete_task(self, outcome: TurnResult) -> None:
+        if policy := outcome.items:
+            if outcome.end:
+                source_only = self._result_suppressed(outcome) and not self._progress_cards.has_card(outcome.target.key)
+                await self._present_run_end(replace(outcome.end, source_only=source_only), lambda: self._deliver_with_receipts(outcome, policy))
+            else:
+                await self._deliver_with_receipts(outcome, policy)
+            return
         file_evidence = outcome.file_evidence
-        silent = (outcome.allow_suppression and outcome.status == "completed"
-                  and not outcome.final_response
-                  and self._reply_suppression.is_suppressed(
-                      outcome.thread_id, outcome.target.run.turn_id if outcome.target.run else outcome.turn_id, outcome.physical_turn_id,
-                  ))
-        ledger = outcome.bounded_delivery
-        if ledger:
-            for part in outcome.partial_answers:
-                ledger.partial(part)
-            if not silent:
-                ledger.expect(BODY)
-            if ledger.items and outcome.run_reply:
-                outcome.run_reply.attempted = True
+        silent = self._result_suppressed(outcome)
         partial_delivery = await self._terminal_partials(outcome)
         if outcome.end:
             await self._present_run_end(outcome.end)
@@ -299,8 +332,6 @@ class CompletionPresentationChannel(ChannelReplies):
         prepared_response = None
         if not silent and outcome.status == "completed":
             task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence)
-            if ledger and has_file_evidence(task_files.evidence, task_files.summary):
-                ledger.expect(("files", ""))
         if outcome.task_feedback.progress_card_enabled:
             # A missing card stays silent; failure of an existing card uses
             # the original result fallback below. Successful updates return.
@@ -308,13 +339,8 @@ class CompletionPresentationChannel(ChannelReplies):
             attempt = await self._terminal_card_delivery(outcome, lambda: self._complete_task_progress_card(
                 outcome, task_files, prepared_response=prepared_response,
                 suppress_result=silent))
-            if attempt is not None and attempt.updated and (ledger is None or attempt.confirmed):
+            if attempt is not None and attempt.updated:
                 if attempt.confirmed:
-                    if outcome.run_reply is not None:
-                        items = tuple(ledger.items) if ledger else ()
-                        if ledger:
-                            ledger.record(items, "confirmed")
-                        outcome.run_reply.published(attempt.message_id, outcome.turn_id, items, bool)
                     await self._remind_task_completion(outcome, attempt.message_id)
                 return
             if outcome.receipt and attempt is not None:
@@ -571,10 +597,7 @@ class CompletionPresentationChannel(ChannelReplies):
             return
         try:
             result = await self._send_completion_reply(outcome.origin, card)
-            if outcome.bounded_delivery and receipt(result) == "confirmed":
-                outcome.bounded_delivery.record((BODY, ("files", "")), "confirmed")
-                record_sent_answer(outcome.run_reply, None, outcome.turn_id, (BODY,), result)
-            if result.success and (outcome.bounded_delivery is None or receipt(result) == "confirmed"):
+            if result.success:
                 return
             logger.warning("completed Turn file card was not confirmed", extra={"turn_id": outcome.turn_id})
         except asyncio.CancelledError:
@@ -601,23 +624,20 @@ class CompletionPresentationChannel(ChannelReplies):
         user_id = outcome.mention_user_id
         if user_id is None:
             return
-        if outcome.target.key.side:
-            session_label = f"临时会话 {outcome.target.key.owner_id[:8]}"
-        else:
-            name = await self._management.completion_thread_name(outcome.thread_id)
-            session_label = (
-                _normalized_thread_text(name, max_chars=80)
-                or f"会话 {outcome.target.key.owner_id[:8]}"
-            )
-        if outcome.run_reply and source_message_id is None:
-            card_message_id = outcome.run_reply.mention_target(card_message_id)
+        session_label = await self._completion_session_label(outcome)
         await send_completion_mention(
             self._channel, scope=scope or self._scope(outcome.origin),
             card_message_id=card_message_id, user_id=user_id,
-            operation_id=outcome.target.run.turn_id if outcome.target.run else outcome.turn_id,
+            operation_id=outcome.turn_id,
             source_message_id=source_message_id,
             session_label=session_label,
         )
+
+    async def _completion_session_label(self, outcome: TurnResult) -> str:
+        if outcome.target.key.side:
+            return f"临时会话 {outcome.target.key.owner_id[:8]}"
+        name = await self._management.completion_thread_name(outcome.thread_id)
+        return _normalized_thread_text(name, max_chars=80) or f"会话 {outcome.target.key.owner_id[:8]}"
 
     async def _reply_task_answers(
         self,
@@ -671,8 +691,6 @@ class CompletionPresentationChannel(ChannelReplies):
                         content = unconfirmed_content
                 if outcome.receipt:
                     outcome.receipt.partials(confirmed)
-                if outcome.bounded_delivery and confirmed:
-                    outcome.bounded_delivery.record(tuple(("partial", p.item_id) for p in outcome.partial_answers), "confirmed")
                 await final_reply(content)
         except TimeoutError:
             # A timed-out post may already have published SDK chunks. Do not
@@ -688,14 +706,8 @@ class CompletionPresentationChannel(ChannelReplies):
         allow_completion_mention: bool = True,
     ) -> None:
         mention = outcome.mention_user_id
-        def record(result: SendResult) -> None:
-            if outcome.bounded_delivery and receipt(result) == "confirmed":
-                outcome.bounded_delivery.record((BODY,), "confirmed")
-                record_sent_answer(outcome.run_reply, None, outcome.turn_id, (BODY,), result)
-
         await self._reply(
             outcome.origin if origin is None else origin,
             content,
             completion_mention_user_id=mention if allow_completion_mention else None,
-            on_result=record if outcome.bounded_delivery else None,
         )

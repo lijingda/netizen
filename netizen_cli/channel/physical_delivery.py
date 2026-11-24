@@ -1,4 +1,4 @@
-"""In-memory receipts for one Claude physical answer and its running presentation."""
+"""In-memory receipts for one physical answer and its running presentation."""
 import asyncio
 import logging
 from collections.abc import Awaitable
@@ -20,13 +20,13 @@ INCOMPLETE = "部分内容未能确认送达。"
 logger = logging.getLogger(__name__)
 
 
-def record_sent_answer(reply: LogicalReply | None, location: CardReplyLocation | None, turn_id: str,
+def record_sent_answer(reply: LogicalReply | None, location: CardReplyLocation, turn_id: str,
                        items: tuple[Item, ...], result: SendResult) -> None:
     # An empty ID denotes a confirmed post with contradictory IDs. It may qualify
     # for the original-input exception, but is never evidence of content on that input.
     mid = _confirmed_reply_id(result, on_conflict="")
     if reply is not None and mid is not None:
-        reply.published(mid, turn_id, items, location.usable if location else bool)
+        reply.published(mid, turn_id, items, location.usable)
 
 
 @dataclass(slots=True)
@@ -36,6 +36,7 @@ class PhysicalDelivery:
     prepared_images: set[Item] = field(default_factory=set)
     posted: set[Item] = field(default_factory=set)
     settled: bool = False
+    bounded_fallback: bool = False
 
     def expect(self, item: Item) -> None:
         self.items.setdefault(item, "unattempted")
@@ -54,7 +55,7 @@ class PhysicalDelivery:
         return "unattempted"
 
     def can_post(self, item: Item) -> bool:
-        return item not in self.posted and self.items.get(item, "unattempted") in ("unattempted", "rejected")
+        return item not in self.posted and self.items.get(item, "unattempted") in (("unattempted", "rejected", "unknown") if self.bounded_fallback else ("unattempted", "rejected"))
 
     def begin(self, items: tuple[Item, ...], reply: LogicalReply | None, *, post: bool = False) -> tuple[Item, ...]:
         # Mark before awaiting the Channel. Cancellation leaves an unknown outcome.

@@ -19,6 +19,7 @@ from openai_codex.generated.v2_all import (
 )
 from pydantic import ValidationError
 
+from ..partial_answers import final_agent_answer
 from ..bindings import (
     ThreadBinding,
 )
@@ -230,17 +231,5 @@ def _turn_contains_item(turn: object, item_type: str) -> bool:
 
 
 def _final_agent_response(items: list[object]) -> str | None:
-    fallback: str | None = None
-    for item in reversed(items):
-        root = getattr(item, "root", item)
-        if getattr(root, "type", None) != "agentMessage":
-            continue
-        text = getattr(root, "text", None)
-        if not isinstance(text, str):
-            continue
-        phase = _enum_value(getattr(root, "phase", None))
-        if phase == "final_answer":
-            return text
-        if phase is None and fallback is None:
-            fallback = text
-    return fallback
+    answer = final_agent_answer(items)
+    return answer.text if answer else None

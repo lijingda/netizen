@@ -2200,7 +2200,7 @@ class CardRendererTest(unittest.TestCase):
                 self.assertNotIn("状态：", json.dumps(panel, ensure_ascii=False))
                 self.assertIn("过程信息：暂不可用", json.dumps(panel, ensure_ascii=False))
 
-        for status, title in (("interrupted", "任务已中断"), ("failed", "任务未完成")):
+        for status, title in (("interrupted", "任务已中断"), ("failed", "任务未完成"), ("unknown", "本轮终态未确认")):
             with self.subTest(status=status):
                 card = turn_progress_card(snapshot=snapshot, terminal_status=status, include_result=False).card
                 self.assertEqual(card["header"]["title"]["content"], title)
@@ -2215,7 +2215,7 @@ class CardRendererTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             turn_progress_card(snapshot=snapshot, collapsed=True)
         with self.assertRaises(ValueError):
-            turn_progress_card(snapshot=snapshot, terminal_status="unknown")
+            turn_progress_card(snapshot=snapshot, terminal_status="invalid")
         with self.assertRaisesRegex(TurnFileCardLimitError, "bytes"):
             turn_progress_card(
                 snapshot=snapshot,
