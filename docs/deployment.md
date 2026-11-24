@@ -338,6 +338,22 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 只运行受影响的 phase。没有触及这些边界的迭代无需
 运行 live probe。
 
+修改飞书过程消息适配层、固定的 `lark-channel-sdk` / `lark-oapi` 版本或过程消息展示时，
+在获准使用的实例和测试群运行 [ADR 0107](adr/0107-present-process-in-feishu-process-messages.md) 专项。
+用该实例的应用身份创建一条测试根消息、一条话题回复和一条过程消息。显式传入 root 和群 ID，
+把只含结构的 JSON 留在本机。例如在 Linux 上执行
+
+```bash
+timeout 300 .venv/bin/python scripts/check_process_messages.py \
+  --live --root "$instance_root" --chat "$test_chat_id" > /tmp/process-message-probe.json
+```
+
+退出码 0 表示 API 检查通过。探针精确读取根、直接父消息与过程消息，核对聊天和话题位置。
+它验证 1,800 字符快照、同一身份的替换和原样重发均获确认，并检查完成后更新返回 10001。
+有界并发样本允许各次返回 0 或 10020，是否出现 10020 仅供记录。回环测试固定覆盖这一拒绝。
+由维护者分别在桌面和移动客户端展开本次话题的过程消息，确认只剩标题“终版”和一行“乙”，
+再记录替换与去重验收结果。实机门禁未通过时依 ADR 0107 降级为普通答案投递。
+
 Worktree 目录选择、定时工作区交接或原生 cwd 采用边界变化时，从源码 checkout 运行：
 
 ```bash
