@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, PropertyMock, patch
 from uuid import UUID
 
 from lark_channel import SendResult
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 import unittest
 
@@ -55,9 +55,10 @@ async def owner_channel():
 
 
 class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
-    def freeze_trace(self, fx, scenario, *, case=None):
-        case = case or self
-        case.enterContext(patch("netizen_cli.runtime.claude_ordinary.uuid4",
+    def freeze_trace(self, fx, scenario, *, stack=None):
+        if stack is None:
+            stack = self.enterContext(ExitStack())
+        stack.enter_context(patch("netizen_cli.runtime.claude_ordinary.uuid4",
                                side_effect=(UUID(int=1), UUID(int=2))))
         def expected_changes(trace):
             # PR 315, merged after the fixture was recorded on a1b9eee.
@@ -79,8 +80,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(field["content"], "任务已完成")
                         field["content"] = "本轮已完成"
 
-        return expect_presenter_trace(case, fx, scenario, reference=CLAUDE_FIXTURE,
-                                     expected_edits=expected_changes)
+        return expect_presenter_trace(self, fx, scenario, reference=CLAUDE_FIXTURE,
+                                      expected_edits=expected_changes, stack=stack)
 
     async def until(self, predicate):
         async with asyncio.timeout(10):
@@ -932,6 +933,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(pulse.typing_reaction_id)
                     self.assertEqual(len(fx.channel.replies), 1)
                     human = ordinary._active[binding.id].human
+                    self.assertIsNone(human.reply.message_id)
                     attempts = []
                     update = fx.channel.update_card
 
@@ -1653,6 +1655,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         # The two golden rows retain the complete call order on the original main.
         await self.exercise_card_order("before", "none", "single", reference="single_result_before_idle")
         await self.exercise_card_order("end", "none", "final wake", reference="late_first_receipt")
+        for fault in ("unknown", "fail"):
+            await self.exercise_card_order("before", "none", "single", at=0, fault=fault, matching_partial=True)
         # Hold the busy receipt across a bodyless wake, a cron change and the final idle.
         for fault in ("ok", "unknown", "fail"):
             with self.subTest(busy_receipt=fault):
@@ -1672,10 +1676,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         await self.exercise_card_order(receipt, cron, wake, at=index, fault=fault)
 
     async def exercise_card_order(self, receipt, cron, wake, *, at=None, fault="ok", hold_busy=False,
-                                  repeated=False, early_idle=False, reference=None):
-        from contextlib import ExitStack
+                                  repeated=False, early_idle=False, reference=None, matching_partial=False):
         from dataclasses import replace
-        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
         from lark_channel import OutboundCard
         from netizen_cli.bindings import BindingTaskFeedback
         from netizen_cli.cards import turn_progress_card
@@ -1683,6 +1686,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
 
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2.
+            if matching_partial:
+                app._progress_cards._poll_seconds = .01
             binding = fx.store.create_channel_binding(
                 scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT), project_alias="test", creator_id="ou_user",
                 task_feedback=BindingTaskFeedback(progress_card_enabled=True),
@@ -1754,9 +1759,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 stack.enter_context(patch.object(fx.channel, "update_card", replace_card))
                 stack.enter_context(patch.object(app, "handle_ordinary_completion", observe))
                 if reference:
-                    case = unittest.TestCase()
-                    stack.callback(case.doCleanups)
-                    self.freeze_trace(fx, reference, case=case)
+                    self.freeze_trace(fx, reference, stack=stack)
                 if receipt == "before":
                     release_first.set()
                 await app.handle_message(FakeMessage("work", message_id="H1"))
@@ -1775,6 +1778,12 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(opened.wait(), 5)
                     if receipt == "before":
                         await self.until(lambda: bool(app._progress_cards._sessions))
+                    if matching_partial:
+                        for block in (TextBlock("one answer"), ToolUseBlock("tool", "Read", {})):
+                            cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session,
+                                uuid=type(block).__name__, message_id="partial"))
+                        await self.until(lambda: bool(attempts))
+                        self.assertEqual("one answer" in str(visible["first"]), fault == "unknown")
                     if wake != "single":
                         cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
                         system("task_started", task_id="t", run_id="r", tool_use_id="tool")
@@ -1848,10 +1857,95 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     before = len(attempts)
                 self.assertTrue(await ordinary.wait_idle(10))
                 assert_current("全部完成")
+                if matching_partial:
+                    self.assertTrue(all(isinstance(item, OutboundCard) for _, item in fx.channel.replies))
                 self.assertEqual(redundant, [])
                 self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
                                  [last_id])
                 return before
+
+    @requires_claude_sdk
+    async def test_explorer_rejects_a_queued_intermediate_view(self):
+        from dataclasses import replace
+        from netizen_cli.ordinary_sessions import CliStateChanged
+
+        enqueue = ClaudeOrdinarySessions._queue
+
+        def capture_state(runtime, execution, human, event, **kwargs):
+            if isinstance(event, CliStateChanged):
+                captured = event.current()
+                event = replace(event, current=lambda: captured)
+            return enqueue(runtime, execution, human, event, **kwargs)
+
+        with patch.object(ClaudeOrdinarySessions, "_queue", capture_state), self.assertRaisesRegex(AssertionError, "late_first_receipt"):
+            await self.exercise_card_order("end", "none", "final wake", reference="late_first_receipt")
+
+    @requires_claude_sdk
+    async def test_retired_or_disqualified_cards_release_their_payloads_while_cron_keeps_client_open(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        from netizen_cli.bindings import BindingTaskFeedback
+
+        for conflict in ("none", "current", "older"):
+            with self.subTest(conflict=conflict):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    binding = fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                        project_alias="test", creator_id="ou_user", task_feedback=BindingTaskFeedback(progress_card_enabled=True))
+                    fx.channel.reply_results.extend(SendResult.ok(message_id=mid) for mid in ("first", "wake"))
+                    await app.handle_message(FakeMessage("work", message_id="H"))
+                    cli = clients.calls[-1]
+                    cli.init()
+                    presenter = app._progress_cards
+                    await self.until(lambda: bool(presenter._sessions))
+                    ex = ordinary._active[binding.id]
+                    reply = ex.human.reply
+                    await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+
+                    def system(kind, **data):
+                        cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+
+                    cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session))
+                    system("task_started", task_id="A", run_id="R", tool_use_id="tool")
+                    system("background_tasks_changed", tasks=[{"task_id": "A", "run_id": "R"}])
+                    cli.result(result="first answer")
+                    await self.until(lambda: ex.admissible and not ex.delivery.queues and reply.message_id == "first")
+                    self.assertEqual(list(presenter._published[reply]), ["first"])
+                    writer = presenter._writers["first"]
+                    self.assertIsNotNone(writer.known)
+                    location = presenter.binding_location(binding.id)
+                    if conflict == "current":
+                        with patch.object(fx.channel, "update_card", return_value=sent_result("first", chat_id="oc_other")):
+                            cli.init(user_message_uuids=[])
+                            await self.until(lambda: "first" in location.unusable and not ex.delivery.queues)
+                        self.assertFalse(presenter._published.get(reply))
+                        self.assertIsNone(writer.known)
+                    else:
+                        cli.init(user_message_uuids=[])
+                    origin = {"kind": "task-notification", "producer": "session-task", "runId": "R"}
+                    if conflict == "older":
+                        await self.until(lambda: cli.live.physical and not ex.delivery.queues)
+                        update = fx.channel.update_card
+                        async def remove_old_line(mid, card):
+                            if mid == "first":
+                                return sent_result(mid, chat_id="oc_other")
+                            return await update(mid, card)
+                        with patch.object(fx.channel, "update_card", remove_old_line):
+                            cli.result(result="wake answer", user_message_uuid=None, idle=False, origin=origin)
+                            await self.until(lambda: "first" in location.unusable and not ex.delivery.queues)
+                        self.assertIsNone(writer.known)
+                        self.assertEqual(list(presenter._published[reply]), ["wake"])
+                        writer = presenter._writers["wake"]
+                        self.assertIsNotNone(writer.known)
+                    else:
+                        cli.result(result=None, reason=None, user_message_uuid=None, idle=False, origin=origin)
+                    system("background_tasks_changed", tasks=[])
+                    system("session_state_changed", state="idle")
+                    await self.until(lambda: not ex.humans and not ex.delivery.queues)
+                    self.assertIs(ordinary._active[binding.id], ex)
+                    self.assertTrue(cli.live.crons)
+                    self.assertNotIn(reply, presenter._published)
+                    self.assertIsNone(writer.known)
+                    self.assertEqual(location.unusable, set() if conflict == "none" else {"first"})
 
     async def test_background_presentation_is_per_physical_result_and_mentions_last_reply_once(self):
         from netizen_cli.bindings import BindingTaskFeedback

@@ -104,8 +104,8 @@ class _PartialAnswerDelivery:
     policy: DeliveryPolicy = DeliveryPolicy.BOUNDED_FALLBACK
     attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
     confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
-    # A physical terminal inherits the running poll's mode and its last confirmed card.
-    initial: tuple[str | None, Activity] | None = None
+    message_id: str | None = None
+    confirmed_snapshot: Activity | None = None
     text_only: bool = False
     location: CardReplyLocation | None = None
 
@@ -164,6 +164,8 @@ class _ReplyCardPresenter:
         self, display: RunDisplay, message_id: str, key: PresentationKey, location: CardReplyLocation,
         content: ReplyCardProjection, *, confirmed: OutboundCard | None = None, tracks_run: bool = True,
     ) -> bool:
+        if not location.can_write(message_id):
+            return False
         writer = self._message_writer(message_id)
         if confirmed is not None:
             writer.known = confirmed
@@ -174,6 +176,24 @@ class _ReplyCardPresenter:
     async def reconcile(self, display: RunDisplay) -> dict[str, bool]:
         cards = self._published.get(display.reply, {}) if display.reply else {}
         return await self._reconcile_cards(display, cards)
+
+    def retire_run(self, reply: LogicalReply) -> None:
+        cards = self._published.pop(reply, {})
+        for view in cards.values():
+            view.writer.known = None
+        cards.clear()
+
+    def _release_cards(self, ids: set[str]) -> None:
+        if not ids:
+            return
+        for mid in ids:
+            if writer := self._writers.get(mid):
+                writer.known = None
+        for reply, cards in tuple(self._published.items()):
+            for mid in ids.intersection(cards):
+                del cards[mid]
+            if not cards:
+                del self._published[reply]
 
     async def finish_initial_card(self, key: PresentationKey, display: RunDisplay, status: TerminalStatus) -> None:
         session = self._sessions_for(key).pop(key.index, None)
@@ -203,12 +223,19 @@ class _ReplyCardPresenter:
 
             try:
                 current = await external_call(view.writer.reconcile(desired, write))
-                if current and mid == newest() and reply and reply.message_id is None:
-                    reply.confirmed(mid)
+                if not view.location.can_write(mid):
+                    if reply and reply.message_id == mid:
+                        reply.message_id = None
+                    return False
+                if current and reply:
+                    has_answer = view.content.result or view.content.partial_answer or view.content.files
+                    if has_answer and mid == newest() and reply.message_id is None:
+                        reply.confirmed(mid)
+                    elif not has_answer and reply.message_id == mid:
+                        reply.message_id = None
                 if view.writer.known is not None and mid != newest() and cards.get(mid) is view:
                     cards.pop(mid)  # A confirmed, immutable card no longer needs a writer.
-                if not view.location.can_write(mid) and reply and reply.message_id == mid:
-                    reply.message_id = None
+                    view.writer.known = None
                 return current
             except Exception:
                 logger.warning("optional reply update failed", extra=view.key.log_context)
@@ -219,7 +246,7 @@ class _ReplyCardPresenter:
         return {mid: result for (mid, _), result in zip(pending, results, strict=True)}
 
     def binding_location(self, binding_id: str) -> BindingCardLocation:
-        return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners))
+        return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners, release_cards=self._release_cards))
 
     def retire_binding(self, binding_id: str) -> None:
         if location := self._binding_locations.pop(binding_id, None):
@@ -326,10 +353,11 @@ class _ReplyCardPresenter:
             ),
             attempted_partials=set() if session is None else session.attempted_partials,
             confirmed_partials=set() if session is None else session.confirmed_partials,
-            initial=(session.message_id, session.snapshot) if session else None,
+            message_id=session.message_id if session else None,
+            confirmed_snapshot=session.snapshot if session and session.writer and session.writer.known is not None else None,
             location=session.location if session else None,
             policy=session.policy if session else DeliveryPolicy.BOUNDED_FALLBACK,
-            text_only=bool(session and session.failed),
+            text_only=bool(session and (session.failed or session.message_id is None)),
         )
 
     async def deliver_partial_answers(

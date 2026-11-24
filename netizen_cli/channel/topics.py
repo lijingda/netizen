@@ -61,6 +61,7 @@ class BindingCardLocation:
     root: str | None = None
     unusable: set[str] = field(default_factory=set)
     retired: bool = False
+    release_cards: Callable[[set[str]], None] = lambda _: None
 
     def retire(self) -> None:
         self.retired = True
@@ -84,9 +85,10 @@ class CardReplyLocation:
 
     def retire(self) -> None:
         self.retired = True
-        for mid in self.cards:
-            if self.binding.owners.get(mid) is self:
-                del self.binding.owners[mid]
+        owned = {mid for mid in self.cards if self.binding.owners.get(mid) is self}
+        self.binding.release_cards(owned)
+        for mid in owned:
+            del self.binding.owners[mid]
         self.cards.clear()
 
     def usable(self, message_id: str) -> bool:
@@ -113,6 +115,8 @@ class CardReplyLocation:
                 or (card and self.scope.topic_id and sent.root_id and not root)
                 or (card and len(ids) > 1)):
             self.binding.unusable.update(ids)
+            self.binding.release_cards({mid for mid in ids
+                                        if (owner := self.binding.owners.get(mid)) and owner.binding is self.binding})
             return SendResult(success=False)
         if any(not self.usable(value) for value in ids):
             return SendResult(success=False)

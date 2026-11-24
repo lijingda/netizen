@@ -50,9 +50,10 @@ def _encode_media(value):
     raise TypeError(f"Unexpected transport value {type(value).__name__}")
 
 
-def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE, expected_edits=None):
+def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE, expected_edits=None, stack=None):
     """Compare the complete ordered trace after the scenario finishes."""
-    stack = case.enterContext(ExitStack())
+    if stack is None:
+        stack = case.enterContext(ExitStack())
     nonces = itertools.count(1)
     stack.enter_context(patch("secrets.token_hex", side_effect=lambda n: next(nonces).to_bytes(n, "big").hex()))
     events = delivery_recorder(fixture.channel, stack, include_reads=True)
@@ -66,5 +67,5 @@ def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE, expected_e
             expected_edits(expected)
         case.assertEqual(expected, actual, name)
 
-    case.addCleanup(compare)
+    stack.callback(compare)
     return events

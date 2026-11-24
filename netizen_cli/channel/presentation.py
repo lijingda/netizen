@@ -119,20 +119,16 @@ class CompletionPresentationChannel(ChannelReplies):
             reply.attempted = True
         status = outcome.status
         publishable = display.publishable
-        first_id, last_snapshot = partials.initial or (None, None)
+        first_id = partials.message_id
         body_items = ((BODY, *ledger.prepared_images) if content else ())
-        previous = ledger.partial_receipt(content)
-        if previous in ("unknown", "rejected"):
-            ledger.record(body_items, previous)
-            content = ""
         location = partials.location or policy.location
-        in_card_mode = outcome.task_feedback.progress_card_enabled and not partials.text_only and (last_snapshot is None or first_id is not None)
-        if in_card_mode and snapshot and (content or outcome.partial_answers or first_id):
+        in_card_mode = outcome.task_feedback.progress_card_enabled and not partials.text_only
+        has_answer = bool(content or outcome.partial_answers)
+        if in_card_mode and snapshot and (has_answer or first_id):
             card_partials = {("partial", part.item_id) for part in outcome.partial_answers}
-            items = tuple(item for item, state in ledger.items.items()
-                          if (state == "unattempted" or (first_id and item in card_partials))
-                          and (item[0] != "partial" or item in card_partials)
-                          and (item[0] != "image" or item in ledger.prepared_images))
+            # A Result can represent a running partial that the terminal snapshot coalesced.
+            items = (*body_items, *(item for item, text in ledger.partial_text.items()
+                                    if item in card_partials or (content and text == content)))
             try:
                 projection = turn_progress_projection(snapshot=snapshot, partial_answers=outcome.partial_answers,
                     final_response=content or None, include_result=bool(content), terminal_status=status,
@@ -144,7 +140,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 ledger.begin(items)
                 if await self._progress_cards.publish_card(display, first_id, key, location, projection):
                     ledger.record(items, "confirmed")
-                    if reply:
+                    if reply and has_answer:
                         reply.confirmed(first_id)
                 return
             if (card and not first_id and publishable()
@@ -154,7 +150,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 state = receipt(sent)
                 ledger.record(items, state)
                 if state == "confirmed":
-                    if reply and (mid := _confirmed_reply_id(sent, on_conflict=_message_id(outcome.origin))):
+                    if reply and has_answer and (mid := _confirmed_reply_id(sent, on_conflict=_message_id(outcome.origin))):
                         reply.confirmed(mid)
                     if reply and (mid := _confirmed_reply_id(sent)):
                         await self._progress_cards.publish_card(display, mid, key, location, projection, confirmed=card)
@@ -163,11 +159,8 @@ class CompletionPresentationChannel(ChannelReplies):
         # their own receipts, including attempts whose publication is uncertain.
         if first_id and not location.can_write(first_id):
             first_id = None
-        displayed = {
-            p for p in (last_snapshot.partial_answers if last_snapshot else ())
-            if ledger.items.get(("partial", p.item_id)) == "confirmed"
-        }
-        if reply and first_id and displayed:
+        last_snapshot = partials.confirmed_snapshot
+        if reply and first_id and last_snapshot and last_snapshot.partial_answers:
             reply.confirmed(first_id)
         try:
             for index, fragment in enumerate(outcome.partial_answers):
@@ -182,7 +175,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 content += policy.plain_suffix()
                 await self._send_receipted_items(outcome, policy, ledger, body_items, content, "final", location)
         finally:
-            if first_id and last_snapshot and not any(value == "unknown" for value in ledger.items.values()):
+            if first_id and last_snapshot:
                 frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
                     run_continues=outcome.run_continues, include_result=False, collapsed=True)
                 await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False)
@@ -246,10 +239,15 @@ class CompletionPresentationChannel(ChannelReplies):
             await self._finish_task_reactions(event.target.origin, run.turn_id, reaction)
             return
         reply = display.reply
-        if reply is None or not display.publishable():
+        if reply is None:
             return
-        if not await self._progress_cards.reconcile(display) and not reply.attempted:
-            await _best_effort_update(self._progress_cards.finish_initial_card(run, display, event.status))
+        try:
+            if not display.publishable():
+                return
+            if not await self._progress_cards.reconcile(display) and not reply.attempted:
+                await _best_effort_update(self._progress_cards.finish_initial_card(run, display, event.status))
+        finally:
+            self._progress_cards.retire_run(reply)
         await _best_effort_update(self._reactions.freeze(run.turn_id))
         await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
         if event.mention_user_id and display.publishable():
