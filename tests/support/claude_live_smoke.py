@@ -23,6 +23,7 @@ class LiveSmoke:
         self.project_token = uuid4().hex
         self.first_token = uuid4().hex
         self.handoff_token = uuid4().hex
+        self.release_token = uuid4().hex
 
     def prompt(self, label, scenario):
         if scenario in ("foreground", "foreground-b"):
@@ -41,12 +42,14 @@ class LiveSmoke:
             "handoff": (f"Remember this separate native handoff token {self.handoff_token}. Without tools, "
                         "reply with the earlier conversation token."),
             "after-cli": "Without tools, recall the separate native handoff token.",
+            "terminal-turn": f"Remember this terminal release token {self.release_token}. Reply briefly without tools.",
+            "after-release": "Without tools, recall the terminal release token I gave you.",
         }
         return prompts.get(label, "Reply with a brief acknowledgement without using tools.")
 
     def check_answer(self, label, answer):
         assert isinstance(answer, str) and answer.strip()
         expected = {"ordinary": self.project_token, "resume": self.first_token,
-                    "handoff": self.first_token, "after-cli": self.handoff_token}
+                    "handoff": self.first_token, "after-cli": self.handoff_token, "after-release": self.release_token}
         if label in expected:
             assert expected[label] in answer, "native context token missing"
