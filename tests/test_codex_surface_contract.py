@@ -7,7 +7,6 @@ import json
 from types import SimpleNamespace
 import unittest
 from contextlib import ExitStack
-from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
@@ -26,38 +25,13 @@ from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.contracts import NativeThreadMetadata
 from tests.support.channel_cards import _card_button_value, _elements, direct_button_event, direct_card_event
 from tests.support.channel_fixtures import channel_fixture
+from tests.support.presenter_traces import delivery_recorder
 from tests.support.channel_messages import FakeMessage
 from tests.test_codex_runtime import FakeTerminalCleanup, FakeThreadSubscriptionControl
 from tests.test_runtime_thread_naming import NamingCodex, NamingThread, eventually
 
 FIXTURE = Path(__file__).parent / "fixtures" / "codex_surfaces_30a9e8c.json"
 DIRECT = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
-
-
-def delivery_value(value):
-    if hasattr(value, "id") and hasattr(value, "conversation"):
-        return {"messageId": value.id, "chatId": getattr(value, "chat_id", None) or getattr(value.conversation, "chat_id", None),
-                "threadId": getattr(value.conversation, "thread_id", None)}
-    if is_dataclass(value):
-        return asdict(value)
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
-    return value
-
-
-def delivery_recorder(channel, stack):
-    events = []
-
-    def capture(method):
-        async def call(*args, **kwargs):
-            events.append([method.__name__, [delivery_value(v) for v in args],
-                           {k: delivery_value(v) for k, v in kwargs.items()}])
-            return await method(*args, **kwargs)
-        return call
-
-    for name in ("reply", "send", "update_card", "upload_media", "add_reaction", "remove_reaction"):
-        stack.enter_context(patch.object(channel, name, capture(getattr(channel, name))))
-    return events
 
 
 def native_access_recorder(runtime, stack):

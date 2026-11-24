@@ -30,6 +30,7 @@ from netizen_cli.schedules.models import ScheduleRule
 from netizen_cli.session_settings import SessionSettings
 from netizen_cli.sessions.errors import SessionToolError
 from netizen_cli.worktrees.policy import WorkspacePolicy
+from tests.support.presenter_traces import expect_presenter_trace
 from tests.support.channel_cards import _elements
 from tests.support.channel_fixtures import channel_fixture, scheduled_channel_fixture
 from tests.support.channel_messages import FakeMessage, PNG
@@ -303,6 +304,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(presentations[0], presentations[1])
 
     async def test_empty_final_suppresses_files_and_images_without_preparing_or_delivering_them(self):
+        expect_presenter_trace(self, self.fixture, "suppressed_files")
         (self.fixture.project / "secret.txt").write_text("private file")
         (self.fixture.project / "secret.png").write_bytes(PNG)
         outcome = self.outcome(
@@ -423,6 +425,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                 self.assert_cleaned(outcome)
 
     async def test_existing_progress_finishes_collapsed_without_result_files_or_new_card(self):
+        expect_presenter_trace(self, self.fixture, "suppressed_same_card")
         (self.fixture.project / "secret.txt").write_text("private file")
         outcome = await self.start_progress(self.outcome(
             task_feedback=replace(self.feedback, progress_card_enabled=True),
@@ -489,6 +492,22 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.replies[-1], (self.origin.id, "visible final answer"))
         self.assertNotIn("投递未确认", str(self.channel.replies))
         self.assert_cleaned(outcome)
+
+    async def test_cardless_suppression_delivers_partial_and_mentions_original_input(self):
+        expect_presenter_trace(self, self.fixture, "suppressed_partial_and_mention")
+        outcome = self.outcome(
+            partial_answers=(PartialAnswer("native-one", "turn-one", "p", "visible partial"),),
+            task_feedback=BindingTaskFeedback(progress_card_enabled=False, completion_mention_enabled=True),
+        )
+        self.channel.reply_results.append(sent_result("om_partial", chat_id="oc_direct"))
+        self.queue_mention(self.origin.id)
+        await self.suppress(outcome)
+        await self.app.handle_completion(outcome)
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertEqual(self.channel.replies[0][1].markdown, "**阶段性答案**\n\nvisible partial")
+        (_, reminder, opts), = self.channel.send_calls
+        self.assertEqual(opts.reply_to, self.origin.id)
+        self.assertEqual(reminder.mentions, [Identity(open_id="ou_initiator")])
 
     async def test_completion_mentions_follow_setting_with_and_without_existing_card(self):
         for progress in (False, True):

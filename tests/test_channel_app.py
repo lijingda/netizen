@@ -115,6 +115,7 @@ from netizen_cli.message_history import (
 from netizen_cli.sdk_gap_adapter import GoalStatus
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
+from tests.support.presenter_traces import expect_presenter_trace
 from tests.support.channel_messages import (
     PNG,
     FakeMessage,
@@ -862,6 +863,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_progress_card_updates_same_message_and_collapses_at_terminal(
         self,
     ) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_same_card")
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -953,6 +955,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_initial_progress_card_failure_falls_back_at_terminal(self) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_start_fallback")
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -1132,9 +1135,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_progress_update_failure_falls_back_to_plain_answer(
         self,
     ) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_terminal_fallback")
         await self._assert_terminal_progress_update_retry(recovers=False)
 
     async def test_terminal_progress_update_retry_keeps_card_and_mentions_once(self) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_retry_mention")
         await self._assert_terminal_progress_update_retry(recovers=True)
 
     async def _assert_terminal_progress_update_retry(self, *, recovers: bool) -> None:
@@ -8981,6 +8986,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         binding, record = await self.open_direct_side()
+        expect_presenter_trace(self, self.fixture, "side_plain")
         prompt = FakeMessage(
             "work quietly",
             message_id="om-side-prompt",
@@ -9221,6 +9227,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_side_turn_without_progress_uses_result_files_card(self) -> None:
         binding, record = await self.open_direct_side()
+        expect_presenter_trace(self, self.fixture, "side_files")
         side_cwd = self.project.parent / "side-cwd"
         side_cwd.mkdir()
         artifact = side_cwd / "side-output.txt"
@@ -9319,6 +9326,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             progress_card_enabled=True,
         )
         binding, record = await self.open_direct_side(task_feedback=feedback)
+        expect_presenter_trace(self, self.fixture, "side_same_card")
         artifact = self.project / "side-progress.txt"
         artifact.write_text("side", encoding="utf-8")
         image = self.project / "side-progress.png"
@@ -9422,6 +9430,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         feedback = BindingTaskFeedback(progress_card_enabled=True)
         binding, record = await self.open_direct_side(task_feedback=feedback)
+        if not terminal_succeeds:
+            expect_presenter_trace(self, self.fixture, "side_terminal_fallback")
         self.runtime.side_turn_activity_values[record.id] = (
             side_turn_activity_snapshot(side_id=record.id)
         )
@@ -9486,6 +9496,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_side_progress_start_failure_falls_back_at_terminal(self) -> None:
         feedback = BindingTaskFeedback(progress_card_enabled=True)
         binding, record = await self.open_direct_side(task_feedback=feedback)
+        expect_presenter_trace(self, self.fixture, "side_start_fallback")
         activity = side_turn_activity_snapshot(side_id=record.id)
         self.runtime.side_turn_activity_values[record.id] = activity
         self.channel.reply_results.append(RuntimeError("progress send failed"))

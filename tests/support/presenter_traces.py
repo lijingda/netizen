@@ -1,0 +1,62 @@
+"""Record calls at the public Feishu transport boundary for Codex differentials."""
+
+import base64
+import itertools
+import json
+from contextlib import ExitStack
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+from unittest.mock import patch
+
+
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "codex_presenter_a1b9eee.json"
+
+
+def delivery_value(value):
+    if hasattr(value, "id") and hasattr(value, "conversation"):
+        return {"messageId": value.id, "chatId": getattr(value, "chat_id", None) or getattr(value.conversation, "chat_id", None),
+                "threadId": getattr(value.conversation, "thread_id", None)}
+    if is_dataclass(value):
+        return asdict(value)
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    return value
+
+
+def delivery_recorder(channel, stack):
+    events = []
+
+    def capture(method):
+        async def call(*args, **kwargs):
+            events.append([method.__name__, [delivery_value(v) for v in args],
+                           {k: delivery_value(v) for k, v in kwargs.items()}])
+            return await method(*args, **kwargs)
+        return call
+
+    for name in ("reply", "send", "update_card", "upload_media", "add_reaction", "remove_reaction"):
+        stack.enter_context(patch.object(channel, name, capture(getattr(channel, name))))
+    return events
+
+
+def _encode_media(value):
+    if isinstance(value, bytes):
+        return {"base64": base64.b64encode(value).decode("ascii")}
+    raise TypeError(f"Unexpected transport value {type(value).__name__}")
+
+
+def expect_presenter_trace(case, fixture, name):
+    """Compare the complete ordered trace after the scenario finishes."""
+    stack = case.enterContext(ExitStack())
+    nonces = itertools.count(1)
+    stack.enter_context(patch("secrets.token_hex", side_effect=lambda n: next(nonces).to_bytes(n, "big").hex()))
+    events = delivery_recorder(fixture.channel, stack)
+
+    def compare():
+        serialized = json.dumps(events, default=_encode_media, ensure_ascii=False)
+        root = fixture.project_root
+        actual = json.loads(serialized.replace(str(root.resolve()), "<root>").replace(str(root), "<root>"))
+        expected = json.loads(FIXTURE.read_text(encoding="utf-8"))[name]
+        case.assertEqual(expected, actual, name)
+
+    case.addCleanup(compare)
+    return events
