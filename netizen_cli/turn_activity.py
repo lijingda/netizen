@@ -202,7 +202,7 @@ class GoalTurnFacts:
     file_items: tuple[FileChangeThreadItem | GoalSavedImage, ...]
     turn_diff: str | None
     partial_answers: tuple[PartialAnswer, ...]
-    has_child_work: bool
+    child_patch_ids: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)

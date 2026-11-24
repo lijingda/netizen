@@ -47,7 +47,7 @@ from ..sdk_gap_adapter import (
     GoalMutationRejected,
     GoalSnapshot,
 )
-from ..turn_patch_children import TaskPatchChildren
+from ..turn_patch_children import TaskPatchChildren, child_patch_item_id
 
 from . import limits
 from .native_values import (
@@ -1020,7 +1020,7 @@ class GoalRuntime(TurnObservationRuntime):
                     active.stream_terminal.turn_diff
                     if active.stream_terminal is not None
                     else None
-                ),
+                ) or (active.candidate.turn_diff if active.candidate else None),
                 error=error,
                 background_cleanup_requested=active.cleanup_succeeded,
                 task_feedback=active.task_feedback,
@@ -1033,16 +1033,7 @@ class GoalRuntime(TurnObservationRuntime):
                 partial_answers=tuple(active.partial_answers.values()),
                 finalization=finalization,
                 finalization_error=finalization_error,
-                patch_children=(
-                    await self._completion_patch_children(
-                        active.thread_id,
-                        active.stream_terminal.final_physical_turn_id,
-                        active.final_items,
-                    )
-                    if active.final_turn_status == "completed"
-                    and active.stream_terminal is not None
-                    else TaskPatchChildren()
-                ),
+                patch_children=await self._goal_patch_children(active),
             )
             try:
                 async with asyncio.timeout(
@@ -1084,6 +1075,19 @@ class GoalRuntime(TurnObservationRuntime):
             await asyncio.gather(task, return_exceptions=True)
         active.delivery_task = None
         active.reply.retire()
+
+    async def _goal_patch_children(self, active: _ActiveGoal) -> TaskPatchChildren:
+        terminal = active.stream_terminal
+        if active.final_turn_status != "completed" or terminal is None:
+            return TaskPatchChildren()
+        children = await self._completion_patch_children(
+            active.thread_id, terminal.final_physical_turn_id, active.final_items,
+        )
+        if active.candidate:
+            proven = {child_patch_item_id(item, active.thread_id) for item in active.final_items}
+            if active.candidate.child_patch_ids - proven:
+                return TaskPatchChildren(children.batches, complete=False)
+        return children
 
     async def _clear_completed_goal(self, active: _ActiveGoal) -> None:
         """Clear one four-proof completed Goal exactly once and confirm absence."""
@@ -1195,20 +1199,16 @@ class GoalRuntime(TurnObservationRuntime):
             if candidate is not None:
                 if candidate.turn_id != terminal.final_physical_turn_id or candidate.status != turn_status:
                     raise RuntimeError("Goal tap and final history disagree")
-                # History can omit completed items. Keep the exact tap evidence
-                # first, then the final native views, deduplicated by item ID.
-                history_files = {
-                    getattr(getattr(item, "root", item), "id", None)
-                    for item in items
-                    if getattr(getattr(item, "root", item), "type", None) in {"fileChange", "imageGeneration"}
-                    and _enum_value(getattr(getattr(item, "root", item), "status", None)) == "completed"
-                    and (getattr(getattr(item, "root", item), "type", None) != "imageGeneration"
-                         or getattr(getattr(item, "root", item), "saved_path", None))
-                }
-                items = (*tuple(item for item in candidate.file_items if item.id not in history_files), *items)
-                if final_response is None or (candidate.phase is not None and not any(
-                    _enum_value(getattr(getattr(item, "root", item), "phase", None)) == "final_answer" for item in items
-                )):
+                # Keep both views. Path discovery takes their union, and exact
+                # patch IDs already deduplicate counts or mark conflicts unknown.
+                roots = tuple(getattr(item, "root", item) for item in items)
+                items = (*items, *candidate.file_items)
+                history_has_final = any(
+                    _enum_value(getattr(root, "phase", None)) == "final_answer"
+                    and isinstance(getattr(root, "text", None), str) and root.text
+                    for root in roots
+                )
+                if not final_response or (candidate.phase is not None and not history_has_final):
                     final_response = candidate.final_response
             active.final_turn_status = turn_status
             active.final_items = items

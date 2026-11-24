@@ -102,6 +102,14 @@ def _child_edges(
     return spawned, referenced, complete
 
 
+def child_patch_item_id(item: object, parent_id: str) -> str | None:
+    root = _item(item)
+    if not isinstance(root, (CollabAgentToolCallThreadItem, SubAgentActivityThreadItem)):
+        return None
+    spawned, referenced, complete = _child_edges((item,), parent_id)
+    return root.id if spawned or referenced or not complete else None
+
+
 def _has_parent(thread: Thread, parent_id: str) -> bool:
     parents = []
     if thread.parent_thread_id is not None:

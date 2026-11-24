@@ -201,3 +201,28 @@ class GoalPresentationTraceTest(GoalPresentationCase):
         self.reminder("om_reply_3")
         await self.two_answers()
         self.assertEqual(self.outcomes[-1].origin.id, "om_goal")
+
+
+class GoalFileEvidenceTest(GoalPresentationCase):
+    async def test_unattributed_child_keeps_each_direct_file_with_unknown_total(self):
+        from tests.test_turn_patch_children import _activity
+
+        await self.start()
+        for index in (1, 2):
+            await self.file(f"direct-{index}.txt")
+            await self.item(_activity(f"child-{index}"))
+            if index == 1:
+                await self.rollover()
+            else:
+                # The final history omits the observed child and has only the
+                # final answer. Do not count the same-named patch from P1.
+                self.handle.record.items.clear()
+                self.reminder("om_reply_3")
+                await self.finish(history_answer="final")
+        for index, (_, card) in enumerate(self.channel.updates, 1):
+            body = str(card["body"])
+            self.assertIn(f"direct-{index}.txt", body)
+            self.assertIn("turn-file.send", body)
+            self.assertNotIn("累计修改 <font", body)
+            self.assertNotIn(f"direct-{3-index}.txt", body)
+        self.assertEqual(len(self.channel.updates), 2)

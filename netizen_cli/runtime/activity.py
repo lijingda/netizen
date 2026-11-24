@@ -448,7 +448,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             final_physical_turn_id=snapshot.physical_turn_id, final_turn_status=facts.status if facts else None,
             final_items=facts.file_items if facts else (), final_response=facts.final_response if facts else None,
             turn_diff=facts.turn_diff if facts else None, activity=snapshot, partial_answers=snapshot.partial_answers,
-            patch_children=TaskPatchChildren(complete=facts is not None and not facts.has_child_work),
+            patch_children=TaskPatchChildren(complete=facts is not None and not facts.child_patch_ids),
             error=None if facts else GoalStateUnknown("未能确认本轮终态；本轮观察已停止。"),
         )
 

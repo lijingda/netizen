@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from .domain import GoalStatus
 from .partial_answers import PartialAnswer, project_partial_answer
 from .progress_card_settings import ProgressCardSettings
+from .turn_patch_children import child_patch_item_id
 from .turn_activity import (
     GoalSavedImage,
     GoalTurnFacts,
@@ -787,7 +788,7 @@ class AppServerGoalControl:
 class _GoalActivityTap:
     """Freeze exact physical Turn evidence in the sole Goal consumer."""
     _terminal: bool
-    _child_work: bool
+    _child_work: set[str]
 
     __slots__ = (
         "_thread_id",
@@ -861,6 +862,10 @@ class _GoalActivityTap:
         if projection.turn_id and projection.turn_id == self._turn_id:
             if self._terminal:
                 return
+            if notification.method == "item/started" and type(payload) is _generated.ItemStartedNotification:
+                child_id = child_patch_item_id(payload.item, self._thread_id)
+                if child_id:
+                    self._child_work.add(child_id)
             if notification.method == "item/completed" and type(payload) is _generated.ItemCompletedNotification:
                 self._observe_item(payload.item)
             if projection.turn_completed and type(payload) is _generated.TurnCompletedNotification:
@@ -872,7 +877,7 @@ class _GoalActivityTap:
                         projection.turn_id, status, self._answer, self._phase,
                         tuple(self._files.values()) if status == "completed" else (),
                         self.final_turn_diff(projection.turn_id) if status == "completed" else None,
-                        tuple(self._partials.values()), self._child_work,
+                        tuple(self._partials.values()), frozenset(self._child_work),
                     )
                     self._terminal = True
                     projection = replace(projection, goal_terminal=facts)
@@ -907,7 +912,7 @@ class _GoalActivityTap:
         self._phase: _generated.MessagePhase | None = None
         self._files: dict[str, _generated.FileChangeThreadItem | GoalSavedImage] = {}
         self._partials: dict[str, PartialAnswer] = {}
-        self._child_work = False
+        self._child_work = set()
 
     def _observe_item(self, wrapped: _generated.ThreadItem) -> None:
         item = wrapped.root
@@ -923,7 +928,10 @@ class _GoalActivityTap:
         elif type(item) is _generated.ImageGenerationThreadItem and item.status == "completed" and item.saved_path:
             self._files[item.id] = GoalSavedImage(item.id, item.saved_path.root)
         elif type(item) in {_generated.CollabAgentToolCallThreadItem, _generated.SubAgentActivityThreadItem}:
-            self._child_work = True
+            if child_patch_item_id(item, self._thread_id):
+                self._child_work.add(item.id)
+            else:
+                self._child_work.discard(item.id)
 
     def final_turn_diff(self, physical_turn_id: str) -> str | None:
         if (

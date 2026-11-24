@@ -234,6 +234,41 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(partial.text, rendered(self.channel.updates[-1][1]))
         self.assertEqual(self.app._progress_cards._sessions, {})
 
+    async def check_both_file_pages(self, progress):
+        await self.start(progress=progress)
+        self.channel.reply_results.extend(sent_result(f"om_files_{i}", chat_id="oc_direct") for i in range(4))
+        pages = []
+        for physical, continues in (("goal-one", True), ("second", False)):
+            paths = [self.fx.project / f"{physical}-{i}.txt" for i in range(10)]
+            for path in paths:
+                path.touch()
+            result = self.outcome(final_items=(file_change_item(*(str(p) for p in paths)),),
+                                  cwd=self.fx.project, final_response=physical, run_continues=continues)
+            if continues:
+                self.activity = replace(self.activity, physical_turn_id="second")
+                self.runtime.goal_activity_values[self.binding.id] = self.activity
+                await self.app.handle_goal_rollover(GoalRollover(result, self.activity))
+            else:
+                await self.app.handle_completion(result)
+            card = OutboundCard(card=self.channel.updates[-1][1]) if progress else self.channel.replies[-1][1]
+            pages.append((physical, continues, button(card, "turn-file.page")))
+        for physical, continues, value in pages:
+            self.assertEqual(value["turn_id"], f"turn:v1:{physical}")
+            self.assertEqual(bool(value.get("reply", {}).get("run_continues")), continues)
+            intent = decode_turn_file_action(app_id="cli_test", message_id=f"om_{physical}", callback_chat_id="oc_direct",
+                sender_id="ou_user", tag="button", form_value={"turn_file_page": "1"}, value=value)
+            await self.app._turn_file_action(intent)
+            redrawn = self.channel.updates[-1][1]
+            self.assertEqual(redrawn["header"]["title"]["content"], "本轮已完成" if continues else "任务已完成")
+            self.assertIn(f"{physical}-8.txt", rendered(redrawn))
+            self.assertNotIn(f"{'second' if continues else 'goal-one'}-8.txt", rendered(redrawn))
+
+    async def test_both_progress_manifests_redraw_after_goal_disposal(self):
+        await self.check_both_file_pages(True)
+
+    async def test_both_files_only_manifests_redraw_after_goal_disposal(self):
+        await self.check_both_file_pages(False)
+
     async def test_plain_goal_delivers_each_partial_and_final_once(self):
         expect_presenter_trace(self, self.fx, "goal_plain_rollover", reference=REFERENCE)
         first = PartialAnswer("native-one", "goal-one", "item", "first partial")
