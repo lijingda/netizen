@@ -12,8 +12,7 @@ from uuid import uuid4
 import lark_oapi as lark
 
 from netizen_cli.process_messages import (
-    CONTENT_LIMIT, ActivitySnapshot, Created, Ok, ProcessMessages, Rejected, RejectionCode,
-    SnapshotContent, Unknown, build_snapshot_content, snapshot_revision,
+    CONTENT_LIMIT, Created, Ok, ProcessMessages, Rejected, RejectionCode, ToolItem, Unknown,
 )
 
 
@@ -108,8 +107,7 @@ class ProcessMessageTransport(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.server.release.set)
         self.app_id = uuid4().hex
         self.port = self.client(timeout=5)
-        content = build_snapshot_content("turn", "进度", ('新"\\\n🍏' * 800,))
-        self.snapshot = snapshot_revision("turn", content, now_seconds=1_800_000_000)
+        self.items = (ToolItem("tool", '新"\\\n🍏' * 800, 1_800_000_000, 1_800_000_001),)
 
     def client(self, timeout):
         domain = "http://127.0.0.1:%d" % self.server.server_port
@@ -120,52 +118,55 @@ class ProcessMessageTransport(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.port.create("chat", "parent", True), Created("cot", "msg"))
         self.server.release.clear()
         async with asyncio.TaskGroup() as group:
-            first = group.create_task(self.port.update("cot", "msg", self.snapshot))
+            first = group.create_task(self.port.update("cot", "msg", self.items))
             await asyncio.wait_for(self.server.entered.wait(), 5)
-            self.assertEqual(await self.port.update("cot", "msg", self.snapshot),
+            self.assertEqual(await self.port.update("cot", "msg", self.items),
                              Rejected(RejectionCode.CONCURRENT))
             self.server.release.set()
         self.assertEqual(first.result(), Ok())
         self.assertEqual(await self.port.complete("cot", "msg", "done"), Ok())
-        self.assertEqual(await self.port.update("cot", "msg", self.snapshot),
+        self.assertEqual(await self.port.update("cot", "msg", self.items),
                          Rejected(RejectionCode.TERMINAL_OR_INVALID))
         first_body, overlap, terminal = self.server.updates
         self.assertEqual(first_body, overlap)
         self.assertEqual(first_body, terminal)
         self.assertEqual((first_body["cot_id"], first_body["message_id"]), ("cot", "msg"))
-        event, = first_body["events"]
-        self.assertEqual(event["timestamp"], "1800000000")
-        self.assertLessEqual(len(event["content"]), CONTENT_LIMIT)
-        self.assertEqual(json.loads(event["content"])["content"]["rows"], list(self.snapshot.content.rows))
-        self.assertTrue(self.snapshot.content.rows[0].endswith("…"))
+        start, end = first_body["events"]
+        self.assertEqual([start["timestamp"], end["timestamp"]], ["1800000000", "1800000001"])
+        self.assertEqual([start["event_type"], end["event_type"]], ["TOOL_CALL_START", "TOOL_CALL_END"])
+        self.assertTrue(all(len(e["content"]) <= CONTENT_LIMIT for e in (start, end)))
+        label = json.loads(start["content"])["toolCallName"]
+        self.assertEqual(label, self.items[0].text[:299] + "…")
+        self.assertEqual(json.loads(end["content"])["toolCallId"], "tool")
 
     async def test_timeout_on_dispatched_write_is_unknown(self):
         self.server.release.clear()
-        result = await self.client(timeout=0.4).update("cot", "msg", self.snapshot)
+        result = await self.client(timeout=0.4).update("cot", "msg", self.items)
         self.assertEqual(result, Unknown())
         self.assertEqual(len(self.server.updates), 1)
 
     async def test_connection_lost_after_dispatch_is_unknown(self):
         self.server.disconnect = True
-        self.assertEqual(await self.port.update("cot", "msg", self.snapshot), Unknown())
+        self.assertEqual(await self.port.update("cot", "msg", self.items), Unknown())
         self.assertEqual(len(self.server.updates), 1)
 
     async def test_non_json_success_status_is_unknown(self):
         self.server.malformed = True
-        self.assertEqual(await self.port.update("cot", "msg", self.snapshot), Unknown())
+        self.assertEqual(await self.port.update("cot", "msg", self.items), Unknown())
 
     async def test_cancellation_on_dispatched_write_propagates(self):
         self.server.release.clear()
         async with asyncio.TaskGroup() as group:
-            pending = group.create_task(self.port.update("cot", "msg", self.snapshot))
+            pending = group.create_task(self.port.update("cot", "msg", self.items))
             await asyncio.wait_for(self.server.entered.wait(), 5)
             pending.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await pending
         self.assertEqual(len(self.server.updates), 1)
 
-    async def test_oversized_snapshot_never_reaches_transport(self):
-        oversized = ActivitySnapshot("turn", SnapshotContent("", ("甲" * CONTENT_LIMIT,)), 1_800_000_001)
-        with self.assertRaises(ValueError):
-            await self.port.update("cot", "msg", oversized)
+    async def test_impossible_identity_and_running_overflow_never_reach_transport(self):
+        for items in ((ToolItem("x" * CONTENT_LIMIT, "工具", 1_800_000_000),),
+                      tuple(ToolItem(str(i), "工具", 1_800_000_000) for i in range(61))):
+            with self.assertRaises(ValueError):
+                await self.port.update("cot", "msg", items)
         self.assertEqual(self.server.updates, [])

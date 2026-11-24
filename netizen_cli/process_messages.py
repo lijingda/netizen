@@ -4,36 +4,84 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Sequence
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
-from typing import Literal
+from typing import Literal, Self, TypedDict
 
 import lark_oapi as lark
 
 
 _RESOURCE = "/open-apis/im/v1/message_cot"
-_EVENT = "ACTIVITY_SNAPSHOT"
 CONTENT_LIMIT = 1_800
+ITEM_TEXT_LIMIT = 300
+ITEM_LIMIT = 60
 _logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class SnapshotContent:
-    title: str
-    rows: tuple[str, ...]
+class _Item:
+    """A presentation-scoped identity and immutable text from the safe Activity projection."""
+
+    item_id: str
+    text: str
+    started_at: int  # Ten-digit second of the first observation.
+    finished_at: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or not self.item_id.strip():
+            raise ValueError("an Activity item requires a stable identity")
+        if not isinstance(self.text, str):
+            raise ValueError("Activity item text must be projected text")
+        _check_timestamp(self.started_at)
+        if self.finished_at is not None:
+            _check_timestamp(self.finished_at)
+            if self.finished_at < self.started_at:
+                raise ValueError("END precedes START")
+
+    @property
+    def state(self) -> Literal["running", "finished"]:
+        return "running" if self.finished_at is None else "finished"
+
+    def finish(self, observed_at: int) -> Self:
+        """Freeze the first completion observation, also when the wall clock has moved back."""
+        if self.finished_at is not None:
+            return self
+        _check_timestamp(observed_at)
+        return replace(self, finished_at=max(self.started_at, observed_at))
+
+
+class ToolItem(_Item):
+    """One safe operation label."""
+
+
+class StepItem(_Item):
+    """A checklist step first seen in progress or completed."""
 
 
 @dataclass(frozen=True)
-class ActivitySnapshot:
-    activity_id: str  # Stable identity of the presentation Turn inside the event.
-    content: SnapshotContent
-    timestamp: int
+class TextItem(_Item):
+    """Completed commentary. CONTENT defaults to the completion second."""
+
+    finished_at: int = field()
+    content_at: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.activity_id.strip():
-            raise ValueError("a snapshot requires a stable activity identity")
-        _check_timestamp(self.timestamp)
+        super().__post_init__()
+        _check_timestamp(self.finished_at)
+        if self.content_at is not None:
+            _check_timestamp(self.content_at)
+            if not self.started_at <= self.content_at <= self.finished_at:
+                raise ValueError("CONTENT must be between START and END")
+
+
+ProcessItem = ToolItem | StepItem | TextItem
+
+
+class _Event(TypedDict):
+    event_type: str
+    content: str
+    timestamp: str
 
 
 @dataclass(frozen=True)
@@ -62,77 +110,94 @@ class Unknown:
     pass
 
 
-def _serialize(activity_id: str, content: SnapshotContent) -> str:
-    return json.dumps({
-        "type": _EVENT, "messageId": activity_id, "activityType": "PLAN",
-        "content": {"title": content.title, "rows": content.rows}, "replace": True,
-    }, ensure_ascii=False, separators=(",", ":"))
+def _inner(event_type: str, **fields: str) -> str:
+    return json.dumps({"type": event_type, **fields}, ensure_ascii=False, separators=(",", ":"))
 
 
-def build_snapshot_content(
-    activity_id: str, title: str, rows: tuple[str, ...], *,
-    state_line: str | None = None, terminal_lines: tuple[str, ...] = (),
-) -> SnapshotContent:
-    """Pack already-safe display rows (oldest first), including the full event overhead."""
-    state = (state_line,) if state_line is not None else ()
-    required = state + terminal_lines
-    available = CONTENT_LIMIT - len(_serialize(activity_id, SnapshotContent(title, required)))
-    if available < 0:
-        # All ordinary rows have been dropped. Keep each required line, sharing
-        # the remaining space when even the title/state/terminal text is long.
-        def shortened(width: int) -> SnapshotContent:
-            return SnapshotContent(_clip(title, width), tuple(_clip(row, width) for row in required))
+def _clip_item_text(text: str, available: int) -> str:
+    # A JSON string literal includes two quotes already counted in the empty event.
+    def cost(value: str) -> int:
+        return len(json.dumps(value, ensure_ascii=False)) - 2
 
-        width = _largest_width(lambda n: len(_serialize(activity_id, shortened(n))) <= CONTENT_LIMIT)
-        if width < 0:
-            raise ValueError("Activity identity and required line structure exceed the budget")
-        return shortened(width)
-
-    kept: list[str] = []
-    for row in reversed(rows):
-        separator = int(bool(required or kept))
-        cost = len(json.dumps(row, ensure_ascii=False)) + separator
-        if cost > available:
-            if not kept:
-                # Once just the newest row remains, shorten its text in place.
-                width = _largest_width(
-                    lambda n: len(json.dumps(_clip(row, n), ensure_ascii=False)) + separator <= available
-                )
-                if width >= 0:
-                    kept.append(_clip(row, width))
-            break
-        kept.append(row)
-        available -= cost
-    return SnapshotContent(title, (*state, *reversed(kept), *terminal_lines))
+    candidate = text if len(text) <= ITEM_TEXT_LIMIT else text[:ITEM_TEXT_LIMIT - 1] + "…"
+    if cost(candidate) <= available:
+        return candidate
+    if available < 1:
+        raise ValueError("Activity identity leaves no room for the item text")
+    remaining = available - 1  # The ellipsis costs one serialized character.
+    for index, char in enumerate(text[:ITEM_TEXT_LIMIT - 1]):
+        remaining -= cost(char)
+        if remaining < 0:
+            return text[:index] + "…"
+    return text[:ITEM_TEXT_LIMIT - 1] + "…"
 
 
-def _clip(text: str, width: int) -> str:
-    return text if len(text) <= width else text[:width] + "…"
+def _bounded_item(item: ProcessItem) -> ProcessItem:
+    if isinstance(item, ToolItem):
+        empty = _inner("TOOL_CALL_START", toolCallId=item.item_id, toolCallName="")
+    elif isinstance(item, StepItem):
+        # FINISHED has the longer envelope. The name must be identical even
+        # when START was already sent while this step was still running.
+        empty = _inner("STEP_FINISHED", stepName="")
+    elif isinstance(item, TextItem):
+        empty = _inner("TEXT_MESSAGE_CONTENT", messageId=item.item_id, delta="")
+    else:
+        raise TypeError("unsupported Activity item")
+    text = _clip_item_text(item.text, CONTENT_LIMIT - len(empty))
+    return item if text == item.text else replace(item, text=text)
 
 
-def _largest_width(fits: Callable[[int], bool]) -> int:
-    low, high = -1, CONTENT_LIMIT + 1
-    while high - low > 1:
-        middle = (low + high) // 2
-        if fits(middle):
-            low = middle
-        else:
-            high = middle
-    return low
+def build_items(items: Sequence[ProcessItem]) -> tuple[ProcessItem, ...]:
+    """Keep every running item and fill the remaining slots with the latest completions."""
+    if len({item.item_id for item in items}) != len(items):
+        raise ValueError("duplicate Activity item identity")
+    running = [item for item in items if item.finished_at is None]
+    slots = ITEM_LIMIT - len(running)
+    if slots < 0:
+        raise ValueError("more than 60 running Activity items")
+    finished = sorted((item for item in items if item.finished_at is not None),
+                      key=lambda item: (item.finished_at or 0, item.started_at, item.item_id), reverse=True)
+    kept = sorted(running + finished[:slots], key=lambda item: (item.started_at, item.item_id))
+    return tuple(_bounded_item(item) for item in kept)
 
 
-def snapshot_revision(
-    activity_id: str, content: SnapshotContent, *, now_seconds: int,
-    previous: ActivitySnapshot | None = None,
-) -> ActivitySnapshot:
-    """Allocate a revision from this message's last desired snapshot, including unacknowledged writes."""
-    if previous is not None:
-        if previous.activity_id != activity_id:
-            raise ValueError("previous revision belongs to a different activity")
-        if previous.content == content:
-            return previous
-        now_seconds = max(now_seconds, previous.timestamp + 1)
-    return ActivitySnapshot(activity_id, content, now_seconds)
+def finish_items(items: Sequence[ProcessItem], observed_at: int) -> tuple[ProcessItem, ...]:
+    """Close the retained items for the final bounded write. Reuse this list on resend."""
+    return tuple(item.finish(observed_at) for item in build_items(items))
+
+
+def _event(name: str, seconds: int, **fields: str) -> _Event:
+    inner = _inner(name, **fields)
+    if len(inner) > CONTENT_LIMIT:
+        raise ValueError("serialized Activity event exceeds its character budget")
+    return {"event_type": name, "timestamp": str(seconds), "content": inner}
+
+
+def _events_for(item: ProcessItem) -> list[_Event]:
+    if isinstance(item, TextItem):
+        return [
+            _event("TEXT_MESSAGE_START", item.started_at, messageId=item.item_id, role="assistant"),
+            _event("TEXT_MESSAGE_CONTENT", item.content_at or item.finished_at, messageId=item.item_id, delta=item.text),
+            _event("TEXT_MESSAGE_END", item.finished_at, messageId=item.item_id),
+        ]
+    if isinstance(item, StepItem):
+        events = [_event("STEP_STARTED", item.started_at, stepName=item.text)]
+        if item.finished_at is not None:
+            events.append(_event("STEP_FINISHED", item.finished_at, stepName=item.text))
+    else:
+        events = [_event("TOOL_CALL_START", item.started_at, toolCallId=item.item_id, toolCallName=item.text)]
+        if item.finished_at is not None:
+            events.append(_event("TOOL_CALL_END", item.finished_at, toolCallId=item.item_id))
+    return events
+
+
+def item_events(items: Sequence[ProcessItem]) -> list[_Event]:
+    # Ten-digit seconds sort chronologically. Equal timestamps use stable
+    # identities and the causal START/CONTENT/END order within each item.
+    ordered = [(event["timestamp"], item.item_id, index, event)
+               for item in build_items(items) for index, event in enumerate(_events_for(item))]
+    ordered.sort(key=lambda entry: entry[:3])
+    return [event for _, _, _, event in ordered]
 
 
 def _check_timestamp(value: int) -> None:
@@ -192,16 +257,11 @@ class ProcessMessages:
         return Unknown()
 
     async def update(
-        self, cot_id: str, message_id: str, snapshot: ActivitySnapshot,
+        self, cot_id: str, message_id: str, items: Sequence[ProcessItem],
     ) -> Ok | Rejected | Unknown:
-        inner = _serialize(snapshot.activity_id, snapshot.content)
-        if len(inner) > CONTENT_LIMIT:
-            raise ValueError("serialized Activity snapshot exceeds its character budget")
         request = (lark.BaseRequest.builder().http_method(lark.HttpMethod.PUT)
                    .uri(_RESOURCE).token_types({lark.AccessTokenType.TENANT})
-                   .body({"cot_id": cot_id, "message_id": message_id, "events": [{
-                       "event_type": _EVENT, "content": inner, "timestamp": str(snapshot.timestamp),
-                   }]}).build())
+                   .body({"cot_id": cot_id, "message_id": message_id, "events": item_events(items)}).build())
         result = await _receipt(self._client.arequest(request))
         return Ok() if isinstance(result, dict) else result
 

@@ -7,13 +7,14 @@ from unittest.mock import AsyncMock
 import lark_oapi as lark
 
 from netizen_cli.process_messages import (
-    ActivitySnapshot, Created, Ok, ProcessMessages, Rejected, RejectionCode,
-    SnapshotContent, Unknown,
+    Created, Ok, ProcessMessages, Rejected, RejectionCode, StepItem, TextItem, ToolItem, Unknown,
 )
 
 
 RESOURCE = "/open-apis/im/v1/message_cot"
-SNAPSHOT = ActivitySnapshot("turn1", SnapshotContent("进度", ("甲", "乙")), 1_800_000_001)
+T = 1_800_000_001
+ITEMS = (ToolItem("tool", "安全操作", T, T + 5), StepItem("step", "核对", T + 1, T + 2),
+         TextItem("text", "进展", T + 1, T + 4, content_at=T + 3))
 
 
 def response(payload, status=200):
@@ -47,18 +48,24 @@ class ProcessMessageShapes(unittest.IsolatedAsyncioTestCase):
                     expected["origin_message_id"] = parent
                 self.assertEqual(body, expected)
 
-    async def test_update_has_one_replaceable_event(self):
+    async def test_update_serializes_only_the_typed_item_fields_in_time_order(self):
         self.client.arequest.return_value = response({"code": 0})
-        self.assertEqual(await self.port.update("cot", "msg", SNAPSHOT), Ok())
+        self.assertEqual(await self.port.update("cot", "msg", ITEMS), Ok())
         body = self.request(lark.HttpMethod.PUT, RESOURCE)
-        event, = body["events"]
-        self.assertEqual(body, {"cot_id": "cot", "message_id": "msg", "events": [event]})
-        self.assertEqual(event, {"event_type": "ACTIVITY_SNAPSHOT", "timestamp": "1800000001",
-                                 "content": event["content"]})
-        self.assertEqual(json.loads(event["content"]), {
-            "type": "ACTIVITY_SNAPSHOT", "messageId": "turn1", "activityType": "PLAN",
-            "content": {"title": "进度", "rows": ["甲", "乙"]}, "replace": True,
-        })
+        events = body["events"]
+        self.assertEqual(body, {"cot_id": "cot", "message_id": "msg", "events": events})
+        expected = [
+            (0, "TOOL_CALL_START", {"toolCallId": "tool", "toolCallName": "安全操作"}),
+            (1, "STEP_STARTED", {"stepName": "核对"}),
+            (1, "TEXT_MESSAGE_START", {"messageId": "text", "role": "assistant"}),
+            (2, "STEP_FINISHED", {"stepName": "核对"}),
+            (3, "TEXT_MESSAGE_CONTENT", {"messageId": "text", "delta": "进展"}),
+            (4, "TEXT_MESSAGE_END", {"messageId": "text"}),
+            (5, "TOOL_CALL_END", {"toolCallId": "tool"}),
+        ]
+        for event, (delta, name, fields) in zip(events, expected, strict=True):
+            self.assertEqual(event, {"timestamp": str(T + delta), "event_type": name, "content": event["content"]})
+            self.assertEqual(json.loads(event["content"]), {"type": name, **fields})
 
     async def test_complete_has_only_exact_target_and_reason(self):
         self.client.arequest.return_value = response({"code": 0})
@@ -70,7 +77,7 @@ class ProcessMessageShapes(unittest.IsolatedAsyncioTestCase):
 
     async def test_acknowledgement_requires_valid_envelope_for_each_operation(self):
         for operation, args in ((self.port.create, ("chat", None, False)),
-                                (self.port.update, ("cot", "msg", SNAPSHOT)),
+                                (self.port.update, ("cot", "msg", ITEMS)),
                                 (self.port.complete, ("cot", "msg", "done"))):
             for status, payload, expected in (
                 (200, {"code": 10020}, Rejected(RejectionCode.CONCURRENT)),
@@ -92,7 +99,7 @@ class ProcessMessageShapes(unittest.IsolatedAsyncioTestCase):
     async def test_code_only_logging_and_no_retry(self):
         self.client.arequest.return_value = response({"code": 10001, "msg": "private error text"})
         with self.assertLogs("netizen_cli.process_messages") as logs:
-            self.assertEqual(await self.port.update("cot", "msg", SNAPSHOT), Rejected(10001))
+            self.assertEqual(await self.port.update("cot", "msg", ITEMS), Rejected(10001))
         self.assertIn("10001", logs.output[0])
         self.assertNotIn("private", logs.output[0])
         self.client.arequest.assert_awaited_once()

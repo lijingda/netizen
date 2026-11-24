@@ -21,8 +21,8 @@ from lark_oapi.api.im.v1 import GetMessageRequest
 from netizen_cli.channel.topics import validate_topic_message
 from netizen_cli.lark_app import LARK_APP_RELATIVE_PATH, load_lark_app
 from netizen_cli.process_messages import (
-    CONTENT_LIMIT, ActivitySnapshot, Created, Ok, ProcessMessages, Rejected, RejectionCode, Unknown,
-    _serialize, build_snapshot_content, snapshot_revision,
+    CONTENT_LIMIT, ITEM_TEXT_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
+    StepItem, TextItem, ToolItem, Unknown, finish_items, item_events,
 )
 
 
@@ -56,8 +56,8 @@ async def probe(root: Path, chat: str, report: dict[str, object]) -> None:
                             log_level=LogLevel.CRITICAL,
                             outbound=OutboundConfig(retry=RetryConfig(max_attempts=1)))
     cases = {
-        "A": "替换与去重：请展开过程消息，确认只显示“终版”与一行“乙”。",
-        "B": "大小预算：验证 1,800 字符快照与完成后拒绝更新。",
+        "A": "活动条目：桌面端请记录工具、清单和进展文字以及完成对勾的显示。",
+        "B": "大小预算：验证 1,800 字符的单事件与完成后拒绝更新。",
         "C": "并发样本：在本消息内发出六次重叠更新。",
     }
     reports: dict[str, dict[str, object]] = {}
@@ -122,44 +122,51 @@ async def create_in_topic(
     return created
 
 
+def budget_item(observed_at: int) -> ToolItem:
+    # Keep the visible label at 300 characters. Pad the synthetic, opaque ID
+    # to exercise the full serialized event budget with printable input.
+    label = "边界" + '"' * (ITEM_TEXT_LIMIT - 2)
+    item = ToolItem("budget", label, observed_at, observed_at)
+    start, _ = item_events((item,))
+    padding = "x" * (CONTENT_LIMIT - len(start["content"]))
+    return ToolItem(item.item_id + padding, label, observed_at, observed_at)
+
+
 async def check_writes(port: ProcessMessages, target: Created, case: str, report: dict[str, object]) -> None:
-    previous: ActivitySnapshot | None = None
+    started_at = int(time.time())
 
-    def revision(title: str, row: str) -> ActivitySnapshot:
-        nonlocal previous
-        content = build_snapshot_content(target.message_id, title, (row,))
-        previous = snapshot_revision(target.message_id, content, now_seconds=int(time.time()), previous=previous)
-        return previous
+    async def write(items: tuple[ProcessItem, ...]) -> Ok | Rejected | Unknown:
+        return await port.update(target.cot_id, target.message_id, items)
 
-    async def write(snapshot: ActivitySnapshot) -> Ok | Rejected | Unknown:
-        return await port.update(target.cot_id, target.message_id, snapshot)
+    async def require_write(phase: str, items: tuple[ProcessItem, ...]) -> None:
+        report["phase"] = phase
+        result = await write(items)
+        report[f"{phase}_code"] = code(result)
+        if not isinstance(result, Ok):
+            raise GateFailed
 
     reason: Literal["done", "error"] = "error"
     try:
         if case == "A":
-            initial = revision("初版", "甲")
-            replacement = revision("终版", "乙")
-            for phase, snap in (("initial", initial), ("replacement", replacement), ("replay", replacement)):
-                report["phase"] = phase
-                result = await write(snap)
-                report[f"{phase}_code"] = code(result)
-                if not isinstance(result, Ok):
-                    raise GateFailed
+            tool = ToolItem("operation", "读取项目文件", started_at)
+            step = StepItem("step", "核对结果", started_at)
+            await require_write("running", (tool, step))
+            observed_at = int(time.time())
+            text = TextItem("progress", "已核对结果", observed_at, observed_at)
+            await require_write("final_items", finish_items((tool, step, text), observed_at))
         elif case == "B":
-            report["phase"] = "budget"
-            largest = revision("边界", '甲"\\\n' + "x" * CONTENT_LIMIT)
-            size = len(_serialize(largest.activity_id, largest.content))
-            report["inner_characters"] = size
+            items = (budget_item(started_at),)
+            size = max(len(e["content"]) for e in item_events(items))
+            report["max_event_characters"] = size
             if size != CONTENT_LIMIT:
                 raise GateFailed
-            result = await write(largest)
-            report["budget_code"] = code(result)
-            if not isinstance(result, Ok):
-                raise GateFailed
+            await require_write("budget", items)
         elif case == "C":
             report["phase"] = "concurrent_updates"
-            burst = [revision("并发校验", str(number)) for number in range(1, 7)]
-            codes = [code(outcome) for outcome in await asyncio.gather(*(write(snap) for snap in burst))]
+            # This isolated burst is the sole intentional multi-writer sample.
+            sample = (TextItem("progress", "并发样本", started_at, started_at),)
+            outcomes = await asyncio.gather(*(write(sample) for _ in range(6)))
+            codes = [code(outcome) for outcome in outcomes]
             report["concurrent_codes"] = codes
             report["concurrent_10020_informational"] = RejectionCode.CONCURRENT in codes
             if any(value not in (0, RejectionCode.CONCURRENT) for value in codes):
@@ -177,7 +184,7 @@ async def check_writes(port: ProcessMessages, target: Created, case: str, report
         raise GateFailed
     if case == "B":
         report["phase"] = "post_complete_update"
-        late = await write(revision("终态后校验", "不得显示"))
+        late = await write((TextItem("late", "完成后校验", started_at, started_at),))
         report["post_complete_code"] = code(late)
         if late != Rejected(RejectionCode.TERMINAL_OR_INVALID):
             raise GateFailed
@@ -197,8 +204,7 @@ def main() -> int:
     report: dict[str, object] = {
         "run_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "phase": "credentials", "api_passed": False,
-        "desktop_replacement_and_deduplication": "requires visual confirmation",
-        "mobile_replacement_and_deduplication": "requires visual confirmation",
+        "desktop_rendering": "separate maintainer observation",
     }
     try:
         asyncio.run(probe(args.root.expanduser().resolve(), args.chat, report))

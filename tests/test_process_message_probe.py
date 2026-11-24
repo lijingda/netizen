@@ -2,34 +2,36 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from netizen_cli.process_messages import Created, Ok, ProcessMessages, Rejected, Unknown
+from netizen_cli.process_messages import Created, Ok, ProcessMessages, Rejected, Unknown, item_events
 from scripts.check_process_messages import GateFailed, check_writes, exact
 
 
 class LiveProbeContract(unittest.IsolatedAsyncioTestCase):
-    async def test_replacement_only_writes_v1_v2_and_identical_replay_then_completes(self):
+    async def test_items_are_closed_in_the_final_list_before_completion(self):
         port = AsyncMock(spec=ProcessMessages)
         port.update.return_value = port.complete.return_value = Ok()
         report = {}
         await check_writes(port, Created("cA", "mA"), "A", report)
         self.assertEqual(report["phase"], "finished")
-        self.assertEqual([call[0] for call in port.mock_calls], ["update"] * 3 + ["complete"])
-        initial, replacement, replay = [call.args[2] for call in port.update.await_args_list]
-        self.assertEqual((initial.content.title, initial.content.rows), ("初版", ("甲",)))
-        self.assertEqual((replacement.content.title, replacement.content.rows), ("终版", ("乙",)))
-        self.assertGreater(replacement.timestamp, initial.timestamp)
-        self.assertEqual(initial.activity_id, replacement.activity_id)
-        self.assertIs(replacement, replay)
+        self.assertEqual([call[0] for call in port.mock_calls], ["update", "update", "complete"])
+        initial, final = [item_events(call.args[2]) for call in port.update.await_args_list]
+        self.assertEqual({e["event_type"] for e in initial}, {"TOOL_CALL_START", "STEP_STARTED"})
+        self.assertTrue(all(e in final for e in initial))
+        self.assertCountEqual([e["event_type"] for e in final],
+                              ["TOOL_CALL_START", "TOOL_CALL_END", "STEP_STARTED", "STEP_FINISHED",
+                               "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END"])
         port.complete.assert_awaited_once_with("cA", "mA", "done")
 
-    async def test_budget_only_writes_one_snapshot_then_challenges_confirmed_completion(self):
+    async def test_budget_reaches_the_boundary_then_challenges_confirmed_completion(self):
         port = AsyncMock(spec=ProcessMessages)
         port.update.side_effect = [Ok(), Rejected(10001)]
         port.complete.return_value = Ok()
         report = {}
         await check_writes(port, Created("cB", "mB"), "B", report)
         self.assertEqual([call[0] for call in port.mock_calls], ["update", "complete", "update"])
-        self.assertEqual(report["inner_characters"], 1800)
+        events = item_events(port.update.await_args_list[0].args[2])
+        self.assertEqual(len(events[0]["content"]), 1800)
+        self.assertEqual(report["max_event_characters"], 1800)
         self.assertEqual(report["post_complete_code"], 10001)
         port.complete.assert_awaited_once_with("cB", "mB", "done")
 
