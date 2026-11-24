@@ -20,7 +20,7 @@ from .reply_events import Activity, ActivityChanged, DeliveryPolicy, Presentatio
 from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
 from .topics import BindingCardLocation, CardReplyLocation
-from .physical_delivery import BODY, Item, PhysicalDelivery, receipt, record_sent_answer
+from .physical_delivery import BODY, Item, Outcome, PhysicalDelivery, receipt, record_sent_answer
 
 
 logger = logging.getLogger(__name__)
@@ -59,18 +59,22 @@ class _CardWriter(asyncio.Lock):
     known: OutboundCard | None = None
 
     async def reconcile(
-        self, desired: Callable[[], OutboundCard | None], write: Callable[[OutboundCard], Awaitable[bool]],
+        self, desired: Callable[[], OutboundCard | None], write: Callable[[OutboundCard], Awaitable[Outcome]],
     ) -> bool:
         async with self:
             delivered = False
             while (card := desired()) is not None:
                 if self.known is not None and self.known.card == card.card:
                     return True
-                self.known = None
-                if not await write(card):
-                    break
-                self.known = card
-                delivered = True
+                previous, self.known = self.known, None
+                outcome = await write(card)
+                if outcome == "confirmed":
+                    self.known = card
+                    delivered = True
+                else:
+                    if outcome == "rejected":
+                        self.known = previous
+                    return False
             return delivered
 
 
@@ -107,7 +111,7 @@ class _PartialAnswerDelivery:
     attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
     confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
     message_id: str | None = None
-    confirmed_snapshot: Activity | None = None
+    freeze_snapshot: Activity | None = None
     text_only: bool = False
     location: CardReplyLocation | None = None
 
@@ -168,7 +172,7 @@ class _ReplyCardPresenter:
         content: ReplyCardProjection, *, delivery: PhysicalDelivery, items: tuple[Item, ...],
         confirmed: OutboundCard | None = None, tracks_run: bool = True,
     ) -> bool:
-        if not location.can_write(message_id):
+        if not location.can_write(message_id) or (display.reply and display.reply.messages is None):
             return False
         writer = self._message_writer(message_id)
         if confirmed is not None:
@@ -193,49 +197,73 @@ class _ReplyCardPresenter:
         for mid in ids:
             if writer := self._writers.get(mid):
                 writer.known = None
-        for reply, cards in tuple(self._published.items()):
+        for cards in self._published.values():
             for mid in ids.intersection(cards):
                 del cards[mid]
-            if not cards:
-                del self._published[reply]
 
-    async def finish_initial_card(self, key: PresentationKey, display: RunDisplay, status: TerminalStatus) -> None:
-        session = self._sessions_for(key).pop(key.index, None)
-        if session:
+    async def finish_run(self, display: RunDisplay, status: TerminalStatus) -> None:
+        """Stop this input's polls, including turns that never finished Result preparation."""
+        sessions = [self._sessions.pop(index) for index, session in tuple(self._sessions.items())
+                    if session.run_reply is display.reply]
+        for session in sessions:
+            session.stopped.set()
+
+        async def close_card(session: _TurnProgressCardSession) -> None:
             await self._stop_session(session)
-            if session.message_id and session.location and session.delivery:
-                content = turn_progress_projection(snapshot=session.snapshot, terminal_status=status,
-                    collapsed=True, include_result=status != "completed")
-                items = tuple(("partial", part.item_id) for part in session.snapshot.partial_answers)
-                await self.publish_card(display, session.message_id, key, session.location, content,
-                                        delivery=session.delivery, items=(*items, BODY) if content.result else items)
+            if not (display.publishable() and session.message_id and session.location and session.writer
+                    and session.location.can_write(session.message_id) and session.delivery and display.reply
+                    and display.reply.messages is not None):
+                return
+            content = turn_progress_projection(snapshot=session.snapshot, terminal_status=status,
+                collapsed=True, include_result=status != "completed")
+            items = tuple(("partial", part.item_id) for part in session.snapshot.partial_answers)
+            cards = self._published.setdefault(display.reply, {})
+            cards[session.message_id] = _PublishedCard(session.target.key, session.location, content,
+                session.writer, True, session.delivery, (*items, BODY) if content.result else items)
+
+        if sessions:
+            await asyncio.gather(*(close_card(session) for session in sessions))
+        if display.publishable():
+            await self.reconcile(display)
+
+    async def _write_card(self, mid: str, card: OutboundCard, key: PresentationKey, location: CardReplyLocation | None,
+                          delivery: PhysicalDelivery, items: tuple[Item, ...], reply: LogicalReply | None) -> Outcome:
+        if location and not location.can_write(mid):
+            return "unknown"
+        undisputed = delivery.begin(items, reply)
+        attempt = await self._attempt_update_message(mid, card, binding_id=key.owner_id,
+            operation_id=key.turn_id, location=location, policy=DeliveryPolicy.ITEM_RECEIPTS)
+        outcome = receipt(attempt.result)
+        # Rejecting this replacement cannot disprove an earlier unacknowledged write.
+        delivery.record(undisputed if outcome == "rejected" else items, outcome)
+        if (location and not location.can_write(mid)) or (reply and reply.messages is None):
+            return "unknown"
+        if outcome == "confirmed" and reply and location:
+            reply.published(mid, key.turn_id, items, location.usable)
+        return outcome
 
     async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard]) -> dict[str, bool]:
         reply = display.reply
 
         def newest() -> str | None:
-            return next((mid for mid in reversed(cards) if cards[mid].tracks_run), None)
+            order = reply.messages if reply and reply.messages is not None else cards
+            return next((mid for mid in reversed(order) if mid in cards and cards[mid].tracks_run), None)
 
         async def reconcile_message(mid: str, view: _PublishedCard) -> bool:
             def desired() -> OutboundCard | None:
-                if cards.get(mid) is not view or not display.publishable() or not view.location.can_write(mid):
+                if ((reply and self._published.get(reply) is not cards) or cards.get(mid) is not view
+                        or not display.publishable() or not view.location.can_write(mid)):
                     return None
                 return render_run_card(view.content, display.current() if mid == newest() else None)
 
-            async def write(card: OutboundCard) -> bool:
-                view.delivery.begin(view.items, reply)
-                attempt = await self._attempt_update_message(mid, card, binding_id=view.key.owner_id,
-                    operation_id=view.key.turn_id, location=view.location, policy=DeliveryPolicy.ITEM_RECEIPTS)
-                view.delivery.record(view.items, receipt(attempt.result))
-                if attempt.confirmed and reply:
-                    reply.published(mid, view.key.turn_id, view.items, view.location.usable)
-                return attempt.confirmed
+            def write(card: OutboundCard) -> Awaitable[Outcome]:
+                return self._write_card(mid, card, view.key, view.location, view.delivery, view.items, reply)
 
             try:
                 current = await external_call(view.writer.reconcile(desired, write))
                 if not view.location.can_write(mid):
                     return False
-                if view.writer.known is not None and mid != newest() and cards.get(mid) is view:
+                if current and view.writer.known is not None and mid != newest() and cards.get(mid) is view:
                     cards.pop(mid)  # A confirmed, immutable card no longer needs a writer.
                     view.writer.known = None
                 return current
@@ -359,7 +387,7 @@ class _ReplyCardPresenter:
             attempted_partials=set() if session is None else session.attempted_partials,
             confirmed_partials=set() if session is None else session.confirmed_partials,
             message_id=session.message_id if session else None,
-            confirmed_snapshot=session.snapshot if session and session.writer and session.writer.known is not None else None,
+            freeze_snapshot=session.snapshot if session and session.writer else None,
             location=session.location if session else None,
             policy=session.policy if session else DeliveryPolicy.BOUNDED_FALLBACK,
             text_only=bool(session and (session.failed or session.message_id is None)),
@@ -423,7 +451,7 @@ class _ReplyCardPresenter:
                 item = ledger.partial(answer)
                 if ledger.items.get(item, "unattempted") != "unattempted":
                     continue
-                ledger.begin((item,), run_reply)
+                ledger.begin((item,), run_reply, post=True)
             try:
                 async with asyncio.timeout(self._operation_timeout_seconds):
                     result = await external_call(reply(post), isolate=session.policy.confirms_items)
@@ -616,7 +644,7 @@ class _ReplyCardPresenter:
                 # A write may span several native changes. Sample again immediately;
                 # the same observed revision does not trigger a retry.
                 read_now = True
-                if not await self._update(session, card, items):
+                if not await self._update(session, card, items, snapshot=snapshot):
                     continue
             elif not await self._update(session, card):
                 failures += 1
@@ -632,6 +660,8 @@ class _ReplyCardPresenter:
         session: _TurnProgressCardSession,
         card: OutboundCard,
         items: tuple[tuple[str, str], ...] = (),
+        *,
+        snapshot: Activity | None = None,
     ) -> bool:
         if session.message_id is None:
             return False
@@ -641,18 +671,15 @@ class _ReplyCardPresenter:
         writer, delivery, mid = session.writer, session.delivery, session.message_id
         assert writer is not None
 
-        async def write(desired: OutboundCard) -> bool:
-            delivery.begin(items, session.run_reply)
-            attempt = await self._attempt_update_message(mid, desired, binding_id=session.target.key.owner_id,
-                operation_id=session.target.key.turn_id, location=session.location, policy=session.policy)
-            delivery.record(items, receipt(attempt.result))
-            return attempt.confirmed
+        async def write(desired: OutboundCard) -> Outcome:
+            outcome = await self._write_card(mid, desired, session.target.key, session.location, delivery, items, session.run_reply)
+            if snapshot is not None and outcome != "rejected":
+                session.snapshot = snapshot  # These partials may now be visible, even if the receipt was lost.
+            return outcome
 
         confirmed = await writer.reconcile(lambda: None if session.stopped.is_set() else card, write)
         if confirmed:
             delivery.record(items, "confirmed")
-            if session.run_reply and session.location:
-                session.run_reply.published(mid, session.target.key.turn_id, items, session.location.usable)
         if session.location and not session.location.can_write(mid):
             session.message_id = None
         return confirmed

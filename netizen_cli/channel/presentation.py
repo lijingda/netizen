@@ -138,7 +138,9 @@ class CompletionPresentationChannel(ChannelReplies):
             if card and first_id and location.can_write(first_id):
                 if await self._progress_cards.publish_card(display, first_id, key, location, projection, delivery=ledger, items=items):
                     ledger.record(items, "confirmed")
-                return
+                    return
+                if not any(ledger.items.get(item) == "rejected" and ledger.can_post(item) for item in items):
+                    return
             if (card and not first_id and publishable()
                     and all(ledger.items[item] not in ("unknown", "rejected") for item in ledger.partial_text)):
                 ledger.begin(items, reply)
@@ -150,23 +152,27 @@ class CompletionPresentationChannel(ChannelReplies):
                     if reply and (mid := _confirmed_reply_id(sent)):
                         await self._progress_cards.publish_card(display, mid, key, location, projection, delivery=ledger, items=items, confirmed=card)
                     return
-        # A fallback freezes the card at the last confirmed poll. Plain posts have
-        # their own receipts, including attempts whose publication is uncertain.
+                if state == "unknown":
+                    return
+        # Freeze any partials the running card may already show. The ledger
+        # independently decides which items can safely take a new text post.
         if first_id and not location.can_write(first_id):
             first_id = None
-        last_snapshot = partials.confirmed_snapshot
+        last_snapshot = partials.freeze_snapshot
         try:
             for index, fragment in enumerate(outcome.partial_answers):
                 item = ("partial", fragment.item_id)
                 if (fragment.thread_id == outcome.thread_id and fragment.turn_id == outcome.turn_id
-                        and ledger.items.get(item) == "unattempted"):
+                        and ledger.can_post(item)):
                     post = OutboundPost(markdown=f"**阶段性答案**\n\n{feishu_answer_text(fragment.text)}")
                     await self._send_receipted_items(outcome, policy, ledger, (item,), post, f"partial/{index}", location)
-            if content and (matching := ledger.partial_receipt(content)) != "unattempted":
+            matching_items = tuple(item for item, text in ledger.partial_text.items() if content and text == content)
+            matching = ledger.partial_receipt(content) if matching_items else "unattempted"
+            if matching in ("confirmed", "unknown") or (matching == "rejected" and ledger.posted.intersection(matching_items)):
                 ledger.record(body_items, matching)
-            if content and ledger.items[BODY] == "unattempted":
+            elif content and ledger.can_post(BODY):
                 content += policy.plain_suffix()
-                await self._send_receipted_items(outcome, policy, ledger, body_items, content, "final", location)
+                await self._send_receipted_items(outcome, policy, ledger, (*body_items, *matching_items), content, "final", location)
         finally:
             if first_id and last_snapshot:
                 frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
@@ -181,7 +187,7 @@ class CompletionPresentationChannel(ChannelReplies):
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
-        ledger.begin(items, policy.display.reply)
+        ledger.begin(items, policy.display.reply, post=True)
         try:
             async with asyncio.timeout(self._progress_cards.operation_timeout):
                 result = await external_call(policy.send(content, operation, location))
@@ -235,10 +241,9 @@ class CompletionPresentationChannel(ChannelReplies):
         if reply is None:
             return
         try:
+            await _best_effort_update(self._progress_cards.finish_run(display, event.status))
             if not display.publishable():
                 return
-            if not await self._progress_cards.reconcile(display) and not reply.attempted:
-                await _best_effort_update(self._progress_cards.finish_initial_card(run, display, event.status))
             await _best_effort_update(self._reactions.freeze(run.turn_id))
             await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
             if event.mention_user_id and display.publishable():

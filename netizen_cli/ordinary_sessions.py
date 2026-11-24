@@ -95,6 +95,7 @@ class ClaudeCliState:
 class _ReplyMessage:
     message_id: str
     location_usable: Callable[[str], bool] = field(repr=False)
+    confirmed_any: bool = False
     confirmed_answer_items: set[tuple[str, str, str]] = field(default_factory=set)
 
     @property
@@ -115,6 +116,7 @@ class LogicalReply:
         answers = {(turn_id, kind, item_id) for kind, item_id in items if kind in ("body", "partial")}
         if mid:
             message = self.messages.setdefault(mid, _ReplyMessage(mid, usable))
+            message.confirmed_any = True
             message.confirmed_answer_items.update(answers)
         elif answers:
             self.unaddressed_confirmation = True
@@ -122,9 +124,9 @@ class LogicalReply:
     def mention_target(self, verified_source: str | None) -> str | None:
         if self.messages is None:
             return None
-        for message in reversed(self.messages.values()):
-            if message.usable and message.confirmed_answer_items:
-                return message.message_id
+        usable = [message for message in reversed(self.messages.values()) if message.usable and message.confirmed_any]
+        if usable:
+            return next((message.message_id for message in usable if message.confirmed_answer_items), usable[0].message_id)
         return verified_source if not self.attempted or self.unaddressed_confirmation else None
 
     def retire(self) -> None:

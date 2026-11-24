@@ -37,6 +37,7 @@ class PhysicalDelivery:
     items: dict[Item, Outcome] = field(default_factory=dict)
     partial_text: dict[Item, str] = field(default_factory=dict)
     prepared_images: set[Item] = field(default_factory=set)
+    posted: set[Item] = field(default_factory=set)
     settled: bool = False
 
     def expect(self, item: Item) -> None:
@@ -55,11 +56,18 @@ class PhysicalDelivery:
                 return state
         return "unattempted"
 
-    def begin(self, items: tuple[Item, ...], reply: LogicalReply | None) -> None:
+    def can_post(self, item: Item) -> bool:
+        return item not in self.posted and self.items.get(item, "unattempted") in ("unattempted", "rejected")
+
+    def begin(self, items: tuple[Item, ...], reply: LogicalReply | None, *, post: bool = False) -> tuple[Item, ...]:
         # Mark before awaiting the Channel. Cancellation leaves an unknown outcome.
+        undisputed = tuple(item for item in items if self.items.get(item) != "unknown")
+        if post:
+            self.posted.update(items)
         if reply and any(kind in ("body", "partial") for kind, _ in items):
             reply.attempted = True
         self.record(items, "unknown")
+        return undisputed
 
     def record(self, items: tuple[Item, ...], outcome: Outcome) -> None:
         for item in items:
