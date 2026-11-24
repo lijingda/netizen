@@ -174,7 +174,7 @@ class ScheduleChannel(SessionToolChannel):
             scope = FeishuScope(self._app_id, run.chat_id, ScopeKind.TOPIC, origin_message.thread_id)
             origin = ScheduledOrigin(self._app_id, run.chat_id, origin_message.message_id,
                                      ScheduledConversation(origin_message.thread_id), plan.id, run.id,
-                                     auto_archive=plan.auto_archive)
+                                     auto_archive=plan.auto_archive, root_id=root.message_id)
             store.set_run(run.id, topic_id=scope.topic_id, origin_message_id=origin_message.message_id)
             context_anchor = (
                 await self._resolve_context_anchor(scope, origin_message.message_id)
@@ -330,7 +330,7 @@ class ScheduleChannel(SessionToolChannel):
             origin = ScheduledBindingOrigin(
                 self._app_id, scope.chat_id, sent.message_id,
                 ScheduledBindingConversation(scope.chat_id, chat_kind, scope.topic_id),
-                plan.id, run.id, binding.id,
+                plan.id, run.id, binding.id, root_id=sent.root_id,
             )
             store.set_run(run.id, origin_message_id=sent.message_id,
                           **({"topic_id": scope.topic_id} if scope.topic_id else {}))

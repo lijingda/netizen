@@ -25,6 +25,7 @@ class CardAnswerOrigin:
     conversation: CardAnswerConversation
     source_card_id: str
     target: QuestionTarget
+    root_id: str | None = None
 
     @property
     def id(self) -> str:

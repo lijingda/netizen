@@ -1,14 +1,23 @@
 """Decoded outbound operations at a short Turn's terminal handoff."""
+import asyncio
 import itertools
 import json
 import unittest
 from contextlib import ExitStack
+from dataclasses import replace
+from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from netizen_cli.bindings import BindingTaskFeedback
+from netizen_cli.channel.process_presentation import ProcessPresentation
+from netizen_cli.channel.reply_events import PresentationKey
+from netizen_cli.channel.topics import BindingCardLocation, CardReplyLocation
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.ordinary_sessions import LogicalReply, PhysicalAnswer, PhysicalStarted
+from netizen_cli.process_messages import Created, Ok, Unknown
 from netizen_cli.partial_answers import PartialAnswer
-from netizen_cli.process_activity import ProcessActivityWindow
+from netizen_cli.process_activity import ObservedProcessItem, ProcessActivityWindow
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.runtime.contracts import TurnOutcome
 from netizen_cli.turn_activity import TurnActivityEvent, TurnActivityKind, TurnActivityStatus, TurnPlanStepSnapshot, TurnPlanStepState
@@ -63,6 +72,9 @@ async def short_turn_trace(*, card, files, install=None):
         activity = turn_activity_snapshot(binding_id=binding.id, steps=(
             TurnPlanStepSnapshot("检查清单", TurnPlanStepState.IN_PROGRESS),
         ))
+        window = ProcessActivityWindow(lambda: 1_800_000_000)
+        window.plan(activity.steps)
+        activity = replace(activity, process_items=window.rows if not card else ())
         partial = PartialAnswer(activity.thread_id, activity.turn_id, "partial-1", "阶段正文")
         items = (file_change_item("output.txt"),) if files else ()
         with ExitStack() as stack:
@@ -83,3 +95,119 @@ class TerminalProcessDifferential(unittest.IsolatedAsyncioTestCase):
             for files in (True, False):
                 with self.subTest(card=card, files=files):
                     self.assertEqual(await short_turn_trace(card=card, files=files), expected[f"{card}/{files}"])
+
+
+
+def process_snapshot(revision, *, binding="binding"):
+    snapshot = turn_activity_snapshot(binding_id=binding, revision=revision)
+    rows = tuple(ObservedProcessItem(str(n), "operation", str(n), 1_800_000_000)
+                 for n in range(1, revision + 1))
+    return replace(snapshot, process_items=rows)
+
+
+def process_port():
+    return SimpleNamespace(create=AsyncMock(return_value=Created("cot", "process-mid")),
+                           update=AsyncMock(return_value=Ok()), complete=AsyncMock(return_value=Ok()))
+
+
+class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_each_changed_version_attempted_once_when_confirmed_write_rereads(self):
+        port = process_port()
+        first, second, third, release = (asyncio.Event() for _ in range(4))
+        calls = []
+        async def update(cot, mid, payload):
+            calls.append(len(payload))
+            if len(calls) == 1:
+                first.set()
+                await release.wait()
+                return Ok()
+            if len(calls) == 2:
+                second.set()
+                return Unknown()
+            third.set()
+            return Ok()
+        port.update.side_effect = update
+        key = PresentationKey("binding", "native-one", "turn-one")
+        scope = FeishuScope("app", "chat", ScopeKind.DIRECT)
+        message = ProcessPresentation(key, key, port, None,
+            lambda: CardReplyLocation(scope, "input", None, BindingCardLocation({})),
+            lambda *_: True, lambda: 1_800_000_001, 1)
+        try:
+            async with asyncio.timeout(2):
+                message.sample(process_snapshot(1))
+                await first.wait()
+                message.sample(process_snapshot(2))
+                release.set()
+                await second.wait()
+                message.sample(process_snapshot(2))
+                await asyncio.sleep(0)
+                self.assertEqual(calls, [1, 2])
+                message.sample(process_snapshot(3))
+                await third.wait()
+                self.assertEqual(calls, [1, 2, 3])
+        finally:
+            message.revoke()
+            if message.task:
+                await asyncio.gather(message.task, return_exceptions=True)
+
+    async def test_short_codex_turn_creates_before_content_and_matches_baseline(self):
+        port = process_port()
+        def install(fx):
+            fx.app._progress_cards._process_port = port
+            async def create(*args):
+                self.assertFalse(fx.channel.replies)
+                return Created("cot", "process-mid")
+            port.create.side_effect = create
+        actual = await short_turn_trace(card=False, files=False, install=install)
+        self.assertEqual(actual, json.loads(REFERENCE.read_text())["False/False"])
+        port.create.assert_awaited_once_with("oc_direct", "om_new", False)
+        self.assertEqual([item.text for item in port.update.await_args.args[2]], ["检查清单"])
+        port.complete.assert_awaited_once_with("cot", "process-mid", "done")
+
+    async def test_claude_safe_items_flow_through_start_and_result_without_becoming_receipts(self):
+        async with channel_fixture() as fx:
+            origin = await fx.new()
+            port = process_port()
+            reply = LogicalReply()
+            fx.app._progress_cards._process_port = port
+            snapshot = process_snapshot(1)
+            key = PresentationKey(snapshot.binding_id, snapshot.thread_id, snapshot.turn_id)
+            with patch.object(fx.app._ordinary, "turn_activity", return_value=snapshot):
+                await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
+                    BindingTaskFeedback(), lambda: True, lambda: True, reply))
+            state = fx.app._progress_cards._process[key]
+            async with asyncio.timeout(1):
+                await state.ready.wait()
+            await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "user", origin, "completed",
+                "final", logical_id=key.turn_id, activity=snapshot, reply=reply))
+            port.create.assert_awaited_once_with("oc_direct", "om_new", False)
+            port.complete.assert_awaited_once_with("cot", "process-mid", "done")
+            self.assertNotIn("process-mid", reply.messages)
+
+    async def test_topic_requires_one_exact_placement_read_before_writes(self):
+        key = PresentationKey("binding", "native-one", "turn-one")
+        scope = FeishuScope("app", "chat", ScopeKind.TOPIC, "topic")
+        exact = dict(message_id="process-mid", chat_id="chat", thread_id="topic", root_id="root", parent_id="input", deleted=False)
+        for variant in ("exact", "missing", "wrong", "deleted"):
+            with self.subTest(variant=variant):
+                row = dict(exact)
+                if variant == "missing":
+                    del row["root_id"]
+                elif variant == "wrong":
+                    row["parent_id"] = "another-parent"
+                elif variant == "deleted":
+                    row["deleted"] = True
+                channel = SimpleNamespace(fetch_message=AsyncMock(return_value={"code":0,"data":{"items":[row]}}))
+                binding = BindingCardLocation({})
+                port = process_port()
+                message = ProcessPresentation(key, key, port, channel,
+                    lambda: CardReplyLocation(scope, "input", "root", binding), lambda *_: True, lambda: 1_800_000_001, 1)
+                message.sample(process_snapshot(1))
+                message.finish("done")
+                async with asyncio.timeout(1):
+                    await message.task
+                port.create.assert_awaited_once_with("chat", "input", True)
+                channel.fetch_message.assert_awaited_once_with("process-mid")
+                self.assertEqual(port.update.await_count, int(variant == "exact"))
+                self.assertEqual(port.complete.await_count, int(variant == "exact"))
+                self.assertEqual("process-mid" in binding.unusable, variant == "wrong")

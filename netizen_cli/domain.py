@@ -86,6 +86,7 @@ class ScheduledOrigin:
     plan_id: str
     run_id: str
     auto_archive: bool = False
+    root_id: str | None = None
 
     @property
     def id(self) -> str:
@@ -110,6 +111,7 @@ class ScheduledBindingOrigin:
     plan_id: str
     run_id: str
     binding_id: str
+    root_id: str | None = None
 
     @property
     def id(self) -> str:
@@ -136,6 +138,7 @@ class SessionAgentOrigin:
     target_binding_id: str
     call_id: str
     source_side_id: str | None = None
+    root_id: str | None = None
 
     @property
     def id(self) -> str:

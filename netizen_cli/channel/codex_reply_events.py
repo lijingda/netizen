@@ -81,7 +81,7 @@ class CodexReplyEvents:
 
         return TurnOpened(
             target, DeliveryPolicy.BOUNDED_FALLBACK, feedback, observe, retain,
-            reply, reply_partial, validate_reply, reuse_existing=goal,
+            reply, reply_partial, validate_reply, reuse_existing=goal, process_enabled=not goal and not key.side,
         )
 
     @classmethod
@@ -112,6 +112,8 @@ class CodexReplyEvents:
         )
         return TurnResult(
             target=target,
+            process_enabled=isinstance(native, OrdinaryConclusion),
+            execution_unknown=outcome.execution_unknown if isinstance(outcome, OrdinaryConclusion) else False,
             status=status,
             content=content,
             final_response=outcome.final_response,

@@ -248,6 +248,7 @@ class CompletionPresentationChannel(ChannelReplies):
                     user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
                 )
         finally:
+            await self._progress_cards.end_process_run(run, "error" if event.status == "failed" else "done")
             self._progress_cards.retire_run(reply)
             reply.retire()
 
@@ -263,6 +264,13 @@ class CompletionPresentationChannel(ChannelReplies):
         )
 
     async def _complete_task(self, outcome: TurnResult) -> None:
+        await self._progress_cards.process_result(outcome)
+        try:
+            await self._deliver_task_result(outcome)
+        finally:
+            await self._progress_cards.release_process(outcome.target.key)
+
+    async def _deliver_task_result(self, outcome: TurnResult) -> None:
         if outcome.items:
             await self._deliver_with_receipts(outcome, outcome.items)
             return

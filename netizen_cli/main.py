@@ -53,6 +53,7 @@ from openai_codex import AsyncCodex, CodexConfig
 
 from .admin.web import AdminWebRunner
 from .admin.port_config import ConfigFileEditor
+from .process_messages import ProcessMessages
 from .progress_card_config import ProgressCardConfigService
 from .group_access import GroupAccessService
 from .question_notifications import QuestionNotificationConfigService
@@ -464,6 +465,7 @@ class ServiceCore:
                 runtime=self._runtime, ordinary=backend.ordinary,
                 bindings=self._store,
                 projects=self._projects,
+                process_messages=ProcessMessages(self._feishu_read_client),
                 message_history=FeishuMessageHistoryReader(
                     self._feishu_read_client
                 ),

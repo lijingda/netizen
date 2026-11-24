@@ -406,7 +406,7 @@ class SessionToolChannel(ForkChannel):
                     )
                 origin = SessionAgentOrigin(self._app_id, destination.chat_id, published.message_id,
                     SessionAgentConversation(destination.chat_id, target.chat_kind, destination.topic_id),
-                    source.id, source_thread_id, binding.id, call_id)
+                    source.id, source_thread_id, binding.id, call_id, root_id=root.message_id)
                 self._runtime.require_topic_creation_open(project.alias)
                 submission_attempted = True
                 submission = await self._runtime.submit_external(
@@ -475,7 +475,7 @@ class SessionToolChannel(ForkChannel):
                 raise TopicPublishError("来信消息不属于指定会话，本次未投递。", unknown=True)
             origin = SessionAgentOrigin(self._app_id, scope.chat_id, sent.message_id,
                 SessionAgentConversation(scope.chat_id, target.chat_kind, scope.topic_id),
-                source_binding_id, source_thread_id, binding.id, call_id, source_side_id)
+                source_binding_id, source_thread_id, binding.id, call_id, source_side_id, root_id=sent.root_id)
             binding, scope = self._require_session_target(target_thread_id)
             submission_attempted = True
             submission = await self._runtime.submit_external(

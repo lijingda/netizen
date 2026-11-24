@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
+from ..process_messages import Created, ProcessMessages
 from ..external_calls import external_call
 from ..cards import reply_card, turn_progress_card
 from ..domain import ReplyCardProjection
 from ..ordinary_sessions import LogicalReply
 from ..cards.reply import feishu_answer_text, turn_progress_projection
 from ..partial_answers import PartialAnswer
+from .process_presentation import ProcessPresentation, Reason
+from .replacement_writer import ReplacementWriter
 from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, RunDisplay, TerminalStatus, TurnOpened, TurnResult
 from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
@@ -53,29 +57,9 @@ class _CardUpdateAttempt:
         return self.result.success and (code is None or code == 0)
 
 
-class _CardWriter(asyncio.Lock):
-    """One replacement at a time. Only a confirmed payload can suppress a write."""
-
-    known: OutboundCard | None = None
-
-    async def reconcile(
-        self, desired: Callable[[], OutboundCard | None], write: Callable[[OutboundCard], Awaitable[Outcome]],
-    ) -> bool:
-        async with self:
-            delivered = False
-            while (card := desired()) is not None:
-                if self.known is not None and self.known.card == card.card:
-                    return True
-                previous, self.known = self.known, None
-                outcome = await write(card)
-                if outcome == "confirmed":
-                    self.known = card
-                    delivered = True
-                else:
-                    if outcome == "rejected":
-                        self.known = previous
-                    return False
-            return delivered
+class _CardWriter(ReplacementWriter[OutboundCard]):
+    def __init__(self) -> None:
+        super().__init__(lambda card: card.card)
 
 
 @dataclass(slots=True)
@@ -143,6 +127,9 @@ class _ReplyCardPresenter:
         self,
         channel: ReplyChannel,
         *,
+        process_messages: ProcessMessages | None = None,
+        process_location: Callable[[str, object], CardReplyLocation | None] | None = None,
+        clock: Callable[[], float] = time,
         poll_seconds: float = _PROGRESS_CARD_POLL_SECONDS,
         operation_timeout_seconds: float = _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS,
     ) -> None:
@@ -151,6 +138,8 @@ class _ReplyCardPresenter:
         if operation_timeout_seconds <= 0:
             raise ValueError("progress card operation timeout must be positive")
         self._channel = channel
+        self._process_port, self._process_location, self._clock = process_messages, process_location, clock
+        self._process: dict[PresentationKey, ProcessPresentation] = {}
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
         self._sessions: dict[
@@ -166,6 +155,71 @@ class _ReplyCardPresenter:
         self._binding_locations: dict[str, BindingCardLocation] = {}
         self._published: WeakKeyDictionary[LogicalReply, dict[str, _PublishedCard]] = WeakKeyDictionary()
         self._closed = False
+
+    def _process_for(self, target: ReplyTarget, binding_id: str) -> ProcessPresentation | None:
+        if self._closed or self._process_port is None or self._process_location is None:
+            return None
+        if state := self._process.get(target.key):
+            return state
+        resolve = self._process_location
+        state = ProcessPresentation(target.key, target.run, self._process_port, self._channel,
+            lambda: resolve(binding_id, target.origin), self._claim_process, self._clock, self.operation_timeout)
+        self._process[target.key] = state
+        return state
+
+    def _claim_process(self, state: ProcessPresentation, created: Created) -> bool:
+        for other in self._process.values():
+            if other is state or not other.created:
+                continue
+            if created.cot_id == other.created.cot_id or created.message_id == other.created.message_id:
+                for owner, mid in ((state, created.message_id), (other, other.created.message_id)):
+                    if owner.location:
+                        owner.location.binding.unusable.add(mid)
+                return False
+        for other in self._process.values():
+            if other is not state and state.run is not None and other.run == state.run and other.created:
+                other.finish(other.verdict)
+        return True
+
+    async def process_result(self, result: TurnResult) -> None:
+        if result.task_feedback.progress_card_enabled or not result.process_enabled:
+            return
+        if result.target.run is None and result.status == "completed" and not (result.content or result.partial_answers):
+            return
+        state = self._process_for(result.target, result.file_binding_id)
+        if state is None:
+            return
+        try:
+            state.verdict = result.process_reason
+            state.sample(result.activity, terminal=True)
+            if not result.run_continues:
+                state.finish(state.verdict)
+            await state.before_content()
+        except Exception:
+            state.revoke()
+            logger.warning("process message result unavailable")
+
+    async def release_process(self, key: PresentationKey) -> None:
+        state = self._process.get(key)
+        if state and (state.closing or state.closed):
+            if state.task:
+                await asyncio.gather(state.task, return_exceptions=True)
+            if self._process.get(key) is state:
+                self._process.pop(key)
+
+    async def end_process_run(self, run: PresentationKey, reason: Reason) -> None:
+        matches = [state for state in self._process.values() if state.run == run]
+        for state in matches:
+            state.finish(reason if reason == "timeout" or state.revision is None else state.verdict)
+        await asyncio.gather(*(self.release_process(state.key) for state in matches))
+
+    def unknown_process(self, key: PresentationKey) -> None:
+        # Keep the spent create on this parked Turn until exact recovery or removal.
+        state = self._process.get(key)
+        if state is None:
+            state = self._process_for(ReplyTarget(key, None, key), key.owner_id)
+        if state:
+            state.finish("timeout")
 
     async def publish_card(
         self, display: RunDisplay, message_id: str, key: PresentationKey, location: CardReplyLocation,
@@ -280,7 +334,12 @@ class _ReplyCardPresenter:
         return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners, release_cards=self._release_cards))
 
     def retire_binding(self, binding_id: str) -> None:
-        if location := self._binding_locations.pop(binding_id, None):
+        location = self._binding_locations.pop(binding_id, None)
+        for key, process in tuple(self._process.items()):
+            if key.owner_id == binding_id or (location and process.location and process.location.binding is location):
+                process.revoke()
+                self._process.pop(key)
+        if location:
             location.retire()
 
     @property
@@ -359,6 +418,13 @@ class _ReplyCardPresenter:
             confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
         sessions[key.index] = session
+        if not event.feedback.progress_card_enabled and event.process_enabled:
+            try:
+                state = self._process_for(target, event.process_binding_id or key.owner_id)
+                if state:
+                    state.sample(snapshot)
+            except Exception:
+                logger.warning("process message observation unavailable")
         session.task = asyncio.create_task(self._poll(session), name=f"netizen-progress-card-{key.turn_id}")
         return True
 
@@ -533,13 +599,19 @@ class _ReplyCardPresenter:
     ) -> None:
         """Stop every ordinary/Goal presenter owned by one removed Thread."""
 
+        for key in tuple(self._process):
+            if (key.owner_id, key.thread_id) == (binding_id, thread_id):
+                state = self._process.pop(key)
+                state.revoke()
+                if state.task:
+                    await asyncio.gather(state.task, return_exceptions=True)
         ordinary_keys = tuple(
             key
             for key in self._sessions
             if key[0] == binding_id and key[1] == thread_id
         )
-        for key in ordinary_keys:
-            session = self._sessions.pop(key, None)
+        for index in ordinary_keys:
+            session = self._sessions.pop(index, None)
             if session is not None:
                 await self._stop_session(session)
 
@@ -592,6 +664,11 @@ class _ReplyCardPresenter:
         if self._closed:
             return
         self._closed = True
+        processes = tuple(self._process.values())
+        self._process.clear()
+        for process in processes:
+            process.revoke()
+        await asyncio.gather(*(state.task for state in processes if state.task), return_exceptions=True)
         for binding_id in tuple(self._binding_locations):
             self.retire_binding(binding_id)
         sessions = tuple(self._sessions.values())
@@ -630,6 +707,12 @@ class _ReplyCardPresenter:
             if change is None:
                 continue
             snapshot = change.snapshot
+            if process := self._process.get(session.target.key):
+                try:
+                    process.sample(snapshot)
+                except Exception:
+                    logger.warning("process message observation unavailable")
+                    process.revoke()
             if session.message_id is None or session.failed:
                 await self._deliver_partial_answers(session, snapshot.partial_answers)
                 if session.message_id is None:

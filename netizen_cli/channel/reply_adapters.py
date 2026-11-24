@@ -52,6 +52,7 @@ from ..schedules.models import ScheduleNotFound
 from . import constants
 from .app_values import (
     _ClaudeReplyTarget,
+    _inbound_root_message_id,
     _message_id,
     _ScheduledCompletion,
 )
@@ -92,6 +93,8 @@ class NativeReplyChannel(CompletionPresentationChannel):
             return
         if isinstance(outcome, DegradedTurn):
             key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+            for input_id in outcome.affected_inputs or (outcome.turn_id,):
+                await self._progress_cards.end_process_run(replace(key, turn_id=input_id), "timeout")
             location = self._physical_card_location(outcome.binding_id, outcome.origin)
             await self._present_run_state(RunState(ReplyTarget(key, outcome.origin, None), str(outcome.error),
                 send_notice=lambda notice: self._physical_reply(outcome.origin, notice, location)))
@@ -118,6 +121,29 @@ class NativeReplyChannel(CompletionPresentationChannel):
                 await self._archive_scheduled_completion(outcome)
         finally:
             self._finish_ordinary_completion(outcome)
+
+    def _process_reply_location(self, binding_id: str, origin: object) -> CardReplyLocation | None:
+        if getattr(origin, "app_id", self._app_id) != self._app_id:
+            return None
+        location = self._physical_card_location(binding_id, origin)
+        scope = location.scope
+        if scope.app_id != self._app_id or location.retired or location.binding.retired:
+            return None
+        parent = location.parent
+        root = location.root or _inbound_root_message_id(origin)
+        if isinstance(origin, ConversationTarget):
+            if not origin.publishable():
+                return None
+            if scope.topic_id:
+                if not isinstance(origin.source, ClaudeInputAnchor) or origin.source.scope != scope:
+                    return None
+                parent = root
+        elif not parent:
+            return None
+        if scope.topic_id and not (root and parent):
+            return None
+        # The process ID has independent write ownership within the same Binding.
+        return CardReplyLocation(scope, parent, root, location.binding)
 
     def _physical_card_location(self, binding_id: str, origin: object) -> CardReplyLocation:
         if isinstance(origin, _ClaudeReplyTarget):
@@ -256,6 +282,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
             "状态仍无法确认时，新消息不会执行。"
         )
         key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+        self._progress_cards.unknown_process(key)
         await self._present_run_state(RunState(ReplyTarget(key, outcome.origin, key), message))
 
     async def _complete_side_lifecycle(

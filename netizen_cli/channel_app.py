@@ -37,6 +37,7 @@ from .cards import (
     TurnFileCardLimitError,
     turn_progress_card,
 )
+from .process_messages import ProcessMessages
 from .channel.input_preparation import MessageInputPreparer
 from .attachments import AttachmentStore
 from .channel.ports import ReplyChannel
@@ -125,6 +126,7 @@ class ChannelApplication(ChannelEntry):
         projects: ProjectRegistry,
         management: InstanceManagementService,
         message_history: MessageHistoryReader | None = None,
+        process_messages: ProcessMessages | None = None,
         admin_urls: tuple[str, ...] = (),
         admin_loopback_only: bool | None = None,
         instance_root: Path | None = None,
@@ -165,7 +167,8 @@ class ChannelApplication(ChannelEntry):
         self._rename_name_generations: dict[str, _RenameNameGeneration] = {}
         self._reactions = _ReactionController(channel, isolate_child_cancellation=self._local_sessions is not None)
         self._reply_suppression = ReplySuppression()
-        self._progress_cards = _ReplyCardPresenter(channel)
+        self._progress_cards = _ReplyCardPresenter(channel, process_messages=process_messages,
+                                                  process_location=self._process_reply_location)
         if self._local_sessions is not None:
             self._local_sessions.on_binding_deleted = self._progress_cards.retire_binding
         self.handle_completion = codex_completion_handler(
