@@ -205,6 +205,18 @@ for line in sys.stdin:
                 },
             )
             if mode == "goal":
+                for item in (
+                    {"type": "agentMessage", "id": "draft", "text": "unphased"},
+                    {"type": "agentMessage", "id": "answer", "text": "first final", "phase": "final_answer"},
+                    {"type": "agentMessage", "id": "later", "text": "later unphased"},
+                    {"type": "fileChange", "id": "patch", "status": "completed",
+                     "changes": [{"path": "direct.txt", "kind": {"type": "add"}, "diff": "new line\n"}]},
+                    {"type": "fileChange", "id": "failed", "status": "failed", "changes": []},
+                    {"type": "imageGeneration", "id": "image", "status": "completed",
+                     "savedPath": "/tmp/art.png", "result": "private image data"},
+                ):
+                    notify("item/completed", {"threadId": "thread-goal", "turnId": first,
+                                              "completedAtMs": 1, "item": item})
                 notify(
                     "item/completed",
                     {
@@ -715,10 +727,20 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 ("turn-2", False, True),
             ],
         )
+        first, second = [p.goal_terminal for p in activity if p and p.goal_terminal]
+        self.assertEqual((first.turn_id, first.status, first.final_response, first.phase.value),
+                         ("turn-1", "completed", "first final", "final_answer"))
+        self.assertEqual([item.id for item in first.file_items], ["patch", "image"])
+        self.assertEqual(first.file_items[0].changes[0].path, "direct.txt")
+        self.assertEqual(first.file_items[1].saved_path, "/tmp/art.png")
+        self.assertFalse(hasattr(first.file_items[1], "result"))
+        self.assertIn("first-latest", first.turn_diff)
+        self.assertEqual((second.turn_id, second.file_items), ("turn-2", ()))
+        self.assertEqual(second.turn_diff, terminal.turn_diff)
         command = next(
             item.event
             for item in activity
-            if item is not None and item.event is not None
+            if item is not None and item.event is not None and item.event.kind is TurnActivityKind.COMMAND
         )
         self.assertIs(command.kind, TurnActivityKind.COMMAND)
         self.assertIs(command.status, TurnActivityStatus.IN_PROGRESS)
@@ -814,6 +836,24 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.next_goal_notification.await_count, 1)
         self.assertEqual(len(projected[0].event.text), 320)
         self.assertEqual(projected[0].event.event_timestamp_ms, 23)
+
+    async def test_goal_projection_exception_returns_the_original_notification(self) -> None:
+        from openai_codex.generated.v2_all import Turn, TurnStartedNotification
+        from openai_codex.models import Notification
+        from netizen_cli.sdk_gap_adapter import _GoalActivityTap
+
+        raw = Notification(method="turn/started", payload=TurnStartedNotification(
+            threadId="thread-goal", turn=Turn(id="one", status="inProgress", items=[]),
+        ))
+        client = AsyncMock()
+        client.next_goal_notification.return_value = raw
+        seen = []
+        tap = _GoalActivityTap("thread-goal")
+        tap.bind(seen.append)
+        with patch("netizen_cli.sdk_gap_adapter.project_turn_activity_notification", side_effect=ValueError("shape")):
+            self.assertIs(await tap.next_notification(client, object()), raw)
+        self.assertEqual(seen, [None])
+        client.next_goal_notification.assert_awaited_once()
 
     async def test_goal_activity_sink_failure_does_not_break_unique_stream(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

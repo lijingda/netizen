@@ -13,7 +13,7 @@ import logging
 import asyncio
 import inspect
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
@@ -27,10 +27,12 @@ from openai_codex.models import Notification
 from pydantic import ValidationError
 
 from .domain import GoalStatus
+from .partial_answers import PartialAnswer, project_partial_answer
 from .progress_card_settings import ProgressCardSettings
 from .turn_activity import (
+    GoalSavedImage,
+    GoalTurnFacts,
     TurnActivityNotificationProjection,
-    TurnActivityProjectionUnavailable,
     project_turn_activity_notification,
 )
 
@@ -783,13 +785,16 @@ class AppServerGoalControl:
 
 
 class _GoalActivityTap:
-    """Project activity and final-Turn diff in the one Goal consumer."""
+    """Freeze exact physical Turn evidence in the sole Goal consumer."""
+    _terminal: bool
+    _child_work: bool
 
     __slots__ = (
         "_thread_id",
         "_turn_id",
         "_completed_turn_id",
         "_started_turn_ids",
+        "_terminal", "_answer", "_phase", "_files", "_partials", "_child_work",
         "_turn_diff",
         "_diff_enabled",
         "_sink",
@@ -801,6 +806,7 @@ class _GoalActivityTap:
         self._turn_id: str | None = None
         self._completed_turn_id: str | None = None
         self._started_turn_ids: set[str] = set()
+        self._reset_facts()
         self._turn_diff: str | None = None
         self._diff_enabled = True
         self._progress_card_settings = ProgressCardSettings()
@@ -819,6 +825,18 @@ class _GoalActivityTap:
 
     async def next_notification(self, client: Any, state: Any) -> Any:
         notification = await client.next_goal_notification(state)
+        try:
+            self._project(notification)
+        except Exception as error:
+            logger.warning("Goal notification projection unavailable (%s)", type(error).__name__)
+            if self._sink is not None:
+                try:
+                    self._sink(None)
+                except Exception:
+                    self._sink = None
+        return notification
+
+    def _project(self, notification: Any) -> None:
         if (
             type(notification) is Notification
             and notification.method == "turn/started"
@@ -827,37 +845,37 @@ class _GoalActivityTap:
         ):
             turn_id = notification.payload.turn.id
             if turn_id in self._started_turn_ids:
-                # Presentation must not rewind when an old start is repeated;
-                # the SDK's one stream still receives the original notification.
-                return notification
+                return
             self._started_turn_ids.add(turn_id)
+            self._turn_id = turn_id
+            self._reset_facts()
         self._capture_turn_diff(notification)
         sink = self._sink
         if sink is None:
-            return notification
-        try:
-            projection = project_turn_activity_notification(
-                notification,
-                expected_thread_id=self._thread_id,
-                expected_turn_id=self._turn_id,
-                progress_card_settings=self._progress_card_settings,
-            )
-        except TurnActivityProjectionUnavailable:
-            self._sink = None
-            try:
-                sink(None)
-            except Exception as diagnostic_error:
-                logger.warning(
-                    "Goal activity unavailable notification failed",
-                    extra={
-                        "thread_id": self._thread_id,
-                        "turn_id": self._turn_id,
-                        "error_type": type(diagnostic_error).__name__,
-                    },
-                )
-            return notification
-        if projection.turn_started:
-            self._turn_id = projection.turn_id
+            return
+        projection = project_turn_activity_notification(
+            notification, expected_thread_id=self._thread_id, expected_turn_id=self._turn_id,
+            progress_card_settings=self._progress_card_settings,
+        )
+        payload = notification.payload
+        if projection.turn_id and projection.turn_id == self._turn_id:
+            if self._terminal:
+                return
+            if notification.method == "item/completed" and type(payload) is _generated.ItemCompletedNotification:
+                self._observe_item(payload.item)
+            if projection.turn_completed and type(payload) is _generated.TurnCompletedNotification:
+                status = payload.turn.status.value
+                if status in {"completed", "interrupted", "failed"}:
+                    for item in payload.turn.items:
+                        self._observe_item(item)
+                    facts = GoalTurnFacts(
+                        projection.turn_id, status, self._answer, self._phase,
+                        tuple(self._files.values()) if status == "completed" else (),
+                        self.final_turn_diff(projection.turn_id) if status == "completed" else None,
+                        tuple(self._partials.values()), self._child_work,
+                    )
+                    self._terminal = True
+                    projection = replace(projection, goal_terminal=facts)
         if not (
             projection.turn_started
             or projection.turn_completed
@@ -866,7 +884,7 @@ class _GoalActivityTap:
             or projection.question is not None
             or projection.partial_answer is not None
         ):
-            return notification
+            return
         try:
             sink(projection)
         except Exception as diagnostic_error:
@@ -881,7 +899,31 @@ class _GoalActivityTap:
             # Activity is display-only. A projection consumer can disable
             # itself but must never interrupt the one Goal notification stream.
             self._sink = None
-        return notification
+        return
+
+    def _reset_facts(self) -> None:
+        self._terminal = False
+        self._answer: str | None = None
+        self._phase: _generated.MessagePhase | None = None
+        self._files: dict[str, _generated.FileChangeThreadItem | GoalSavedImage] = {}
+        self._partials: dict[str, PartialAnswer] = {}
+        self._child_work = False
+
+    def _observe_item(self, wrapped: _generated.ThreadItem) -> None:
+        item = wrapped.root
+        if type(item) is _generated.AgentMessageThreadItem:
+            if item.phase is _generated.MessagePhase.final_answer or (item.phase is None and self._phase is None):
+                self._answer, self._phase = item.text, item.phase
+            elif self._turn_id is not None:
+                partial = project_partial_answer(item, thread_id=self._thread_id, turn_id=self._turn_id)
+                if partial is not None:
+                    self._partials.setdefault(partial.item_id, partial)
+        elif type(item) is _generated.FileChangeThreadItem and item.status.value == "completed":
+            self._files[item.id] = item.model_copy(deep=True)
+        elif type(item) is _generated.ImageGenerationThreadItem and item.status == "completed" and item.saved_path:
+            self._files[item.id] = GoalSavedImage(item.id, item.saved_path.root)
+        elif type(item) in {_generated.CollabAgentToolCallThreadItem, _generated.SubAgentActivityThreadItem}:
+            self._child_work = True
 
     def final_turn_diff(self, physical_turn_id: str) -> str | None:
         if (

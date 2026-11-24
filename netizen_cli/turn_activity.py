@@ -186,6 +186,26 @@ class TurnActivityEntrySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class GoalSavedImage:
+    id: str
+    saved_path: str
+    type: str = "imageGeneration"
+    status: str = "completed"
+
+
+@dataclass(frozen=True, slots=True)
+class GoalTurnFacts:
+    turn_id: str
+    status: str
+    final_response: str | None
+    phase: MessagePhase | None
+    file_items: tuple[FileChangeThreadItem | GoalSavedImage, ...]
+    turn_diff: str | None
+    partial_answers: tuple[PartialAnswer, ...]
+    has_child_work: bool
+
+
+@dataclass(frozen=True, slots=True)
 class TurnActivityNotificationProjection:
     turn_id: str | None = None
     turn_started: bool = False
@@ -196,7 +216,11 @@ class TurnActivityNotificationProjection:
     question: QuestionRequest | None = None
     partial_answer: PartialAnswer | None = None
 
+    goal_terminal: GoalTurnFacts | None = None
+
     def __post_init__(self) -> None:
+        if self.goal_terminal is not None and (not self.turn_completed or self.goal_terminal.turn_id != self.turn_id):
+            raise ValueError("Goal terminal facts require a matching physical Turn")
         if self.turn_id is not None:
             _validate_exact_id(self.turn_id, label="Turn")
         if self.turn_id is None and (
