@@ -5,8 +5,9 @@ Python service, one `FeishuChannel`, one Channel database, and one backend fixed
 Codex is the reference backend and shares one `AsyncCodex` from the official `openai-codex` SDK.
 Claude Code is an owner-only ordinary-session pilot (ADR 0104).
 
-The Channel SDK owns messaging. Netizen owns SDK requests, result delivery and its
-resources. The selected agent owns native execution, history, tools, configuration
+The Channel SDK owns messaging. ADR 0107 permits three typed Feishu process-message
+writes through the instance's pinned `lark-oapi` client. Netizen owns SDK requests,
+result delivery and its resources. The selected agent owns native execution, history, tools, configuration
 and permissions. Keep a single runtime per instance, with no second service,
 scheduler, history model or configuration layer. See the
 [responsibility boundary](docs/design.md#netizen-与原生-agent-的职责边界).
@@ -165,8 +166,9 @@ The usage guides are not implementation guides.
   receipt locks or infer attachment history.
 - Display is best effort and never changes native execution. Keep Reply Cards
   within the closed Activity/Partial Answer/Result/Files set. Goal management cards
-  are separate. Never expose reasoning or raw tool arguments/output. Files use exact
-  Turn evidence, not workspace scans.
+  are separate. Outside Reply Cards, ADR 0107 permits process messages carrying only
+  the safe Activity projection. Never expose reasoning or raw tool arguments/output.
+  Files use exact Turn evidence, not workspace scans.
   Partial Answers use the existing observation/consumption chain independently of
   Progress Card, never signal completion, and never create database answer history.
   Preserve Goal's four-proof completion and exact final-Turn Result/Files handoff contract,
