@@ -21,6 +21,8 @@ from unittest.mock import patch
 import yaml
 
 from netizen_cli import cli
+from tests.support import requires_claude_sdk
+
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.cli_data import prepare_instance
 from netizen_cli.cli_services import ServiceBinding, ServiceManager, _service_environment
@@ -95,6 +97,7 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         self.assertEqual(code, 0, report)
         self.assertEqual(report["status"], "prepared")
 
+    @requires_claude_sdk
     def test_claude_setup_start_and_repair_use_instance_installation(self):
         from netizen_cli.claude_installation import REPAIR, verified_claude_cli
 

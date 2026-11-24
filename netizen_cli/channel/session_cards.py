@@ -182,12 +182,13 @@ class SessionCardChannel(QuestionChannel):
                 native_thread_id=binding.native_thread_id,
                 title=_session_title(binding, item.native.metadata if item.native else None),
                 state=projection.primary_status or "暂不可用",
+                can_stop_all=projection.can_stop_all, can_stop=projection.can_stop,
                 state_label=projection.local_label, observations=projection.observations,
                 registered_at=binding.created_at,
                 catalog_unconfirmed=item.inventory_state is SessionInventoryState.UNKNOWN,
                 active=binding.active,
                 activity_revision=snapshot.activity_revision,
-                turn_id=snapshot.turn.turn_id if snapshot.turn is not None else None,
+                turn_id=snapshot.turn.turn_id if snapshot.turn is not None else projection.control_turn_id,
             ))
         current_session = sessions.pop() if current is not None else None
         if local_directory and previous is None and navigation.page:

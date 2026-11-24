@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -16,6 +17,7 @@ import httpx
 from lark_channel import FeishuChannelError, FeishuChannelErrorCode, MediaSource, classify_error
 from markdown_it.token import Token
 
+from .external_calls import ExternalCallCancelled, external_call
 from .markdown_images import image_tokens, parse_markdown, render_markdown, replace_image_with_text
 from .turn_files import is_supported_image_header
 
@@ -28,6 +30,7 @@ _UPLOAD_TIMEOUT_SECONDS = 4.0
 _IMAGE_KEY = re.compile(r"img_[A-Za-z0-9_-]{1,256}\Z")
 _INVALID_IMAGE_KEY = "飞书未返回有效的图片标识"
 logger = logging.getLogger(__name__)
+ImageState = Literal["unattempted", "unknown", "rejected", "ready"]
 
 
 class ImageUploadChannel(Protocol):
@@ -46,6 +49,7 @@ def _batch_timeout(stage: str) -> str:
 class _Preview:
     key: str | None = None
     reason: str = ""
+    state: ImageState = "unattempted"
 
 
 async def prepare_result_images(
@@ -53,6 +57,7 @@ async def prepare_result_images(
     content: str,
     *,
     cwd: Path | None,
+    on_image: Callable[[str, ImageState], None] | None = None,
 ) -> str:
     """Upload each admitted path once, then render results in original Markdown order."""
     if "![" not in content:
@@ -63,9 +68,19 @@ async def prepare_result_images(
     references: dict[str, list[Token]] = {}
     for token in image_tokens(tokens):
         target = token.attrGet("src") or ""
-        parts = urlsplit(target)
-        if _IMAGE_KEY.fullmatch(target) or parts.scheme not in {"", "file"} or parts.netloc:
+        try:
+            parts = urlsplit(target)
+        except ValueError:
+            if on_image is None:
+                raise
+            on_image(target, "rejected")
             continue
+        if _IMAGE_KEY.fullmatch(target) or parts.scheme not in {"", "file"} or parts.netloc:
+            if on_image:
+                on_image(target, "ready")
+            continue
+        if on_image:
+            on_image(target, "unattempted")
         references.setdefault(target, []).append(token)
     if not references:
         return content
@@ -82,12 +97,12 @@ async def prepare_result_images(
                 try:
                     path = await asyncio.to_thread(_local_path, target, cwd)
                 except _ImageProblem as exc:
-                    by_target[target] = _Preview(reason=str(exc))
+                    by_target[target] = _Preview(reason=str(exc), state="rejected")
                     continue
                 if path in by_path:
                     by_target[target] = by_path[path]
                 elif len(by_path) >= _MAX_IMAGES:
-                    by_target[target] = _Preview(reason=f"每条回复最多预览 {_MAX_IMAGES} 张不同图片，此图已跳过")
+                    by_target[target] = _Preview(reason=f"每条回复最多预览 {_MAX_IMAGES} 张不同图片，此图已跳过", state="rejected")
                 else:
                     preview = _Preview()
                     by_target[target] = by_path[path] = preview
@@ -96,6 +111,10 @@ async def prepare_result_images(
         if not batch.expired():
             raise
         logger.warning("inline result image preview batch timed out")
+    finally:
+        if on_image:
+            for target, preview in by_target.items():
+                on_image(target, preview.state)
 
     for target, occurrences in references.items():
         preview = by_target.get(target)
@@ -166,10 +185,12 @@ async def _prepare_one(
             body = await asyncio.shield(read)
             reading = False
             preview.reason = _batch_timeout("尚未收到此图的上传结果")
-            key = await channel.upload_media(MediaSource(kind="buffer", buffer=body), kind="image")
+            preview.state = "unknown"
+            key = await external_call(channel.upload_media(MediaSource(kind="buffer", buffer=body), kind="image"))
             if not isinstance(key, str) or not _IMAGE_KEY.fullmatch(key):
                 raise _ImageProblem(_INVALID_IMAGE_KEY)
             preview.key = key
+            preview.state = "ready"
     except asyncio.CancelledError:
         # TaskGroup isolates a cancelled child and propagates cancellation of its parent.
         # At the batch deadline keep the recorded stage for the partial reply.
@@ -177,9 +198,15 @@ async def _prepare_one(
             preview.reason = "上传等待已取消，未取得结果"
         raise
     except Exception as exc:
+        if isinstance(exc, FeishuChannelError) and isinstance(exc.context.get("raw_code"), int) and exc.context["raw_code"] > 0:
+            preview.state = "rejected"
+        elif reading and not timer.expired():
+            preview.state = "rejected"
         if timer.expired():
             stage = "读取图片超时" if reading else "等待飞书上传结果超时"
             preview.reason = f"{stage}（单图处理上限 {_UPLOAD_TIMEOUT_SECONDS:g} 秒）"
+        elif isinstance(exc, ExternalCallCancelled):
+            preview.reason = "上传等待已取消，未取得结果"
         elif isinstance(exc, _ImageProblem):
             preview.reason = str(exc)
         elif reading:

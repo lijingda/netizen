@@ -3,21 +3,27 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID
 
 from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.file_evidence import FileEvidence
-from netizen_cli.ordinary_sessions import OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, PromptImage
-from netizen_cli.runtime.claude_client import BundledClaudeClients
-from netizen_cli.runtime.claude_ordinary import (
-    CLOSE_FAILED, DEFAULT_MODE, GRACE, MODE_UNKNOWN, START_FAILED, UNKNOWN, ClaudeOrdinarySessions,
+from netizen_cli.ordinary_sessions import (
+    ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, PhysicalAnswer, LogicalTerminal, OrdinaryConclusion, OrdinaryInputRejected, PreparedPrompt, PromptImage,
 )
 from netizen_cli.runtime.contracts import ContextCursorCommit, StopDisposition, TerminalStateUnknown, ThreadActivityChanged
-from tests.support.claude_client import FakeClaudeClients
+from tests.support import has_claude_sdk, requires_claude_sdk
+
+if has_claude_sdk:
+    from netizen_cli.runtime.claude_client import BundledClaudeClients
+    from netizen_cli.runtime.claude_ordinary import (
+        CLOSE_FAILED, DEFAULT_MODE, DEGRADED, MODE_UNKNOWN, GRACE, START_FAILED, UNKNOWN, ClaudeOrdinarySessions,
+    )
+    from tests.support.claude_client import FakeClaudeClients
 
 
+@requires_claude_sdk
 class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -30,11 +36,14 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.clients = FakeClaudeClients()
         self.now = 10.
         self.events = []
+        self.all_events = []
         self.notices = []
         self.delivered = asyncio.Event()
 
         async def completion(event):
-            self.events.append(event)
+            self.all_events.append(event)
+            if not isinstance(event, LogicalTerminal):
+                self.events.append(event)
             self.delivered.set()
 
         async def notice(origin, text):
@@ -73,6 +82,805 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         client.result()
         self.assertTrue(await self.runtime.wait_idle(1))
 
+    async def wait_until(self, predicate):
+        async with asyncio.timeout(15):
+            while not predicate():
+                await asyncio.sleep(.005)
+
+    @staticmethod
+    async def cron(cli, registered):
+        await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}] if registered else []},
+                                 None, None)
+
+    async def retain(self):
+        h1 = await self.submit(origin="H1")
+        h1.release_receipt_attempt()
+        cli = self.clients.calls[-1]
+        cli.init()
+        await self.cron(cli, True)
+        cli.result()
+        await self.wait_until(lambda: cli.live.ordered_idle)
+        return h1, cli
+
+    async def test_unwritten_init_on_either_side_of_rollback_degrades_before_result(self):
+        for rollback_first in (False, True):
+            with self.subTest(rollback_first=rollback_first):
+                _, cli = await self.retain()
+                reserved, proceed = asyncio.Event(), asyncio.Event()
+                write = self.runtime._write_next
+                async def delayed(*args):
+                    reserved.set()
+                    await proceed.wait()
+                    await write(*args)
+                with patch.object(self.runtime, "_write_next", side_effect=delayed):
+                    submit = asyncio.create_task(self.submit(origin="never written"))
+                    await asyncio.wait_for(reserved.wait(), 5)
+                    execution = self.runtime._active[self.binding.id]
+                    h2 = execution.pending.input_id
+                    if rollback_first:
+                        await self.runtime.binding_pointer_changed(self.binding.id, None)
+                        proceed.set()
+                        with self.assertRaises(OrdinaryInputRejected):
+                            await asyncio.wait_for(submit, 5)
+                    cli.init(user_message_uuids=[h2])
+                    await self.wait_until(lambda: execution.broken)
+                    proceed.set()
+                    cli.result(user_message_uuid=h2, result="wrong body")
+                    with self.assertRaises(OrdinaryInputRejected):
+                        await asyncio.wait_for(submit, 5)
+                self.assertTrue(await self.runtime.wait_idle(5))
+                self.assertIsInstance(self.events[-1], DegradedTurn)
+                self.assertFalse(any(getattr(e, "final_response", None) == "wrong body" for e in self.events))
+                self.assertEqual((len(cli.inputs), cli.closes), (1, 1))
+
+    async def exercise_shutdown_queue(self, *, cancel_send):
+        from claude_agent_sdk import SystemMessage
+        _, cli = await self.retain()
+        execution = self.runtime._active[self.binding.id]
+        entered, release = asyncio.Event(), asyncio.Event()
+        attempted = []
+        async def deliver(event):
+            if not isinstance(event, PhysicalAnswer):
+                return
+            attempted.append(event.turn_id)
+            if len(attempted) == 1:
+                entered.set()
+                await release.wait()
+                raise asyncio.CancelledError()
+        with patch.object(self.runtime, "_completion", side_effect=deliver):
+            for uid in ("cron-one", "cron-two"):
+                cli.init(user_message_uuids=[])
+                cli.result(uuid=uid, user_message_uuid=None)
+                cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+            await asyncio.wait_for(entered.wait(), 5)
+            await self.wait_until(lambda: "cron-two" in cli.live.seen)
+            deadline = asyncio.get_running_loop().time() + (5 if cancel_send else .2)
+            shutdown = asyncio.create_task(self.runtime.interrupt_all(deadline=deadline))
+            await asyncio.wait_for(cli.closing.wait(), 5)
+            if cancel_send:
+                release.set()
+            await asyncio.wait_for(shutdown, 5)
+            self.assertFalse(any(not t.done() for t in execution.delivery.workers))
+            release.set()
+            self.assertEqual(attempted, ["cron-one", "cron-two"] if cancel_send else ["cron-one"])
+
+    async def test_send_cancelled_during_shutdown_drains_following_body(self):
+        await self.exercise_shutdown_queue(cancel_send=True)
+
+    async def test_presentation_joined_at_service_deadline(self):
+        await self.exercise_shutdown_queue(cancel_send=False)
+
+    async def test_stream_ping_and_last_cron_removal_share_one_reader_wakeup(self):
+        from claude_agent_sdk import StreamEvent
+
+        _, cli = await self.retain()
+        # Queue the pump first. The Stop callback wakes the consumer behind it,
+        # so it reads both changes at the cut carrying the ping.
+        cli.stream.put_nowait(StreamEvent("ping", cli.session, {}))
+        await self.cron(cli, False)
+        self.assertTrue(await self.runtime.wait_idle(10))
+        self.assertEqual(cli.closes, 1)
+
+    async def test_reservation_rollback_and_last_cron_removal_commute(self):
+        for clear_first in (True, False):
+            with self.subTest(clear_first=clear_first):
+                h1, cli = await self.retain()
+                reserved, proceed = asyncio.Event(), asyncio.Event()
+                write = self.runtime._write_next
+                async def delayed(*args):
+                    reserved.set()
+                    await proceed.wait()
+                    await write(*args)
+                with patch.object(self.runtime, "_write_next", side_effect=delayed):
+                    submit = asyncio.create_task(self.submit(origin="never written"))
+                    await asyncio.wait_for(reserved.wait(), 2)
+                    self.assertIsNone(await self.runtime.preview_stop(self.binding))
+                    await self.runtime.binding_pointer_changed(self.binding.id, None)
+                    if clear_first:
+                        await self.cron(cli, False)
+                    proceed.set()
+                    with self.assertRaisesRegex(OrdinaryInputRejected, "未发送"):
+                        await asyncio.wait_for(submit, 2)
+                    if not clear_first:
+                        await self.cron(cli, False)
+                self.assertTrue(await self.runtime.wait_idle(2))
+                self.assertEqual((len(cli.inputs), cli.closes), (1, 1))
+                self.assertIsNone(self.runtime.local_snapshot(self.binding.id).turn)
+                self.assertEqual(self.runtime._activity[self.binding.id].last_execution_id, h1.turn_id)
+                self.assertFalse(any(isinstance(e, DegradedTurn) for e in self.events))
+
+    async def test_reader_failure_distinguishes_unwritten_reservation(self):
+        from claude_agent_sdk import StreamEvent
+        for malformed_uuid in (True, False):
+            with self.subTest(malformed_uuid=malformed_uuid):
+                before = len(self.events)
+                h1, cli = await self.retain()
+                reserved = asyncio.Event()
+                async def never_wrote(*args):
+                    reserved.set()
+                    await asyncio.Future()
+                with patch.object(self.runtime, "_write_next", side_effect=never_wrote):
+                    submit = asyncio.create_task(self.submit(origin="H2"))
+                    await asyncio.wait_for(reserved.wait(), 3)
+                    cli.stream.put_nowait(StreamEvent("frame", cli.session, {}, user_message_uuid="") if malformed_uuid else None)
+                    with self.assertRaisesRegex(OrdinaryInputRejected, "未发送"):
+                        await asyncio.wait_for(submit, 3)
+                self.assertTrue(await self.runtime.wait_idle(3))
+                self.assertEqual([i["uuid"] for i in cli.inputs], [h1.turn_id])
+                notice, = [e for e in self.events[before:] if isinstance(e, DegradedTurn)]
+                self.assertEqual(notice.origin.source, "H1")
+                self.assertTrue(set(notice.affected_inputs) <= {h1.turn_id})
+
+    async def test_idle_with_any_outstanding_physical_or_pending_input_has_bounded_exit(self):
+        from claude_agent_sdk import SystemMessage
+        for current_init in (False, True):
+            with self.subTest(current_init=current_init), patch("netizen_cli.runtime.claude_ordinary._TRANSITION_SECONDS", .04):
+                h = await self.submit()
+                h.release_receipt_attempt()
+                cli = self.clients.calls[-1]
+                if current_init:
+                    cli.init()
+                    cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "running"}))
+                cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+                self.assertTrue(await self.runtime.wait_idle(3))
+                self.assertEqual(cli.closes, 1)
+                self.assertIsInstance(self.events[-1], DegradedTurn)
+                self.assertEqual(self.events[-1].affected_inputs, (h.turn_id,))
+                await self.runtime.capture_submission_admission(self.binding.id)
+
+    async def test_anonymous_stream_event_cannot_accept_a_reserved_input(self):
+        from claude_agent_sdk import StreamEvent, SystemMessage
+
+        _, cli = await self.retain()
+        reserved, proceed = asyncio.Event(), asyncio.Event()
+        write = self.runtime._write_next
+        async def delayed(*args):
+            reserved.set()
+            await proceed.wait()
+            await write(*args)
+        with patch.object(self.runtime, "_write_next", side_effect=delayed):
+            submission = asyncio.create_task(self.submit(origin="H2"))
+            await asyncio.wait_for(reserved.wait(), 3)
+            human = self.runtime._active[self.binding.id].pending
+            for kwargs in ({}, {"user_message_uuid": None}, {"user_message_uuid": human.input_id}):
+                cli.stream.put_nowait(StreamEvent("frame", cli.session, {}, **kwargs))
+            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "running"}))
+            await self.wait_until(lambda: cli.live.state == "running")
+            self.assertFalse(human.ready.done() or human.proof.is_set() or human.written)
+            self.assertEqual(len(cli.inputs), 1)
+            proceed.set()
+            with self.assertRaisesRegex(OrdinaryInputRejected, "未发送"):
+                await asyncio.wait_for(submission, 3)
+        cli.stream.put_nowait(None)
+        self.assertTrue(await self.runtime.wait_idle(3))
+        self.assertNotIn(human.input_id, self.events[-1].affected_inputs)
+
+    async def assert_shutdown_during_settlement(self, *, uncertain_write):
+        binding = self.new_binding("overlapping-shutdown")
+        scope = self.store.get_scope(binding.scope_key).scope
+        anchor = ClaudeInputAnchor(scope, "H1", None, AsyncMock())
+        before = len(self.events)
+        self.clients.created.clear()
+        self.clients.configure = lambda c: setattr(c, "failure", "query" if uncertain_write else "connect")
+        entered, release = asyncio.Event(), asyncio.Event()
+        disconnect = self.runtime._disconnect
+        async def gated(execution):
+            entered.set()
+            await release.wait()
+            await disconnect(execution)
+        with patch.object(self.runtime, "_disconnect", side_effect=gated):
+            submit = asyncio.create_task(self.submit(binding, origin=anchor))
+            await asyncio.wait_for(self.clients.created.wait(), 5)
+            client = self.clients.calls[-1]
+            if uncertain_write:
+                await asyncio.wait_for(client.writing.wait(), 5)
+                client.stream.put_nowait(None)
+            await asyncio.wait_for(entered.wait(), 5)
+            execution = self.runtime._active[binding.id]
+            human = execution.human
+            resolved = Mock()
+            human.ready.add_done_callback(resolved)
+            self.assertTrue(execution.ending)
+            self.assertFalse(execution.closing or human.ready.done())
+            # Reach forced cleanup while the ending owner is blocked before the SDK close.
+            forced = asyncio.Event()
+            begin = self.runtime._begin_client_cleanup
+            def begin_cleanup():
+                begin()
+                forced.set()
+            with (patch("netizen_cli.runtime.claude_ordinary._CONTROL_SECONDS", 0),
+                  patch.object(self.runtime, "_begin_client_cleanup", side_effect=begin_cleanup)):
+                shutdown = asyncio.create_task(self.runtime.interrupt_all() if uncertain_write else self.runtime.cancel_tasks())
+                try:
+                    await asyncio.wait_for(forced.wait(), 5)
+                    self.assertFalse(await self.runtime.wait_idle(0))
+                finally:
+                    release.set()
+                await asyncio.wait_for(shutdown, 5)
+            try:
+                self.assertTrue(await self.runtime.wait_idle(0))
+                self.assertFalse(self.runtime._active)
+                self.assertTrue(human.ready.done() and human.receipt.is_set() and anchor.retired)
+                with self.assertRaises(LiveSubmissionUnknown if uncertain_write else OrdinaryInputRejected):
+                    await asyncio.wait_for(submit, 5)
+                resolved.assert_called_once_with(human.ready)
+                self.assertEqual(anchor.stop_reactions.await_count, int(uncertain_write))
+                self.assertEqual([type(e) for e in self.events[before:]], [DegradedTurn] if uncertain_write else [])
+                self.assertEqual((len(client.inputs), client.closes), (int(uncertain_write), 1))
+            finally:
+                if not submit.done():
+                    submit.cancel()
+                await asyncio.gather(submit, return_exceptions=True)
+
+    async def test_settlement_survives_uncertain_write_eof_and_shutdown(self):
+        await self.assert_shutdown_during_settlement(uncertain_write=True)
+
+    async def assert_contradictory_result_during_reservation(self):
+        h1, cli = await self.retain()
+        reserved, release = asyncio.Event(), asyncio.Event()
+        write = self.runtime._write_next
+        async def delayed(*args):
+            reserved.set()
+            await release.wait()
+            await write(*args)
+        scope = self.store.get_scope(self.binding.scope_key).scope
+        anchor = ClaudeInputAnchor(scope, "H2", None, AsyncMock())
+        with patch.object(self.runtime, "_write_next", side_effect=delayed):
+            submit = asyncio.create_task(self.submit(origin=anchor))
+            await asyncio.wait_for(reserved.wait(), 5)
+            execution = self.runtime._active[self.binding.id]
+            h2 = execution.pending
+            resolved = Mock()
+            h2.ready.add_done_callback(resolved)
+            cli.result(uuid="contradiction", user_message_uuid=h2.input_id, result="wrong recipient")
+            try:
+                await self.wait_until(lambda: execution.broken or "contradiction" in cli.live.seen)
+            finally:
+                release.set()
+            with self.assertRaisesRegex(OrdinaryInputRejected, "未发送"):
+                await asyncio.wait_for(submit, 5)
+        await self.wait_until(lambda: execution.broken or any(e.origin == "H2" for e in self.events))
+        self.assertFalse(any(e.origin == "H2" for e in self.events))
+        self.assertTrue(await self.runtime.wait_idle(5))
+        notices = [e for e in self.events if isinstance(e, DegradedTurn)]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0].turn_id, h1.turn_id)
+        self.assertNotIn(h2.input_id, notices[0].affected_inputs)
+        self.assertTrue(anchor.retired and h2.receipt.is_set())
+        self.assertFalse(h2.proof.is_set() or execution.humans or execution.delivery.queues)
+        resolved.assert_called_once_with(h2.ready)
+        anchor.stop_reactions.assert_not_awaited()
+        self.assertEqual((len(cli.inputs), cli.closes), (1, 1))
+
+    async def test_every_exit_settles_submission_delivery_cleanup_and_cursor_once(self):
+        for exit_path in ("normal", "invalid-result", "invalid-state", "delivery-error", "cancel-physical",
+                          "cancel-logical", "cancel-cleanup", "reservation-conflict", "eof", "shutdown"):
+            with self.subTest(exit_path=exit_path):
+                if exit_path == "reservation-conflict":
+                    await self.assert_contradictory_result_during_reservation()
+                    continue
+                scope = FeishuScope("app", exit_path, ScopeKind.GROUP)
+                binding = self.store.create_channel_binding(scope=scope, project_alias="work", creator_id="owner",
+                    message_context_mode=MentionContextMode.CATCH_UP, context_anchor=MessageContextAnchor("old", 100))
+                commit = ContextCursorCommit(binding.context_revision, MessageContextAnchor("new", 200))
+                anchor = ClaudeInputAnchor(scope, "origin", None, AsyncMock())
+                if exit_path == "cancel-cleanup":
+                    anchor.stop_reactions.side_effect = asyncio.CancelledError()
+                attempted = []
+                async def deliver(event):
+                    if isinstance(event, (DegradedTurn, PhysicalAnswer, LogicalTerminal)):
+                        attempted.append(type(event))
+                    if exit_path == "delivery-error" and isinstance(event, LogicalTerminal):
+                        raise OSError()
+                    if ((exit_path == "cancel-physical" and isinstance(event, PhysicalAnswer)) or
+                            (exit_path == "cancel-logical" and isinstance(event, LogicalTerminal))):
+                        raise asyncio.CancelledError()
+
+                self.clients.configure = lambda c: setattr(c, "failure", "query" if exit_path == "invalid-result" else None)
+                self.clients.created.clear()
+                with (patch.object(self.runtime, "_completion", side_effect=deliver),
+                      patch.object(self.store, "commit_context_anchor", wraps=self.store.commit_context_anchor) as save):
+                    submit = asyncio.create_task(self.submit(binding, origin=anchor, context_commit=commit))
+                    await asyncio.wait_for(self.clients.created.wait(), 3)
+                    cli = self.clients.calls[-1]
+                    await asyncio.wait_for(cli.writing.wait(), 3)
+                    execution = self.runtime._active[binding.id]
+                    human = execution.human
+                    resolved = Mock()
+                    human.ready.add_done_callback(resolved)
+                    cli.init()
+                    if exit_path == "invalid-result":
+                        cli.result(reason="unrecognized", idle=False)
+                        with self.assertRaises(LiveSubmissionUnknown):
+                            await asyncio.wait_for(submit, 3)
+                    else:
+                        receipt = await asyncio.wait_for(submit, 3)
+                        if exit_path != "shutdown":
+                            receipt.release_receipt_attempt()
+                        await self.wait_until(human.proof.is_set)
+                        if exit_path == "eof":
+                            cli.stream.put_nowait(None)
+                        elif exit_path == "invalid-state":
+                            cli.result(session_id="foreign")
+                        elif exit_path == "shutdown":
+                            # One input is active and another is settling its failed connect.
+                            await self.assert_shutdown_during_settlement(uncertain_write=False)
+                        else:
+                            cli.result()
+                    self.assertTrue(await self.runtime.wait_idle(5))
+                    if exit_path in ("invalid-result", "eof", "invalid-state"):
+                        self.assertEqual(attempted, [DegradedTurn])
+                    elif exit_path == "shutdown":
+                        self.assertEqual(attempted, [])
+                    else:
+                        self.assertEqual(attempted, [PhysicalAnswer, LogicalTerminal])
+                    self.assertEqual(save.call_count, int(exit_path != "invalid-result"))
+                    self.assertEqual(self.store.get(binding.id).context_anchor,
+                                     binding.context_anchor if exit_path == "invalid-result" else commit.anchor)
+                    self.assertIsNone(human.commit)
+                    resolved.assert_called_once_with(human.ready)
+                    self.assertTrue(human.receipt.is_set())
+                    self.assertTrue(anchor.retired)
+                    anchor.stop_reactions.assert_awaited_once_with(human.input_id)
+                    self.assertFalse(execution.humans or execution.delivery.queues or execution.delivery.receipts or execution.delivery.cleanups)
+                    self.assertEqual((len(cli.inputs), cli.closes), (1, 1))
+
+    async def test_context_mode_change_after_write_supersedes_the_unconfirmed_cursor(self):
+        binding = self.store.create_channel_binding(
+            scope=FeishuScope("app", "group", ScopeKind.GROUP), project_alias="work", creator_id="owner",
+            message_context_mode=MentionContextMode.CATCH_UP, context_anchor=MessageContextAnchor("old", 100))
+        commit = ContextCursorCommit(binding.context_revision, MessageContextAnchor("new", 200))
+        accepted = await self.submit(binding, context_commit=commit)
+        current = await self.runtime.configure_context_exact(binding_id=binding.id,
+            expected_settings_revision=binding.settings_revision, expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision, settings=None, task_feedback=binding.task_feedback,
+            message_context_mode=MentionContextMode.CURRENT_ONLY, context_anchor=None)
+        await self.finish(accepted)
+        self.assertEqual(self.store.get(binding.id), current)
+        self.assertEqual(current.context_revision, binding.context_revision + 1)
+        self.assertIsNone(current.context_anchor)
+        self.assertEqual(self.notices, [])
+        await self.finish(await self.submit(self.binding))
+
+    async def test_local_configuration_works_during_execution_and_cron_retention(self):
+        h = await self.submit()
+        h.release_receipt_attempt()
+        cli = self.clients.calls[-1]
+        cli.init()
+        await self.cron(cli, True)
+        for enabled in (False, True):
+            current = self.store.get(self.binding.id)
+            changed = await self.runtime.configure_context_exact(binding_id=current.id,
+                expected_settings_revision=current.settings_revision, expected_feedback_revision=current.feedback_revision,
+                expected_context_revision=current.context_revision, settings=None,
+                task_feedback=replace(current.task_feedback, completion_mention_enabled=enabled),
+                message_context_mode=MentionContextMode.CURRENT_ONLY, context_anchor=None)
+            self.assertEqual(changed.task_feedback.completion_mention_enabled, enabled)
+            if not enabled:
+                cli.result()
+                await self.wait_until(lambda: cli.live.ordered_idle)
+        self.assertEqual(len(cli.inputs), 1)
+        await self.cron(cli, False)
+        self.assertTrue(await self.runtime.wait_idle(2))
+
+    async def test_service_shutdown_disconnects_retained_clients_without_waiting_for_idle(self):
+        from claude_agent_sdk import SystemMessage
+        _, cron_client = await self.retain()
+        h2 = await self.submit(self.new_binding("shell"))
+        h2.release_receipt_attempt()
+        shell = self.clients.calls[-1]
+        shell.init()
+        shell.stream.put_nowait(SystemMessage("background_tasks_changed", {
+            "session_id": shell.session, "tasks": [{"task_id": "shell", "run_id": "r"}]}))
+        shell.result()
+        await self.wait_until(lambda: shell.live.ordered_idle)
+        await asyncio.wait_for(self.runtime.interrupt_all(), 2)
+        self.assertEqual([(c.closes, c.interrupts) for c in (cron_client, shell)], [(1, 0), (1, 0)])
+        self.assertFalse(any(isinstance(e, DegradedTurn) for e in self.events))
+
+    async def test_slow_conversation_queue_of_1100_bodies_cancels_iteratively(self):
+        from claude_agent_sdk import SystemMessage
+        _, cli = await self.retain()
+        rendering = asyncio.Event()
+        async def slow(event):
+            if isinstance(event.origin, ConversationTarget):
+                rendering.set()
+                await asyncio.Future()
+        self.runtime._completion = slow
+        cli.init(user_message_uuids=[])
+        for i in range(1100):
+            cli.result(result=f"body {i}", user_message_uuid=None, idle=False)
+        await asyncio.wait_for(rendering.wait(), 3)
+        await self.wait_until(lambda: len(cli.live.seen) == 1101)
+        await self.cron(cli, False)
+        cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+        await asyncio.wait_for(cli.closing.wait(), 3)
+        # Exercise the forced-cancellation phase without waiting the full production drain budget.
+        with patch("netizen_cli.runtime.claude_ordinary._CLOSE_SECONDS", .05):
+            await asyncio.wait_for(self.runtime.cancel_tasks(), 3)
+        self.assertTrue(await self.runtime.wait_idle(1))
+        await self.wait_until(lambda: not self.runtime._tasks and not self.runtime._closes)
+
+    async def test_unowned_body_does_not_wait_for_h2_receipt_or_consume_its_notice(self):
+        _, cli = await self.retain()
+        h2 = await self.submit(origin="H2")
+        cli.init(mode="default")
+        cli.result(result="human")
+        cli.init(user_message_uuids=[])
+        cli.result(user_message_uuid=None, result="cron")
+        await self.wait_until(lambda: any(isinstance(e.origin, ConversationTarget) for e in self.events))
+        self.assertFalse(self.notices)
+        self.assertFalse(any(e.origin == "H2" for e in self.events))
+        h2.release_receipt_attempt()
+        await self.wait_until(lambda: self.notices)
+        self.assertEqual(self.notices, [("H2", DEFAULT_MODE)])
+        await self.cron(cli, False)
+        from claude_agent_sdk import SystemMessage
+        cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+        self.assertTrue(await self.runtime.wait_idle(2))
+
+    async def test_all_native_frames_share_one_pump_task(self):
+        from claude_agent_sdk import SystemMessage
+        callers = set()
+        def configure(cli):
+            original = cli.receive_messages
+            async def capture():
+                async for message in original():
+                    callers.add(asyncio.current_task())
+                    yield message
+            cli.receive_messages = capture
+        self.clients.configure = configure
+        receipt = await self.submit()
+        cli = self.clients.calls[-1]
+        cli.init()
+        for _ in range(30):
+            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "running"}))
+        cli.result()
+        receipt.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(2))
+        self.assertEqual(len(callers), 1)
+
+    async def test_foreign_or_malformed_task_inventory_cannot_complete_the_turn(self):
+        from claude_agent_sdk import SystemMessage
+        for data in ({"session_id": "foreign", "tasks": []}, {"tasks": [None]},
+                     {"tasks": [{"task_id": "a", "run_id": "same"}, {"task_id": "b", "run_id": "same"}]}):
+            receipt = await self.submit()
+            client = self.clients.calls[-1]
+            client.init()
+            client.stream.put_nowait(SystemMessage("background_tasks_changed", {"session_id": client.session} | data))
+            client.result(result="wrong answer")
+            receipt.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(2))
+            self.assertNotIsInstance(self.events[-1], OrdinaryConclusion)
+            self.assertEqual(client.consumers, 1)
+            self.assertEqual(client.closes, 1)
+
+    async def test_idle_binding_reuses_its_client_and_routes_a_late_wake_to_h1(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+        h1 = await self.submit(origin="first")
+        h1.release_receipt_attempt()
+        cli = self.clients.calls[0]
+        cli.init(user_message_uuids=[h1.turn_id])
+        cli.stream.put_nowait(AssistantMessage([ToolUseBlock("tool", "Bash", {})], "model", session_id=cli.session,
+                                               user_message_uuid=h1.turn_id))
+        def frame(subtype, **data):
+            cli.stream.put_nowait(SystemMessage(subtype, {"session_id": cli.session, **data}))
+        frame("background_tasks_changed", tasks=[{"task_id": "task", "run_id": "run"}])
+        frame("task_started", task_id="task", run_id="run", tool_use_id="tool")
+        cli.result(result="H1 body")
+        frame("session_state_changed", state="idle")
+        async with asyncio.timeout(2):
+            while not self.events:
+                await asyncio.sleep(.01)
+        h2 = await self.submit(origin="second")
+        h2.release_receipt_attempt()
+        self.assertEqual(len(self.clients.calls), 1)
+        cli.init(user_message_uuids=[h2.turn_id])
+        frame("session_state_changed", state="running")
+        frame("background_tasks_changed", tasks=[])
+        cli.result(result="H2 body", user_message_uuid=h2.turn_id, idle=False)
+        cli.init(user_message_uuids=[])
+        cli.result(result="wake A", user_message_uuid=None, origin={"kind":"task-notification", "producer":"session-task", "runId":"run"})
+        frame("session_state_changed", state="idle")
+        self.assertTrue(await self.runtime.wait_idle(2))
+        self.assertEqual([(e.origin,e.final_response) for e in self.events if isinstance(e, OrdinaryConclusion)],
+                         [("first","H1 body"),("second","H2 body"),("first","wake A")])
+        self.assertEqual([e.turn_id for e in self.all_events if isinstance(e, LogicalTerminal)], [h1.turn_id, h2.turn_id])
+        self.assertEqual([type(e) for e in self.all_events[-2:]], [LogicalTerminal, LogicalTerminal])
+        self.assertEqual((cli.consumers, cli.closes), (1, 1))
+
+    async def test_explore_ordered_task_cuts(self):
+        from itertools import permutations
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+
+        # Enumerate task departure orders and native grouping. The observations
+        # below use only emitted frames, SDK calls and delivered typed events.
+        for order in permutations("ABC"):
+            for grouped in (False, True):
+                for during_h2 in (False, True):
+                    with self.subTest(order=order, grouped=grouped, during_h2=during_h2):
+                        start = len(self.all_events)
+                        h = await self.submit(origin="H1")
+                        h.release_receipt_attempt()
+                        cli = self.clients.calls[-1]
+                        def frame(kind, **data):
+                            cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+                        def membership(ids):
+                            frame("background_tasks_changed", tasks=[{"task_id": k, "run_id": "r" + k} for k in ids])
+                        def result(key, **fields):
+                            cli.result(uuid=key, idle=False, **fields)
+                        def events(kind):
+                            return [e for e in self.all_events[start:] if isinstance(e, kind)]
+                        def wake(key, *, receipt=False, opened=False):
+                            if not opened:
+                                cli.init(user_message_uuids=[])
+                            args = dict(user_message_uuid=None, result=None if receipt else key,
+                                        reason=None if receipt else "completed",
+                                        origin={"kind": "task-notification", "producer": "session-task", "runId": "r" + key})
+                            result(key, **args)
+                            result(key, **args)  # Repeated native Result UUID.
+                        cli.init()
+                        ids = set("ABC")
+                        for k in sorted(ids):
+                            cli.stream.put_nowait(AssistantMessage([ToolUseBlock(k, "Bash", {})], "model",
+                                                                   session_id=cli.session))
+                            frame("task_started", task_id=k, run_id="r" + k, tool_use_id=k)
+                        membership(sorted(ids))
+                        result("human1", result="first")
+                        frame("session_state_changed", state="idle")
+                        await self.wait_until(lambda: cli.live.ordered_idle)
+                        self.assertFalse(events(LogicalTerminal))
+                        h2 = await self.submit(origin="H2")
+                        h2.release_receipt_attempt()
+                        cli.init()
+                        frame("session_state_changed", state="running")
+                        if during_h2:
+                            ids.remove(order[0])
+                            membership(sorted(ids))
+                        result("human2", result="second")
+                        if not during_h2:
+                            frame("session_state_changed", state="idle")
+                            await self.wait_until(lambda: any(e.origin == "H2" for e in events(LogicalTerminal)))
+                            self.assertFalse(any(e.origin == "H1" for e in events(LogicalTerminal)))
+                            ids.remove(order[0])
+                            membership(sorted(ids))
+                        # A second natural removal can occur during a first wake or before its init.
+                        if not grouped:
+                            cli.init(user_message_uuids=[])
+                            frame("session_state_changed", state="running")
+                        ids.remove(order[1])
+                        membership(sorted(ids))
+                        wake(order[0], opened=not grouped)
+                        wake(order[1], receipt=grouped)
+                        ids.clear()
+                        membership([])
+                        await self.wait_until(lambda: not cli.live.tasks and order[1] in cli.live.seen)
+                        self.assertFalse(cli.closing.is_set())
+                        self.assertFalse(any(e.origin == "H1" for e in events(LogicalTerminal)))
+                        wake(order[2])
+                        cli.close_gate.clear()
+                        frame("session_state_changed", state="idle")
+                        try:
+                            await asyncio.wait_for(cli.closing.wait(), 5)
+                            with self.assertRaises(OrdinaryInputRejected):
+                                await self.runtime.capture_submission_admission(self.binding.id)
+                        finally:
+                            cli.close_gate.set()
+                        self.assertTrue(await self.runtime.wait_idle(5))
+                        expected = [("H1", "first"), ("H2", "second"), ("H1", order[0])]
+                        if not grouped:
+                            expected.append(("H1", order[1]))
+                        expected.append(("H1", order[2]))
+                        for anchor in ("H1", "H2"):
+                            self.assertEqual([e.final_response for e in events(PhysicalAnswer) if e.origin == anchor],
+                                             [body for owner, body in expected if owner == anchor])
+                        self.assertCountEqual([(e.origin, e.turn_id) for e in events(LogicalTerminal)],
+                                              [("H1", h.turn_id), ("H2", h2.turn_id)])
+                        self.assertTrue(all(e.thread_id == cli.session and e.binding_id == self.binding.id
+                                            for e in self.all_events[start:]))
+                        self.assertFalse(events(DegradedTurn))
+                        self.assertEqual((cli.consumers, len(cli.inputs), cli.closes), (1, 2, 1))
+
+    async def test_timer_only_bounds_empty_unconfirmed_native_transition(self):
+        from claude_agent_sdk import SystemMessage
+        receipt = await self.submit()
+        receipt.release_receipt_attempt()
+        cli = self.clients.calls[0]
+        def frame(kind, **data):
+            cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+        with patch("netizen_cli.runtime.claude_ordinary._TRANSITION_SECONDS", .25):
+            cli.init()
+            frame("background_tasks_changed", tasks=[{"task_id": "A", "run_id": "runA"}])
+            cli.result(result="first")
+            await asyncio.wait_for(self.delivered.wait(), 2)
+            self.now += 36000
+            self.assertFalse(await self.runtime.wait_idle(.35))
+            await self.runtime.capture_submission_admission(self.binding.id)
+            self.assertFalse(cli.closing.is_set())
+            # Natural removal invalidates the earlier idle. Positive running
+            # evidence disarms the deadline for the model's own latency.
+            frame("background_tasks_changed", tasks=[])
+            frame("session_state_changed", state="running")
+            cli.init(user_message_uuids=[])
+            async with asyncio.timeout(2):
+                while cli.live.physical is None:
+                    await asyncio.sleep(.002)
+            self.assertFalse(await self.runtime.wait_idle(.35))
+            self.assertFalse(cli.closing.is_set())
+            with self.assertRaises(OrdinaryInputRejected):
+                await self.submit()
+            cli.result(user_message_uuid=None, result="unowned", idle=False)
+            self.assertTrue(await self.runtime.wait_idle(2))
+        self.assertEqual(len([e for e in self.events if isinstance(e, DegradedTurn)]), 1)
+        self.assertEqual(cli.closes, 1)
+
+    async def test_close_rechecks_cron_and_bodyless_receipts_do_not_render(self):
+        from claude_agent_sdk import SystemMessage
+        receipt = await self.submit()
+        receipt.release_receipt_attempt()
+        cli = self.clients.calls[0]
+        disconnect = self.runtime._disconnect
+        async def register_before_disconnect(execution):
+            self.assertFalse(execution.closing)
+            if not execution.ending and not cli.live.crons and not getattr(cli, "registered", False):
+                cli.registered = True
+                await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+            await disconnect(execution)
+        async def state_idle():
+            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+            async with asyncio.timeout(30):
+                while (not cli.stream.empty() or not cli.live.ordered_idle or not cli.live.crons
+                       or self.runtime._active[self.binding.id].closing):
+                    await asyncio.sleep(.002)
+        with patch.object(self.runtime, "_disconnect", side_effect=register_before_disconnect):
+            cli.init()
+            cli.result(result=None, reason=None)
+            await state_idle()
+            self.assertEqual(cli.closes, 0)
+            await asyncio.wait_for(self.delivered.wait(), 2)
+            self.assertEqual([type(e) for e in self.all_events], [LogicalTerminal])
+            h2 = await self.submit(origin="second")
+            h2.release_receipt_attempt()
+            cli.init()
+            cli.result(result="H2 only")
+            await state_idle()
+            # A recurring cron has no human origin. Its wake uses the same
+            # conversation, including after thousands of duplicate receipts.
+            cli.init(user_message_uuids=[])
+            for i in range(10000):
+                cli.result(reason=None, result=None, user_message_uuid=None, uuid=str(UUID(int=i)), idle=False)
+            cli.result(reason=None, result=None, user_message_uuid=None, uuid=str(UUID(int=0)), idle=False)
+            cli.result(result="cron", user_message_uuid=None, idle=False)
+            await state_idle()
+            self.assertEqual(len(cli.live.seen), 10003)
+            self.assertFalse(cli.live.tool_owner or cli.live.run_tool)
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": []}, None, None)
+            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+            self.assertTrue(await self.runtime.wait_idle(3))
+        bodies = [(e.origin, e.final_response) for e in self.events if isinstance(e, OrdinaryConclusion)]
+        self.assertEqual(bodies[0], ("second", "H2 only"))
+        self.assertIsInstance(bodies[1][0], ConversationTarget)
+        self.assertEqual([body for _, body in bodies], ["H2 only", "cron"])
+        self.assertEqual((len(self.clients.calls), len(cli.inputs), cli.closes), (1, 2, 1))
+
+    async def test_lost_h2_write_uses_same_reader_and_reserves_until_proven(self):
+        h1 = await self.submit(origin="first")
+        h1.release_receipt_attempt()
+        cli = self.clients.calls[0]
+        cli.init()
+        await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+        cli.result()
+        async with asyncio.timeout(3):
+            while not cli.live.ordered_idle:
+                await asyncio.sleep(.002)
+        cli.failure = "query"
+        h2 = asyncio.create_task(self.submit(origin="second"))
+        async with asyncio.timeout(3):
+            while len(cli.inputs) < 2:
+                await asyncio.sleep(.002)
+        with self.assertRaises(OrdinaryInputRejected):
+            await self.submit(origin="contender")
+        cli.init()
+        cli.result(result="confirmed once")
+        accepted = await asyncio.wait_for(h2, 3)
+        accepted.release_receipt_attempt()
+        async with asyncio.timeout(3):
+            while len([e for e in self.all_events if isinstance(e, LogicalTerminal)]) != 2:
+                await asyncio.sleep(.002)
+        await cli.live.stop_hook({"session_id": cli.session, "session_crons": []}, None, None)
+        self.assertTrue(await self.runtime.wait_idle(3))
+        self.assertEqual([(e.origin, e.final_response) for e in self.events], [("first", "answer"), ("second", "confirmed once")])
+        self.assertEqual((len(cli.inputs), cli.consumers, cli.closes), (2, 1, 1))
+
+    def test_stop_confirmation_only_preserves_an_existing_fresh_idle(self):
+        from claude_agent_sdk import SystemMessage
+        from netizen_cli.runtime.claude_client import LiveSession
+        for natural_removal in (False, True):
+            live = LiveSession("session", self.fail)
+            def frame(kind, **data):
+                live.system(SystemMessage(kind, {"session_id": live.session, **data}))
+            tasks = [{"task_id": "A", "run_id": "runA"}, {"task_id": "B", "run_id": "runB"}]
+            frame("background_tasks_changed", tasks=tasks)
+            frame("session_state_changed", state="idle")
+            live.stop_requested.update(["B"] if natural_removal else ["A", "B"])
+            frame("task_notification", task_id="A", status="stopped")
+            frame("background_tasks_changed", tasks=tasks[1:])
+            frame("task_updated", task_id="B", patch={"status":"killed"})
+            frame("background_tasks_changed", tasks=[])
+            self.assertEqual(live.ordered_idle, not natural_removal)
+            self.assertFalse(live.stop_requested or live.stopped)
+
+    def test_wake_tools_and_nested_agent_tasks_keep_the_physical_launcher(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock, ResultMessage
+        from netizen_cli.runtime.claude_client import LiveSession
+        live = LiveSession("session", self.fail)
+        def init(ids):
+            live.init(SystemMessage("init", {"uuid": "turn", "user_message_uuids": ids}))
+        def tool(name, parent=None, human=None):
+            live.assistant(AssistantMessage([ToolUseBlock(name, "Agent", {})], "model",
+                           parent_tool_use_id=parent, user_message_uuid=human))
+        def started(run, tool_id):
+            live.system(SystemMessage("task_started", {"task_id": run, "run_id": run, "tool_use_id": tool_id}))
+        def result(human, run=None):
+            origin = {"kind": "task-notification", "producer": "session-task", "runId": run} if run else None
+            return ResultMessage("success", 1, 1, False, 1, "session", user_message_uuid=human, origin=origin)
+        init(["H1"])
+        tool("first", human="H1")
+        started("A", "first")
+        self.assertEqual(live.route(result("H1"))[0], "H1")
+        init([])
+        tool("child-agent")
+        tool("nested", parent="child-agent")
+        started("B", "nested")
+        # One merged body goes to H2. The newly launched task belongs to A's wake.
+        self.assertEqual(live.route(result("H2", "A"))[0], "H2")
+        live.system(SystemMessage("background_tasks_changed", {"tasks": [{"task_id": "B", "run_id": "B"}]}))
+        self.assertTrue(live.has_work("H1"))
+        self.assertFalse(live.has_work("H2"))
+        init([])
+        self.assertEqual(live.route(result(None, "B"))[0], "H1")
+        init(["H1"])
+        with self.assertRaises(ValueError):
+            tool("wrong-tool", human="H2")
+        with self.assertRaises(ValueError):
+            live.route(result("H2"))
+        init([])
+        tool("named", human="H1")
+        with self.assertRaises(ValueError):
+            live.route(result("H2"))
+
+    async def test_missing_error_body_still_delivers_safe_failure(self):
+        for subtype, reason, text in (("error_max_turns", "max_turns", "轮数"),
+                                      ("error_during_execution", "private", "unknown"),
+                                      ("error_max_budget_usd", None, "预算")):
+            receipt = await self.submit()
+            receipt.release_receipt_attempt()
+            cli = self.clients.calls[-1]
+            cli.init()
+            cli.result(subtype, reason, True, result=None)
+            self.assertTrue(await self.runtime.wait_idle(2))
+            self.assertIn(text, self.events[-1].error_detail)
+
     async def test_closed_grace_and_owner_gate_precede_native_calls(self):
         for self.now in (9., 11.999):
             with self.assertRaisesRegex(OrdinaryInputRejected, GRACE):
@@ -107,7 +915,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.runtime.wait_idle(1))
         event = self.events.pop()
         self.assertEqual((event.thread_id, event.turn_id, event.final_response), (first.thread_id, first.turn_id, "answer"))
-        self.assertEqual((event.partial_answers, event.activity, event.file_evidence()), ((), None, FileEvidence()))
+        self.assertEqual((event.partial_answers, event.activity.turn_id, event.file_evidence()), ((), event.turn_id, FileEvidence()))
         with self.assertRaises(OrdinaryInputRejected):
             await self.submit(admission=stale)
         other = self.cwd / "native-cwd"
@@ -146,7 +954,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(getattr(event, "status", None), status)
                 self.assertNotIn("raw secret", repr(event))
                 if status is None:
-                    self.assertEqual(str(event.error), UNKNOWN)
+                    self.assertEqual(str(event.error), DEGRADED)
                 if reason == "private raw secret":
                     self.assertEqual(event.error_detail, "Claude 执行失败（error_during_execution/unknown）。")
                 if reason == "api_error" and status == "failed":
@@ -175,7 +983,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         summary = "本次有 2 个操作被 Claude Code 的权限设置拒绝（Bash、Write）。如需允许，请在 Claude Code 设置中调整权限规则。"
         seen_at_completion = []
         async def complete(event):
-            seen_at_completion.append((event.final_response, list(self.notices)))
+            if isinstance(event, OrdinaryConclusion):
+                seen_at_completion.append((event.final_response, list(self.notices)))
         self.runtime._completion = complete
 
         for mode, denials, expected in (
@@ -192,34 +1001,34 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                 seen_at_completion.clear()
                 receipt = await self.submit()
                 client = self.clients.calls[-1]
-                client.init(mode)
-                client.init(mode)
+                client.init(mode, user_message_uuids=[])
                 client.result(user_message_uuid="foreign", permission_denials=denied)
                 client.result(user_message_uuid=None, origin={"kind": "task-notification"}, permission_denials=denied)
-                client.result(permission_denials=denials)
-                client.result(permission_denials=denied)
+                client.init(mode)
+                client.result(permission_denials=denials, uuid="result")
+                client.result(permission_denials=denied, uuid="result")
                 receipt.release_receipt_attempt()
                 self.assertTrue(await self.runtime.wait_idle(1))
                 self.assertEqual(seen_at_completion, [("answer", [("origin", text) for text in expected])])
                 self.assertEqual(self.notices, seen_at_completion[0][1])
 
-    async def test_default_notice_survives_stream_end_without_a_result(self):
+    async def test_stream_end_subsumes_pending_permission_notice(self):
         receipt = await self.submit()
         receipt.release_receipt_attempt()
         client = self.clients.calls[-1]
         client.init("default")
         client.stream.put_nowait(None)
         self.assertTrue(await self.runtime.wait_idle(1))
-        self.assertEqual(self.notices, [("origin", DEFAULT_MODE)])
-        self.assertEqual(str(self.events[-1].error), UNKNOWN)
+        self.assertEqual(self.notices, [])
+        self.assertEqual(str(self.events[-1].error), DEGRADED)
 
     async def test_foreign_result_can_precede_our_attributed_result_and_duplicate_is_not_delivered(self):
         receipt = await self.submit()
         client = self.clients.calls[-1]
-        client.init()
         client.result(user_message_uuid="other", result="foreign")
-        client.result(user_message_uuid="other", user_message_uuids=[receipt.turn_id], result="ours")
-        client.result(result="duplicate")
+        client.init()
+        client.result(uuid="same", result="ours", idle=False)
+        client.result(uuid="same", result="ours")
         receipt.release_receipt_attempt()
         self.assertTrue(await self.runtime.wait_idle(1))
         self.assertEqual([event.final_response for event in self.events], ["ours"])
@@ -248,7 +1057,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                     await self.submit()
                 client.close_gate.set()
                 self.assertTrue(await self.runtime.wait_idle(1))
-                self.assertEqual(str(self.events[-1].error), UNKNOWN)
+                self.assertEqual(str(self.events[-1].error), DEGRADED)
                 self.assertEqual(len(client.inputs), 1)
         self.assertEqual(len(self.events), 5)
         self.assertEqual(len({client.session for client in self.clients.calls}), 1)
@@ -264,7 +1073,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             await self.submit()
         self.assertIsNotNone(self.store.get(self.binding.id).native_thread_id)
         self.assertEqual(len(self.clients.calls[-1].inputs), 1)
-        self.assertEqual(self.events, [])
+        self.assertTrue(await self.runtime.wait_idle(2))
+        self.assertEqual([str(e.error) for e in self.events], [DEGRADED])
         self.clients.configure = None
         await self.finish(await self.submit())
 
@@ -327,8 +1137,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             first = await self.submit(binding, context_commit=commit)
             save.assert_not_called()
             client = self.clients.calls[-1]
-            client.init()
             client.result(user_message_uuid="other")
+            client.init()
             client.result()
             await asyncio.wait_for(client.closing.wait(), 1)
             save.assert_called_once_with(binding_id=binding.id, expected_context_revision=binding.context_revision,
@@ -388,7 +1198,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             client.result()
             await client.closing.wait()
             raise asyncio.CancelledError()
-        with patch.object(client, "interrupt", side_effect=cancel_on_terminal), self.assertRaises(asyncio.CancelledError):
+        with patch.object(client, "interrupt", side_effect=cancel_on_terminal), self.assertRaisesRegex(TerminalStateUnknown, "停止结果未知"):
             await self.runtime.stop_exact(self.binding.id, **fields)
         self.assertTrue(await self.runtime.wait_idle(1))
 
@@ -433,7 +1243,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             c.close_gate.set()
         await asyncio.wait_for(shutdown, 1)
         self.assertTrue(await self.runtime.wait_idle(1))
-        self.assertEqual([str(e.error) for e in self.events], [UNKNOWN, UNKNOWN])
+        self.assertEqual(self.events, [])
 
     async def test_stale_preview_and_changed_settings_reject_before_native_action(self):
         admission = await self.runtime.capture_submission_admission(self.binding.id)
@@ -535,7 +1345,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         client.stream.put_nowait(None)
         client.write_gate.set()
         self.assertTrue(await self.runtime.wait_idle(1))
-        self.assertEqual([str(event.error) for event in self.events], [UNKNOWN])
+        self.assertEqual([str(event.error) for event in self.events], [DEGRADED])
         self.assertEqual((len(client.inputs), client.closes), (1, 1))
 
     async def test_unknown_handoff_cannot_retire_the_next_execution(self):
@@ -577,7 +1387,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             client.init()
             client.result(user_message_uuid=None)
             self.assertTrue(await self.runtime.wait_idle(1))
-        self.assertEqual(str(self.events[-1].error), UNKNOWN)
+        self.assertEqual(str(self.events[-1].error), DEGRADED)
 
     async def test_close_timeout_quarantines_binding_and_shutdown_reports_incomplete(self):
         with patch("netizen_cli.runtime.claude_ordinary._CLOSE_SECONDS", 0.01):
@@ -632,8 +1442,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             receipt = await self.submit()
             receipt.release_receipt_attempt()
             client = self.clients.calls[-1]
-            client.init()
             client.result(user_message_uuid="foreign", origin={"kind": "peer"})
+            client.init()
             while not client.stream.empty():
                 await asyncio.sleep(0)
             await asyncio.sleep(0)
@@ -648,8 +1458,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             receipt = await self.submit()
             receipt.release_receipt_attempt()
             client = self.clients.calls[-1]
-            client.init()
-            client.result(reason=None, user_message_uuid=None, user_message_uuids=[],
+            client.init(user_message_uuids=[])
+            client.result(reason=None, result=None, user_message_uuid=None, user_message_uuids=[],
                           origin={"kind": "task-notification", "producer": "session-task"})
             client.init()
             while not client.stream.empty():
@@ -683,7 +1493,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
             client.init()
             client.result(user_message_uuid=None, user_message_uuids=[])
             self.assertTrue(await self.runtime.wait_idle(1))
-        self.assertEqual(str(self.events[-1].error), UNKNOWN)
+        self.assertEqual(str(self.events[-1].error), DEGRADED)
 
     async def test_interrupt_failure_after_confirmed_completion_returns_finished(self):
         receipt = await self.submit()
@@ -778,7 +1588,7 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         preview = await self.runtime.preview_stop(self.binding)
         fields = dict(expected_activity_revision=preview.activity_revision, expected_turn_id=preview.turn_id)
         with patch.object(client, "interrupt", new=AsyncMock(side_effect=OSError("private"))):
-            with self.assertRaisesRegex(TerminalStateUnknown, "无法确认"):
+            with self.assertRaisesRegex(TerminalStateUnknown, "停止结果未知"):
                 await self.runtime.stop_exact(self.binding.id, **fields)
         with self.assertRaises(OrdinaryInputRejected):
             await self.submit()

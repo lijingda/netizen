@@ -14,6 +14,8 @@ from importlib import metadata
 from unittest.mock import patch
 import zipfile
 
+from tests.support import requires_claude_sdk
+
 from netizen_cli.package_resources import resource_path
 from netizen_cli.claude_installation import REPAIR, verified_claude_cli
 from scripts.build_cli_distribution import verify_sdist, verify_wheel
@@ -51,6 +53,7 @@ class ClaudeInstallationTests(unittest.TestCase):
         self.version = self.enterContext(patch("netizen_cli.claude_installation.metadata.version",
                                                return_value="0.2.186"))
 
+    @requires_claude_sdk
     def test_uses_only_recorded_bundle(self):
         self.assertEqual(verified_claude_cli(), self.binary)
 

@@ -20,6 +20,7 @@ from ..cards import (
 )
 from .messages import _nonempty_field, _object_field, _send_result_error_code
 from .ports import ReplyChannel
+from .topics import CardReplyLocation
 from ..completion_mention import valid_completion_mention_user_id
 from ..runtime.contracts import (
     GoalActivitySnapshot,
@@ -58,6 +59,12 @@ class _CardReplyTarget:
     message_id: str
     chat_id: str
     conversation: _CardReplyConversation
+    root_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ClaudeReplyTarget(_CardReplyTarget):
+    location: CardReplyLocation
 
 
 @dataclass(frozen=True, slots=True)

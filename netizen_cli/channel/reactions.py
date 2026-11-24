@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from ..external_calls import external_call
 from .ports import ReplyChannel
 
 
@@ -23,6 +25,7 @@ class _TurnReactionPulse:
     turn_id: str
     message_id: str
     stopped: asyncio.Event
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     typing_reaction_id: str | None = None
     thinking_reaction_id: str | None = None
     task: asyncio.Task[None] | None = None
@@ -35,6 +38,7 @@ class _ReactionController:
         self,
         channel: ReplyChannel,
         *,
+        isolate_child_cancellation: bool = False,
         visible_seconds: float = _THINKING_VISIBLE_SECONDS,
         hidden_seconds: float = _THINKING_HIDDEN_SECONDS,
         operation_timeout_seconds: float = _REACTION_OPERATION_TIMEOUT_SECONDS,
@@ -44,6 +48,7 @@ class _ReactionController:
         if operation_timeout_seconds <= 0:
             raise ValueError("reaction operation timeout must be positive")
         self._channel = channel
+        self._isolate_child_cancellation = isolate_child_cancellation
         self._visible_seconds = visible_seconds
         self._hidden_seconds = hidden_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
@@ -56,6 +61,7 @@ class _ReactionController:
         message_id: str,
         *,
         pulse_enabled: bool,
+        retained: Callable[[], bool] = lambda: True,
     ) -> bool:
         if type(pulse_enabled) is not bool:
             raise ValueError("reaction pulse setting must be a boolean")
@@ -73,47 +79,30 @@ class _ReactionController:
             return False
         if turn_id in self._pulses:
             await self.stop(turn_id)
+            if self._closed or turn_id in self._pulses:
+                return False
+        if not retained():
+            return False
         pulse = _TurnReactionPulse(
             turn_id=turn_id,
             message_id=message_id,
             stopped=asyncio.Event(),
         )
         self._pulses[turn_id] = pulse
-        reaction_id = await self._add_reaction(pulse, _TYPING_REACTION)
-        if self._pulses.get(turn_id) is not pulse:
-            if reaction_id is not None:
-                await self._remove_reaction(
-                    pulse,
-                    reaction_id,
-                    _TYPING_REACTION,
-                )
-            return False
-        if reaction_id is None:
-            self._pulses.pop(turn_id, None)
-            return False
-        pulse.typing_reaction_id = reaction_id
-        if not pulse_enabled:
+        async with pulse.lock:
+            pulse.typing_reaction_id = await self._add_reaction(pulse, _TYPING_REACTION)
+            if pulse.typing_reaction_id is None:
+                del self._pulses[turn_id]
+                return False
+            if pulse.stopped.is_set():
+                return False
+            if pulse_enabled:
+                pulse.thinking_reaction_id = await self._add_reaction(pulse, _THINKING_REACTION)
+                if pulse.stopped.is_set():
+                    return False
+                if pulse.thinking_reaction_id is not None:
+                    pulse.task = asyncio.create_task(self._pulse(pulse), name=f"netizen-thinking-{turn_id}")
             return True
-
-        reaction_id = await self._add_reaction(pulse, _THINKING_REACTION)
-        if self._pulses.get(turn_id) is not pulse:
-            if reaction_id is not None:
-                await self._remove_reaction(
-                    pulse,
-                    reaction_id,
-                    _THINKING_REACTION,
-                )
-            return False
-        if reaction_id is None:
-            # Keep the stable Typing placeholder even when the optional pulse
-            # cannot start. Terminal/shutdown cleanup still owns its exact ID.
-            return True
-        pulse.thinking_reaction_id = reaction_id
-        pulse.task = asyncio.create_task(
-            self._pulse(pulse),
-            name=f"netizen-thinking-{turn_id}",
-        )
-        return True
 
     async def freeze(self, turn_id: str) -> None:
         """Stop future pulse operations without removing visible reactions."""
@@ -124,32 +113,39 @@ class _ReactionController:
         pulse.stopped.set()
         await self._wait_for_task(pulse)
 
+    async def background(self, turn_id: str) -> None:
+        """Keep Typing on the source until its logical run completes."""
+        await self.freeze(turn_id)
+        pulse = self._pulses.get(turn_id)
+        if pulse:
+            async with pulse.lock:
+                if pulse.thinking_reaction_id and await self._remove_reaction(
+                    pulse, pulse.thinking_reaction_id, _THINKING_REACTION
+                ):
+                    pulse.thinking_reaction_id = None
+
     async def stop(self, turn_id: str) -> None:
-        pulse = self._pulses.pop(turn_id, None)
+        pulse = self._pulses.get(turn_id)
         if pulse is None:
             return
         pulse.stopped.set()
-        await self._wait_for_task(pulse)
-        reaction_id = pulse.thinking_reaction_id
-        if reaction_id is not None:
-            if await self._remove_reaction(
-                pulse,
-                reaction_id,
-                _THINKING_REACTION,
-            ):
-                pulse.thinking_reaction_id = None
-        reaction_id = pulse.typing_reaction_id
-        if reaction_id is not None:
-            if await self._remove_reaction(
-                pulse,
-                reaction_id,
-                _TYPING_REACTION,
-            ):
-                pulse.typing_reaction_id = None
+        async with pulse.lock:
+            await self._wait_for_task(pulse)
+            try:
+                if pulse.thinking_reaction_id is not None and await self._remove_reaction(
+                    pulse, pulse.thinking_reaction_id, _THINKING_REACTION,
+                ):
+                    pulse.thinking_reaction_id = None
+            finally:
+                if pulse.typing_reaction_id is not None and await self._remove_reaction(
+                    pulse, pulse.typing_reaction_id, _TYPING_REACTION,
+                ):
+                    pulse.typing_reaction_id = None
+                if (pulse.thinking_reaction_id is None and pulse.typing_reaction_id is None
+                        and self._pulses.get(turn_id) is pulse):
+                    del self._pulses[turn_id]
 
     async def close(self) -> None:
-        if self._closed:
-            return
         self._closed = True
         await asyncio.gather(
             *(self.stop(turn_id) for turn_id in tuple(self._pulses)),
@@ -161,9 +157,11 @@ class _ReactionController:
         if task is None or task is asyncio.current_task():
             return
         try:
-            await task
-        except asyncio.CancelledError:
-            raise
+            # The controller owns the pulse. A cancelled terminal presenter only
+            # abandons its wait; the cleanup owner still joins the same pulse.
+            await asyncio.wait([task])
+            if not task.cancelled():
+                task.result()
         except Exception:
             logger.exception(
                 "thinking reaction pulse failed while stopping",
@@ -211,10 +209,10 @@ class _ReactionController:
     ) -> str | None:
         try:
             async with asyncio.timeout(self._operation_timeout_seconds):
-                result = await self._channel.add_reaction(
+                result = await external_call(self._channel.add_reaction(
                     pulse.message_id,
                     emoji_type,
-                )
+                ), isolate=self._isolate_child_cancellation)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -259,12 +257,10 @@ class _ReactionController:
     ) -> bool:
         try:
             async with asyncio.timeout(self._operation_timeout_seconds):
-                result = await self._channel.remove_reaction(
+                result = await external_call(self._channel.remove_reaction(
                     pulse.message_id,
                     reaction_id,
-                )
-        except asyncio.CancelledError:
-            raise
+                ))
         except Exception:
             logger.exception(
                 "failed to remove turn reaction",

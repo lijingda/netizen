@@ -106,6 +106,7 @@ from .base import (
     SideTopicCreateFailed,
 )
 from .base import ChannelState
+from .messages import _confirmed_reply_id
 
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
@@ -361,8 +362,10 @@ class ChannelReplies(ChannelState):
                 mentions=[Identity(open_id=completion_mention_user_id)],
             )
         result = await self._send_completion_reply(message, content)
-        if on_sent is not None and result.success and result.message_id:
-            on_sent(result.message_id)
+        if on_sent is not None:
+            target = _confirmed_reply_id(result, on_conflict=_message_id(message))
+            if target:
+                on_sent(target)
         failure_notice = _reply_failure_notice(result)
         if failure_notice is None:
             return

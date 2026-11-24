@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from tests.support import requires_claude_sdk
+
 _DRIVER = Path(__file__).with_name("browser_smoke.js")
 _BROWSER_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
                   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -122,6 +124,7 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
     async def test_admin_pages(self):
         await self._admin_pages(owner_only=False)
 
+    @requires_claude_sdk
     async def test_owner_admin_pages(self):
         await self._admin_pages(owner_only=True)
 
@@ -134,8 +137,6 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
     async def _admin_pages(self, *, owner_only, manual_only=False, delete_limited=False):
         from netizen_cli.backends import BackendPolicy, OperationId
         from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
-        from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
-        from tests.support.claude_client import FakeClaudeClients
         node = shutil.which("node")
         browser = find_browser()
         if not node or not browser:
@@ -170,6 +171,8 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
         management = fixture.management
         policy = BackendPolicy("codex")
         if owner_only:
+            from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
+            from tests.support.claude_client import FakeClaudeClients
             from netizen_cli.domain import FeishuScope, ScopeKind
             lazy_project = fixture.project_root / "pending"
             lazy_project.mkdir()

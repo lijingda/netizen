@@ -21,7 +21,7 @@ logger = logging.getLogger(RUNTIME_LOGGER_NAME)
 class ShutdownRuntime(SideRuntime):
     """Service shutdown: interrupt, drain and task cancellation."""
 
-    async def interrupt_all(self) -> None:
+    async def interrupt_all(self, *, deadline: float | None = None) -> None:
         self._shutdown_requested = True
         self.close_admission()
         await self._drain_subscription_idle_tasks()

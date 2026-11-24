@@ -9,10 +9,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lark_channel import (
-    OutboundCard,
+    OutboundCard, OutboundPost, SendResult,
 )
 
 from ..bindings import (
+    BindingTaskFeedback,
     SideTopicNotFound,
     SideTopicState,
     ThreadBinding,
@@ -24,11 +25,15 @@ from ..cards import (
 )
 from ..cards.reply import feishu_answer_text
 from .completion_mentions import send_completion_mention
+from .messages import _confirmed_reply_id
+from .topics import CardReplyLocation, TopicPublishError
+from .physical_delivery import BODY, INCOMPLETE, Item, PhysicalDelivery, receipt
 from .reply_presenter import (
     _CardUpdateAttempt,
     _PartialAnswerDelivery,
 )
-from ..ordinary_sessions import OrdinaryConclusion, OrdinaryEvent
+from ..ordinary_sessions import ClaudeInputAnchor, ClaudeCliState, CliStateChanged, ConversationTarget, DegradedTurn, LogicalTerminal, OrdinaryConclusion, OrdinaryEvent, PhysicalAnswer, PhysicalStarted
+from ..external_calls import external_call
 from ..file_evidence import FileEvidence
 from ..runtime.codex_replies import CodexFeatureEvent, outcome_file_evidence
 from ..runtime.codex_contracts import GoalOutcome
@@ -68,6 +73,7 @@ from ..schedules.models import ScheduleNotFound
 from ..session_views import ResultView
 from . import constants
 from .app_values import (
+    _ClaudeReplyTarget,
     _task_has_error,
     _ScheduledCompletion,
     _message_id,
@@ -92,28 +98,71 @@ class _TaskFiles:
     summary: TurnDiffSummary = TurnDiffSummary()
 
 
+async def _best_effort_update(operation: Awaitable[object]) -> None:
+    try:
+        async with asyncio.timeout(5):
+            await external_call(operation)
+    except Exception:
+        logger.warning("optional Claude presentation update failed")
+
+
 class CompletionPresentationChannel(ChannelReplies):
     """Completion handling: Result, Files, Goal receipts and reminders."""
 
     async def handle_ordinary_completion(self, outcome: OrdinaryEvent) -> None:
-        local = self._local_sessions is not None
-        if isinstance(outcome, TurnObservationUnavailableOutcome):
-            if local:
-                await self._reactions.stop(outcome.turn_id)
-                await self._reply(outcome.origin, str(outcome.error))
-            else:
-                await self._park_observation(outcome)
+        if isinstance(outcome, PhysicalStarted):
+            if outcome.active():
+                await self._start_logical_presentation(outcome.binding_id, outcome.thread_id, outcome.turn_id,
+                    outcome.origin, outcome.feedback, active=outcome.active, retained=outcome.retained, on_confirmed=outcome.reply.confirmed)
             return
-        if local:
-            result = self._result_view(
-                outcome, failure=lambda: outcome.error_detail or "Claude 本次执行失败。",
-                interruption=lambda: "Claude 本次执行已停止。", empty_answer="Claude 已完成本次执行。",
-            )
-            content = result.content
-            if result.status == "completed":
-                content = await self._prepare_task_result_images(result) or content
-            await self._finish_result_reactions(result)
-            await self._reply_task_result(result, content)
+        if isinstance(outcome, CliStateChanged):
+            if outcome.publishable():
+                if outcome.reply.refresh:
+                    await _best_effort_update(outcome.reply.refresh(outcome.current()))
+                if outcome.background:
+                    await _best_effort_update(self._reactions.background(outcome.turn_id))
+            return
+        if isinstance(outcome, LogicalTerminal):
+            if not outcome.publishable():
+                return
+            if outcome.reply.refresh:
+                await _best_effort_update(outcome.reply.refresh(outcome.state()))
+            elif not outcome.reply.attempted:
+                async def finish_initial_card() -> None:
+                    attempt = await self._progress_cards.finish(binding_id=outcome.binding_id, thread_id=outcome.thread_id,
+                        turn_id=outcome.turn_id, activity=None, publishable=outcome.publishable, render=lambda snap: turn_progress_card(
+                            snapshot=replace(snap, state_line=outcome.state().line), terminal_status=outcome.status,
+                            collapsed=True, include_result=outcome.status != "completed"))
+                    if attempt and attempt.confirmed:
+                        outcome.reply.confirmed(attempt.message_id)
+                await _best_effort_update(finish_initial_card())
+            outcome.reply.refresh = None
+            reaction = {"interrupted": constants.INTERRUPTED_REACTION, "failed": constants.ERROR_REACTION}.get(
+                outcome.status, constants.DONE_REACTION)
+            await _best_effort_update(self._reactions.freeze(outcome.turn_id))
+            await _best_effort_update(self._safe_add_reaction(outcome.origin, reaction))
+            if outcome.mention_user_id and outcome.publishable():
+                confirmed_id = outcome.reply.message_id
+                location = self._physical_card_location(outcome.binding_id, outcome.origin)
+                source_id = _message_id(outcome.origin)
+                if confirmed_id and not location.usable(confirmed_id):
+                    confirmed_id = source_id if location.usable(source_id) else None
+                await send_completion_mention(
+                    self._channel, scope=self._scope(outcome.origin), card_message_id=confirmed_id,
+                    user_id=outcome.mention_user_id, operation_id=outcome.turn_id, isolate_child_cancellation=True,
+                    source_message_id=source_id if not outcome.reply.attempted and location.usable(source_id) else None,
+                    location=location,
+                )
+            return
+        if isinstance(outcome, DegradedTurn):
+            location = self._physical_card_location(outcome.binding_id, outcome.origin)
+            await self._physical_reply(outcome.origin, str(outcome.error), location)
+            return
+        if isinstance(outcome, TurnObservationUnavailableOutcome):
+            await self._park_observation(outcome)
+            return
+        if isinstance(outcome, PhysicalAnswer):
+            await self._handle_physical_answer(outcome)
             return
         scheduled = outcome.origin if isinstance(outcome.origin, ScheduledOrigin) else None
         completion = _ScheduledCompletion()
@@ -129,6 +178,213 @@ class CompletionPresentationChannel(ChannelReplies):
                 await self._archive_scheduled_completion(outcome)
         finally:
             self._finish_ordinary_completion(outcome)
+
+    async def _handle_physical_answer(self, outcome: PhysicalAnswer) -> None:
+        if not outcome.publishable():
+            return
+        if isinstance(outcome.origin, ConversationTarget):
+            outcome = replace(outcome, origin=replace(outcome.origin, single_attempt=True))
+        ledger = self._progress_cards.physical_delivery(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+        result = self._result_view(outcome, failure=lambda: outcome.error_detail or "Claude 本次执行失败。",
+                                   interruption=lambda: "Claude 本次执行已停止。", empty_answer="")
+        for part in outcome.partial_answers:
+            if part.thread_id == outcome.thread_id and part.turn_id == outcome.turn_id and part.text.strip():
+                ledger.partial(part)
+        if result.content:
+            ledger.expect(BODY)
+        try:
+            async with asyncio.timeout_at(outcome.delivery_deadline):
+                content = result.content
+                if result.status == "completed":
+                    content = await self._prepare_task_result_images(result, ledger=ledger) or content
+                if outcome.publishable():
+                    await self._present_physical_answer(outcome, content, ledger)
+        except Exception as error:
+            logger.warning("Claude physical delivery ended without full confirmation (%s)", type(error).__name__)
+        if ledger.settle() and outcome.publishable():
+            target = outcome.origin
+            if isinstance(target, ConversationTarget):
+                target = replace(target, delivery_id=target.delivery_id + "/notice")
+            try:
+                async with asyncio.timeout(5):
+                    location = self._physical_card_location(outcome.binding_id, target)
+                    sent = await external_call(self._physical_reply(target, INCOMPLETE, location))
+                if receipt(sent) != "confirmed":
+                    logger.warning("Claude incomplete delivery notice was rejected")
+            except Exception:
+                logger.warning("Claude incomplete delivery notice was not confirmed")
+
+    def _physical_card_location(self, binding_id: str, origin: object) -> CardReplyLocation:
+        if isinstance(origin, _ClaudeReplyTarget):
+            return origin.location
+        if isinstance(origin, ConversationTarget):
+            anchor = origin.source
+            root = anchor.topic_root_id if isinstance(anchor, ClaudeInputAnchor) else None
+            binding = (anchor.source.location.binding if isinstance(anchor, ClaudeInputAnchor) and isinstance(anchor.source, _ClaudeReplyTarget)
+                       else self._progress_cards.binding_location(binding_id))
+            return CardReplyLocation(origin.scope, None, root, binding)
+        scope = self._scope(origin)
+        parent = _message_id(origin)
+        root = getattr(origin, "root_id", None)
+        return CardReplyLocation(scope, parent, root or (None if scope.topic_id else parent),
+                                 binding=self._progress_cards.binding_location(binding_id))
+
+    async def _physical_reply(self, target: object, content: str | OutboundPost | OutboundCard,
+                              location: CardReplyLocation) -> SendResult:
+        if isinstance(target, ConversationTarget):
+            # Validate each chunk before the SDK receipts are reduced to one logical send.
+            return await self._reply_to_origin(target, content, location=location)
+        sent = await self._reply_to_origin(target, content)
+        return location.validate(sent, card=isinstance(content, OutboundCard))
+
+    async def _present_physical_answer(self, outcome: PhysicalAnswer, content: str, ledger: PhysicalDelivery) -> None:
+        reply = outcome.reply
+        snapshot = outcome.activity
+        location = self._physical_card_location(outcome.binding_id, outcome.origin)
+        async def send_partial(post):
+            if not outcome.publishable():
+                raise RuntimeError("本轮投递已取消。")
+            return await self._send_physical_partial(outcome.origin, post, reply.confirmed if reply else None, location)
+
+        partials = await self._progress_cards.prepare_partial_answers(
+            owner_id=outcome.binding_id, thread_id=outcome.thread_id, turn_id=outcome.turn_id,
+            side=False, reply=send_partial)
+        await self._progress_cards.abandon(binding_id=outcome.binding_id, thread_id=outcome.thread_id, turn_id=outcome.turn_id)
+        if not outcome.publishable():
+            return
+        previous_refresh = reply.refresh if reply else None
+        previous_id = reply.message_id if reply else None
+        if reply and ledger.items:
+            reply.attempted = True
+        status = outcome.status
+        publishable = outcome.publishable
+        binding_id, turn_id = outcome.binding_id, outcome.turn_id
+        first_id, last_snapshot = partials.initial or (None, None)
+        body_items = ((BODY, *ledger.prepared_images) if content else ())
+        previous = ledger.partial_receipt(content)
+        if previous in ("unknown", "rejected"):
+            ledger.record(body_items, previous)
+            content = ""
+        location = partials.location or location
+        in_card_mode = outcome.task_feedback.progress_card_enabled and not partials.text_only and (last_snapshot is None or first_id is not None)
+        if in_card_mode and snapshot and (content or snapshot.partial_answers or first_id):
+            state: ClaudeCliState | None = outcome.state()
+            def render(current: ClaudeCliState | None) -> OutboundCard:
+                return turn_progress_card(snapshot=replace(snapshot, state_line=current.line if current else None),
+                                          final_response=content or None, partial_answers=snapshot.partial_answers,
+                                          terminal_status=status, include_result=bool(content), collapsed=True)
+
+            items = tuple(key for key, state in ledger.items.items() if state == "unattempted"
+                          and (key[0] != "image" or key in ledger.prepared_images))
+            attempt = None
+            try:
+                card = render(state)
+            except Exception:
+                card = None
+            # Already attempted fragments stay on their original transport.
+            # Confirmed fragments may remain visible across replacements of the same card.
+            if card and all(ledger.items[item] not in ("unknown", "rejected") for item in ledger.partial_text):
+                if first_id:
+                    attempt = await self._progress_cards.write_physical_card(first_id, card, binding_id=binding_id,
+                        turn_id=turn_id, location=location, publishable=publishable, begin=lambda: ledger.begin(items))
+                elif publishable():
+                    ledger.begin(items)
+                    sent = await self._physical_reply(outcome.origin, card, location)
+                    attempt = _CardUpdateAttempt(_confirmed_reply_id(sent) or "", sent)
+                if attempt is not None:
+                    ledger.record(items, receipt(attempt.result))
+            if attempt and attempt.confirmed:
+                if reply and not attempt.message_id and attempt.result:
+                    target = _confirmed_reply_id(attempt.result, on_conflict=_message_id(outcome.origin))
+                    if target:
+                        reply.confirmed(target)
+                if reply and attempt.message_id:
+                    message_id = attempt.message_id
+                    reply.confirmed(message_id)
+                    async def refresh(current: ClaudeCliState | None) -> None:
+                        nonlocal state
+                        if current != state and publishable():
+                            try:
+                                card = render(current)
+                            except Exception:
+                                return  # The terminal body was already delivered.
+                            if await self._progress_cards.update_message(message_id, card, binding_id=binding_id,
+                                                                         operation_id=turn_id, publishable=publishable,
+                                                                         location=location):
+                                state = current
+                            elif not location.can_write(message_id) and reply.message_id == message_id:
+                                reply.message_id = None
+                                reply.refresh = None
+                    reply.refresh = refresh
+                    if previous_refresh and previous_id != message_id:
+                        await _best_effort_update(previous_refresh(None))
+                    await _best_effort_update(refresh(outcome.state()))
+                return
+        # A fallback freezes the card at the last confirmed poll. Plain posts have
+        # their own receipts, including attempts whose publication is uncertain.
+        if first_id and not location.can_write(first_id):
+            first_id = None
+        displayed = {
+            p for p in (last_snapshot.partial_answers if last_snapshot else ())
+            if ledger.items.get(("partial", p.item_id)) == "confirmed"
+        }
+        if reply and first_id and displayed:
+            reply.confirmed(first_id)
+        try:
+            for index, fragment in enumerate(outcome.partial_answers):
+                item = ("partial", fragment.item_id)
+                if (fragment.thread_id == outcome.thread_id and fragment.turn_id == outcome.turn_id
+                        and ledger.items.get(item) == "unattempted"):
+                    post = OutboundPost(markdown=f"**阶段性答案**\n\n{feishu_answer_text(fragment.text)}")
+                    await self._send_physical_items(outcome, ledger, (item,), post, f"partial/{index}", location)
+            if content and (matching := ledger.partial_receipt(content)) != "unattempted":
+                ledger.record(body_items, matching)
+            if content and ledger.items[BODY] == "unattempted":
+                if count := outcome.owned_tasks():
+                    content += f"\n\n后台任务 {count} 个运行中，可继续发送消息"
+                await self._send_physical_items(outcome, ledger, body_items, content, "final", location)
+        finally:
+            if first_id and last_snapshot and not any(value == "unknown" for value in ledger.items.values()):
+                async def freeze() -> None:
+                    card = turn_progress_card(snapshot=replace(last_snapshot, state_line=None), terminal_status="completed",
+                                              include_result=False, collapsed=True)
+                    await self._progress_cards.update_message(first_id, card, binding_id=binding_id,
+                                                             operation_id=turn_id, publishable=publishable, location=location)
+                await _best_effort_update(freeze())
+            if reply and previous_refresh and reply.message_id != previous_id:
+                reply.refresh = None
+                await _best_effort_update(previous_refresh(None))
+
+    async def _send_physical_items(self, outcome: PhysicalAnswer, ledger: PhysicalDelivery, items: tuple[Item, ...],
+                                   content: str | OutboundPost, operation: str, location: CardReplyLocation) -> None:
+        if not outcome.publishable() or (outcome.delivery_deadline is not None and
+                                         asyncio.get_running_loop().time() >= outcome.delivery_deadline):
+            return
+        target = outcome.origin
+        if isinstance(target, ConversationTarget):
+            target = replace(target, delivery_id=target.delivery_id + "/" + operation)
+            if isinstance(content, OutboundPost):
+                content = content.markdown or ""
+        ledger.begin(items)
+        try:
+            async with asyncio.timeout(self._progress_cards.operation_timeout):
+                result = await external_call(self._physical_reply(target, content, location))
+            ledger.record(items, receipt(result))
+            if outcome.reply and (mid := _confirmed_reply_id(result, on_conflict=_message_id(target))):
+                outcome.reply.confirmed(mid)
+        except TopicPublishError as error:
+            ledger.record(items, "unknown" if error.unknown else "rejected")
+        except Exception:
+            logger.warning("Claude content delivery was not confirmed")
+
+    async def _terminal_card_delivery(self, outcome: OrdinaryConclusion | SideTurnOutcome,
+                                      deliver: Callable[[], Awaitable[_CardUpdateAttempt | None]]) -> _CardUpdateAttempt | None:
+        try:
+            return await deliver()
+        except Exception:
+            logger.exception("terminal progress-card delivery failed", extra={"turn_id": outcome.turn_id})
+            await self._abandon_task_progress_card(outcome)
+            return _CardUpdateAttempt("", None)
 
     def _finish_ordinary_completion(self, outcome: OrdinaryConclusion | TurnOutcome) -> None:
         scheduled = outcome.origin if isinstance(outcome.origin, ScheduledOrigin) else None
@@ -316,37 +572,16 @@ class CompletionPresentationChannel(ChannelReplies):
                 thread_id=outcome.thread_id, turn_id=outcome.turn_id,
                 side=isinstance(outcome, SideTurnOutcome),
             )
-            try:
-                attempt = await self._complete_task_progress_card(
-                    outcome, result, task_files,
-                    prepared_response=prepared_response, file_turn_id=file_turn_id,
-                    suppress_result=silent,
-                )
-                if attempt is not None:
-                    if attempt.updated:
-                        if attempt.confirmed:
-                            await self._remind_task_completion(outcome, attempt.message_id)
-                        return
-                    if isinstance(outcome.origin, ScheduledOrigin):
-                        return
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                fallback_to_result = True
-                logger.exception(
-                    "terminal progress-card delivery failed",
-                    extra={
-                        "binding_id": getattr(outcome, "binding_id", None),
-                        "side_id": getattr(outcome, "side_id", None),
-                        "turn_id": outcome.turn_id,
-                    },
-                )
-                await self._abandon_task_progress_card(outcome)
-                # A failure after the terminal update/receipt may be uncertain.
-                # Never publish a second scheduled result on that uncertainty.
-                if isinstance(outcome.origin, ScheduledOrigin):
-                    return
-            if silent and fallback_to_result:
+            attempt = await self._terminal_card_delivery(outcome, lambda: self._complete_task_progress_card(
+                outcome, result, task_files, prepared_response=prepared_response, file_turn_id=file_turn_id,
+                suppress_result=silent))
+            if attempt is not None and attempt.updated:
+                if attempt.confirmed:
+                    await self._remind_task_completion(outcome, attempt.message_id)
+                return
+            if isinstance(outcome.origin, ScheduledOrigin) and attempt is not None:
+                return
+            if silent and (fallback_to_result or (attempt is not None and not attempt.message_id)):
                 silent = False
                 task_files, prepared_response = await self._prepare_task_result(outcome, file_evidence)
         try:
@@ -412,7 +647,7 @@ class CompletionPresentationChannel(ChannelReplies):
         return task_files, response
 
     async def _prepare_task_result_images(
-        self, outcome: OrdinaryConclusion | SideTurnOutcome | ResultView,
+        self, outcome: OrdinaryConclusion | SideTurnOutcome | ResultView, *, ledger: PhysicalDelivery | None = None,
     ) -> str | None:
         content = outcome.content if isinstance(outcome, ResultView) else outcome.final_response
         if not content:
@@ -420,6 +655,8 @@ class CompletionPresentationChannel(ChannelReplies):
         content = feishu_answer_text(content)
         if "![" not in content:
             return content
+        if ledger:
+            return await prepare_result_images(self._channel, content, cwd=outcome.cwd, on_image=ledger.image)
         return await self._prepare_result_images(content, cwd=outcome.cwd)
 
     async def _prepare_result_images(
@@ -492,11 +729,8 @@ class CompletionPresentationChannel(ChannelReplies):
 
         if isinstance(outcome, OrdinaryConclusion):
             attempt = await self._progress_cards.finish(
-                binding_id=outcome.binding_id,
-                thread_id=outcome.thread_id,
-                turn_id=outcome.turn_id,
-                activity=outcome.activity,
-                render=render,
+                binding_id=outcome.binding_id, thread_id=outcome.thread_id, turn_id=outcome.turn_id,
+                activity=outcome.activity, render=render,
             )
             if attempt is not None and isinstance(outcome.origin, ScheduledOrigin):
                 if suppress_result and attempt.confirmed:
@@ -767,17 +1001,36 @@ class CompletionPresentationChannel(ChannelReplies):
             )
             return None if snapshot is None else _goal_reply_activity(snapshot)
 
-        await self._reactions.start(
-            submission.logical_turn_id, _message_id(origin),
-            pulse_enabled=submission.task_feedback.reaction_pulse_enabled,
-        )
+        return await self._start_logical_presentation(binding.id, submission.thread_id, submission.logical_turn_id,
+            origin, submission.task_feedback, snapshot_reader=snapshot_reader, goal=True)
+
+    async def _start_logical_presentation(
+        self, binding_id: str, thread_id: str, turn_id: str, origin: object, feedback: BindingTaskFeedback, *,
+        snapshot_reader: Callable[[], TurnActivitySnapshot | None] | None = None, goal: bool = False,
+        active: Callable[[], bool] = lambda: True, retained: Callable[[], bool] = lambda: True,
+        on_confirmed: Callable[[str], None] | None = None,
+    ) -> bool:
+        await self._reactions.start(turn_id, _message_id(origin), pulse_enabled=feedback.reaction_pulse_enabled,
+                                    retained=retained)
+        if not active():
+            return False
+        location = None if goal else self._physical_card_location(binding_id, origin)
         return await self._progress_cards.start(
-            binding_id=binding.id, thread_id=submission.thread_id,
-            turn_id=submission.logical_turn_id, origin=origin,
-            progress_enabled=submission.task_feedback.progress_card_enabled,
-            reply_partial=lambda post: self._reply_to_origin(origin, post),
-            snapshot_reader=snapshot_reader, logical_turn=True,
-        )
+            binding_id=binding_id, thread_id=thread_id, turn_id=turn_id, origin=origin,
+            progress_enabled=feedback.progress_card_enabled, snapshot_reader=snapshot_reader, logical_turn=goal,
+            retain_for_terminal=not goal, retained=retained,
+            location=location,
+            reply=None if goal else lambda card: self._reply_to_origin(origin, card),
+            reply_partial=lambda post: self._send_physical_partial(origin, post, on_confirmed, location))
+
+    async def _send_physical_partial(self, origin: object, post: OutboundPost,
+                                     on_confirmed: Callable[[str], None] | None, location: CardReplyLocation | None) -> SendResult:
+        result = await self._physical_reply(origin, post, location) if location else await self._reply_to_origin(origin, post)
+        if on_confirmed:
+            target = _confirmed_reply_id(result, on_conflict=_message_id(origin))
+            if target:
+                on_confirmed(target)
+        return result
 
     async def _goal_management_receipt(
         self, binding: ThreadBinding, scope: FeishuScope, origin: object, *,

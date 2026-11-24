@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import MutableMapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 import json
@@ -13,11 +14,42 @@ import subprocess
 import sys
 import tempfile
 import time
+from traceback import walk_tb
 from uuid import uuid4
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+@contextmanager
+def checking(condition):
+    """Attach only harness-defined condition names, including on an outer deadline's cancellation."""
+    try:
+        yield
+    except (Exception, asyncio.CancelledError) as error:
+        if not hasattr(error, "_claude_probe_condition"):
+            error._claude_probe_condition = condition
+        raise
+
+
+def failure_details(error):
+    # asyncio.timeout raises in the stdlib. Its cancellation traceback still
+    # identifies the operation in the probe that was waiting at the deadline.
+    cause = error.__cause__ or error.__context__
+    cancelled = isinstance(error, TimeoutError) and isinstance(cause, asyncio.CancelledError)
+    sources = (ROOT / "scripts", ROOT / "tests", ROOT / "netizen_cli")
+    details = {"error": type(error).__name__}
+    condition = None
+    for origin in ((error, cause) if cancelled else (error,)):
+        condition = getattr(origin, "_claude_probe_condition", None) or condition
+        for frame, line in walk_tb(origin.__traceback__):
+            code = frame.f_code
+            if any(Path(code.co_filename).is_relative_to(source) for source in sources):
+                details.update(file=Path(code.co_filename).name, line=line, condition=code.co_name)
+    if condition:
+        details["condition"] = condition
+    return details
 
 
 def fixture_environment(home: Path) -> dict[str, str]:
@@ -123,8 +155,8 @@ class ObservedClients:
         self.calls = []
         self.drop_receipt = False
 
-    def create(self, session_id, cwd, *, resume):
-        client = ObservedClient(self.bundled.create(session_id, cwd, resume=resume), self)
+    def create(self, session_id, cwd, *, resume, live=None):
+        client = ObservedClient(self.bundled.create(session_id, cwd, resume=resume, live=live), self)
         self.calls.append(client)
         return client
 
@@ -199,7 +231,11 @@ async def main_cases(cwd, provider, evidence):
                        not {"--system-prompt", "--system-prompt-file", "--append-system-prompt"}.intersection(commands[0]))
         return result
     async def done(label):
+        from netizen_cli.ordinary_sessions import PhysicalAnswer
         event = await asyncio.wait_for(completions.get(), 45)
+        if isinstance(event, PhysicalAnswer):
+            terminal = await asyncio.wait_for(completions.get(), 45)
+            assert terminal.turn_id == event.logical_id and terminal.origin == label
         if event.origin != label:
             raise AssertionError("different execution produced the Result")
         if not await runtime.wait_idle(20):
@@ -379,6 +415,8 @@ async def worker():
             await main_cases(cwd, provider, evidence)
             from tests.support.claude_channel_e2e import channel_cases
             await channel_cases(cwd, provider)
+        from tests.support.claude_session_facts import session_facts
+        await session_facts(cwd, provider, evidence)
         print(json.dumps({"checks": evidence.names, "mockRequests": len(provider.rows)}), flush=True)
     finally:
         await provider.close()
@@ -420,8 +458,9 @@ def live_worker():
             install_tools(cwd)
             asyncio.run(run_cases(cwd, live=live, report=emit))
             return 0
-        except Exception:
-            emit(json.dumps({"scenario": "live_run", "status": "fail", "seconds": round(time.monotonic()-started, 3)}),
+        except Exception as error:
+            emit(json.dumps({"scenario": "live_run", "status": "fail", **failure_details(error),
+                             "seconds": round(time.monotonic()-started, 3)}),
                  flush=True)
             return 1
 
@@ -446,14 +485,15 @@ def live_smoke():
                               start_new_session=True) as child:
             try:
                 return child.wait(timeout=900)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
                 os.killpg(child.pid, signal.SIGTERM)
                 try:
                     child.wait(timeout=8)
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
-                print(json.dumps({"scenario": "live_run", "status": "interrupted"}))
+                print(json.dumps({"scenario": "live_run", "status": "interrupted", **failure_details(error),
+                                  "condition": "live_worker_exit"}))
                 return 1
 
 
@@ -461,8 +501,8 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--live"]:
         try:
             raise SystemExit(live_smoke())
-        except Exception:
-            print(json.dumps({"scenario": "live_setup", "status": "fail"}))
+        except Exception as error:
+            print(json.dumps({"scenario": "live_setup", "status": "fail", **failure_details(error)}))
             raise SystemExit(1) from None
     if sys.argv[1:] == ["--worker"]:
         asyncio.run(worker())
@@ -475,7 +515,7 @@ if __name__ == "__main__":
             command = [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--worker"]
             with subprocess.Popen(command, env=fixture_environment(home), cwd=cwd, start_new_session=True) as worker_process:
                 try:
-                    status = worker_process.wait(timeout=270)
+                    status = worker_process.wait(timeout=500)
                 except (subprocess.TimeoutExpired, KeyboardInterrupt):
                     # This group belongs exclusively to the disposable fixture worker.
                     os.killpg(worker_process.pid, signal.SIGTERM)

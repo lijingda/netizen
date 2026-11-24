@@ -210,6 +210,8 @@ class BindingStatusProjection:
     catalog_state: NativeThreadCatalogState | None
     can_stop: bool
     can_release: bool
+    control_turn_id: str | None = None
+    can_stop_all: bool = False
     local_label: str | None = None
     observations: SessionObservations | None = None
 
@@ -923,7 +925,7 @@ class InstanceManagementService:
 
     def has_provider(self, provider: Provider) -> bool:
         match provider:
-            case Provider.HOST | Provider.ORDINARY:
+            case Provider.HOST | Provider.ORDINARY | Provider.REPLY_PROGRESS:
                 return True
             case Provider.CODEX_RUNTIME:
                 return self._runtime.has_codex_runtime if isinstance(self._runtime, ManagementRuntimePort) else self.local is None
@@ -1637,7 +1639,8 @@ class InstanceManagementService:
                                          persisted_goal_resolved=True)
         assert self.local is not None
         observations = capture.observations if capture.observations is not None else self.local.observation_defaults
-        return replace(status, local_label=local.label, observations=observations)
+        return replace(status, local_label=local.label, observations=observations, can_stop=local.can_stop,
+                       control_turn_id=local.control_turn_id, can_stop_all=local.can_stop_all)
 
     async def binding_status_exact(
         self,
@@ -2109,6 +2112,16 @@ class InstanceManagementService:
             binding = self._require_current(target)
             disposition = await self._runtime.release_exact(binding.id)
             return ReleasedBinding(binding=binding, disposition=disposition)
+
+    async def stop_claude_control(self, target: ExactBindingTarget, *, sender_id: str, revision: int | None,
+                                  turn_id: str | None, all_tasks: bool,
+                                  acknowledge: Callable[[str], Awaitable[None]]) -> StopDisposition:
+        if self.local is None or (all_tasks and not self.policy.can_stop_background_tasks):
+            raise BackendUnsupported("Claude 停止控制")
+        async with self._scope_coordinator.hold(target.scope_key):
+            binding, _ = self._require_exact(target)
+            return await self.local.stop_control(binding.id, sender_id=sender_id, revision=revision, turn_id=turn_id,
+                                                 all_tasks=all_tasks, acknowledge=acknowledge)
 
     async def stop_current_binding(
         self,

@@ -7,7 +7,7 @@ from typing import Protocol
 
 from .backends import BackendPolicy
 from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
-from .domain import ActiveState, MessageContextAnchor, MentionContextMode
+from .domain import ActiveState, FeishuScope, MessageContextAnchor, MentionContextMode
 from .runtime.codex_contracts import BindingRuntimeSnapshot
 from .session_views import SessionObservations
 from .file_evidence import FileEvidence
@@ -15,7 +15,7 @@ from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
 from .runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
-    TurnActivitySnapshot, TurnObservationUnavailableOutcome,
+    TerminalStateUnknown, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
 
 
@@ -49,7 +49,112 @@ class OrdinaryConclusion:
             raise ValueError("Turn outcome activity belongs to another Turn")
 
 
-OrdinaryEvent = OrdinaryConclusion | TurnObservationUnavailableOutcome
+@dataclass(slots=True)
+class ClaudeInputAnchor:
+    scope: FeishuScope
+    source: object
+    topic_root_id: str | None
+    stop_reactions: Callable[[str], Awaitable[None]]
+    retired: bool = False
+    release_cards: Callable[[], None] = lambda: None
+
+    def retained(self) -> bool:
+        return not self.retired
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationTarget:
+    scope: FeishuScope
+    source: object
+    delivery_id: str
+    publishable: Callable[[], bool] = lambda: True
+    single_attempt: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeCliState:
+    idle: bool = False
+    tasks: int = 0
+    crons: bool = False
+
+    @property
+    def line(self) -> str:
+        if not self.idle:
+            return "Claude：执行中"
+        if self.tasks:
+            return f"Claude：空闲，后台任务 {self.tasks} 个运行中，可以发送新消息"
+        if self.crons:
+            return "Claude：空闲，定时任务已登记，可以发送新消息"
+        return "全部完成"
+
+
+@dataclass(slots=True)
+class LogicalReply:
+    refresh: Callable[[ClaudeCliState | None], Awaitable[None]] | None = None
+    attempted: bool = False
+    message_id: str | None = None
+
+    def confirmed(self, message_id: str) -> None:
+        self.message_id = message_id
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalStarted:
+    binding_id: str
+    thread_id: str
+    turn_id: str
+    origin: object
+    feedback: BindingTaskFeedback
+    active: Callable[[], bool]
+    retained: Callable[[], bool]
+    reply: LogicalReply
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalAnswer(OrdinaryConclusion):
+    owned_tasks: Callable[[], int] = lambda: 0
+    logical_id: str | None = None
+    state: Callable[[], ClaudeCliState] = ClaudeCliState
+    wake: bool = False
+    reply: LogicalReply | None = None
+    publishable: Callable[[], bool] = lambda: True
+    delivery_deadline: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CliStateChanged:
+    origin: object
+    turn_id: str
+    background: bool
+    reply: LogicalReply
+    current: Callable[[], ClaudeCliState]
+    publishable: Callable[[], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class LogicalTerminal:
+    binding_id: str
+    thread_id: str
+    turn_id: str
+    owner_id: str
+    origin: object
+    status: str
+    reply: LogicalReply
+    mention_user_id: str | None
+    publishable: Callable[[], bool]
+    state: Callable[[], ClaudeCliState] = ClaudeCliState
+
+
+@dataclass(frozen=True, slots=True)
+class DegradedTurn(TurnObservationUnavailableOutcome):
+    affected_inputs: tuple[str, ...] = ()
+
+
+class LiveSubmissionUnknown(TerminalStateUnknown):
+    """The runtime sends the uncertainty notice to the Binding conversation."""
+
+
+OrdinaryEvent = PhysicalStarted | CliStateChanged | OrdinaryConclusion | LogicalTerminal | TurnObservationUnavailableOutcome
 OrdinaryCompletionHandler = Callable[[OrdinaryEvent], Awaitable[None]]
 
 
@@ -104,6 +209,10 @@ class LocalExecutionSnapshot:
     revision: int
     turn: ActiveTurnSnapshot | None
     unavailable: bool
+    cli: ClaudeCliState | None = None
+    control_turn_id: str | None = None
+    can_stop: bool = False
+    can_stop_all: bool = False
 
     def capture(self, binding_id: str, session_id: str | None, observations: SessionObservations) -> "LocalStatusSnapshot":
         return LocalStatusSnapshot(
@@ -116,6 +225,8 @@ class LocalExecutionSnapshot:
     def label(self) -> str:
         if self.unavailable:
             return "无法确认 Claude 客户端已关闭"
+        if self.cli and (self.turn is None or self.turn.state is ActiveState.RUNNING):
+            return self.cli.line
         if self.turn is None:
             return "空闲"
         return {ActiveState.CLOSING: "正在收尾", ActiveState.RUNNING: "执行中", ActiveState.STOPPING: "正在停止",
@@ -130,6 +241,8 @@ class LocalStatusSnapshot(BindingRuntimeSnapshot):
 
 
 class LocalSessionManagement(Protocol):
+    on_binding_deleted: Callable[[str], None] | None
+
     @property
     def backend_policy(self) -> BackendPolicy: ...
     @property
@@ -140,6 +253,8 @@ class LocalSessionManagement(Protocol):
     async def delete_lazy_resource(self, binding_id: str) -> ThreadBinding: ...
 
     def require_admission(self) -> None: ...
+    async def stop_control(self, binding_id: str, *, sender_id: str, revision: int | None, turn_id: str | None,
+                           all_tasks: bool, acknowledge: Callable[[str], Awaitable[None]]) -> StopDisposition: ...
     def local_snapshot(self, binding_id: str) -> LocalExecutionSnapshot: ...
     async def binding_pointer_changed(self, previous_binding_id: str | None, current_binding_id: str | None) -> None: ...
     async def activate_exact(
@@ -155,7 +270,7 @@ class LocalSessionManagement(Protocol):
 class SessionShutdownPort(Protocol):
     def close_admission(self) -> None: ...
 
-    async def interrupt_all(self) -> None: ...
+    async def interrupt_all(self, *, deadline: float | None = None) -> None: ...
 
     async def wait_idle(self, timeout: float) -> bool: ...
 

@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from lark_channel import DedupStore, FeishuChannelError, FeishuChannelErrorCode, SendResult
 from openai_codex import CodexConfig
 
+from tests.support import requires_claude_sdk
+
 from netizen_cli.admin.port_config import ConfigFileSnapshot
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.bindings import BindingStore, SideTopicState
@@ -926,6 +928,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             await _start_channel_input(channel, object(), ready_file=Path("/unused/service.ready"))
         self.assertEqual(events, ["handlers", "transport"])
 
+    @requires_claude_sdk
     async def test_claude_service_ready_message_stop_and_shutdown(self) -> None:
         from netizen_cli.runtime.claude_ordinary import DEFAULT_MODE, GRACE
         from tests.support.channel_messages import FakeChannel, FakeMessage
@@ -966,13 +969,18 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 await core._management.create_current_binding(scope=scope, project_alias="test", creator_id="ou_admin")
                 await send("hello", "om_first")
                 first, = clients.calls
+                from lark_channel import SendResult
+                channel.reply_results.extend([SendResult.ok(), SendResult.ok(message_id="om_answer")])
+                channel.send_results.append(SendResult.ok(message_id="om_mention"))
                 first.init("default")
                 first.result(result="native answer")
                 self.assertTrue(await core._claude.wait_idle(2))
                 self.assertIn(DEFAULT_MODE, [reply for _, reply in channel.replies])
                 reply = channel.replies[-1][1]
-                self.assertEqual(reply.markdown, "native answer")
-                self.assertEqual([mention.open_id for mention in reply.mentions], ["ou_admin"])
+                self.assertEqual(reply, "native answer")
+                _, reminder, opts = channel.send_calls[-1]
+                self.assertEqual(opts.reply_to, "om_answer")
+                self.assertEqual([mention.open_id for mention in reminder.mentions], ["ou_admin"])
                 await send("second", "om_second")
                 second = clients.calls[-1]
                 second.init()
@@ -994,6 +1002,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len({item.session for item in clients.calls}), 1)
             self.assertTrue(await core._claude.wait_idle(0))
 
+    @requires_claude_sdk
     async def test_claude_requires_exactly_one_owner_and_verified_install_before_bind(self):
         from netizen_cli.admin.users import AdminIdentity, AdminUsersError
         from netizen_cli.claude_installation import REPAIR
@@ -1017,6 +1026,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(verify.call_count, int(state == "invalid-installation"))
                 self.assertIsNone(core.application)
 
+    @requires_claude_sdk
     async def test_claude_partial_start_closes_admission_and_listener(self):
         with tempfile.TemporaryDirectory() as raw:
             core = self._make_core(Path(raw))
@@ -1485,7 +1495,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             def close_admission(self) -> None:
                 events.append("runtime:admission")
 
-            async def interrupt_all(self) -> None:
+            async def interrupt_all(self, *, deadline: float | None = None) -> None:
                 events.append("runtime:interrupt")
 
             async def wait_idle(self, timeout: float | None = None) -> bool:
@@ -1586,7 +1596,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 order.append(name)
             return record
 
-        async def hung():
+        async def hung(*, deadline):
+            assert deadline > asyncio.get_running_loop().time()
             order.append("claude:close")
             await asyncio.Future()
 
@@ -1950,7 +1961,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             def close_admission(self) -> None:
                 return None
 
-            async def interrupt_all(self) -> None:
+            async def interrupt_all(self, *, deadline: float | None = None) -> None:
                 raise asyncio.CancelledError
 
             async def wait_idle(self, timeout: float | None = None) -> bool:

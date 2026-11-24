@@ -283,7 +283,7 @@ class ForkChannel(SideChannel):
                         (("netizen-fork-main:v1\0" if intent.landing == "main" else "netizen-fork-root:v1\0")
                          + thread.id).encode()).hexdigest()[:32]))
                 if intent.landing == "main":
-                    if root.thread_id is not None or root.parent_id is not None or root.root_id not in {None, root.message_id}:
+                    if not root.is_main_line:
                         raise TopicPublishError("飞书未确认消息发布到聊天主线，本次未绑定分支。", unknown=True)
                     assert destination is not None
                     origin = root

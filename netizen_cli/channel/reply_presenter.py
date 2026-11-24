@@ -6,9 +6,11 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from weakref import WeakValueDictionary
 
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
+from ..external_calls import external_call
 from ..cards import turn_progress_card
 from ..cards.reply import feishu_answer_text
 from ..codex_runtime import CodexRuntime
@@ -18,8 +20,10 @@ from ..runtime.contracts import (
     SideTurnActivitySnapshot,
     TurnActivitySnapshot,
 )
-from .messages import _progress_card_message_id, _send_result_error_code
+from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
+from .topics import BindingCardLocation, CardReplyLocation
+from .physical_delivery import PhysicalDelivery, receipt
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,10 @@ class _PartialAnswerDelivery:
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
     attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
     confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
+    # A physical terminal inherits the running poll's mode and its last confirmed card.
+    initial: tuple[str | None, TurnActivitySnapshot] | None = None
+    text_only: bool = False
+    location: CardReplyLocation | None = None
 
 
 @dataclass(slots=True)
@@ -73,6 +81,8 @@ class _TurnProgressCardSession:
     snapshot: TurnActivitySnapshot
     snapshot_reader: Callable[[], TurnActivitySnapshot | None]
     partial_turn_id: str | None
+    location: CardReplyLocation | None = None
+    delivery: PhysicalDelivery | None = None
     reply_partial: Callable[[OutboundPost], Awaitable[SendResult]] | None = None
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
     attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
@@ -126,7 +136,35 @@ class _ReplyCardPresenter:
             tuple[str, str, str],
             _SideTurnProgressCardSession,
         ] = {}
+        self._writers: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._card_owners: dict[str, CardReplyLocation] = {}
+        self._binding_locations: dict[str, BindingCardLocation] = {}
         self._closed = False
+
+    def binding_location(self, binding_id: str) -> BindingCardLocation:
+        return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners))
+
+    def retire_binding(self, binding_id: str) -> None:
+        if location := self._binding_locations.pop(binding_id, None):
+            location.retire()
+
+    @property
+    def operation_timeout(self) -> float:
+        return self._operation_timeout_seconds
+
+    def physical_delivery(self, binding_id: str, thread_id: str, turn_id: str) -> PhysicalDelivery:
+        session = self._sessions.get((binding_id, thread_id, turn_id))
+        return session.delivery if session and session.delivery is not None else PhysicalDelivery()
+
+    async def write_physical_card(self, message_id: str, card: OutboundCard, *, binding_id: str, turn_id: str,
+                                  location: CardReplyLocation | None, publishable: Callable[[], bool],
+                                  begin: Callable[[], None]) -> _CardUpdateAttempt | None:
+        async with self._message_writer(message_id):
+            if not publishable() or (location and not location.can_write(message_id)):
+                return None
+            begin()
+            return await self._attempt_update_message(message_id, card, binding_id=binding_id,
+                                                      operation_id=turn_id, location=location)
 
     @property
     def _runtime(self) -> CodexRuntime:
@@ -147,8 +185,11 @@ class _ReplyCardPresenter:
         reply_partial: Callable[[OutboundPost], Awaitable[SendResult]] | None = None,
         snapshot_reader: Callable[[], TurnActivitySnapshot | None] | None = None,
         logical_turn: bool = False,
+        retain_for_terminal: bool = False,
+        location: CardReplyLocation | None = None,
+        retained: Callable[[], bool] = lambda: True,
     ) -> bool:
-        if self._closed:
+        if self._closed or not retained():
             return False
         key = (binding_id, thread_id, turn_id)
         if logical_turn and key in self._sessions:
@@ -177,17 +218,25 @@ class _ReplyCardPresenter:
             )
             return False
         message_id = None
+        delivery = PhysicalDelivery() if location else None
         if progress_enabled:
             try:
                 card = turn_progress_card(snapshot=snapshot)
                 async with asyncio.timeout(self._operation_timeout_seconds):
+                    items = tuple(delivery.partial(p) for p in snapshot.partial_answers) if delivery else ()
+                    if delivery:
+                        delivery.begin(items)
                     result = (
-                        await self._channel.reply(origin, card)
+                        await external_call(self._channel.reply(origin, card), isolate=self._codex is None)
                         if reply is None
-                        else await reply(card)
+                        else await external_call(reply(card), isolate=self._codex is None)
                     )
-                    if validate_reply is None or await validate_reply(result):
-                        message_id = _progress_card_message_id(result)
+                    if validate_reply is None or await external_call(validate_reply(result), isolate=self._codex is None):
+                        if location:
+                            result = location.validate(result, card=True)
+                        message_id = _confirmed_reply_id(result) if self._codex is None else _receipt_message_id(result)
+                        if delivery:
+                            delivery.record(items, receipt(result))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -202,7 +251,7 @@ class _ReplyCardPresenter:
                 )
         current = snapshot_reader()
         if (
-            current is None
+            self._closed or not retained() or (current is None and not retain_for_terminal)
             or (self._runtime.lifecycle_state(binding_id) is not None if logical_turn
                 else self._ordinary.reply_blocked_by_lifecycle(binding_id))
         ):
@@ -211,6 +260,8 @@ class _ReplyCardPresenter:
         previous = self._sessions.pop(key, None)
         if previous is not None:
             await self._stop_session(previous)
+        if self._closed or not retained():
+            return False
         session = _TurnProgressCardSession(
             binding_id=binding_id,
             thread_id=thread_id,
@@ -220,6 +271,8 @@ class _ReplyCardPresenter:
             snapshot=snapshot,
             snapshot_reader=snapshot_reader,
             partial_turn_id=None if logical_turn else turn_id,
+            location=location,
+            delivery=delivery,
             reply_partial=reply_partial or (lambda post: self._channel.reply(origin, post)),
             validate_reply=validate_reply,
             attempted_partials=set() if previous is None else previous.attempted_partials,
@@ -249,7 +302,9 @@ class _ReplyCardPresenter:
         session = None if turn_id is None else sessions.get((owner_id, thread_id, turn_id))
         if session is not None:
             try:
-                async with asyncio.timeout(self._operation_timeout_seconds):
+                # The Claude poll bounds its SDK call. Join that write before
+                # transferring its receipts and the message to the terminal writer.
+                async with asyncio.timeout(None if self._codex is None else self._operation_timeout_seconds):
                     await self._stop_session(session)
             except TimeoutError:
                 # Cancellation affects only this local presentation task. Its
@@ -266,6 +321,9 @@ class _ReplyCardPresenter:
             ),
             attempted_partials=set() if session is None else session.attempted_partials,
             confirmed_partials=set() if session is None else session.confirmed_partials,
+            initial=(session.message_id, session.snapshot) if isinstance(session, _TurnProgressCardSession) else None,
+            location=session.location if isinstance(session, _TurnProgressCardSession) else None,
+            text_only=bool(isinstance(session, _TurnProgressCardSession) and session.failed),
         )
 
     async def deliver_partial_answers(
@@ -334,12 +392,20 @@ class _ReplyCardPresenter:
             # Mark before I/O: a timeout or cancellation may follow publication.
             # Even an SDK failure may hide a partially delivered long post.
             session.attempted_partials.add(identity)
+            ledger = session.delivery if isinstance(session, _TurnProgressCardSession) else None
+            if ledger:
+                item = ledger.partial(answer)
+                if ledger.items.get(item, "unattempted") != "unattempted":
+                    continue
+                ledger.begin((item,))
             try:
                 async with asyncio.timeout(self._operation_timeout_seconds):
-                    result = await reply(post)
+                    result = await external_call(reply(post), isolate=self._codex is None)
+                    if ledger:
+                        ledger.record((item,), receipt(result))
                     if not _CardUpdateAttempt("", result).confirmed:
                         continue
-                    if session.validate_reply is not None and not await session.validate_reply(result):
+                    if session.validate_reply is not None and not await external_call(session.validate_reply(result), isolate=self._codex is None):
                         continue
                     session.confirmed_partials.add(identity)
             except asyncio.CancelledError:
@@ -356,6 +422,7 @@ class _ReplyCardPresenter:
         turn_id: str,
         activity: TurnActivitySnapshot | None,
         render: Callable[[TurnActivitySnapshot], OutboundCard],
+        publishable: Callable[[], bool] = lambda: True,
     ) -> _CardUpdateAttempt | None:
         session = self._sessions.pop((binding_id, thread_id, turn_id), None)
         if session is None:
@@ -394,7 +461,7 @@ class _ReplyCardPresenter:
             session.message_id,
             card,
             binding_id=session.binding_id,
-            operation_id=session.turn_id,
+            operation_id=session.turn_id, publishable=publishable, location=session.location,
         )
 
     async def abandon(
@@ -514,11 +581,11 @@ class _ReplyCardPresenter:
                 card = turn_progress_card(snapshot=snapshot)
                 async with asyncio.timeout(self._operation_timeout_seconds):
                     result = (
-                        await self._channel.reply(origin, card)
+                        await external_call(self._channel.reply(origin, card), isolate=self._codex is None)
                         if reply is None
-                        else await reply(card)
+                        else await external_call(reply(card), isolate=self._codex is None)
                     )
-                message_id = _progress_card_message_id(result)
+                message_id = _receipt_message_id(result)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -611,6 +678,8 @@ class _ReplyCardPresenter:
         if self._closed:
             return
         self._closed = True
+        for binding_id in tuple(self._binding_locations):
+            self.retire_binding(binding_id)
         sessions = tuple(self._sessions.values())
         self._sessions.clear()
         side_sessions = tuple(self._side_sessions.values())
@@ -672,9 +741,10 @@ class _ReplyCardPresenter:
                 return
             if snapshot is None:
                 continue
-            if session.message_id is None:
+            if session.message_id is None or session.failed:
                 await self._deliver_partial_answers(session, snapshot.partial_answers)
-                session.snapshot = snapshot
+                if session.message_id is None:
+                    session.snapshot = snapshot
                 continue
             if snapshot.revision == session.snapshot.revision:
                 continue
@@ -683,8 +753,16 @@ class _ReplyCardPresenter:
             except Exception:
                 logger.exception("failed to render running progress card", extra=log_context)
                 session.failed = True
+                if isinstance(session, _TurnProgressCardSession) and session.delivery:
+                    await self._deliver_partial_answers(session, snapshot.partial_answers)
+                    continue  # Preserve the last rendered card for the terminal freeze.
                 return
-            if not await update(card):
+            if isinstance(session, _TurnProgressCardSession) and session.delivery:
+                items = tuple(session.delivery.partial(p) for p in snapshot.partial_answers)
+                if not await self._update(session, card, items):
+                    # Never replay a running replacement with uncertain content.
+                    return
+            elif not await update(card):
                 failures += 1
                 if failures >= _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES:
                     session.failed = True
@@ -697,15 +775,24 @@ class _ReplyCardPresenter:
         self,
         session: _TurnProgressCardSession,
         card: OutboundCard,
+        items: tuple[tuple[str, str], ...] = (),
     ) -> bool:
         if session.message_id is None:
             return False
-        return await self._update_message(
-            session.message_id,
-            card,
-            binding_id=session.binding_id,
-            operation_id=session.turn_id,
-        )
+        if not session.delivery:
+            return await self.update_message(session.message_id, card, binding_id=session.binding_id,
+                                             operation_id=session.turn_id, location=session.location)
+        async with self._message_writer(session.message_id):
+            if session.location and not session.location.can_write(session.message_id):
+                session.message_id = None
+                return False
+            session.delivery.begin(items)
+            attempt = await self._attempt_update_message(session.message_id, card, binding_id=session.binding_id,
+                                                        operation_id=session.turn_id, location=session.location)
+            session.delivery.record(items, receipt(attempt.result))
+        if session.location and not session.location.can_write(session.message_id):
+            session.message_id = None
+        return attempt.confirmed
 
     async def _update_side(
         self,
@@ -714,25 +801,34 @@ class _ReplyCardPresenter:
     ) -> bool:
         if session.message_id is None:
             return False
-        return await self._update_message(
+        return await self.update_message(
             session.message_id,
             card,
             binding_id=f"side:{session.side_id}",
             operation_id=session.turn_id,
         )
 
-    async def _update_message(
+    async def update_message(
         self,
         message_id: str,
         card: OutboundCard,
         *,
         binding_id: str,
         operation_id: str,
+        publishable: Callable[[], bool] = lambda: True,
+        location: CardReplyLocation | None = None,
     ) -> bool:
-        attempt = await self._attempt_update_message(
-            message_id, card, binding_id=binding_id, operation_id=operation_id,
-        )
-        return attempt.updated
+        async with self._message_writer(message_id):
+            if not publishable():
+                return False
+            attempt = await self._attempt_update_message(
+                message_id, card, binding_id=binding_id, operation_id=operation_id, location=location,
+            )
+            return attempt.confirmed if self._codex is None else attempt.updated
+
+    def _message_writer(self, message_id: str) -> asyncio.Lock:
+        # A waiter retains the same lock until its complete card replacement settles.
+        return self._writers.setdefault(message_id, asyncio.Lock())
 
     async def _update_terminal_message(
         self,
@@ -741,20 +837,24 @@ class _ReplyCardPresenter:
         *,
         binding_id: str,
         operation_id: str,
+        publishable: Callable[[], bool] = lambda: True,
+        location: CardReplyLocation | None = None,
     ) -> _CardUpdateAttempt:
         # Retry only replacement of the same frozen card, never a new reply.
         # All attempts and delays share the existing terminal update budget.
         uncertain = False
         try:
-            async with asyncio.timeout(self._operation_timeout_seconds):
+            async with asyncio.timeout(self._operation_timeout_seconds), self._message_writer(message_id):
                 for index in range(_TERMINAL_CARD_UPDATE_ATTEMPTS):
                     if index:
                         await asyncio.sleep(_TERMINAL_CARD_RETRY_SECONDS)
+                    if not publishable():
+                        return _CardUpdateAttempt(message_id, None)
                     attempt = await self._attempt_update_message(
                         message_id, card,
-                        binding_id=binding_id, operation_id=operation_id,
+                        binding_id=binding_id, operation_id=operation_id, location=location,
                     )
-                    if attempt.updated:
+                    if attempt.updated or not attempt.message_id:
                         return attempt
                     code = _send_result_error_code(attempt.result)
                     uncertain |= code is None or code <= 0
@@ -779,13 +879,16 @@ class _ReplyCardPresenter:
         *,
         binding_id: str,
         operation_id: str,
+        location: CardReplyLocation | None = None,
     ) -> _CardUpdateAttempt:
+        if location and not location.can_write(message_id):
+            return _CardUpdateAttempt("", None)
         try:
             async with asyncio.timeout(self._operation_timeout_seconds):
-                result = await self._channel.update_card(
+                result = await external_call(self._channel.update_card(
                     message_id,
                     card.card,
-                )
+                ), isolate=self._codex is None)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -798,6 +901,8 @@ class _ReplyCardPresenter:
                 },
             )
             return _CardUpdateAttempt(message_id, None)
+        if location:
+            result = location.validate(result, card=True, updated_id=message_id)
         attempt = _CardUpdateAttempt(message_id, result)
         if not attempt.updated:
             logger.error(
@@ -810,8 +915,8 @@ class _ReplyCardPresenter:
             )
         return attempt
 
-    @staticmethod
     async def _stop_session(
+        self,
         session: (
             _TurnProgressCardSession
             | _SideTurnProgressCardSession
@@ -822,7 +927,7 @@ class _ReplyCardPresenter:
         if task is None or task is asyncio.current_task():
             return
         try:
-            await task
+            await external_call(task, isolate=self._codex is None)
         except asyncio.CancelledError:
             raise
         except Exception:

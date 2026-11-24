@@ -125,6 +125,8 @@ class SessionCardItem:
     state_label: str | None = None
     observations: SessionObservations | None = None
     registered_at: str | None = None
+    can_stop_all: bool = False
+    can_stop: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1445,10 +1447,10 @@ def archived_sessions_delete_binding_card(
 
 def _local_stop_button(
     scope: FeishuScope, binding_id: str, active_binding_id: str | None,
-    revision: int, turn_id: str, navigation: SessionCardPage, *, from_status: bool = False,
+    revision: int, turn_id: str, navigation: SessionCardPage, *, from_status: bool = False, all_tasks: bool = False,
 ) -> dict[str, Any]:
-    return _callback_button(label="停止", value=_envelope(
-        scope, CardControlName.STOP_EXACT_BINDING, binding_id=_binding_reference(binding_id),
+    return _callback_button(label="全部停止" if all_tasks else "停止", value=_envelope(
+        scope, CardControlName.STOP_EXACT_BINDING, **({"all_tasks": True} if all_tasks else {}), binding_id=_binding_reference(binding_id),
         expected_active_binding_id=_binding_reference(active_binding_id) if active_binding_id else None,
         expected_activity_revision=revision, expected_turn_id=_turn_reference(turn_id),
         page=navigation.page, session_cursor=navigation.encode(scope), **({"from_status": True} if from_status else {}),
@@ -1461,9 +1463,12 @@ def local_status_card(
     observed = status.observations or defaults
     label = status.local_label or "状态待确认"
     turn = status.snapshot.turn
-    controls = ((_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, turn.turn_id,
+    controls: tuple[dict[str, Any], ...] = ((_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, turn.turn_id,
                                     SessionCardPage("lazy"), from_status=True),)
                 if turn is not None and status.can_stop else ())
+    if status.can_stop_all and status.control_turn_id:
+        controls += (_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, status.control_turn_id,
+                                        SessionCardPage("lazy"), from_status=True, all_tasks=True),)
     view = SessionStatusView.from_observations(binding, status.primary_status or "unknown", label, observed)
     return render_session_status(view, controls)
 
@@ -1647,7 +1652,7 @@ def _session_row(
                 style="danger",
             )
         )
-    if policy.allows(OperationId.STOP) and session_stop_available(session.state) and (not local_directory or session.turn_id is not None):
+    if policy.allows(OperationId.STOP) and session_stop_available(session.state) and (not local_directory or (session.turn_id is not None and session.can_stop)):
         controls.append(
             _callback_button(
                 label="停止",
@@ -1667,6 +1672,12 @@ def _session_row(
                 ),
             )
         )
+    if local_directory and session.can_stop_all and session.turn_id:
+        controls.append(_callback_button(label="全部停止", value=_envelope(
+            scope, CardControlName.STOP_EXACT_BINDING, **navigation, all_tasks=True, page=page,
+            binding_id=_binding_reference(session.binding_id), expected_turn_id=_turn_reference(session.turn_id),
+            expected_active_binding_id=_binding_reference(expected_active_binding_id) if expected_active_binding_id else None,
+            expected_activity_revision=session.activity_revision)))
     if (
         not local_directory and policy.allows(OperationId.RECHECK) and session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
         and session.turn_id is not None
@@ -2178,6 +2189,8 @@ def decode_button_action(
         CardControlName.STOP_EXACT_BINDING, CardControlName.RECHECK_EXACT_TURN,
         CardControlName.SESSIONS_PAGE, CardControlName.REFRESH_ARCHIVED_SESSIONS,
     }
+    if name is CardControlName.STOP_EXACT_BINDING and payload.get("all_tasks") is True:
+        expected.add("all_tasks")
     if name is CardControlName.STOP_EXACT_BINDING and payload.get("from_status") is True:
         expected.add("from_status")
     if name in session_navigation_names and "session_cursor" in payload:
@@ -2321,7 +2334,7 @@ def decode_button_action(
         sender_id=sender_id,
         name=name,
         settings_section=section,
-        from_status=payload.get("from_status") is True,
+        from_status=payload.get("from_status") is True, all_tasks=payload.get("all_tasks") is True,
         project_alias=alias,
         expected_revision=revision,
         enabled=enabled,
