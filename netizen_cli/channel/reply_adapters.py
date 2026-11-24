@@ -300,7 +300,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
                               outcome.delivery.window if outcome.delivery else lambda bound, notice: asyncio.timeout_at(bound))
         end = event.end
         if end:
-            end = replace(end, display=display, location=location, session_label=await self._completion_session_label(event) if end.mention_user_id else None,
+            end = replace(end, display=display, location=location, session_label=lambda: self._completion_session_label(event),
                           settle=outcome.delivery.drain if outcome.delivery and not outcome.run_continues else None)
         await self._complete_task(replace(event, items=policy, end=end))
 

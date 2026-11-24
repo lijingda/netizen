@@ -591,30 +591,24 @@ def _summary_paths(summary: TurnDiffSummary) -> Iterator[OutputPath]:
         yield OutputPath(stats.path, deleted=stats.deleted, additions=stats.additions, deletions=stats.deletions)
 
 
-@dataclass(frozen=True, slots=True)
-class SavedImage:
-    id: str
-    saved_path: str
-    type: str = "imageGeneration"
-    status: str = "completed"
-
-
 def direct_file_item(item: object) -> object | None:
+    if isinstance(item, OutputPath):
+        return item
     root = getattr(item, "root", item)
     if _enum_value(getattr(root, "status", None)) == "completed":
         if getattr(root, "type", None) == "fileChange":
             return root
         if getattr(root, "type", None) == "imageGeneration":
             if path := _path_value(getattr(root, "saved_path", None)):
-                return SavedImage(getattr(root, "id", ""), path)
+                return OutputPath(path, generated_image=True)
     return None
 
 
 def _item_paths(items: Sequence[object]) -> Iterator[OutputPath]:
     for item in items:
         root = direct_file_item(item)
-        if isinstance(root, SavedImage):
-            yield OutputPath(root.saved_path, generated_image=True)
+        if isinstance(root, OutputPath):
+            yield root
         elif root is not None:
             for change in getattr(root, "changes", ()):
                 kind = getattr(getattr(change, "kind", None), "root", None)

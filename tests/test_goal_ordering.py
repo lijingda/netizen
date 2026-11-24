@@ -370,6 +370,7 @@ class PhysicalTurnEvidenceTest(GoalPresentationCase):
         await self.answer("final_answer", "still observed")
         await self.rollover()
         first = self.cards("om_reply_2")[-1]
+        self.assertIn("unprojectable.txt", first)
         self.assertIn("retained.txt", first)
         self.assertIn("still observed", first)
         self.assertNotIn("累计修改 <font", first)
@@ -495,3 +496,26 @@ class PhysicalTurnEvidenceTest(GoalPresentationCase):
         await self.finish(history_answer="delivered once")
         self.assertEqual(sum("delivered once" in card for card in self.cards("om_reply_2")), 1)
         self.assertFalse(any("delivered once" in str(content) for _, content in self.channel.replies))
+
+    async def test_final_handoff_bounds_the_notice_and_drops_local_state(self):
+        await self.start(progress=False)
+        attempts = []
+        async def stall(source, content, *args, **kwargs):
+            attempts.append(getattr(content, "markdown", content))
+            await asyncio.Event().wait()
+        self.enterContext(patch.object(self.channel, "reply", stall))
+        with patch("netizen_cli.runtime.limits.GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS", .4):
+            async with asyncio.timeout(.65):
+                await self.finish(history_answer="final")
+        self.assertEqual(attempts, ["final", INCOMPLETE])
+        self.assertIsNone(self.runtime.active_goal(self.target.id))
+        self.assertFalse(self.app._reactions._pulses)
+
+    async def test_file_resolution_failure_keeps_body_and_reports_files_once(self):
+        await self.start(progress=False)
+        await self.file("output.txt")
+        with patch.object(self.app, "_task_completion_files", side_effect=OSError("unavailable")):
+            await self.finish(history_answer="file result")
+        sent = [getattr(content, "markdown", content) for _, content in self.channel.replies]
+        self.assertEqual(sent.count("file result"), 1)
+        self.assertEqual(sent.count(INCOMPLETE), 1)

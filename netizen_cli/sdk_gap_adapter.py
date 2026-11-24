@@ -835,8 +835,14 @@ class _GoalActivityTap:
             observed = self.turns[turn_id]
             if observed.terminal:
                 return notification
-            projection = project_turn_activity_notification(notification, expected_thread_id=self.thread,
-                expected_turn_id=turn_id, progress_card_settings=self.settings)
+            try:
+                projection = project_turn_activity_notification(notification, expected_thread_id=self.thread,
+                    expected_turn_id=turn_id, progress_card_settings=self.settings)
+            except Exception as error:
+                observed.complete = False
+                logger.warning("Goal activity projection unavailable (%s)", type(error).__name__)
+                projection = TurnActivityNotificationProjection(turn_id=turn_id, incomplete=True,
+                    turn_completed=notification.method == "turn/completed" and type(payload) is _generated.TurnCompletedNotification)
             if notification.method == "turn/diff/updated" and type(payload) is _generated.TurnDiffUpdatedNotification:
                 observed.diff = payload.diff
             if notification.method == "item/started" and type(payload) is _generated.ItemStartedNotification:

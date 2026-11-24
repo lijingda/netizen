@@ -730,9 +730,11 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         first, second = [p.goal_terminal for p in activity if p and p.goal_terminal]
         self.assertEqual((first.turn_id, first.status, first.final_response, first.answer.explicit),
                          ("turn-1", "completed", "first final", True))
-        self.assertEqual([item.id for item in first.file_items], ["patch", "image"])
+        self.assertEqual(len(first.file_items), 2)
+        self.assertEqual(first.file_items[0].id, "patch")
         self.assertEqual(first.file_items[0].changes[0].path, "direct.txt")
-        self.assertEqual(first.file_items[1].saved_path, "/tmp/art.png")
+        self.assertEqual(first.file_items[1].path, "/tmp/art.png")
+        self.assertTrue(first.file_items[1].generated_image)
         self.assertFalse(hasattr(first.file_items[1], "result"))
         self.assertIn("first-latest", first.turn_diff)
         self.assertEqual((second.turn_id, second.file_items), ("turn-2", ()))

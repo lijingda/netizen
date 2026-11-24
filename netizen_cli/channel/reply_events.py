@@ -150,7 +150,7 @@ class RunEnded:
     mention_user_id: str | None
     display: RunDisplay | None = None
     location: CardReplyLocation | None = None
-    session_label: str | None = None
+    session_label: Callable[[], Awaitable[str]] | None = None
     source_only: bool = False
     settle: Callable[[], Awaitable[None]] | None = None
 

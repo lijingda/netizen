@@ -81,6 +81,8 @@ def merge_final_answer(observed: FinalAgentAnswer | None, turn: object) -> Final
     if history is None or observed is None:
         return observed or history
     view = getattr(turn, "items_view", "full")
+    if not history.text and observed.text:
+        return observed
     if history.explicit != observed.explicit:
         return history if history.explicit else observed
     return history if getattr(view, "value", view) == "full" else observed

@@ -68,6 +68,12 @@ class _TaskFiles:
     summary: TurnDiffSummary = TurnDiffSummary()
 
 
+    def card(self, outcome: TurnResult, scope: FeishuScope, files: tuple[TurnFile, ...], content: str) -> OutboundCard:
+        return turn_files_card(scope=scope, binding_id=outcome.file_binding_id, turn_id=outcome.physical_turn_id,
+            final_response=content, files=files, additions=self.summary.additions, deletions=self.summary.deletions,
+            completion_mention_user_id=outcome.mention_user_id, run_continues=outcome.run_continues)
+
+
 async def _best_effort_update(operation: Awaitable[object]) -> None:
     try:
         async with asyncio.timeout(5):
@@ -96,10 +102,9 @@ class CompletionPresentationChannel(ChannelReplies):
             async with policy.window(policy.deadline, False):
                 files = _TaskFiles()
                 if not silent and outcome.status == "completed":
-                    if ledger.bounded_fallback:
-                        files = self._prepare_task_files(outcome.cwd, outcome.file_evidence)
-                        if has_file_evidence(files.evidence, files.summary):
-                            ledger.expect(("files", ""))
+                    files = self._prepare_task_files(outcome.cwd, outcome.file_evidence)
+                    if has_file_evidence(files.evidence, files.summary):
+                        ledger.expect(("files", ""))
                     if content and outcome.partial_answers and not outcome.final_response:
                         content = ("本轮" if outcome.run_continues else "任务") + "已完成，答案见阶段性答案。"
                     content = await self._prepare_task_result_images(outcome, ledger=ledger) or content
@@ -134,7 +139,10 @@ class CompletionPresentationChannel(ChannelReplies):
         files: tuple[TurnFile, ...] = ()
         scope = None
         if ("files", "") in ledger.items:
-            scope, files, _ = self._task_completion_files(outcome, task_files)
+            try:
+                scope, files, _ = self._task_completion_files(outcome, task_files)
+            except Exception:
+                logger.exception("failed to resolve exact Turn files", extra=key.log_context)
         body_items: tuple[Item, ...] = ((BODY, *ledger.prepared_images) if content else ())
         if files:
             body_items += (("files", ""),)
@@ -198,10 +206,11 @@ class CompletionPresentationChannel(ChannelReplies):
                 mention = outcome.mention_user_id
                 message: str | OutboundPost | OutboundCard = content
                 if files and scope:
-                    message = turn_files_card(scope=scope, binding_id=outcome.file_binding_id, turn_id=outcome.turn_id,
-                        final_response=content, files=files, additions=task_files.summary.additions,
-                        deletions=task_files.summary.deletions, completion_mention_user_id=mention, run_continues=outcome.run_continues)
-                elif mention:
+                    try:
+                        message = task_files.card(outcome, scope, files, content)
+                    except TurnFileCardLimitError:
+                        body_items = tuple(item for item in body_items if item != ("files", ""))
+                if mention and isinstance(message, str):
                     message = OutboundPost(markdown=content, mentions=[Identity(open_id=mention)])
                 if reply and mention:
                     reply.mention_attempted = True
@@ -293,7 +302,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 await send_completion_mention(
                     self._channel, scope=self._scope(event.target.origin), card_message_id=anchor,
                     user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
-                    session_label=event.session_label,
+                    session_label=await event.session_label() if event.session_label else None,
                 )
         finally:
             self._progress_cards.retire_run(reply)
@@ -503,6 +512,8 @@ class CompletionPresentationChannel(ChannelReplies):
         evidence = FileEvidence()
         try:
             evidence = file_evidence()
+            if evidence == FileEvidence():
+                return _TaskFiles()
             if cwd is None:
                 raise TurnFileError("本轮工作目录未确认，不能使用项目默认目录解释文件。")
             summary = summarize_file_evidence(evidence, cwd)
@@ -543,23 +554,12 @@ class CompletionPresentationChannel(ChannelReplies):
             )
             return
         try:
-            scope, files, file_provenance_id = self._task_completion_files(
+            scope, files, _ = self._task_completion_files(
                 outcome,
                 task_files,
             )
-            card = turn_files_card(
-                scope=scope,
-                binding_id=file_provenance_id,
-                turn_id=outcome.physical_turn_id,
-                final_response=(
-                    prepared_response or outcome.final_response or constants.TURN_FILES_WITHOUT_FINAL_RESPONSE
-                ),
-                files=files,
-                additions=task_files.summary.additions,
-                deletions=task_files.summary.deletions,
-                completion_mention_user_id=outcome.mention_user_id,
-                run_continues=outcome.run_continues,
-            ) if files else None
+            card = task_files.card(outcome, scope, files,
+                prepared_response or outcome.final_response or constants.TURN_FILES_WITHOUT_FINAL_RESPONSE) if files else None
         except asyncio.CancelledError:
             raise
         except TurnFileCardLimitError as error:

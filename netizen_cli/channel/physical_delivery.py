@@ -55,7 +55,8 @@ class PhysicalDelivery:
         return "unattempted"
 
     def can_post(self, item: Item) -> bool:
-        return item not in self.posted and self.items.get(item, "unattempted") in (("unattempted", "rejected", "unknown") if self.bounded_fallback else ("unattempted", "rejected"))
+        state = self.items.get(item, "unattempted")
+        return item not in self.posted and (state in ("unattempted", "rejected") or (state == "unknown" and self.bounded_fallback))
 
     def begin(self, items: tuple[Item, ...], reply: LogicalReply | None, *, post: bool = False) -> tuple[Item, ...]:
         # Mark before awaiting the Channel. Cancellation leaves an unknown outcome.
