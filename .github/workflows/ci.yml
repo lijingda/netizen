@@ -62,8 +62,12 @@ jobs:
       - name: Run the repository gate
         run: make check
 
+  # macOS jobs run on main pushes and manual dispatch only. Release qualification
+  # uses the exact main push run; dispatch the workflow on a branch whose change is
+  # platform-sensitive (process lifecycle, deployment, packaging, native adapters).
   macos-arm64-check:
     name: macOS arm64 Python ${{ matrix.python }}
+    if: github.event_name != 'pull_request'
     runs-on: macos-15
     strategy:
       fail-fast: false
@@ -103,7 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-15"]') }}
         python: ["3.11", "3.14"]
     steps:
       - *checkout
@@ -143,7 +147,7 @@ jobs:
           retention-days: 3
 
   native-isolated:
-    name: Native isolated regression (${{ matrix.platform }})
+    name: Native isolated regression (${{ matrix.os == 'macos-15' && 'macOS arm64' || 'Linux' }})
     runs-on: ${{ matrix.os }}
     # The serial isolated deadlines total about 100 minutes, before cleanup and setup.
     timeout-minutes: 120
@@ -151,12 +155,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.14"]
-        os: [ubuntu-latest, macos-15]
-        include:
-          - os: ubuntu-latest
-            platform: Linux
-          - os: macos-15
-            platform: macOS arm64
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-15"]') }}
     steps:
       - *checkout
       - *setup-python
@@ -184,7 +183,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.14"]
-        os: [ubuntu-latest, macos-15]
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-15"]') }}
     steps:
       - *checkout
       - *setup-python
