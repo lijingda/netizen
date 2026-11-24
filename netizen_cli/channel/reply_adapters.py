@@ -94,7 +94,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
         if isinstance(outcome, DegradedTurn):
             key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
             for input_id in outcome.affected_inputs or (outcome.turn_id,):
-                await self._progress_cards.end_process_run(replace(key, turn_id=input_id), "timeout")
+                self._progress_cards.end_process_run(replace(key, turn_id=input_id), "timeout")
             location = self._physical_card_location(outcome.binding_id, outcome.origin)
             await self._present_run_state(RunState(ReplyTarget(key, outcome.origin, None), str(outcome.error),
                 send_notice=lambda notice: self._physical_reply(outcome.origin, notice, location)))
@@ -207,7 +207,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
                 await self._finish_task_reactions(outcome.origin, turn_id, constants.ERROR_REACTION)
             finally:
                 key = PresentationKey(outcome.binding_id, outcome.thread_id, turn_id)
-                await self._progress_cards.end_process_run(key, "error")
+                self._progress_cards.end_process_run(key, "error")
                 await self._progress_cards.abandon(key=key)
         finally:
             if isinstance(outcome, TurnOutcome):
@@ -285,7 +285,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
             "状态仍无法确认时，新消息不会执行。"
         )
         key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
-        self._progress_cards.unknown_process(key)
+        self._progress_cards.tombstone_unknown_process(key)
         await self._present_run_state(RunState(ReplyTarget(key, outcome.origin, key), message))
 
     async def _complete_side_lifecycle(

@@ -251,11 +251,14 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(5):
             while len(self.channel.replies) < 2:
                 await asyncio.sleep(.01)
+        state, = self.app._progress_cards._process.values()
+        await state.ready.wait()
         self.channel.reply_results.append(sent_result("om_partial_two", chat_id="oc_direct"))
         await self.app.handle_completion(self.outcome(partial_answers=(first, second)))
         self.assertEqual([post.markdown for _, post in self.channel.replies[1:3]],
                          ["**阶段性答案**\n\nfirst partial", "**阶段性答案**\n\nsecond partial"])
         self.assertIn("final answer", str(self.channel.replies[3][1]))
+        await state.task
         self.assertEqual(sum(event[0] == "process.create" for event in events), 1)
         self.assertEqual(sum(event[0] == "process.complete" for event in events), 1)
 

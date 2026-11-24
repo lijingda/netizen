@@ -8972,6 +8972,15 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             mentioned_bot=False,
         )
 
+        process_id = "synthetic-process-1"
+        self.channel.fetched_messages[process_id] = {"code": 0, "data": {"items": [{
+            "message_id": process_id, "chat_id": "oc-direct", "thread_id": record.topic_id,
+            "root_id": record.root_message_id, "parent_id": prompt.id, "deleted": False,
+        }]}}
+        activity = replace(side_turn_activity_snapshot(side_id=record.id), process_items=(
+            ObservedProcessItem("read", "operation", "Read", 1_800_000_000),
+        ))
+        self.runtime.side_turn_activity_values[record.id] = activity
         await self.app.handle_message(prompt)
 
         self.assertEqual(
@@ -8979,11 +8988,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             [("om-side-prompt", "Typing")],
         )
         self.assertEqual(self.channel.replies, [])
-        process_id = "synthetic-process-1"
-        self.channel.fetched_messages[process_id] = {"code": 0, "data": {"items": [{
-            "message_id": process_id, "chat_id": "oc-direct", "thread_id": record.topic_id,
-            "root_id": record.root_message_id, "parent_id": prompt.id, "deleted": False,
-        }]}}
+        state, = self.app._progress_cards._process.values()
+        await state.ready.wait()
         await self.app.handle_completion(
             SideTurnOutcome(
                 side_id=record.id,
@@ -8995,14 +9001,13 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 cwd=self.project,
                 result=completed_turn_result(final_response="side answer"),
                 root_message_id=record.root_message_id,
-                activity=replace(side_turn_activity_snapshot(side_id=record.id), process_items=(
-                    ObservedProcessItem("read", "operation", "Read", 1_800_000_000),
-                )),
+                activity=activity,
             )
         )
 
+        await state.task
         self.assertEqual([event[0] for event in events if event[0].startswith("process.")],
-                         ["process.create", "process.update", "process.complete"])
+                         ["process.create", "process.update", "process.update", "process.complete"])
         self.assertEqual(self.channel.replies, [(prompt.id, completion_post("side answer"))])
         self.assertEqual(
             self.channel.reactions,

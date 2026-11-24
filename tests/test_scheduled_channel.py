@@ -611,7 +611,6 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         return driver
 
     async def test_confirmed_process_never_confirms_an_unconfirmed_scheduled_answer(self):
-        claim, request = await self.completion_fixture()
         wire = ProcessTransport([])
         self.app._progress_cards._process_port = wire.port
         mid = "synthetic-process-1"
@@ -619,12 +618,22 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             "message_id": mid, "chat_id": "oc_group", "thread_id": "omt_fresh",
             "root_id": "om_root", "parent_id": "om_seed", "deleted": False,
         }]}}
+        submit = self.runtime.submit_initial
+        async def start(**kwargs):
+            initial = await submit(**kwargs)
+            activity = turn_activity_snapshot(binding_id=initial.binding_id, thread_id=initial.thread_id,
+                                              turn_id=initial.turn_id)
+            self.runtime.turn_activity_values[initial.binding_id] = replace(activity, process_items=(
+                ObservedProcessItem("read", "operation", "Read", 1_800_000_000),
+            ))
+            return initial
+        self.runtime.submit_initial = start
+        claim, request = await self.completion_fixture()
+        state, = self.app._progress_cards._process.values()
+        await state.ready.wait()
         self.channel.reply_results.append(SendResult(success=False))
-        activity = turn_activity_snapshot(binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
-                                          turn_id="turn-initial")
-        await self.finish_fixture(claim, request, activity=replace(activity, process_items=(
-            ObservedProcessItem("read", "operation", "Read", 1_800_000_000),
-        )))
+        await self.finish_fixture(claim, request)
+        await state.task
         self.assertEqual(wire.completed, {mid})
         self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
 

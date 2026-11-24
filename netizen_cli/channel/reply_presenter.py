@@ -140,6 +140,7 @@ class _ReplyCardPresenter:
         self._channel = channel
         self._process_port, self._process_location, self._clock = process_messages, process_location, clock
         self._process: dict[PresentationKey, ProcessPresentation] = {}
+        self._process_tombstones: set[PresentationKey] = set()
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
         self._sessions: dict[
@@ -157,13 +158,13 @@ class _ReplyCardPresenter:
         self._closed = False
 
     def _process_for(self, target: ReplyTarget, binding_id: str | None, root_id: str | None = None) -> ProcessPresentation | None:
-        if not binding_id or self._closed or self._process_port is None or self._process_location is None:
+        if not binding_id or target.key in self._process_tombstones or self._closed or self._process_port is None or self._process_location is None:
             return None
         if state := self._process.get(target.key):
             return state
         resolve = self._process_location
         state = ProcessPresentation(target.key, target.run, self._process_port, self._channel,
-            lambda: resolve(binding_id, target.origin, root_id), self._claim_process, self._clock, self.operation_timeout)
+            lambda: resolve(binding_id, target.origin, root_id), self._claim_process, self._clock, self.operation_timeout, self._forget_process)
         self._process[target.key] = state
         return state
 
@@ -181,44 +182,34 @@ class _ReplyCardPresenter:
                 other.finish(other.verdict)
         return True
 
-    async def process_result(self, result: TurnResult) -> None:
-        if result.task_feedback.progress_card_enabled:
-            return
-        if result.target.run is None and result.status == "completed" and not (result.content or result.partial_answers):
-            return
-        state = self._process_for(result.target, result.file_binding_id, result.process_root_id)
+    def _forget_process(self, state: ProcessPresentation) -> None:
+        if self._process.get(state.key) is state:
+            self._process.pop(state.key)
+            if not state.terminal:
+                self._process_tombstones.add(state.key)
+
+    def process_result(self, result: TurnResult) -> None:
+        key = result.target.key
+        self._process_tombstones.discard(key)
+        state = self._process.get(key)
         if state is None:
             return
+        state.verdict = result.process_reason
         try:
-            state.verdict = result.process_reason
             state.sample(result.activity, terminal=True)
-            if not result.run_continues:
-                state.finish(state.verdict)
-            await state.before_content()
         except Exception:
-            state.revoke()
-            logger.warning("process message result unavailable")
+            logger.warning("process message result observation unavailable")
+        if not result.run_continues or state.task is None:
+            state.finish(state.verdict)
 
-    async def release_process(self, key: PresentationKey) -> None:
-        state = self._process.get(key)
-        if state and (state.closing or state.closed):
-            if state.task:
-                await asyncio.gather(state.task, return_exceptions=True)
-            if self._process.get(key) is state:
-                self._process.pop(key)
+    def end_process_run(self, run: PresentationKey, reason: Reason) -> None:
+        for state in tuple(self._process.values()):
+            if state.run == run:
+                state.finish(reason if reason == "timeout" or state.revision is None else state.verdict)
 
-    async def end_process_run(self, run: PresentationKey, reason: Reason) -> None:
-        matches = [state for state in self._process.values() if state.run == run]
-        for state in matches:
-            state.finish(reason if reason == "timeout" or state.revision is None else state.verdict)
-        await asyncio.gather(*(self.release_process(state.key) for state in matches))
-
-    def unknown_process(self, key: PresentationKey) -> None:
-        # Keep the spent create on this parked Turn until exact recovery or removal.
-        state = self._process.get(key)
-        if state is None:
-            state = self._process_for(ReplyTarget(key, None, key), key.owner_id)
-        if state:
+    def tombstone_unknown_process(self, key: PresentationKey) -> None:
+        self._process_tombstones.add(key)
+        if state := self._process.get(key):
             state.finish("timeout")
 
     async def publish_card(
@@ -333,14 +324,16 @@ class _ReplyCardPresenter:
     def binding_location(self, binding_id: str) -> BindingCardLocation:
         return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners, release_cards=self._release_cards))
 
-    def retire_binding(self, binding_id: str) -> None:
+    async def retire_binding(self, binding_id: str) -> None:
+        self._process_tombstones.difference_update({key for key in self._process_tombstones if key.owner_id == binding_id})
         location = self._binding_locations.pop(binding_id, None)
+        processes = []
         for key, process in tuple(self._process.items()):
             if key.owner_id == binding_id or (location and process.location and process.location.binding is location):
-                process.revoke()
-                self._process.pop(key)
+                processes.append(self._process.pop(key))
         if location:
             location.retire()
+        await self._cancel_processes(processes)
 
     @property
     def operation_timeout(self) -> float:
@@ -599,12 +592,11 @@ class _ReplyCardPresenter:
     ) -> None:
         """Stop every ordinary/Goal presenter owned by one removed Thread."""
 
-        for key in tuple(self._process):
-            if (key.owner_id, key.thread_id) == (binding_id, thread_id):
-                state = self._process.pop(key)
-                state.revoke()
-                if state.task:
-                    await asyncio.gather(state.task, return_exceptions=True)
+        keys = {key for key in self._process.keys() | self._process_tombstones
+                if (key.owner_id, key.thread_id) == (binding_id, thread_id)}
+        processes = [self._process.pop(key) for key in keys if key in self._process]
+        self._process_tombstones.difference_update(keys)
+        await self._cancel_processes(processes)
         ordinary_keys = tuple(
             key
             for key in self._sessions
@@ -660,17 +652,23 @@ class _ReplyCardPresenter:
             )
             return False
 
+    async def _cancel_processes(self, processes: list[ProcessPresentation]) -> None:
+        for process in processes:
+            process.revoke()
+        tasks = {process.task for process in processes if process.task and not process.task.done()}
+        if tasks:
+            await asyncio.wait(tasks, timeout=self.operation_timeout)
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        processes = tuple(self._process.values())
+        processes = list(self._process.values())
         self._process.clear()
-        for process in processes:
-            process.revoke()
-        await asyncio.gather(*(state.task for state in processes if state.task), return_exceptions=True)
+        self._process_tombstones.clear()
+        await self._cancel_processes(processes)
         for binding_id in tuple(self._binding_locations):
-            self.retire_binding(binding_id)
+            await self.retire_binding(binding_id)
         sessions = tuple(self._sessions.values())
         self._sessions.clear()
         side_sessions = tuple(self._side_sessions.values())
@@ -712,7 +710,6 @@ class _ReplyCardPresenter:
                     process.sample(snapshot)
                 except Exception:
                     logger.warning("process message observation unavailable")
-                    process.revoke()
             if session.message_id is None or session.failed:
                 await self._deliver_partial_answers(session, snapshot.partial_answers)
                 if session.message_id is None:

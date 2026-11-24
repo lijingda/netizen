@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from netizen_cli.bindings import BindingTaskFeedback
+from netizen_cli.channel.codex_reply_events import CodexReplyEvents
 from netizen_cli.channel.process_presentation import ProcessPresentation
 from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.channel.topics import BindingCardLocation, CardReplyLocation
@@ -103,12 +104,7 @@ class TerminalProcessDifferential(unittest.IsolatedAsyncioTestCase):
                     wire = ProcessTransport([])
                     self.assertEqual(await short_turn_trace(card=card, files=files, wire=wire), expected[f"{card}/{files}"])
                     names = [op for op, _, _ in wire.events]
-                    self.assertEqual([name for name in names if name.startswith("process.")],
-                                     [] if card else ["process.create", "process.update", "process.complete"])
-                    if not card:
-                        self.assertLess(names.index("process.create"), names.index("reply"))
-                        self.assertEqual(wire.completed, {"synthetic-process-1"})
-
+                    self.assertFalse(any(name.startswith("process.") for name in names))
 
 
 def process_snapshot(revision, *, binding="binding"):
@@ -163,19 +159,12 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
             if message.task:
                 await asyncio.gather(message.task, return_exceptions=True)
 
-    async def test_short_codex_turn_creates_before_content_and_matches_baseline(self):
+    async def test_terminal_only_codex_activity_keeps_the_short_turn_baseline(self):
         port = process_port()
-        def install(fx):
-            fx.app._progress_cards._process_port = port
-            async def create(*args):
-                self.assertFalse(fx.channel.replies)
-                return Created("cot", "process-mid")
-            port.create.side_effect = create
-        actual = await short_turn_trace(card=False, files=False, install=install)
+        actual = await short_turn_trace(card=False, files=False,
+            install=lambda fx: setattr(fx.app._progress_cards, "_process_port", port))
         self.assertEqual(actual, json.loads(REFERENCE.read_text())["False/False"])
-        port.create.assert_awaited_once_with("oc_direct", "om_new", False)
-        self.assertEqual([item.text for item in port.update.await_args.args[2]], ["检查清单"])
-        port.complete.assert_awaited_once_with("cot", "process-mid", "done")
+        port.create.assert_not_awaited()
 
     async def test_claude_safe_items_flow_through_start_and_result_without_becoming_receipts(self):
         async with channel_fixture() as fx:
@@ -193,6 +182,7 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
                 await state.ready.wait()
             await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "user", origin, "completed",
                 "final", logical_id=key.turn_id, activity=snapshot, reply=reply))
+            await state.task
             port.create.assert_awaited_once_with("oc_direct", "om_new", False)
             port.complete.assert_awaited_once_with("cot", "process-mid", "done")
             self.assertNotIn("process-mid", reply.messages)
@@ -216,12 +206,13 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
                 message = ProcessPresentation(key, key, port, channel,
                     lambda: CardReplyLocation(scope, "input", "root", binding), lambda *_: True, lambda: 1_800_000_001, 1)
                 message.sample(process_snapshot(1))
+                await message.ready.wait()
                 message.finish("done")
                 async with asyncio.timeout(1):
                     await message.task
                 port.create.assert_awaited_once_with("chat", "input", True)
                 channel.fetch_message.assert_awaited_once_with("process-mid")
-                self.assertEqual(port.update.await_count, int(variant == "exact"))
+                self.assertEqual(port.update.await_count, 2 if variant == "exact" else 0)
                 self.assertEqual(port.complete.await_count, int(variant == "exact"))
                 self.assertEqual("process-mid" in binding.unusable, variant == "wrong")
 
@@ -256,8 +247,10 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
                 rollover = await written.get()
                 self.assertEqual([(r.item_id, r.finished_at is None) for r in rollover],
                                  [(initial.item_id, False), (last.process_items[0].identity, True)])
+                state, = fx.app._progress_cards._process.values()
                 await fx.app.handle_completion(GoalOutcome(binding.id, "native-one", "goal-one", "user", origin,
                     final_physical_turn_id="physical-2", final_turn_status="completed", final_response="done", activity=last))
+            await state.task
             port.create.assert_awaited_once()
             port.complete.assert_awaited_once_with("cot", "process-mid", "done")
             self.assertFalse(fx.app._progress_cards._process)
@@ -273,6 +266,14 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(fx.channel, "fetch_message", AsyncMock(return_value={"code":0,"data":{"items":[{
                 "message_id":"process-mid","chat_id":"chat","thread_id":"topic","root_id":"wrong","parent_id":"input","deleted":False
             }]}})) as read:
+                key = PresentationKey("side", activity.thread_id, activity.turn_id, True)
+                event = CodexReplyEvents(fx.runtime, fx.app._ordinary).opened(
+                    key, origin, BindingTaskFeedback(), reply=AsyncMock(), reply_partial=AsyncMock(),
+                    parent_binding_id="parent", root_message_id="root")
+                fx.runtime.side_turn_activity_values["side"] = activity
+                await presenter.open(event)
+                state = presenter._process[key]
+                await state.task
                 await fx.app.handle_completion(SideTurnOutcome("side", "parent", activity.thread_id, activity.turn_id,
                     "owner", origin, fx.project, result=completed_turn_result(final_response="side result"),
                     activity=activity, root_message_id="root"))

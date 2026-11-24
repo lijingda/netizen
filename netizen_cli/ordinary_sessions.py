@@ -299,7 +299,7 @@ class LocalStatusSnapshot(BindingRuntimeSnapshot):
 
 
 class LocalSessionManagement(Protocol):
-    on_binding_deleted: Callable[[str], None] | None
+    on_binding_deleted: Callable[[str], Awaitable[None]] | None
 
     @property
     def backend_policy(self) -> BackendPolicy: ...

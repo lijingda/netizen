@@ -1271,9 +1271,7 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0101](adr/0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页。Admin 按页内顺序在期限内读取每轮首项（升序、`limit=1`、最多十轮），首项为 `functionCallOutput` 时替换 Summary 输入 | shape/synthetic 与原生 paginated/legacy 探针。首项读取失败按 [Admin 对话记录规则](#管理查询与操作) 降级，legacy `-32601` 不告警。运行终态与 Files 仍有各自的证据读取。 | 公开等价历史分页 facade。 |
 | `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
 
-终态首次创建过程消息时，从交给 SDK 起，创建与必要的位置读取共用服务事件循环上的两秒期限。
-固定版 `lark-oapi` 的异步请求在租户令牌过期或缓存为空时会先同步刷新令牌，因此实际耗时可能超过两秒。
-期限触发后此次创建按未知处理，随即发送普通内容。上游提供异步令牌路径后移除这项 SDK 限制。
+固定版 `lark-oapi` 在租户令牌过期或缓存为空时会同步刷新令牌，可能延迟服务事件循环中的其他操作。上游提供异步令牌路径后移除这项 SDK 限制。
 
 Channel SDK 的卡片原始结构适配见 [ADR 0099](adr/0099-project-original-card-content-with-bounded-component-adapter.md)
 及[引用读取与 SDK 内容适配](#引用读取与-sdk-内容适配)：仅用公开 SDK 取得原始卡片，
@@ -1486,9 +1484,9 @@ Binding 的“回复消息类型”可选卡片或过程消息。卡片沿用原
 结束提及和定时首轮回执继续以承载内容的回复为依据。Claude 当前只有阶段性答案和状态行，
 因此通常只发送普通内容。
 
-过程消息在首次观察到可见条目时创建。运行中由展示任务异步写入；终态才观察到条目时先尝试
-创建并确认位置，再发送最终内容。话题内精确读取一次新消息，核对消息、聊天、话题、根和
-直接父消息；定时首轮引用选定的根或种子，无归属的 Claude 话题结果引用已核实的根。明确矛盾
+仅在运行中的初始观察或轮询发现可见条目时创建过程消息。终态只收尾运行中已启动的写入者，
+短任务可直接交付答案。匿名唤醒和 cron 的过程展示留待 ADR 0105 D①。内容、表情、提及和通知独立交付。话题内精确读取一次新消息，核对消息、聊天、话题、根和
+直接父消息。定时首轮引用选定的根或种子。明确矛盾
 会停用该 Binding 下涉及的消息 ID。创建回执丢失、读取不完整或位置不符时，该轮结束过程写入。
 
 每条过程消息串行替换完整列表，保存上次确认的列表。未知回执、超时或并发码 10020 后，
@@ -1498,7 +1496,7 @@ Binding 的“回复消息类型”可选卡片或过程消息。卡片沿用原
 运行结束或执行结果明确未知时，写入者关闭运行项并执行一次有界最终写入，再尝试完成一次。
 已完成和中断用 `done`，失败用 `error`，执行结果明确未知用 `timeout`。单纯失去 Activity
 观察时保留写入者。确认为执行未知后恢复的结果只交付普通内容。Goal 整个逻辑运行使用同一条
-过程消息，物理换轮重新区分条目。详见 [ADR 0107](adr/0107-present-process-in-feishu-process-messages.md)。
+过程消息，物理换轮重新区分条目。服务关闭、Binding 退役或移除 Thread 时会取消写入者，已创建的消息可能仍显示进行中。详见 [ADR 0107](adr/0107-present-process-in-feishu-process-messages.md)。
 
 ### 当前物理 Turn 的结果静默
 

@@ -301,7 +301,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
-        self.on_binding_deleted: Callable[[str], None] | None = None
+        self.on_binding_deleted: Callable[[str], Awaitable[None]] | None = None
         self._activity: dict[str, _BindingActivity] = {}
         self._active: dict[str, _Execution] = {}
         self._tasks: dict[asyncio.Task[None], _Execution] = {}
@@ -951,9 +951,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             removed = self._bindings.delete_binding(binding_id)
             self._activity.pop(binding_id, None)
             self.observations.discard(binding_id)
-            if self.on_binding_deleted:
-                self.on_binding_deleted(binding_id)
-            return removed
+        if self.on_binding_deleted:
+            await self.on_binding_deleted(binding_id)
+        return removed
 
     observation_defaults = DEFAULT_OBSERVATIONS
 

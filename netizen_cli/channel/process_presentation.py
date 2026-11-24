@@ -24,7 +24,6 @@ from .topics import CardReplyLocation
 logger = logging.getLogger(__name__)
 Reason = Literal["done", "error", "timeout"]
 Payload = tuple[ProcessItem, ...]
-CREATE_BUDGET = 2.0
 
 
 def _item(row: ObservedProcessItem) -> ProcessItem:
@@ -110,10 +109,11 @@ class ProcessPresentation:
     def __init__(self, key: PresentationKey, run: PresentationKey | None, port: ProcessMessages,
                  channel: ReplyChannel, location: Callable[[], CardReplyLocation | None],
                  claim: Callable[[ProcessPresentation, Created], bool], clock: Callable[[], float],
-                 timeout: float) -> None:
+                 timeout: float, on_closed: Callable[[ProcessPresentation], None] = lambda _: None) -> None:
         self.key, self.run = key, run
         self.port, self.channel, self.resolve, self.claim = port, channel, location, claim
-        self.clock, self.timeout = clock, timeout
+        self.clock, self.timeout, self.on_closed = clock, timeout, on_closed
+        self.terminal = False
         self.items = ProcessList()
         self.writer = ReplacementWriter[Payload](lambda items: items)
         self.location: CardReplyLocation | None = None
@@ -129,13 +129,16 @@ class ProcessPresentation:
         self.closed = False
 
     def sample(self, snapshot: Activity | None, *, terminal: bool = False) -> None:
+        if self.terminal and not terminal:
+            return
+        self.terminal |= terminal
         if self.closed or self.closing or snapshot is None or not self.key.matches(snapshot):
             return
         if not terminal and self.revision == snapshot.revision:
             return
         self.revision = snapshot.revision
         self.items.observe(snapshot, int(self.clock()))
-        if self.items.desired or self.created:
+        if self.task or (not self.terminal and self.items.desired):
             self._trigger()
 
     def _trigger(self) -> None:
@@ -143,15 +146,6 @@ class ProcessPresentation:
         self.wake.set()
         if self.task is None:
             self.task = asyncio.create_task(self._drive())
-
-    async def before_content(self) -> None:
-        if self.task is None or self.ready.is_set():
-            return
-        try:
-            async with asyncio.timeout(CREATE_BUDGET):
-                await self.ready.wait()
-        except TimeoutError:
-            self.revoke()
 
     def revoke(self) -> None:
         self.closed = True
@@ -163,12 +157,10 @@ class ProcessPresentation:
         if self.closed or self.closing:
             return
         self.closing = reason
-        if reason == "timeout" and self.created is None:
-            self.revoke()
-            return
-        if self.created is None and self.task is None:
+        if self.task is None:
             self.closed = True
             self.ready.set()
+            self.on_closed(self)
             return
         self._trigger()
 
@@ -177,22 +169,21 @@ class ProcessPresentation:
         if location is None or location.binding.retired or (location.scope.topic_id and not (location.root and location.parent)):
             logger.warning("process message target unavailable")
             return False
-        async with asyncio.timeout(CREATE_BUDGET) as deadline:
+        async with asyncio.timeout(self.timeout):
             created = await external_call(self.port.create(location.scope.chat_id, location.parent, bool(location.scope.topic_id)))
-            if not isinstance(created, Created):
-                if not isinstance(created, Rejected):
-                    logger.warning("process message creation unconfirmed")
-                return False
-            if self.closed or deadline.expired():
-                return False
+        if not isinstance(created, Created):
+            if not isinstance(created, Rejected):
+                logger.warning("process message creation unconfirmed")
+            return False
+        async with asyncio.timeout(self.timeout):
             verified = await _verify(self.channel, location, created)
-            if not verified or self.closed or deadline.expired() or not self.claim(self, created):
-                logger.warning("process message location unconfirmed")
-                return False
-            self.created = created
-            location.binding.owners[created.message_id] = location
-            location.cards.add(created.message_id)
-            return True
+        if not verified or self.closed or not self.claim(self, created):
+            logger.warning("process message location unconfirmed")
+            return False
+        self.created = created
+        location.binding.owners[created.message_id] = location
+        location.cards.add(created.message_id)
+        return True
 
     def _can_write(self) -> bool:
         return bool(self.created and self.location and not self.closed and self.location.can_write(self.created.message_id))
@@ -219,7 +210,7 @@ class ProcessPresentation:
         try:
             if not self.ready.is_set():
                 try:
-                    if not await self._create():
+                    if self.terminal or self.closing or not self.items.desired or not await self._create():
                         self.closed = True
                         return
                 finally:
@@ -253,3 +244,4 @@ class ProcessPresentation:
             self.ready.set()
             if self.location:
                 self.location.retire()
+            self.on_closed(self)

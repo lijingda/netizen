@@ -8,14 +8,16 @@ from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 from netizen_cli.channel.process_presentation import ProcessList, ProcessPresentation
-from netizen_cli.channel.reply_events import PresentationKey
+from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
 from netizen_cli.channel.topics import BindingCardLocation, CardReplyLocation
 from netizen_cli.domain import FeishuScope, ScopeKind
-from netizen_cli.ordinary_sessions import LogicalReply, PhysicalAnswer
+from netizen_cli.bindings import BindingTaskFeedback
+from netizen_cli.ordinary_sessions import DegradedTurn, LogicalReply, PhysicalAnswer, PhysicalStarted
+from netizen_cli.runtime.contracts import TerminalStateUnknown
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from netizen_cli.process_activity import ProcessActivityWindow
-from netizen_cli.process_messages import Ok, Rejected, Unknown, item_events
+from netizen_cli.process_messages import Created, Ok, Rejected, Unknown, item_events
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.turn_activity import (
     TurnActivityEvent, TurnActivityKind as Kind, TurnActivityStatus as Status,
@@ -149,13 +151,14 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         for response in (Rejected(10020), Rejected(10001), Unknown(), OSError()):
             with self.subTest(response=response):
                 port = process_port()
-                port.update.side_effect = [response]
+                port.update.side_effect = [Ok(), response]
                 state = self.message(port)
                 state.sample(process_snapshot(1))
+                await state.ready.wait()
                 state.finish("error")
                 async with asyncio.timeout(1):
                     await state.task
-                port.update.assert_awaited_once()
+                self.assertEqual(port.update.await_count, 2)
                 port.complete.assert_awaited_once_with("cot","process-mid","error")
                 state.sample(process_snapshot(2))
                 self.assertTrue(state.closed)
@@ -293,19 +296,26 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
             replies = {"A":LogicalReply(), "B":LogicalReply()}
             async def answer(owner, turn):
                 snap = replace(process_snapshot(1),turn_id=turn)
-                await fx.app.handle_ordinary_completion(PhysicalAnswer("binding", "native-one", turn, "user",
-                    FakeMessage("input",message_id=owner), "completed", "answer", activity=snap,
-                    logical_id=owner, run_continues=True, reply=replies[owner]))
+                key = PresentationKey("binding", "native-one", turn)
+                origin = FakeMessage("input", message_id=owner)
+                state = presenter._process_for(ReplyTarget(key, origin, replace(key, turn_id=owner)), "binding")
+                state.sample(snap)
+                await state.ready.wait()
+                await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "user", origin, "completed",
+                    "answer", activity=snap, logical_id=owner, run_continues=True, reply=replies[owner]))
+                return state
             async with asyncio.timeout(2):
-                await answer("A","A1")
-                await answer("B","B1")
+                first = await answer("A","A1")
+                other = await answer("B","B1")
                 self.assertFalse(wire.completed)
-                await answer("A","A2")
-                await presenter._process[PresentationKey("binding","native-one","A1")].task
+                latest = await answer("A","A2")
+                await first.task
                 self.assertEqual(wire.completed, {"synthetic-process-1"})
-                await presenter.end_process_run(PresentationKey("binding","native-one","B"),"timeout")
+                presenter.end_process_run(PresentationKey("binding","native-one","B"),"timeout")
+                await other.task
                 self.assertEqual(wire.completed, {"synthetic-process-1","synthetic-process-2"})
-                await presenter.end_process_run(PresentationKey("binding","native-one","A"),"done")
+                presenter.end_process_run(PresentationKey("binding","native-one","A"),"done")
+                await latest.task
             completions = [args for name,args,_ in wire.events if name == "process.complete"]
             self.assertEqual(completions, [["synthetic-process-1","done"],["synthetic-process-2","timeout"],
                                           ["synthetic-process-3","done"]])
@@ -313,33 +323,81 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
             for reply in replies.values():
                 self.assertTrue(wire.completed.isdisjoint(reply.messages))
 
-    async def test_terminal_deadline_delivers_content_after_uncertain_create_or_read(self):
-        for hold in ("create","read"):
-            async with channel_fixture() as fx:
-                port = process_port()
-                fx.app._progress_cards._process_port = port
-                wait = asyncio.Event()
-                started = asyncio.Event()
-                async def block(*args):
-                    started.set()
-                    await wait.wait()
-                    raise AssertionError("late operation")
-                if hold == "create":
-                    port.create.side_effect = block
-                origin = FakeMessage("prompt",message_id="anchor",thread_id="topic",raw={"root_id":"root"})
-                with patch.object(fx.channel,"fetch_message",AsyncMock(side_effect=block)) as read, patch(
-                    "netizen_cli.channel.process_presentation.CREATE_BUDGET",0.05
-                ):
-                    async with asyncio.timeout(2):
-                        await fx.app.handle_ordinary_completion(PhysicalAnswer("binding","native-one","turn-one","user",
-                            origin,"completed","ordinary answer",logical_id="turn-one",activity=process_snapshot(1)))
-                    self.assertTrue(started.is_set())
-                    self.assertEqual(read.await_count,int(hold == "read"))
-                    wait.set()
-                port.create.assert_awaited_once()
-                port.update.assert_not_awaited()
-                port.complete.assert_not_awaited()
-                self.assertIn("ordinary answer",str(fx.channel.replies))
+    async def test_terminal_only_claude_sample_cannot_spend_the_answer_deadline(self):
+        async with channel_fixture() as fx:
+            port = process_port()
+            fx.app._progress_cards._process_port = port
+            origin = FakeMessage("prompt", message_id="in")
+            event = PhysicalAnswer("binding", "native-one", "turn-one", "user", origin, "completed", "answer",
+                logical_id="turn-one", activity=process_snapshot(1),
+                delivery_deadline=asyncio.get_running_loop().time() + .08)
+            await fx.app.handle_ordinary_completion(event)
+            self.assertIn("answer", str(fx.channel.replies))
+            port.create.assert_not_awaited()
+
+    async def test_queued_running_sample_cannot_first_dispatch_after_result(self):
+        port = process_port()
+        state = self.message(port)
+        state.sample(process_snapshot(1))
+        state.sample(process_snapshot(2), terminal=True)
+        state.finish("done")
+        await state.task
+        port.create.assert_not_awaited()
+
+    async def test_late_running_receipt_is_owned_while_content_or_unknown_notice_proceeds(self):
+        for cut, unknown in itertools.product(("create", "placement", "complete"), (False, True)):
+            with self.subTest(cut=cut, unknown=unknown):
+                async with channel_fixture() as fx, asyncio.timeout(2):
+                    port = process_port()
+                    presenter = fx.app._progress_cards
+                    presenter._process_port = port
+                    snap = process_snapshot(1)
+                    key = PresentationKey(snap.binding_id, snap.thread_id, snap.turn_id)
+                    origin = FakeMessage("prompt", message_id="in", thread_id="topic", raw={"root_id":"root"})
+                    entered, release = asyncio.Event(), asyncio.Event()
+                    async def hold(result):
+                        entered.set()
+                        await release.wait()
+                        return result
+                    async def create(*args):
+                        return await hold(Created("cot","process-mid"))
+                    async def complete(*args):
+                        return await hold(Ok())
+                    async def read(mid):
+                        result = {"code":0,"data":{"items":[{"message_id":mid,"chat_id":origin.conversation.chat_id,
+                            "thread_id":"topic","root_id":"root","parent_id":"in","deleted":False}]}}
+                        return await hold(result) if cut == "placement" else result
+                    if cut == "create":
+                        port.create.side_effect = create
+                    elif cut == "complete":
+                        port.complete.side_effect = complete
+                    reply = LogicalReply()
+                    with patch.object(fx.app._ordinary, "turn_activity", return_value=snap), patch.object(
+                        fx.channel, "fetch_message", side_effect=read) as fetched:
+                        await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
+                            BindingTaskFeedback(), lambda:True, lambda:True, reply))
+                        state = presenter._process[key]
+                        if cut == "complete":
+                            await state.ready.wait()
+                        else:
+                            await entered.wait()
+                        if unknown:
+                            event = DegradedTurn(*key.index, "user", origin, TerminalStateUnknown("uncertain"))
+                            expected = "uncertain"
+                        else:
+                            event = PhysicalAnswer(*key.index, "user", origin, "completed", "ordinary answer",
+                                logical_id=key.turn_id, activity=snap, reply=reply)
+                            expected = "ordinary answer"
+                        await fx.app.handle_ordinary_completion(event)
+                        self.assertIn(expected, str(fx.channel.replies))
+                        await entered.wait()
+                        release.set()
+                        await state.task
+                        fetched.assert_awaited_once_with("process-mid")
+                    port.create.assert_awaited_once()
+                    self.assertTrue(port.update.await_count >= 1)
+                    port.complete.assert_awaited_once_with("cot","process-mid","timeout" if unknown else "done")
+                    self.assertNotIn(key, presenter._process)
 
     async def test_execution_unknown_then_exact_result_cannot_reopen_its_writer(self):
         async with channel_fixture() as fx:
@@ -347,7 +405,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
             presenter = fx.app._progress_cards
             presenter._process_port = port
             key = PresentationKey("binding","native-one","turn-one")
-            presenter.unknown_process(key)
+            presenter.tombstone_unknown_process(key)
             await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index,"user",FakeMessage("prompt",message_id="in"),
                 "completed","recovered content",logical_id=key.turn_id,activity=process_snapshot(1)))
             port.create.assert_not_awaited()
