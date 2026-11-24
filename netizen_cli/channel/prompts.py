@@ -15,6 +15,8 @@ from .base import CHANNEL_LOGGER_NAME
 from ..bindings import (
     ThreadBinding,
 )
+from .codex_reply_events import CodexReplyEvents
+from .reply_events import PresentationKey
 from .question_inputs import CardAnswerOrigin
 from ..cards.defaults import defaults_card
 from ..defaults import DefaultConfigurationError
@@ -76,13 +78,13 @@ from .app_values import (
     _message_chat_type,
     _message_id,
 )
-from .presentation import CompletionPresentationChannel
+from .reply_adapters import NativeReplyChannel
 
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
 
 
-class PromptChannel(CompletionPresentationChannel):
+class PromptChannel(NativeReplyChannel):
     """Ordinary prompt admission, automatic session creation and context receipts."""
 
     async def _prompt(
@@ -310,7 +312,7 @@ class PromptChannel(CompletionPresentationChannel):
                 async def cleanup(turn_id: str) -> None:
                     try:
                         if presentation_thread:
-                            await self._progress_cards.abandon(binding_id=binding.id, thread_id=presentation_thread, turn_id=turn_id)
+                            await self._progress_cards.abandon(key=PresentationKey(binding.id, presentation_thread, turn_id))
                     finally:
                         await self._reactions.stop(turn_id)
                 origin = ClaudeInputAnchor(location, source, root if location.topic_id else None, cleanup, release_cards=address.retire)
@@ -398,24 +400,16 @@ class PromptChannel(CompletionPresentationChannel):
             if not self._session_form.progress_editable:
                 await asyncio.gather(*presenters)
                 return
-            delivery_options = {}
-            if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin)):
-                delivery_options = {
-                    "reply": lambda card: self._reply_to_origin(origin, card),
-                }
-                if isinstance(origin, ScheduledOrigin):
-                    delivery_options["validate_reply"] = lambda result: self._scheduled_reply_confirmed(origin, result)
-            presenters.append(
-                self._progress_cards.start(
-                    binding_id=submission.binding_id,
-                    thread_id=submission.thread_id,
-                    turn_id=submission.turn_id,
-                    origin=origin,
-                    progress_enabled=submission.task_feedback.progress_card_enabled,
-                    reply_partial=lambda post: self._reply_to_origin(origin, post),
-                    **delivery_options,
-                )
+            key = PresentationKey(submission.binding_id, submission.thread_id, submission.turn_id)
+            routed = isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin))
+            event = CodexReplyEvents(self._runtime, self._ordinary).opened(
+                key, origin, submission.task_feedback,
+                reply=lambda card: self._reply_to_origin(origin, card) if routed else self._channel.reply(origin, card),
+                reply_partial=lambda post: self._reply_to_origin(origin, post),
+                validate_reply=(lambda result: self._scheduled_reply_confirmed(origin, result))
+                               if isinstance(origin, ScheduledOrigin) else None,
             )
+            presenters.append(self._progress_cards.open(event))
             if presenters:
                 await asyncio.gather(*presenters)
         except Exception as error:

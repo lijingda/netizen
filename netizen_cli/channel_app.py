@@ -6,7 +6,8 @@ so a dependency on a later feature is a type error rather than a convention:
 
     base           shared state, scope, card and scheduled-delivery utilities
     replies        replies, error reports and Goal management cards
-    presentation   completion Result, Files, Goal receipts and reminders
+    presentation   typed reply events, Result, Files and reminders
+    reply_adapters  native completion and lifecycle handoffs
     prompts        ordinary prompt admission and automatic session creation
     sides          Side topic creation, routing and cards
     forks          persistent fork cards and creation
@@ -164,7 +165,7 @@ class ChannelApplication(ChannelEntry):
         self._rename_name_generations: dict[str, _RenameNameGeneration] = {}
         self._reactions = _ReactionController(channel, isolate_child_cancellation=self._local_sessions is not None)
         self._reply_suppression = ReplySuppression()
-        self._progress_cards = _ReplyCardPresenter(channel, runtime, ordinary=self._ordinary)
+        self._progress_cards = _ReplyCardPresenter(channel)
         if self._local_sessions is not None:
             self._local_sessions.on_binding_deleted = self._progress_cards.retire_binding
         self.handle_completion = codex_completion_handler(

@@ -352,6 +352,15 @@ task、receipt Event，以及只读 Activity cursor/checklist/commentary/安全�
 与 freshness。
 native 终态到达即释放，均不持久化。
 
+**Presentation Turn / 展示 Turn**：由所有者（Binding 或 Side）、原生会话和物理 Turn 身份
+共同确定的飞书回复单位，承载该 Turn 的 Activity、阶段性答案、Result 与 Files。
+它可以通过一张卡片或多条消息交付，也可以根据投递规则静默。
+
+**Logical Run / 逻辑运行**：由人工输入、定时输入、会话协作工具、`/goal` 或流结束后的
+resume 获准启动的一次执行，保留启动时的 Completion Origin 与发起人。steer、原生 join
+和同流 resume 沿用该运行。它关联生命周期表情、最近已确认回复卡的状态行、停止后的提醒抑制、
+结束提及和定时新话题首轮回执。
+
 **Turn Activity Projection / Turn 活动投影**：一个 exact Ordinary、Side 或 Goal physical
 Turn 的有界、瞬态展示视图，包含状态、原生 checklist、最近 completed commentary、原生
 操作字段的受限预览、事件时间及子任务和文件修改数量。它不包含工具参数/结果、命令输出或

@@ -266,6 +266,38 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assert_success_cards()
         self.assert_no_execution()
 
+    async def test_adopted_fork_first_human_turn_updates_its_own_card(self):
+        from netizen_cli.runtime.contracts import TurnOutcome
+        from netizen_cli.message_history import MessageHistoryWindow, MessageHistoryStats
+        from tests.support.channel_results import completed_turn_result, turn_activity_snapshot
+        from tests.support.presenter_traces import expect_presenter_trace
+
+        self.queue_topic()
+        await self.app.handle_card_action(self.confirm_event())
+        fork = self.store.active_binding(self.target_scope.key)
+        self.runtime.adopt_fork.assert_awaited_once()
+        self.runtime.native_cwds[self.native.id] = self.fixture.project
+        activity = turn_activity_snapshot(binding_id=fork.id, thread_id=self.native.id, turn_id="fork-first")
+        self.runtime.turn_activity_values[fork.id] = activity
+        self.runtime.submission = Submission(SubmitDisposition.STARTED, fork.id, self.native.id, activity.turn_id, lambda: None,
+                                            task_feedback=fork.task_feedback)
+        self.channel.reply_results.append(sent_result("om_fork_progress", chat_id=self.target_scope.chat_id,
+                                                     thread_id=self.target_scope.topic_id))
+        message = FakeMessage("first human turn", message_id="om_fork_input", chat_id=self.target_scope.chat_id,
+                              chat_type="group", thread_id=self.target_scope.topic_id)
+        self.history.window = MessageHistoryWindow(fork.context_anchor, MessageContextAnchor(message.id, 3000),
+                                                   (), MessageHistoryStats(1, 2, 0, 0, 0, False, False))
+        expect_presenter_trace(self, self.fixture, "adopted_fork_first_turn")
+        await self.app.handle_message(message)
+        self.assertEqual(self.runtime.submit_calls[-1]["binding"].id, fork.id)
+        self.assertIn((fork.id, self.native.id, activity.turn_id), self.app._progress_cards._sessions)
+        self.assertEqual(self.channel.replies[-1][0], message.id)
+        await self.app.handle_completion(TurnOutcome(fork.id, self.native.id, activity.turn_id, "ou_user", message,
+            result=completed_turn_result(final_response="fork result"), task_feedback=fork.task_feedback, activity=activity, cwd=self.fixture.project))
+        self.assertEqual(self.channel.updates[-1][0], "om_fork_progress")
+        self.assertIn("fork result", str(self.channel.updates[-1][1]))
+        self.assertFalse(self.app._progress_cards._sessions)
+
     async def test_empty_name_submission_preserves_form_and_target_without_creation(self):
         target = AvailableChat("oc_target", "研发群", "group", False)
         self.management.query_available_chats.return_value = AvailableChatPage((target,), None)

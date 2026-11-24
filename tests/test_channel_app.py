@@ -35,6 +35,8 @@ from openai_codex.errors import InternalRpcError
 from openai_codex.types import ThreadItem, TurnError
 
 from netizen_cli import channel_app
+from netizen_cli.channel.reply_events import PresentationKey
+from tests.support.reply_events import open_card
 from netizen_cli.turn_files import summarize_file_evidence
 from netizen_cli.channel import constants as channel_constants
 from netizen_cli.channel.session_pages import SessionCardPage
@@ -115,6 +117,7 @@ from netizen_cli.message_history import (
 from netizen_cli.sdk_gap_adapter import GoalStatus
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
+from tests.support.presenter_traces import expect_presenter_trace
 from tests.support.channel_messages import (
     PNG,
     FakeMessage,
@@ -218,12 +221,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
         self.kind = kind
         self.channel = FakeChannel()
         self.runtime = StubRuntime()
-        self.presenter = reply_presenter._ReplyCardPresenter(
-            self.channel,
-            self.runtime,  # type: ignore[arg-type]
-            ordinary=CodexOrdinarySessions(self.runtime),
-            poll_seconds=0.01,
-        )
+        self.presenter = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.01)
         self.addAsyncCleanup(self.presenter.close)
         self.scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         self.goal = native_goal()
@@ -239,7 +237,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(self.channel, "reply", side_effect=reply):
             if kind == "ordinary":
-                started = await self.presenter.start(
+                started = await open_card(self.presenter, self.runtime,
                     binding_id="binding-one", thread_id="native-one",
                     turn_id="turn-one", origin=prompt,
                 )
@@ -247,7 +245,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                     ("binding-one", "native-one", "turn-one")
                 ]
             elif kind == "side":
-                started = await self.presenter.start_side(
+                started = await open_card(self.presenter, self.runtime,
                     side_id="side-one", thread_id="native-side-1",
                     turn_id="side-turn-1", origin=prompt,
                 )
@@ -255,10 +253,9 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                     ("side-one", "native-side-1", "side-turn-1")
                 ]
             else:
-                started = await self.presenter.start(
+                started = await open_card(self.presenter, self.runtime,
                     binding_id="binding-one", thread_id="native-one",
                     turn_id="goal-one", origin=prompt,
-                    snapshot_reader=lambda: self.projection(self.latest_revision),
                     logical_turn=True,
                 )
                 self.session = self.presenter._sessions[
@@ -267,7 +264,6 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(started)
 
     def publish_revision(self, revision):
-        self.latest_revision = revision
         steps = (
             TurnPlanStepSnapshot(f"revision {revision}", TurnPlanStepState.IN_PROGRESS),
         )
@@ -280,11 +276,10 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                 side_id="side-one", revision=revision, steps=steps,
             )
 
-    def projection(self, revision):
-        return channel_app._goal_reply_activity(goal_activity_snapshot(
-            binding_id="binding-one", revision=revision,
-            steps=(TurnPlanStepSnapshot(f"revision {revision}", TurnPlanStepState.IN_PROGRESS),),
-        ))
+        else:
+            self.runtime.goal_activity_values["binding-one"] = goal_activity_snapshot(
+                binding_id="binding-one", revision=revision, steps=steps,
+            )
 
     def assert_delivered_revision(self, revision):
         self.assertEqual(self.session.snapshot.revision, revision)
@@ -297,21 +292,12 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
             )
 
         if self.kind == "ordinary":
-            attempt = await self.presenter.finish(
-                binding_id="binding-one", thread_id="native-one",
-                turn_id="turn-one", activity=None, render=render,
-            )
+            attempt = await self.presenter.finish(key=PresentationKey('binding-one', 'native-one', 'turn-one'), activity=None, render=render)
             return attempt is not None and attempt.updated
         if self.kind == "side":
-            attempt = await self.presenter.finish_side(
-                side_id="side-one", thread_id="native-side-1",
-                turn_id="side-turn-1", activity=None, render=render,
-            )
+            attempt = await self.presenter.finish(key=PresentationKey('side-one', 'native-side-1', 'side-turn-1', side=True), activity=None, render=render)
             return attempt is not None and attempt.updated
-        result = await self.presenter.finish(
-            binding_id="binding-one", thread_id="native-one",
-            turn_id="goal-one", activity=None, render=render,
-        )
+        result = await self.presenter.finish(key=PresentationKey('binding-one', 'native-one', 'goal-one'), activity=None, render=render)
         return result is not None and result.updated
 
     async def test_polling_recovers_same_revision_and_coalesces_new_revisions(self):
@@ -518,7 +504,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                         target = reply_presenter
                         method = "turn_progress_card"
                     elif kind == "goal":
-                        target, method = self, "projection"
+                        target, method = self.runtime, "goal_activity"
                     else:
                         target = self.runtime
                         method = "turn_activity" if kind == "ordinary" else "side_turn_activity"
@@ -862,18 +848,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_progress_card_updates_same_message_and_collapses_at_terminal(
         self,
     ) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_same_card")
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         feedback = BindingTaskFeedback(progress_card_enabled=True)
         initial = turn_activity_snapshot(binding_id=binding.id)
         self.runtime.turn_activity_values[binding.id] = initial
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(
-            self.channel,
-            self.runtime,  # type: ignore[arg-type]
-            ordinary=self.app._ordinary,
-            poll_seconds=0.01,
-        )
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.01)
         released = False
 
         def release() -> None:
@@ -953,6 +935,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_initial_progress_card_failure_falls_back_at_terminal(self) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_start_fallback")
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -1019,7 +1002,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(
-            await controller.start(
+            await open_card(controller, self.runtime,
                 binding_id=first.binding_id,
                 thread_id=first.thread_id,
                 turn_id=first.turn_id,
@@ -1027,7 +1010,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertTrue(
-            await controller.start(
+            await open_card(controller, self.runtime,
                 binding_id=second.binding_id,
                 thread_id=second.thread_id,
                 turn_id=second.turn_id,
@@ -1037,16 +1020,12 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(controller._sessions), 2)
 
         delivered = await controller.finish(
-            binding_id=first.binding_id,
-            thread_id=first.thread_id,
-            turn_id=first.turn_id,
-            activity=first,
+            key=PresentationKey(first.binding_id, first.thread_id, first.turn_id), activity=first,
             render=lambda snapshot: channel_app.turn_progress_card(
                 snapshot=snapshot,
                 terminal_status="completed",
                 final_response="done",
-            ),
-        )
+            ))
 
         self.assertTrue(delivered.updated)
         self.assertEqual(self.channel.updates[-1][0], "om_progress_one")
@@ -1055,11 +1034,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             (second.binding_id, second.thread_id, second.turn_id),
             controller._sessions,
         )
-        await controller.abandon(
-            binding_id=second.binding_id,
-            thread_id=second.thread_id,
-            turn_id=second.turn_id,
-        )
+        await controller.abandon(key=PresentationKey(second.binding_id, second.thread_id, second.turn_id))
         self.assertEqual(controller._sessions, {})
 
     async def test_progress_file_page_keeps_collapsed_process_panel(self) -> None:
@@ -1132,9 +1107,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_progress_update_failure_falls_back_to_plain_answer(
         self,
     ) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_terminal_fallback")
         await self._assert_terminal_progress_update_retry(recovers=False)
 
     async def test_terminal_progress_update_retry_keeps_card_and_mentions_once(self) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_retry_mention")
         await self._assert_terminal_progress_update_retry(recovers=True)
 
     async def _assert_terminal_progress_update_retry(self, *, recovers: bool) -> None:
@@ -1221,12 +1198,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         feedback = BindingTaskFeedback(progress_card_enabled=True)
         initial = turn_activity_snapshot(binding_id=binding.id)
         self.runtime.turn_activity_values[binding.id] = initial
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(
-            self.channel,
-            self.runtime,  # type: ignore[arg-type]
-            ordinary=self.app._ordinary,
-            poll_seconds=0.01,
-        )
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.01)
         self.runtime.submission = Submission(
             SubmitDisposition.STARTED,
             binding.id,
@@ -7564,6 +7536,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_accepted_steer_keeps_original_turn_pulse_anchored(self) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_steer")
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -7603,6 +7576,12 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("om_original", "Typing"), self.channel.reactions)
         self.assertIn(("om_original", "THINKING"), self.channel.reactions)
         self.assertIn(("om_steer", "OnIt"), self.channel.reactions)
+        await self.app.handle_completion(TurnOutcome(
+            binding_id=binding.id, thread_id="native-one", turn_id="turn-one", owner_id="ou_owner",
+            origin=FakeMessage("work", message_id="om_original", sender_id="ou_owner"),
+            result=completed_turn_result(final_response="finished"),
+        ))
+        self.assertEqual(self.channel.replies, [("om_original", completion_post("finished", "ou_owner"))])
 
     async def test_failed_steer_has_no_confirmation_reaction(self) -> None:
         await self.fixture.new()
@@ -8174,6 +8153,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_turn_observation_unavailable_notice_preserves_exit_paths(
         self,
     ) -> None:
+        expect_presenter_trace(self, self.fixture, "ordinary_observation_unavailable")
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -8187,7 +8167,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             sent_result("om_unavailable_progress", chat_id="oc_direct")
         )
         self.assertTrue(
-            await self.app._progress_cards.start(
+            await open_card(self.app._progress_cards, self.runtime,
                 binding_id=binding.id,
                 thread_id="native-one",
                 turn_id="turn-one",
@@ -8253,7 +8233,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             sent_result("om_discarded_progress", chat_id="oc_direct")
         )
         self.assertTrue(
-            await self.app._progress_cards.start(
+            await open_card(self.app._progress_cards, self.runtime,
                 binding_id=binding.id,
                 thread_id="native-one",
                 turn_id="turn-one",
@@ -8298,7 +8278,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.channel.reply = delayed_reply  # type: ignore[method-assign]
         starting = asyncio.create_task(
-            self.app._progress_cards.start(
+            open_card(self.app._progress_cards, self.runtime,
                 binding_id=binding.id,
                 thread_id="native-one",
                 turn_id="turn-one",
@@ -8527,7 +8507,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         for update_failed in (False, True):
             with self.subTest(update_failed=update_failed):
                 self.channel.reply_results.append(sent_result("om_failure_progress", chat_id="oc_direct"))
-                await self.app._progress_cards.start(
+                await open_card(self.app._progress_cards, self.runtime,
                     binding_id=binding.id, thread_id="native-one", turn_id="turn-one", origin=origin,
                 )
                 self.channel.fail_card_updates = update_failed
@@ -8855,7 +8835,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(self.runtime, "submit_side", side_effect=accepted),
-            patch.object(self.app._progress_cards, "start_side", side_effect=AttributeError("private detail")),
+            patch.object(self.app._progress_cards, "open", side_effect=AttributeError("private detail")),
             self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs,
         ):
             await self.app.handle_message(source)
@@ -8879,7 +8859,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             SubmitDisposition.STARTED, binding.id, binding.native_thread_id, "turn-presenter-failure", release,
         )
         with (
-            patch.object(self.app._progress_cards, "start", side_effect=AttributeError("private detail")),
+            patch.object(self.app._progress_cards, "open", side_effect=AttributeError("private detail")),
             self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs,
         ):
             await self.app.handle_message(source)
@@ -8981,6 +8961,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         binding, record = await self.open_direct_side()
+        expect_presenter_trace(self, self.fixture, "side_plain")
         prompt = FakeMessage(
             "work quietly",
             message_id="om-side-prompt",
@@ -9169,7 +9150,6 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                             self.runtime.turn_activity_values[binding.id] = activity
                             target = dict(binding_id=binding.id, thread_id="native-one", turn_id="turn-one")
                             outcome = TurnOutcome(**target, **common, activity=activity)
-                            start = self.app._progress_cards.start
                         else:
                             activity = side_turn_activity_snapshot(side_id=record.id)
                             self.runtime.side_turn_activity_values[record.id] = activity
@@ -9178,12 +9158,11 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                                 **target, **common, parent_binding_id=binding.id,
                                 cwd=self.project, activity=activity,
                             )
-                            start = self.app._progress_cards.start_side
                         if delivery != "text":
                             self.channel.reply_results.append(sent_result(
                                 "om-interrupted-progress", chat_id="oc-direct", thread_id=record.topic_id,
                             ))
-                            self.assertTrue(await start(**target, origin=origin))
+                            self.assertTrue(await open_card(self.app._progress_cards, self.runtime, **target, origin=origin))
                         self.channel.fail_card_updates = delivery == "fallback"
                         replies_before = len(self.channel.replies)
                         sends_before = len(self.channel.send_calls)
@@ -9221,6 +9200,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_side_turn_without_progress_uses_result_files_card(self) -> None:
         binding, record = await self.open_direct_side()
+        expect_presenter_trace(self, self.fixture, "side_files")
         side_cwd = self.project.parent / "side-cwd"
         side_cwd.mkdir()
         artifact = side_cwd / "side-output.txt"
@@ -9319,18 +9299,14 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             progress_card_enabled=True,
         )
         binding, record = await self.open_direct_side(task_feedback=feedback)
+        expect_presenter_trace(self, self.fixture, "side_same_card")
         artifact = self.project / "side-progress.txt"
         artifact.write_text("side", encoding="utf-8")
         image = self.project / "side-progress.png"
         image.write_bytes(PNG)
         initial = side_turn_activity_snapshot(side_id=record.id)
         self.runtime.side_turn_activity_values[record.id] = initial
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(
-            self.channel,
-            self.runtime,  # type: ignore[arg-type]
-            ordinary=self.app._ordinary,
-            poll_seconds=0.01,
-        )
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.01)
         self.channel.reply_results.append(
             sent_result(
                 "om-side-progress",
@@ -9422,15 +9398,12 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         feedback = BindingTaskFeedback(progress_card_enabled=True)
         binding, record = await self.open_direct_side(task_feedback=feedback)
+        if not terminal_succeeds:
+            expect_presenter_trace(self, self.fixture, "side_terminal_fallback")
         self.runtime.side_turn_activity_values[record.id] = (
             side_turn_activity_snapshot(side_id=record.id)
         )
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(
-            self.channel,
-            self.runtime,  # type: ignore[arg-type]
-            ordinary=self.app._ordinary,
-            poll_seconds=0.01,
-        )
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.01)
         self.channel.reply_results.append(
             sent_result("om-side-progress", chat_id="oc-direct", thread_id=record.topic_id)
         )
@@ -9486,6 +9459,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_side_progress_start_failure_falls_back_at_terminal(self) -> None:
         feedback = BindingTaskFeedback(progress_card_enabled=True)
         binding, record = await self.open_direct_side(task_feedback=feedback)
+        expect_presenter_trace(self, self.fixture, "side_start_fallback")
         activity = side_turn_activity_snapshot(side_id=record.id)
         self.runtime.side_turn_activity_values[record.id] = activity
         self.channel.reply_results.append(RuntimeError("progress send failed"))

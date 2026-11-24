@@ -440,6 +440,7 @@ class ReplyCardManifest:
     activity: ReplyCardActivityModule | None = None
     result: ReplyCardResultModule | None = None
     partial_answer: ReplyCardPartialAnswerModule | None = None
+    run_continues: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,6 +453,7 @@ class ReplyCardProjection:
     result: ReplyCardResultModule | None = None
     files: ReplyCardFilesModule | None = None
     partial_answer: ReplyCardPartialAnswerModule | None = None
+    run_continues: bool = False
 
 
 @dataclass(frozen=True, slots=True)

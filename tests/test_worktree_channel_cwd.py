@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from tests.support.reply_events import codex_result
 from netizen_cli.bindings import BindingTurnSettings
 from netizen_cli.cards import goal_generation
 from netizen_cli.cards.fork import ForkCardAction, ForkSource
@@ -204,7 +205,7 @@ class WorktreeChannelCwdTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(cwd=cwd):
                 outcome = ordinary_conclusion(self.outcome(cwd=cwd))
                 task_files = self.app._prepare_task_files(cwd, outcome.file_evidence)
-                _, files = self.app._completion_files(outcome, task_files)
+                _, files, _ = self.app._task_completion_files(codex_result(outcome), task_files)
                 self.assertEqual(files[0].resolved_path, (self.selected / "answer.txt").resolve())
                 self.assertEqual(files[0].size, len("correct source"))
 
@@ -215,7 +216,7 @@ class WorktreeChannelCwdTest(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             task_files = self.app._prepare_task_files(outcome.cwd, outcome.file_evidence)
         with self.assertRaises(TurnFileError):
-            self.app._completion_files(outcome, task_files)
+            self.app._task_completion_files(codex_result(outcome), task_files)
 
     async def test_missing_turn_cwd_keeps_text_without_reading_current_native_cwd(self):
         self.materialize()

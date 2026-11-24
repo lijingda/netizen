@@ -4,7 +4,8 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 from lark_channel import CardActionPayload, ChatQueueConfig, OutboundCard, PolicyConfig, SafetyPipeline, TextBatchConfig
 from lark_channel.channel.channel import _card_action_identity
@@ -21,6 +22,7 @@ from tests.support.channel_cards import callback, elements, form_values
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from tests.support.channel_results import sent_result
+from tests.support.presenter_traces import expect_presenter_trace
 
 
 class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
@@ -80,6 +82,8 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(elements(card, "button"), [])
 
     async def test_late_answer_starts_ordinary_input_with_real_operator_and_new_anchor(self):
+        expect_presenter_trace(self, self.fx, "question_answer")
+        self.enterContext(patch("netizen_cli.cards.questions.uuid4", return_value=UUID(int=1)))
         self.queue_anchor()
         await self.app.handle_card_action(self.event())
         self.assertEqual(self.runtime.capture_calls, [self.binding.id])
@@ -360,6 +364,8 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls[0]["origin"].conversation.thread_id, "omt_topic")
 
     async def test_display_sends_each_question_using_binding_scope(self):
+        expect_presenter_trace(self, self.fx, "question_cards")
+        self.enterContext(patch("netizen_cli.cards.questions.uuid4", side_effect=(UUID(int=1), UUID(int=2))))
         self.channel.send_results.extend([
             sent_result("om_q1", chat_id=self.scope.chat_id),
             sent_result("om_q2", chat_id=self.scope.chat_id),

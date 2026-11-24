@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 from lark_channel import (
     SendResult,
@@ -20,6 +22,7 @@ from lark_channel import (
     RetryConfig,
 )
 
+from tests.support.reply_events import open_card
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings
 from netizen_cli.cards import decode_turn_file_action
@@ -65,6 +68,7 @@ from tests.support.channel_results import (
 
 
 from tests.support.channel_fixtures import scheduled_channel_fixture
+from tests.support.presenter_traces import expect_presenter_trace
 
 
 class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
@@ -315,7 +319,18 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.barrier, "released")
 
     async def test_progress_card_records_confirmed_delivery_without_extra_reply(self):
+        trace = self.record_initial_delivery("scheduled_topic_sent")
         await self.assert_progress_completion(topic="omt_fresh")
+        self.record_initial_receipt(trace)
+
+    def record_initial_delivery(self, name):
+        ids = itertools.count(1)
+        self.enterContext(patch("uuid.uuid4", side_effect=lambda: UUID(int=next(ids))))
+        return expect_presenter_trace(self, self.fixture, name)
+
+    def record_initial_receipt(self, trace):
+        run = self.store.schedules.get_run(self.submissions[0]["run_id"])
+        trace.append(["scheduled_receipt", run.initial_turn_id, run.delivery_state, run.barrier])
 
     async def test_progress_card_destination_unknown_does_not_duplicate_result(self):
         await self.assert_progress_completion(topic="omt_other")
@@ -343,7 +358,9 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.barrier, "released")
 
     async def test_terminal_update_response_lost_does_not_send_another_result(self):
+        trace = self.record_initial_delivery("scheduled_topic_unknown")
         await self.assert_uncertain_progress_update(TimeoutError("response lost after patch"))
+        self.record_initial_receipt(trace)
 
     async def test_terminal_update_false_without_receipt_stays_unknown(self):
         await self.assert_uncertain_progress_update(SendResult(success=False))
@@ -814,9 +831,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.queue_topic(promote=True)
         native_id = "native-" + claim.run.id
         partial = PartialAnswer(native_id, "turn-initial", "partial-one", "stable answer")
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(
-            self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.001,
-        )
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.001)
 
         async def submit_initial(**kwargs):
             submission = await self.fixture.submit_initial(**kwargs)
@@ -1051,7 +1066,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.store.set_configuration(binding_id=binding.id, expected_settings_revision=binding.settings_revision,
             expected_context_revision=binding.context_revision, expected_feedback_revision=binding.feedback_revision,
             settings=binding.turn_settings, task_feedback=feedback, message_context_mode=binding.message_context_mode, context_anchor=None)
-        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, self.runtime, ordinary=self.app._ordinary, poll_seconds=0.01)
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(self.channel, poll_seconds=0.01)
         source_activity = turn_activity_snapshot(binding_id=source.id, thread_id="native-source", turn_id="turn-followup",
             steps=(TurnPlanStepSnapshot("source scope activity", TurnPlanStepState.IN_PROGRESS),))
         initial = turn_activity_snapshot(binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-followup")
@@ -1060,7 +1075,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             sent_result("om_source_progress", chat_id="oc_group"),
             sent_result("om_followup_progress", chat_id="oc_group", thread_id="omt_fresh"),
         ])
-        self.assertTrue(await self.app._progress_cards.start(binding_id=source.id, thread_id="native-source", turn_id="turn-followup",
+        self.assertTrue(await open_card(self.app._progress_cards, self.runtime, binding_id=source.id, thread_id="native-source", turn_id="turn-followup",
             origin=FakeMessage("source work", message_id="om_source", chat_id="oc_group", chat_type="group")))
         self.runtime.submission = Submission(SubmitDisposition.STARTED, binding.id, binding.native_thread_id, "turn-followup", lambda: None, task_feedback=feedback)
         prompt = FakeMessage("生成后续报告", message_id="om_followup", chat_id="oc_group", thread_id="omt_fresh", chat_type="group")

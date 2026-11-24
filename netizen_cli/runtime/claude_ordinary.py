@@ -8,6 +8,7 @@ from weakref import WeakValueDictionary
 from dataclasses import dataclass, field, replace
 import logging
 import os
+from functools import partial
 from pathlib import Path
 import time
 from typing import Any
@@ -184,17 +185,17 @@ class _Execution:
             raise ValueError("Claude attributed a Result to an unwritten input")
         return human
 
-    def cli_state(self) -> ClaudeCliState:
+    def cli_state(self, owner: str | None = None) -> ClaudeCliState:
         return ClaudeCliState(self.live.ordered_idle and self.pending is None and self.live.physical is None,
-                             len(self.live.tasks), bool(self.live.crons))
+                             len(self.live.tasks) if owner is None else self.live.task_count(owner), bool(self.live.crons))
 
-    def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, final: str | None = None) -> TurnActivitySnapshot:
+    def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, state: ClaudeCliState, final: str | None = None) -> TurnActivitySnapshot:
         partials = tuple(PartialAnswer(self.session, turn_id, key, text) for key, text in self.live.partials.items()
                          if text != final)
         return TurnActivitySnapshot(self.binding.id, self.session, turn_id, self.revision,
                                    ActiveState.RUNNING, 0, False, False, False, (), partial_answers=partials,
                                    progress_card_settings=feedback.progress_card_settings or ProgressCardSettings(),
-                                   state_line=self.cli_state().line)
+                                   state_line=state.line)
 
     @property
     def finishing(self) -> bool:
@@ -645,6 +646,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
     def _retire(self, execution: _Execution, human: _Human) -> None:
         if execution.humans.pop(human.input_id, None) is None:
             return
+        human.reply.retire()
         human.take_cursor()  # Discard a cursor for which intake was never proven.
         anchor = human.origin
         if isinstance(anchor, ClaudeInputAnchor):
@@ -752,13 +754,17 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         finish_presentation = direct and isinstance(source.origin, ClaudeInputAnchor)
         if frame.result or detail or live.partials or (status == "completed" and finish_presentation):
             turn_id = source.input_id if direct else frame.uuid
-            snapshot = execution.activity(turn_id, source.binding.task_feedback, final=body)
+            state = partial(execution.cli_state, human.input_id if human else "")
+            snapshot = execution.activity(turn_id, source.binding.task_feedback, state=state(), final=body)
             event = PhysicalAnswer(source.binding.id, execution.session,
                                    turn_id, self._owner,
                                    human.source if human else execution.scope, status, body, detail,
                                    task_feedback=source.binding.task_feedback, feedback_revision=source.binding.feedback_revision,
                                    cwd=self._owned_cwds[source.binding.id], logical_id=human.input_id if human else None,
-                                   state=execution.cli_state, owned_tasks=(lambda: live.task_count(human.input_id) if human else 0),
+                                   run_continues=human is not None and (
+                                       live.has_work(human.input_id) or (execution.pending is human and submitted is not human)
+                                   ),
+                                   state=state, session_has_work=lambda: bool(live.tasks or live.crons),
                                    activity=snapshot, partial_answers=snapshot.partial_answers,
                                    wake=wake, reply=human.reply if human else None,
                                    publishable=execution.publication.valid)
@@ -811,15 +817,15 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         elif not waiting and execution.timer is not None:
             execution.timer.cancel()
             execution.timer = None
-        display = execution.cli_state()
         for human in execution.humans.values():
             if force or human.terminal_sent or human.status is None or not isinstance(human.origin, ClaudeInputAnchor):
                 continue
-            background = live.has_work(human.input_id)
+            display = execution.cli_state(human.input_id)
+            background = bool(display.tasks)
             if (display, background) != human.last_display:
                 human.last_display = (display, background)
-                self._queue(execution, human, CliStateChanged(human.source, human.input_id, background,
-                            human.reply, execution.cli_state, execution.publication.valid))
+                self._queue(execution, human, CliStateChanged(binding_id, execution.session, human.source, human.input_id, background,
+                            human.reply, partial(execution.cli_state, human.input_id), execution.publication.valid))
         if idle and not force and not execution.closing:
             self._complete_humans(execution)
         if close and execution.close is None:
@@ -838,7 +844,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if human.binding.task_feedback.completion_mention_enabled and not human.stop_requested and human.status != "interrupted":
                 mention = valid_completion_mention_user_id(self._owner)
             self._queue(execution, human, LogicalTerminal(human.binding.id, execution.session, human.input_id, self._owner,
-                        human.source, human.status, human.reply, mention, lambda: not execution.broken, execution.cli_state))
+                        human.source, human.status, human.reply, mention, lambda: not execution.broken, partial(execution.cli_state, human.input_id)))
         live.prune({key for key, human in execution.humans.items() if not human.terminal_sent})
 
     async def _observe(self, execution: _Execution, client: ClaudeClient, cwd: Path, confirmed_write: bool) -> None:
@@ -1003,7 +1009,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if execution and execution.session == thread_id and not execution.broken:
             human = execution.humans.get(turn_id)
             if human and human.written and execution.live.init_human == turn_id:
-                return execution.activity(turn_id, human.binding.task_feedback)
+                return execution.activity(turn_id, human.binding.task_feedback, state=execution.cli_state(turn_id))
         return None
 
     def reply_blocked_by_lifecycle(self, binding_id: str) -> bool:

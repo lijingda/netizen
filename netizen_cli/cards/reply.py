@@ -181,6 +181,7 @@ def reply_card_from_manifest(
     return reply_card(
         ReplyCardProjection(
             scope=scope,
+            run_continues=reply.run_continues,
             goal=reply.goal,
             activity=reply.activity,
             partial_answer=reply.partial_answer,
@@ -212,6 +213,8 @@ def _normalize_reply_projection(
     activity = _normalize_activity_module(projection.activity)
     partial_answer = _normalize_partial_answer_module(projection.partial_answer)
     result = projection.result
+    if type(projection.run_continues) is not bool:
+        raise ValueError("run_continues must be a boolean")
     if result is not None:
         _bounded_card_text(result.content, "result", 100_000)
         if (
@@ -243,9 +246,9 @@ def _normalize_reply_projection(
             raise ValueError("unsupported Reply Card file action version")
         if (
             files.action_version == TURN_FILE_ACTION_VERSION
-            and (goal is not None or partial_answer is not None)
+            and (goal is not None or partial_answer is not None or projection.run_continues)
         ):
-            raise ValueError("a Goal or Partial Answer + Files Reply Card requires v5 callbacks")
+            raise ValueError("these reply modules and heading require v5 file callbacks")
         if goal is not None and goal.binding_id != files.binding_id:
             raise ValueError("Goal and Files modules require the same binding_id")
         _optional_line_counts(
@@ -524,12 +527,14 @@ def turn_files_card(
     additions: int | None = None,
     deletions: int | None = None,
     completion_mention_user_id: str | None = None,
+    run_continues: bool = False,
     partial_answers: tuple[_PartialAnswerLike, ...] = (),
 ) -> OutboundCard:
     return reply_card(
         ReplyCardProjection(
             scope=scope,
             partial_answer=_partial_answer_module(partial_answers),
+            run_continues=run_continues,
             result=ReplyCardResultModule(
                 final_response,
                 completion_mention_user_id=completion_mention_user_id,
@@ -540,7 +545,7 @@ def turn_files_card(
                 items=tuple(_reply_file_item(item) for item in files),
                 page=page,
                 action_version=(
-                    REPLY_CARD_ACTION_VERSION if partial_answers
+                    REPLY_CARD_ACTION_VERSION if partial_answers or run_continues
                     else TURN_FILE_ACTION_VERSION
                 ),
                 additions=additions,
@@ -556,6 +561,7 @@ def turn_progress_card(
     final_response: str | None = None,
     files: tuple[TurnFile, ...] = (),
     terminal_status: str | None = None,
+    run_continues: bool = False,
     collapsed: bool = False,
     scope: FeishuScope | None = None,
     binding_id: str | None = None,
@@ -566,6 +572,31 @@ def turn_progress_card(
     partial_answers: tuple[_PartialAnswerLike, ...] | None = None,
     include_result: bool = True,
 ) -> OutboundCard:
+    return reply_card(turn_progress_projection(
+        snapshot=snapshot, final_response=final_response, files=files, terminal_status=terminal_status,
+        run_continues=run_continues, collapsed=collapsed, scope=scope, binding_id=binding_id, turn_id=turn_id,
+        additions=additions, deletions=deletions, completion_mention_user_id=completion_mention_user_id,
+        partial_answers=partial_answers, include_result=include_result,
+    ))
+
+
+def turn_progress_projection(
+    *,
+    snapshot: _TurnActivitySnapshotLike,
+    final_response: str | None = None,
+    files: tuple[TurnFile, ...] = (),
+    terminal_status: str | None = None,
+    run_continues: bool = False,
+    collapsed: bool = False,
+    scope: FeishuScope | None = None,
+    binding_id: str | None = None,
+    turn_id: str | None = None,
+    additions: int | None = None,
+    deletions: int | None = None,
+    completion_mention_user_id: str | None = None,
+    partial_answers: tuple[_PartialAnswerLike, ...] | None = None,
+    include_result: bool = True,
+) -> ReplyCardProjection:
     """Render one replaceable Phase 1 Turn progress card.
 
     The activity panel reads only the bounded, safety-projected status,
@@ -619,7 +650,7 @@ def turn_progress_card(
             turn_id=turn_id,
             items=tuple(_reply_file_item(item) for item in files),
             action_version=(
-                REPLY_CARD_ACTION_VERSION if partial_answer is not None or activity.state_line
+                REPLY_CARD_ACTION_VERSION if partial_answer is not None or activity.state_line or run_continues
                 else TURN_FILE_ACTION_VERSION
             ),
             additions=additions,
@@ -631,14 +662,9 @@ def turn_progress_card(
             final_response or _default_terminal_response(normalized_terminal_status),
             completion_mention_user_id=completion_mention_user_id,
         )
-    return reply_card(
-        ReplyCardProjection(
-            scope=scope,
-            activity=activity,
-            partial_answer=partial_answer,
-            result=result,
-            files=files_module,
-        )
+    return ReplyCardProjection(
+        scope=scope, activity=activity, partial_answer=partial_answer, result=result,
+        files=files_module, run_continues=run_continues,
     )
 
 
@@ -847,7 +873,7 @@ def _reply_card_chrome(
         )
     if projection.activity is not None:
         title, template, summary = _progress_card_chrome(
-            projection.activity.terminal_status
+            projection.activity.terminal_status, projection.run_continues
         )
         return title, None, template, summary
     if projection.files is not None:
@@ -857,15 +883,12 @@ def _reply_card_chrome(
             f"本轮文件 {visible.total_items} 个 · "
             f"第 {visible.page + 1}/{visible.total_pages} 页"
         )
-        return (
-            "任务已完成",
-            subtitle,
-            "green",
-            f"任务已完成 · 本轮文件 {visible.total_items} 个",
-        )
+        title, template, summary = _progress_card_chrome("completed", projection.run_continues)
+        return title, subtitle, template, f"{summary} · 本轮文件 {visible.total_items} 个"
     if projection.result is None and projection.partial_answer is not None:
         return "任务执行中", None, "blue", "阶段性答案"
-    return "任务已完成", None, "green", "任务已完成"
+    title, template, summary = _progress_card_chrome("completed", projection.run_continues)
+    return title, None, template, summary
 
 
 def _reply_goal_block(
@@ -1030,6 +1053,7 @@ def _goal_control_button(
 def _reply_card_manifest(projection: ReplyCardProjection) -> ReplyCardManifest:
     return ReplyCardManifest(
         goal=projection.goal,
+        run_continues=projection.run_continues,
         activity=projection.activity,
         partial_answer=projection.partial_answer,
         result=(
@@ -1049,9 +1073,10 @@ def _terminal_progress_status(value: str | None) -> str | None:
     return normalized
 
 
-def _progress_card_chrome(status: str | None) -> tuple[str, str, str]:
+def _progress_card_chrome(status: str | None, run_continues: bool = False) -> tuple[str, str, str]:
     if status == "completed":
-        return "任务已完成", "green", "任务已完成"
+        title = "本轮已完成" if run_continues else "任务已完成"
+        return title, "green", title
     if status == "interrupted":
         return "任务已中断", "orange", "任务已中断"
     if status == "failed":
@@ -1787,10 +1812,11 @@ def _decode_reply_card_manifest(
     binding_id: str,
 ) -> ReplyCardManifest:
     required = {"goal", "activity", "result"}
-    if not isinstance(value, Mapping) or set(value) not in (
-        required, required | {"partial_answer"},
-    ):
+    if not isinstance(value, Mapping) or set(value) - {"partial_answer", "run_continues"} != required:
         raise CardActionError("组合回复清单字段不完整或包含未知字段。")
+    run_continues = value.get("run_continues", False)
+    if type(run_continues) is not bool:
+        raise CardActionError("组合回复清单的运行状态无效。")
     goal = _decode_reply_goal_module(value["goal"], binding_id=binding_id)
     activity = _decode_reply_activity_module(value["activity"])
     partial_answer = _decode_reply_partial_answer_module(value.get("partial_answer"))
@@ -1798,7 +1824,7 @@ def _decode_reply_card_manifest(
     if goal is None and activity is None and partial_answer is None and result is None:
         raise CardActionError("组合回复清单不能为空。")
     return ReplyCardManifest(
-        goal=goal, activity=activity, partial_answer=partial_answer, result=result,
+        goal=goal, activity=activity, partial_answer=partial_answer, result=result, run_continues=run_continues,
     )
 
 
@@ -2355,6 +2381,8 @@ def _encode_reply_card_manifest(
             None if reply.result is None else {"content": reply.result.content}
         ),
     }
+    if reply.run_continues:
+        value["run_continues"] = True
     if reply.partial_answer is not None:
         value["partial_answer"] = {"contents": list(reply.partial_answer.contents)}
     return value

@@ -878,12 +878,17 @@ asyncio.run(probe())
         self.assertEqual(len(self.clients.calls), 1)
         cli.init(user_message_uuids=[h2.turn_id])
         frame("session_state_changed", state="running")
-        frame("background_tasks_changed", tasks=[])
         cli.result(result="H2 body", user_message_uuid=h2.turn_id, idle=False)
+        await self.wait_until(lambda: any(e.origin == "second" and isinstance(e, OrdinaryConclusion) for e in self.events))
+        second_result = next(e for e in self.events if isinstance(e, OrdinaryConclusion) and e.origin == "second")
+        second_state = second_result.state()
+        owner_state = self.runtime._active[self.binding.id].cli_state(h2.turn_id)
+        frame("background_tasks_changed", tasks=[])
         cli.init(user_message_uuids=[])
         cli.result(result="wake A", user_message_uuid=None, origin={"kind":"task-notification", "producer":"session-task", "runId":"run"})
         frame("session_state_changed", state="idle")
         self.assertTrue(await self.runtime.wait_idle(2))
+        self.assertEqual(second_state, owner_state)
         self.assertEqual([(e.origin,e.final_response) for e in self.events if isinstance(e, OrdinaryConclusion)],
                          [("first","H1 body"),("second","H2 body"),("first","wake A")])
         self.assertEqual([e.turn_id for e in self.all_events if isinstance(e, LogicalTerminal)], [h1.turn_id, h2.turn_id])
@@ -1916,7 +1921,7 @@ asyncio.run(probe())
 
         async with channel_fixture() as fixture:
             with (patch.object(fixture.app._reactions, "start", side_effect=slow_reaction),
-                  patch.object(fixture.app._progress_cards, "start", new=AsyncMock(return_value=True))):
+                  patch.object(fixture.app._progress_cards, "open", new=AsyncMock(return_value=True))):
                 delivery = asyncio.create_task(fixture.app._present_ordinary_receipt(receipt, message))
                 await asyncio.wait_for(started.wait(), 1)
                 self.assertEqual(self.events, [])

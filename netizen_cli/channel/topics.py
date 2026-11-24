@@ -6,7 +6,7 @@ import logging
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from lark_channel import OutboundCard, OutboundConfig, OutboundPost, SendOpts, SendResult
@@ -26,6 +26,16 @@ class TopicPublishError(RuntimeError):
     def __init__(self, message: str, *, unknown: bool = False) -> None:
         super().__init__(message)
         self.unknown = unknown
+
+
+def receipt(result: SendResult | Exception | None) -> Literal["confirmed", "rejected", "unknown"]:
+    """Classify the evidence from one Feishu write, including a transport exception."""
+    if isinstance(result, Exception):
+        return "rejected" if isinstance(result, TopicPublishError) and not result.unknown else "unknown"
+    code = _send_result_error_code(result)
+    if result is not None and result.success and code in (None, 0):
+        return "confirmed"
+    return "rejected" if code is not None and code > 0 else "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +71,7 @@ class BindingCardLocation:
     root: str | None = None
     unusable: set[str] = field(default_factory=set)
     retired: bool = False
+    release_cards: Callable[[set[str]], None] = lambda _: None
 
     def retire(self) -> None:
         self.retired = True
@@ -84,9 +95,10 @@ class CardReplyLocation:
 
     def retire(self) -> None:
         self.retired = True
-        for mid in self.cards:
-            if self.binding.owners.get(mid) is self:
-                del self.binding.owners[mid]
+        owned = {mid for mid in self.cards if self.binding.owners.get(mid) is self}
+        self.binding.release_cards(owned)
+        for mid in owned:
+            del self.binding.owners[mid]
         self.cards.clear()
 
     def usable(self, message_id: str) -> bool:
@@ -113,6 +125,8 @@ class CardReplyLocation:
                 or (card and self.scope.topic_id and sent.root_id and not root)
                 or (card and len(ids) > 1)):
             self.binding.unusable.update(ids)
+            self.binding.release_cards({mid for mid in ids
+                                        if (owner := self.binding.owners.get(mid)) and owner.binding is self.binding})
             return SendResult(success=False)
         if any(not self.usable(value) for value in ids):
             return SendResult(success=False)
@@ -196,7 +210,7 @@ async def send_topic_message(channel: ReplyChannel, chat_id: str, content: Any, 
             result = await external_call(channel.send(chat_id, content, opts), isolate=isolate_child_cancellation)
         except Exception as error:
             if single_attempt:
-                raise TopicPublishError("飞书发送结果未确认。", unknown=True) from error
+                raise TopicPublishError("飞书发送结果未确认。", unknown=receipt(error) == "unknown") from error
             logger.warning(
                 "topic message send failed",
                 extra={
@@ -217,9 +231,8 @@ async def send_topic_message(channel: ReplyChannel, chat_id: str, content: Any, 
             if attempt == 0:
                 continue
             raise TopicPublishError("话题发布结果未确认；同 UUID 对账仍返回可重试失败。", unknown=True)
-        if single_attempt and not result.success:
-            code = _send_result_error_code(result)
-            raise TopicPublishError("飞书未确认内容送达。", unknown=code is None or code <= 0)
+        if single_attempt and (outcome := receipt(result)) != "confirmed":
+            raise TopicPublishError("飞书未确认内容送达。", unknown=outcome == "unknown")
         try:
             return validate_topic_message(result, chat_id, allow_chunks=allow_chunks)
         except TopicPublishError as error:

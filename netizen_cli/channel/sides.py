@@ -11,6 +11,8 @@ from lark_channel import (
     SendOpts,
 )
 
+from .codex_reply_events import CodexReplyEvents
+from .reply_events import PresentationKey
 from ..admin.port_config import AdminPortConfigurationError
 from ..group_access import GroupAccessLimitExceeded
 from ..bindings import (
@@ -271,20 +273,14 @@ class SideChannel(PromptChannel):
                     ),
                 )
             ]
-            delivery_options = {}
-            if isinstance(reply_origin, CardAnswerOrigin):
-                delivery_options["reply"] = lambda card: self._reply_to_origin(reply_origin, card)
-            presenters.append(
-                self._progress_cards.start_side(
-                    side_id=submission.side_id,
-                    thread_id=submission.thread_id,
-                    turn_id=submission.turn_id,
-                    origin=reply_origin,
-                    progress_enabled=submission.task_feedback.progress_card_enabled,
-                    reply_partial=lambda post: self._reply_to_origin(reply_origin, post),
-                    **delivery_options,
-                )
+            key = PresentationKey(submission.side_id, submission.thread_id, submission.turn_id, side=True)
+            event = CodexReplyEvents(self._runtime, self._ordinary).opened(
+                key, reply_origin, submission.task_feedback,
+                reply=lambda card: (self._reply_to_origin(reply_origin, card) if isinstance(reply_origin, CardAnswerOrigin)
+                                    else self._channel.reply(reply_origin, card)),
+                reply_partial=lambda post: self._reply_to_origin(reply_origin, post),
             )
+            presenters.append(self._progress_cards.open(event))
             if presenters:
                 await asyncio.gather(*presenters)
         except Exception as error:
