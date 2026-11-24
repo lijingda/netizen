@@ -495,7 +495,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
         self.assert_cleaned(outcome)
 
     async def test_cardless_suppression_delivers_partial_and_mentions_original_input(self):
-        expect_presenter_trace(self, self.fixture, "suppressed_partial_and_mention")
+        expect_presenter_trace(self, self.fixture, "suppressed_partial_and_mention", process_mode=True)
         outcome = self.outcome(
             partial_answers=(PartialAnswer("native-one", "turn-one", "p", "visible partial"),),
             task_feedback=BindingTaskFeedback(progress_card_enabled=False, completion_mention_enabled=True),

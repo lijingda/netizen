@@ -91,7 +91,7 @@ async def short_turn_trace(*, card, files, install=None, wire=None):
                 turn_id=activity.turn_id, owner_id="ou_user", origin=origin, activity=activity,
                 cwd=fx.project, result=completed_turn_result(*items, final_response="最终正文"),
                 task_feedback=BindingTaskFeedback(progress_card_enabled=card), partial_answers=(partial,)))
-        return json.loads(json.dumps(wire.content_trace() if wire else events, ensure_ascii=False).replace(str(fx.project_root.resolve()), "<root>"))
+        return json.loads(json.dumps(wire.content_trace() if wire and not card else events, ensure_ascii=False).replace(str(fx.project_root.resolve()), "<root>"))
 
 
 class TerminalProcessDifferential(unittest.IsolatedAsyncioTestCase):

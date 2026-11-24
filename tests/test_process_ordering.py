@@ -361,6 +361,13 @@ class ProcessMutationTest(unittest.TestCase):
         from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
         from tests.test_process_presentation import OrdinaryProcessTest
 
+        from tests.test_goal_reply_separation import GoalReplySeparationTest
+
+        start_goal = GoalReplySeparationTest.start
+        async def create_in_card_mode(case, **kwargs):
+            await case.fx.app._progress_cards._process_port.create("oc_direct", "om_goal", False)
+            return await start_goal(case, **kwargs)
+
         create = ProcessPresentation._create
         claim = _ReplyCardPresenter._claim_process
         write = ProcessPresentation._write
@@ -379,6 +386,8 @@ class ProcessMutationTest(unittest.TestCase):
                     previous.finish("done")
             return claim(presenter,state,created)
         for owner, name, change, case in (
+            (GoalReplySeparationTest, "start", create_in_card_mode,
+             GoalReplySeparationTest("test_rollover_partials_share_one_card_through_final_files_page")),
             (ProcessPresentation,"_create",replay_create,
              ProcessOrderingTest("test_lost_create_is_never_replayed_at_result")),
             (ProcessPresentation,"_write",keep_unknown,

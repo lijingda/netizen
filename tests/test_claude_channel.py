@@ -48,7 +48,7 @@ async def owner_channel():
             bindings=fixture.store, projects=fixture.projects, management=management, policy=BackendPolicy("claude", "ou_user"))
         ordinary.open_admission()
         try:
-            yield app, replace(fixture, app=app), clients, clock, ordinary
+            yield app, fixture, clients, clock, ordinary
         finally:
             await ordinary.cancel_tasks()
             await app.close()
@@ -175,7 +175,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         field["content"] = "本轮已完成"
 
         return expect_presenter_trace(self, fx, scenario, reference=CLAUDE_FIXTURE,
-                                      expected_edits=expected_changes, stack=stack)
+                                      expected_edits=expected_changes, stack=stack,
+                                      process_mode=scenario in {"background_plain", "rejected_body"})
 
     async def until(self, predicate):
         async with asyncio.timeout(10):
@@ -1891,7 +1892,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 mentions = _MentionTrace(fx.channel, stack)
                 stack.enter_context(patch.object(app, "handle_ordinary_completion", observe))
                 if reference:
-                    self.freeze_trace(fx, reference, stack=stack)
+                    self.freeze_trace(replace(fx, app=app), reference, stack=stack)
                 if receipt == "before":
                     release_first.set()
                 await app.handle_message(FakeMessage("work", message_id="H1"))
@@ -2557,7 +2558,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 # card.config.summary.content. In the decoded background_cards trace,
                 # writes 3, 5 and 7 update "first". The wake publishes with no owned
                 # work remaining and keeps its heading through the state-line update.
-                self.freeze_trace(fx, "background_cards" if cards else "background_plain")
+                self.freeze_trace(replace(fx, app=app), "background_cards" if cards else "background_plain")
                 clock[0] = 2.
                 scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
                 binding = fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
@@ -2619,7 +2620,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejected_physical_body_issues_one_unconfirmed_notice(self):
         from netizen_cli.bindings import BindingTaskFeedback
         async with owner_channel() as (app, fx, clients, clock, ordinary):
-            self.freeze_trace(fx, "rejected_body")
+            self.freeze_trace(replace(fx, app=app), "rejected_body")
             clock[0] = 2.
             scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
             fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
@@ -2779,7 +2780,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 if cards and outcome == "confirmed":
                     # H1's typing reaction can outlive its delivery queue.
                     await self.until(lambda: ("H1", "reaction-1") in fx.channel.reaction_removals)
-                    self.freeze_trace(fx, "ownerless_cron")
+                    self.freeze_trace(replace(fx, app=app), "ownerless_cron")
                 cli.init(user_message_uuids=[])
                 for i, block in enumerate((TextBlock("stage"), ToolUseBlock("tool", "Bash", {}))):
                     cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session, message_id="m", uuid=str(i)))
@@ -2812,7 +2813,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("final text", str(calls[0][1]))
                 if cards and outcome == "confirmed":
                     await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
-                    expect_presenter_trace(self, fx, "bodyless_anonymous_wake", reference=CLAUDE_FIXTURE)
+                    expect_presenter_trace(self, replace(fx, app=app), "bodyless_anonymous_wake", reference=CLAUDE_FIXTURE)
                     cli.init(user_message_uuids=[])
                     cli.result(user_message_uuid=None, uuid="empty-wake", reason=None, result=None,
                                origin={"kind": "task-notification", "producer": "session-task", "runId": "unknown"})

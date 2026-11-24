@@ -239,7 +239,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app._progress_cards._sessions, {})
 
     async def test_plain_goal_delivers_rollover_partials_then_final(self):
-        events = expect_presenter_trace(self, self.fx, "goal_plain_rollover")
+        events = expect_presenter_trace(self, self.fx, "goal_plain_rollover", process_mode=True)
         first_row = ObservedProcessItem("first", "operation", "Read", 1_800_000_000)
         self.activity = replace(self.activity, process_items=(replace(first_row, identity="final"),))
         first = PartialAnswer("native-one", "physical-first", "item", "first partial")

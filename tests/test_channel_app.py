@@ -8962,7 +8962,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         binding, record = await self.open_direct_side()
-        events = expect_presenter_trace(self, self.fixture, "side_plain")
+        events = expect_presenter_trace(self, self.fixture, "side_plain", process_mode=True)
         prompt = FakeMessage(
             "work quietly",
             message_id="om-side-prompt",
@@ -9212,7 +9212,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_side_turn_without_progress_uses_result_files_card(self) -> None:
         binding, record = await self.open_direct_side()
-        expect_presenter_trace(self, self.fixture, "side_files")
+        expect_presenter_trace(self, self.fixture, "side_files", process_mode=True)
         side_cwd = self.project.parent / "side-cwd"
         side_cwd.mkdir()
         artifact = side_cwd / "side-output.txt"
