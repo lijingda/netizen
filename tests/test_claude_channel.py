@@ -1814,7 +1814,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 branch = fx.store.active_binding(target.key)
                 self.assertNotEqual(branch.id, previous.id, fx.channel.updates)
                 switched.assert_awaited_once_with(previous.id, branch.id)
-            self.assertEqual(clients.forks, [(native, fx.project, None, branch.native_thread_id)])
+            self.assertEqual(clients.forks, [(native, fx.project.resolve(), None, branch.native_thread_id)])
             self.assertIsNone(branch.working_cwd)
             self.assertEqual(fx.store.active_binding(scope.key).native_thread_id, native)
             self.assertFalse(clients.calls)
@@ -1913,7 +1913,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                                 self.assertEqual(send.await_count, len(sends) + 1)
                                 self.assertEqual(job.cancelling(), 0)
                     (source_id, cwd, title, child_id), = clients.forks
-                    self.assertEqual((source_id, cwd, title), (native, fx.project, "draft name"))
+                    self.assertEqual((source_id, cwd, title), (native, fx.project.resolve(), "draft name"))
                     receipt = fx.channel.updates[-1][1]
                     if failure != "cancel caller":
                         self.assertEqual(fx.channel.updates[-1][0], event.message_id)
