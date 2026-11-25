@@ -59,6 +59,17 @@ def _has_card_answer(card):
     return any(element.get("element_id") in {"turnanswerv1", "partialanswerv1"} for element in card["body"]["elements"])
 
 
+def _system_frame(cli, kind, **data):
+    from claude_agent_sdk import SystemMessage
+    cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+
+
+def _start_background_tool(cli, task):
+    from claude_agent_sdk import AssistantMessage, ToolUseBlock
+    cli.stream.put_nowait(AssistantMessage([ToolUseBlock(task, "Bash", {})], "model", session_id=cli.session))
+    _system_frame(cli, "task_started", task_id=task, run_id=task, tool_use_id=task)
+
+
 class _MentionTrace:
     """Infer the expected reminder from public Feishu calls in a direct-chat explorer row."""
 
@@ -1000,6 +1011,55 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(sends.await_args.args[1], INCOMPLETE)
                     self.assertEqual([(opts.reply_to, [m.open_id for m in item.mentions])
                                       for _, item, opts in fx.channel.send_calls], [(anchor, ["ou_user"])] if anchor else [])
+
+    @requires_claude_sdk
+    async def test_attributed_wake_queued_behind_separate_reminder_mentions_once(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+            await app.handle_message(FakeMessage("work", message_id="H"))
+            cli = clients.calls[-1]
+            cli.init()
+            await self.until(lambda: bool(app._progress_cards._sessions))
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "retain"}]}, None, None)
+            execution = ordinary._active[binding.id]
+            human = execution.human
+            sending, release = asyncio.Event(), asyncio.Event()
+            send = fx.channel.send
+
+            async def hold_reminder(to, content, opts=None):
+                sending.set()
+                await release.wait()
+                return await send(to, content, opts)
+
+            fx.channel.send_results.append(sent_result("reminder", chat_id="oc_direct", parent_id="H", root_id="H"))
+            fx.channel.reply_results.append(SendResult.ok(message_id="wake"))
+            with patch.object(fx.channel, "send", hold_reminder):
+                _start_background_tool(cli, "A")
+                _system_frame(cli, "background_tasks_changed", tasks=[{"task_id": "A", "run_id": "A"}])
+                cli.result(reason=None, result=None)
+                await self.until(lambda: execution.admissible and not execution.delivery.queues)
+                _system_frame(cli, "background_tasks_changed", tasks=[])
+                _system_frame(cli, "session_state_changed", state="idle")
+                await asyncio.wait_for(sending.wait(), 3)
+                try:
+                    self.assertTrue(human.terminal_sent)
+                    self.assertTrue(human.reply.mention_attempted, "the in-flight reminder must own the mention attempt")
+                    cli.init(user_message_uuids=[])
+                    cli.result(result="wake-A", user_message_uuid=human.input_id, idle=False,
+                               origin={"kind": "task-notification", "producer": "session-task", "runId": "A"})
+                    await self.until(lambda: len(cli.live.seen) == 2)
+                finally:
+                    release.set()
+                await self.until(lambda: not execution.delivery.queues)
+                self.assertIsNone(human.reply.messages)
+                self.assertEqual([(opts.reply_to, post.text, [m.open_id for m in post.mentions])
+                                  for _, post, opts in fx.channel.send_calls], [("H", "本轮任务已结束。", ["ou_user"])])
+                self.assertIn(("H", f"wake-A\n\n{CLAUDE_RELEASE_HINT}"), fx.channel.replies)
+                self.assertFalse(any(getattr(post, "mentions", ()) for _, post in fx.channel.replies))
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": []}, None, None)
+            _system_frame(cli, "session_state_changed", state="idle")
+            self.assertTrue(await ordinary.wait_idle(3))
 
     @requires_claude_sdk
     async def test_final_post_mention_at_the_logical_terminal_boundary(self):

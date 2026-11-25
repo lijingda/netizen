@@ -243,14 +243,15 @@ class CompletionPresentationChannel(ChannelReplies):
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
-        if allow_inline_mention and isinstance(content, str) and reply and reply.mention_user_id and not reply.mention_carried:
+        if (allow_inline_mention and isinstance(content, str) and reply and reply.messages is not None
+                and reply.mention_user_id and not reply.mention_attempted):
             try:
                 content = mentioned_answer(content, reply.mention_user_id)
             except Exception:
                 logger.warning("could not prepare inline completion mention", exc_info=True)
             else:
                 # The first SDK chunk may notify even if a later chunk is rejected.
-                reply.mention_carried = True
+                reply.mention_attempted = True
         _, result = await ledger.send(items, reply, external_call(policy.send(content, operation, location)),
                                       post=True, timeout=constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS)
         if result is not None:
@@ -305,15 +306,17 @@ class CompletionPresentationChannel(ChannelReplies):
                 return
             await _best_effort_update(self._reactions.freeze(run.turn_id))
             await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
-            if event.mention_user_id and not reply.mention_carried and display.publishable():
+            if event.mention_user_id and not reply.mention_attempted and display.publishable():
                 location = event.location
                 assert location is not None
                 source_id = _message_id(event.target.origin)
                 anchor = reply.mention_target(source_id if location.usable(source_id) else None)
-                await send_completion_mention(
-                    self._channel, scope=self._scope(event.target.origin), card_message_id=anchor,
-                    user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
-                )
+                if anchor:
+                    reply.mention_attempted = True
+                    await send_completion_mention(
+                        self._channel, scope=self._scope(event.target.origin), card_message_id=anchor,
+                        user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
+                    )
         finally:
             self._progress_cards.retire_run(display)
             reply.retire()

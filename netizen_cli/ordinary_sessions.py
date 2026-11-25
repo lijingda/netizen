@@ -120,7 +120,7 @@ class LogicalReply:
     unaddressed_confirmation: bool = False
     mention_user_id: str | None = None
     mention_decided: asyncio.Event = field(default_factory=asyncio.Event)
-    mention_carried: bool = False
+    mention_attempted: bool = False
 
     def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], usable: Callable[[str], bool]) -> None:
         if self.messages is None:
