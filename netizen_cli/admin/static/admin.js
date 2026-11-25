@@ -1653,6 +1653,9 @@ function observeSessionPreviews(body) {
 }
 
 function sessionName(session) {
+  if (document.body.dataset.backend === "claude" && session.nativeThreadId && !session.nativeTitle && !session.nativePreview) {
+    return session.shortId;
+  }
   return session.nativeTitle || (session.catalogState === "lazy" ? "未开始的会话" : "未命名会话");
 }
 

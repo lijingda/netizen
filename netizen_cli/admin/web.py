@@ -138,6 +138,7 @@ from ..runtime.contracts import (
     ThreadDeleteUnavailable,
     ThreadGoalActive,
     ThreadLifecycleError,
+    SessionRenameUnconfirmed,
     ThreadLifecycleStateUnknown,
     ThreadNotArchived,
     ThreadNotMaterialized,
@@ -2400,7 +2401,15 @@ class AdminWebApplication:
             expected_resource="binding",
             allowed_extra={"name"},
         )
-        name = _required_text(payload, "name", maximum=120)
+        if self._backend_policy.backend == "claude":
+            # The ordinary title writer validates 1–120 Unicode characters.
+            # The generic HTTP field bound is in UTF-8 bytes.
+            value = payload.get("name")
+            if isinstance(value, str):
+                value = " ".join(value.split())
+            name = _required_text({"name": value}, "name", maximum=4 * 120)
+        else:
+            name = _required_text(payload, "name", maximum=120)
         renamed = await self._mutation(
             context,
             OPERATIONS[OperationId.MANUAL_RENAME].grant,
@@ -3773,6 +3782,8 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(503, "state_unknown", "结果未确认，请刷新对账。")
     if isinstance(error, MalformedActionGrant):
         return AdminWebError(400, "invalid_action", "操作凭据无效。")
+    if isinstance(error, SessionRenameUnconfirmed):
+        return AdminWebError(503, "state_unknown", str(error))
     if isinstance(error, ThreadLifecycleError):
         return AdminWebError(409, "operation_rejected", describe_error(error))
     if isinstance(

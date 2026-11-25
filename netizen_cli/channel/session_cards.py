@@ -28,6 +28,7 @@ from ..cards import (
     new_binding_card,
 )
 from .session_pages import SessionCardPage
+from ..cards.controls import local_status_card
 from ..runtime.contracts import (
     NativeThreadMetadata,
     ThreadLifecycleError,
@@ -49,6 +50,7 @@ from ..management import (
 from . import constants
 from .base import (
     CHANNEL_LOGGER_NAME,
+    _local_session_title,
     _session_title,
     _session_card_cursor,
 )
@@ -122,6 +124,13 @@ class SessionCardChannel(QuestionChannel):
             )
             return metadata
 
+    async def _local_status_card(self, scope: FeishuScope, binding: ThreadBinding) -> OutboundCard:
+        assert self._local_sessions is not None
+        status = await self._management.binding_status_exact(binding.id)
+        metadata = await self._read_thread_metadata((binding,))
+        return local_status_card(scope, binding, status, self._local_sessions.observation_defaults,
+                                 title=_local_session_title(binding, metadata.get(binding.native_thread_id)))
+
     async def _sessions_card(
         self,
         *,
@@ -175,12 +184,13 @@ class SessionCardChannel(QuestionChannel):
         for item, projection in zip(items, projections, strict=True):
             binding = item.record.binding
             snapshot = projection.snapshot
+            metadata = item.native.metadata if item.native else None
             sessions.append(SessionCardItem(
                 binding_id=binding.id,
                 short_id=binding.short_id,
                 project_alias=binding.project_alias,
                 native_thread_id=binding.native_thread_id,
-                title=_session_title(binding, item.native.metadata if item.native else None),
+                title=(_local_session_title(binding, metadata) if local_directory else _session_title(binding, metadata)),
                 state=projection.primary_status or "暂不可用",
                 can_stop_all=projection.can_stop_all, can_stop=projection.can_stop,
                 state_label=projection.local_label, observations=projection.observations,

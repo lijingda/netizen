@@ -28,7 +28,7 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
-from ..cards.controls import local_status_card, release_confirmation_card
+from ..cards.controls import release_confirmation_card
 from ..ordinary_sessions import ReleaseConfirmation
 from ..cards.status import (
     codex_context_line, codex_model_lines, decode_status_command, session_status_card,
@@ -70,6 +70,7 @@ from .app_values import (
 from .base import (
     CHANNEL_LOGGER_NAME,
     _markdown_code,
+    _normalized_thread_text,
     _session_title,
     _thread_metadata_status_lines,
     _git_branch_status_lines,
@@ -156,7 +157,7 @@ class CommandChannel(CardControlChannel):
         self, message: Any, intent: ControlIntent, *, expected_binding_id: str | None = None,
     ) -> None:
         if self._local_sessions is not None:
-            if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.DEFAULTS}:
+            if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.RENAME, ControlName.DEFAULTS}:
                 self._local_sessions.require_admission()
         refusal = self._policy.command_refusal(intent.name.value, archived=bool(intent.arguments))
         if refusal:
@@ -482,8 +483,12 @@ class CommandChannel(CardControlChannel):
                 "请先发送一条真实任务，再使用 /rename。"
             )
         if not intent.arguments:
-            metadata = await self._read_thread_metadata((binding,)) if self._policy.allows(OperationId.HISTORY) else {}
             self._management.title_writer_for(binding)
+            metadata = (await self._read_thread_metadata((binding,))).get(binding.native_thread_id)
+            if self._local_sessions is not None:
+                title = _normalized_thread_text(metadata.name if metadata else None, max_chars=120)
+            else:
+                title = _session_title(binding, metadata)
             await self._reply(
                 message,
                 rename_binding_card(
@@ -493,10 +498,7 @@ class CommandChannel(CardControlChannel):
                     project_alias=binding.project_alias,
                     sync_hint=self._management.names.sync_hint,
                     can_generate=self._policy.allows(OperationId.GENERATE_NAME),
-                    current_title=_session_title(
-                        binding,
-                        metadata.get(binding.native_thread_id),
-                    ),
+                    current_title=title,
                 ),
             )
             return
@@ -617,11 +619,10 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        status = await self._management.binding_status_exact(binding.id)
         if self._local_sessions is not None:
-            card = local_status_card(intent.scope, binding, status, self._local_sessions.observation_defaults)
-            await self._reply(message, card)
+            await self._reply(message, await self._local_status_card(intent.scope, binding))
             return
+        status = await self._management.binding_status_exact(binding.id)
         state = status.primary_status
         assert state is not None
         try:

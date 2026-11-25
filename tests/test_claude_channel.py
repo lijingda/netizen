@@ -16,6 +16,7 @@ from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.channel.physical_delivery import INCOMPLETE
 from netizen_cli.domain import FeishuScope, MessageContextAnchor, ScopeKind
 from netizen_cli.ordinary_sessions import CLAUDE_RELEASE_HINT, ReleaseConfirmation
+from netizen_cli.session_providers import SessionNames
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from tests.support import has_claude_sdk, requires_claude_sdk
 
@@ -43,7 +44,8 @@ async def owner_channel():
         ordinary = ClaudeOrdinarySessions(bindings=fixture.store, clients=clients, owner_id="ou_user",
             on_completion=completion, notice=fixture.channel.reply, clock=lambda: clock[0])
         management = InstanceManagementService(bindings=fixture.store, projects=fixture.projects,
-            runtime=ManagementRuntimePort(None, ordinary=ordinary, local=ordinary), scope_coordinator=ScopeCoordinator())
+            runtime=ManagementRuntimePort(None, ordinary=ordinary, local=ordinary, names=SessionNames(writer=ordinary),
+                                         local_summary=clients.session_metadata), scope_coordinator=ScopeCoordinator())
         app = ChannelApplication(app_id="cli_test", channel=fixture.channel, runtime=None, ordinary=ordinary,
             bindings=fixture.store, projects=fixture.projects, management=management, policy=BackendPolicy("claude", "ou_user"))
         ordinary.open_admission()
@@ -1735,7 +1737,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 await app.handle_message(FakeMessage(text, message_id="om"))
                 return fx.channel.replies[-1][1]
 
-            for body in ("go", "/new", "/defaults", "/config"):
+            for body in ("go", "/new", "/defaults", "/config", "/rename"):
                 self.assertEqual(await send(body), GRACE)
             clock[0] = 2.
             for cmd in ("goal this", "side close", "fork", "usage", "compact", "cron", "archive", "delete",

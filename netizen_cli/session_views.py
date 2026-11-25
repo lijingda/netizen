@@ -111,12 +111,12 @@ class SessionStatusView:
 
     @classmethod
     def from_observations(
-        cls, binding: ThreadBinding, state: str, label: str, observed: SessionObservations,
+        cls, binding: ThreadBinding, state: str, label: str, observed: SessionObservations, *, title: str,
     ) -> "SessionStatusView":
         layout = observed.presentation
         return cls(
             project_alias=binding.project_alias, state=state, state_label=label,
-            metadata_lines=(layout.provider, f"本地任务：{label}"), workspace_lines=observed.lines(layout.workspace),
+            metadata_lines=(f"{layout.provider} · {title}", f"本地任务：{label}"), workspace_lines=observed.lines(layout.workspace),
             model_rows=tuple(lines for group in layout.model_rows if (lines := observed.lines(group))),
             context_lines=(*observed.lines(layout.usage), f"回复消息类型：{binding.task_feedback.reply_type_label}"), progress_lines=(),
             identity_lines=(f"Netizen 会话编号（/resume）：{binding.short_id}",

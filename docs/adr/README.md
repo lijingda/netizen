@@ -130,6 +130,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) | 以飞书展示 Turn 统一各后端的回复展示 | 架构决策 | 草案 | 拟修订 [0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0053](0053-show-exact-turn-line-statistics-in-files.md)、[0056](0056-count-successful-patches-in-task-files.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md)、[0084](0084-separate-goal-controls-from-logical-turn-replies.md)，[0107](0107-present-process-in-feishu-process-messages.md) 修订本条 |
 | [0107](0107-present-process-in-feishu-process-messages.md) | 用飞书过程消息作为展示 Turn 的第二种形态 | 架构决策 | 有效 | 修订 [0046](0046-add-opt-in-binding-task-feedback.md)、[0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md)、[0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md)、[0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md)、[0087](0087-use-instance-progress-card-settings-for-missing-session-intent.md)、[0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) |
 | [0108](0108-project-claude-activity-and-files-from-pinned-native-tool-frames.md) | 从固定版本的原生工具消息投影 Claude Activity 与 Files | 架构决策 | 有效 | 修订 [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) |
+| [0109](0109-name-and-fork-exact-claude-sessions.md) | 通过精确的 Claude 会话元数据改名和创建持久分支 | 架构决策 | 提议中 | 拟修订 [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) |
 
 ## 命令与 Skills
 

@@ -5,9 +5,10 @@ import tempfile
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
@@ -16,7 +17,7 @@ from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.ordinary_sessions import (
     ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, PhysicalAnswer, LogicalTerminal, OrdinaryConclusion, OrdinaryInputRejected, OrdinarySessionDiverged, PreparedPrompt, PromptImage, ReleaseConfirmation,
 )
-from netizen_cli.runtime.contracts import ContextCursorCommit, ReleaseDisposition, StopDisposition, TerminalStateUnknown, ThreadActivityChanged
+from netizen_cli.runtime.contracts import ContextCursorCommit, ReleaseDisposition, SessionRenameUnconfirmed, StopDisposition, TerminalStateUnknown, ThreadActivityChanged, ThreadLifecycleError
 from tests.support import has_claude_sdk, requires_claude_sdk
 
 if has_claude_sdk:
@@ -114,6 +115,110 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         arguments = dict(scope_key=self.binding.scope_key, sender_id="owner",
                          revision=preview.revision if preview else None, turn_id=preview.turn_id if preview else None)
         return await self.runtime.release_control(self.binding.id, **(arguments | overrides))
+
+    async def test_rename_confirms_only_the_exact_post_append_title(self):
+        native_id = str(uuid4())
+        self.store.assign_native_thread_id(self.binding.id, native_id)
+        sdk = "netizen_cli.runtime.claude_client."
+        correct = SimpleNamespace(session_id=native_id, custom_title="new name")
+        old = SimpleNamespace(session_id=native_id, custom_title="old name")
+        wrong_id = SimpleNamespace(session_id=str(uuid4()), custom_title="new name")
+        with patch.object(self.clients, "rename", BundledClaudeClients.rename):
+            for write_error, read_result, error_type in (
+                (ValueError(), None, ThreadLifecycleError), (FileNotFoundError(), None, ThreadLifecycleError),
+                (OSError(), None, SessionRenameUnconfirmed), (None, ValueError(), SessionRenameUnconfirmed),
+                (None, FileNotFoundError(), SessionRenameUnconfirmed), (None, old, SessionRenameUnconfirmed),
+                (None, wrong_id, SessionRenameUnconfirmed), (None, None, SessionRenameUnconfirmed),
+                (None, object(), SessionRenameUnconfirmed), (None, correct, None),
+            ):
+                with (self.subTest(write_error=write_error, read_result=read_result),
+                      patch(sdk + "rename_session", side_effect=write_error) as write,
+                      patch(sdk + "get_session_info", return_value=read_result,
+                            side_effect=read_result if isinstance(read_result, Exception) else None) as read):
+                    if error_type:
+                        with self.assertRaises(error_type) as failure:
+                            await self.runtime.rename_exact(self.binding.id, " new  name ")
+                        self.assertIs(type(failure.exception), error_type)
+                    else:
+                        self.assertEqual(await self.runtime.rename_exact(self.binding.id, " new  name "), "new name")
+                    write.assert_called_once_with(native_id, "new name")
+                    if write_error:
+                        read.assert_not_called()
+                    else:
+                        read.assert_called_once_with(native_id)
+                    await self.runtime.capture_submission_admission(self.binding.id)
+            with patch(sdk + "rename_session") as write:
+                for invalid in (" \t ", "a" * 121):
+                    with self.assertRaises(ValueError):
+                        await self.runtime.rename_exact(self.binding.id, invalid)
+                write.assert_not_called()
+
+    async def test_cancelled_or_timed_out_rename_excludes_input_until_physical_completion(self):
+        native_id = str(uuid4())
+        self.store.assign_native_thread_id(self.binding.id, native_id)
+        other = self.new_binding(chat="other")
+        binding = self.store.get(self.binding.id)
+        loop = asyncio.get_running_loop()
+        for cancel in (False, True):
+            admission = await self.runtime.capture_submission_admission(binding.id)
+            release = threading.Event()
+            entered = asyncio.Event()
+
+            def blocked(session, name):
+                loop.call_soon_threadsafe(entered.set)
+                if not release.wait(5):
+                    raise AssertionError("rename worker was never released")
+                return name
+
+            with (self.subTest(cancel=cancel), patch.object(self.clients, "rename", side_effect=blocked) as write,
+                  patch("netizen_cli.runtime.claude_ordinary._RENAME_SECONDS", 5.0 if cancel else 0.05)):
+                operation = asyncio.create_task(self.runtime.rename_exact(binding.id, "title"))
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    if cancel:
+                        operation.cancel()
+                    with self.assertRaises(asyncio.CancelledError if cancel else SessionRenameUnconfirmed):
+                        await operation
+                    for call in (lambda: self.runtime.capture_submission_admission(binding.id),
+                                 lambda: self.submit(binding=binding, admission=admission),
+                                 lambda: self.runtime.rename_exact(binding.id, "competing")):
+                        with self.assertRaisesRegex(OrdinaryInputRejected, "正在改名"):
+                            await asyncio.wait_for(call(), 0.5)
+                    await self.runtime.capture_submission_admission(other.id)
+                    worker = self.runtime._title_writes[binding.id]
+                    if cancel:
+                        await asyncio.wait_for(self.runtime.interrupt_all(deadline=loop.time()), 0.5)
+                        self.assertFalse(worker.done())
+                finally:
+                    release.set()
+                await asyncio.wait_for(asyncio.shield(worker), 2)
+                if not cancel:
+                    await self.runtime.capture_submission_admission(binding.id)
+                write.assert_called_once_with(native_id, "title")
+                self.assertEqual(self.clients.calls, [])
+
+    async def test_rename_rejects_opening_and_retained_client_without_stopping_it(self):
+        native_id = str(uuid4())
+        self.store.assign_native_thread_id(self.binding.id, native_id)
+        self.clients.cwds[native_id] = self.cwd
+        self.clients.configure = lambda client: client.connect_gate.clear()
+        with patch.object(self.clients, "rename") as write:
+            opening = asyncio.create_task(self.submit())
+            await asyncio.wait_for(self.clients.created.wait(), 2)
+            cli = self.clients.calls[0]
+            with self.assertRaisesRegex(ThreadLifecycleError, "暂不能改名"):
+                await self.runtime.rename_exact(self.binding.id, "during open")
+            cli.connect_gate.set()
+            receipt = await asyncio.wait_for(opening, 2)
+            receipt.release_receipt_attempt()
+            cli.init()
+            await self.cron(cli, True)
+            cli.result()
+            await self.wait_for_history_baseline()
+            with self.assertRaisesRegex(ThreadLifecycleError, "Claude 进程仍在运行（后台任务或会话 cron）"):
+                await self.runtime.rename_exact(self.binding.id, "during cron")
+            self.assertEqual((cli.closes, cli.interrupts, cli.stopped_tasks), (0, 0, []))
+            write.assert_not_called()
 
     async def test_reply_settings_capture_instance_defaults_per_input(self):
         current = ProgressCardSettings(operation_limit=2)

@@ -33,7 +33,6 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
-from ..cards.controls import local_status_card
 from ..cards.defaults import decode_defaults_action
 from ..defaults import DefaultConfigurationError
 from ..runtime.contracts import (
@@ -916,8 +915,7 @@ class CardControlChannel(TurnFileChannel):
             notice = "已请求停止本次 Claude 执行。" if disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
         try:
             if self._local_sessions is not None and intent.from_status:
-                card = local_status_card(intent.scope, binding, await self._management.binding_status_exact(binding.id),
-                                         self._local_sessions.observation_defaults)
+                card = await self._local_status_card(intent.scope, binding)
             else:
                 card = await self._sessions_card(scope=intent.scope, page=intent.page,
                                                  session_cursor=intent.session_cursor, notice=notice)

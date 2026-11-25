@@ -263,6 +263,7 @@ class ServiceCore:
         _editor: ConfigFileEditor | None, progress_card_config: ProgressCardConfigService,
     ) -> BackendAssembly:
         from .runtime.claude_ordinary import ClaudeOrdinarySessions
+        from .session_providers import SessionNames
 
         async def completed(event: OrdinaryEvent) -> None:
             assert self.application is not None
@@ -278,7 +279,8 @@ class ServiceCore:
         )
         return BackendAssembly(
             self._claude, self._claude,
-            ManagementRuntimePort(None, ordinary=self._claude, local=self._claude),
+            ManagementRuntimePort(None, ordinary=self._claude, local=self._claude,
+                                  names=SessionNames(writer=self._claude), local_summary=clients.session_metadata),
         )
 
     async def _assemble_codex(

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
+from contextlib import AbstractAsyncContextManager, aclosing, nullcontext
 from collections.abc import Awaitable, Callable
 from weakref import WeakValueDictionary
 from dataclasses import dataclass, field, replace
@@ -38,12 +38,15 @@ from .claude_activity import ClaudeChecklist, ClaudeTurnTools
 from .claude_delivery import AnchorDelivery
 from .claude_status import ClaudeObservations, DEFAULT_OBSERVATIONS, record_observation
 from .claude_client import ClaudeClient, ClaudeClients, LiveSession, SessionReader, live_messages, native_human, single_message, user_message
+from .name_writes import normalize_session_name
 from .contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, ReleaseDisposition, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
+    NativeThreadCatalogState, SessionRenameUnconfirmed, ThreadLifecycleError, ThreadNotMaterialized,
     SubmitDisposition, TerminalStateUnknown, ThreadActivityChanged, TurnActivitySnapshot,
 )
 
 logger = logging.getLogger(__name__)
+_RENAME_SECONDS = 5.0
 UNKNOWN = "本次 Claude 提交结果未知，请检查原会话；系统不会自动重发。"
 CLOSE_FAILED = "无法确认 Claude 客户端已关闭，本会话暂不可再提交。"
 CLOSING_CONCLUDED = "这次 Claude 执行已经结束，结果正在送出。"
@@ -367,6 +370,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._title_writes: dict[str, asyncio.Future[str]] = {}
         self.on_physical_terminal: PhysicalTerminalHandler | None = None
         self.on_binding_deleted: Callable[[str], Awaitable[None]] | None = None
         self._activity: dict[str, _BindingActivity] = {}
@@ -391,7 +395,58 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             raise OrdinaryInputRejected(GRACE)
 
     def _lock(self, binding_id: str) -> asyncio.Lock:
+        if binding_id in self._title_writes:
+            raise OrdinaryInputRejected("会话正在改名，请稍后再试。")
         return self._locks.setdefault(binding_id, asyncio.Lock())
+
+    def _state_lock(self, binding_id: str) -> AbstractAsyncContextManager[object]:
+        # The off-loop title writer only uses its captured native ID. Read-only
+        # projections and pointer notifications can still access local state.
+        return nullcontext() if binding_id in self._title_writes else self._lock(binding_id)
+
+    sync_hint = "保存后名称同步显示在 Claude Code 的会话列表（claude --resume）。"
+
+    def eligible(self, binding: ThreadBinding, catalog_state: NativeThreadCatalogState | None) -> bool:
+        return binding.native_thread_id is not None
+
+    async def rename_exact(self, binding_id: str, name: str) -> str:
+        normalized = normalize_session_name(name)
+        self.require_admission()
+        lock = self._lock(binding_id)
+        if lock.locked():
+            raise ThreadLifecycleError("会话操作正在进行，暂不能改名。")
+        await lock.acquire()
+        try:
+            self.require_admission()
+            binding = self._bindings.get(binding_id)
+            self._bindings.require_project_not_deleting(binding.project_alias)
+            self._bindings.worktrees.require_binding_not_deleting(binding_id)
+            if binding.native_thread_id is None:
+                raise ThreadNotMaterialized("当前 Claude 会话尚未建立，请先发送一条任务。")
+            if binding_id in self._unavailable:
+                raise ThreadLifecycleError("Claude 客户端关闭未确认，暂不能改名。")
+            execution = self._active.get(binding_id)
+            if execution is not None and not execution.close_finished:
+                if execution.admissible and (execution.live.tasks or execution.live.crons):
+                    raise ThreadLifecycleError("Claude 进程仍在运行（后台任务或会话 cron），暂不能改名；后台工作结束后再试。")
+                raise ThreadLifecycleError("Claude 会话正在启动、执行或收尾，暂不能改名。")
+            worker = SessionReader().start(partial(self._clients.rename, binding.native_thread_id, normalized))
+        except BaseException:
+            lock.release()
+            raise
+        self._title_writes[binding_id] = worker
+
+        def finished(done: asyncio.Future[str]) -> None:
+            self._title_writes.pop(binding_id)
+            lock.release()
+            done.exception()  # The caller may already have timed out or left.
+
+        worker.add_done_callback(finished)
+        try:
+            async with asyncio.timeout(self._remaining(_RENAME_SECONDS)):
+                return await asyncio.shield(worker)
+        except TimeoutError:
+            raise SessionRenameUnconfirmed() from None
 
     def _advance(self, binding_id: str, *, execution_id: str | None = None) -> int:
         activity = self._activity.setdefault(binding_id, _BindingActivity())
@@ -405,7 +460,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             return
         for binding_id in (previous_binding_id, current_binding_id):
             if binding_id is not None:
-                async with self._lock(binding_id):
+                async with self._state_lock(binding_id):
                     try:
                         self._bindings.get(binding_id)
                     except BindingNotFound:
@@ -1024,8 +1079,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         return frozenset(key for key, cwd in self._owned_cwds.items() if cwd.is_relative_to(target))
 
     async def resource_usage(self, binding_id: str) -> dict[str, str | None]:
-        lock = self._lock(binding_id)
-        async with lock:
+        async with self._state_lock(binding_id):
             binding = self._bindings.get(binding_id)
             snapshot = self.local_snapshot(binding_id)
             owned = self._owned_cwds.get(binding_id)
@@ -1112,7 +1166,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         return False
 
     async def preview_stop(self, binding: ThreadBinding) -> StopPreview | None:
-        async with self._lock(binding.id):
+        async with self._state_lock(binding.id):
             if binding.id in self._unavailable:
                 raise OrdinaryInputRejected(CLOSE_FAILED)
             execution = self._active.get(binding.id)
@@ -1334,6 +1388,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         try:
             if not await self.wait_idle(_CONTROL_SECONDS):
                 await self.cancel_tasks()
+            if self._title_writes:
+                await asyncio.wait(tuple(self._title_writes.values()), timeout=self._remaining(_RENAME_SECONDS))
         except asyncio.CancelledError:
             # The service's remaining drain budget can expire during interrupt.
             # Trigger each execution's owned finally even when there is no time to join.

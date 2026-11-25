@@ -87,12 +87,21 @@ class FakeClaudeClient:
 
 class FakeClaudeClients:
     def __init__(self):
+        self.titles = {}
         self.calls = []
         self.lookups = []
         self.cwds = {}
         self.configure = None
         self.created = asyncio.Event()
         self.history = "assistant"
+
+    async def session_metadata(self, session):
+        from netizen_cli.runtime.contracts import NativeThreadMetadata
+        return NativeThreadMetadata(session, self.titles.get(session), "")
+
+    def rename(self, session, name):
+        self.titles[session] = name
+        return name
 
     async def last_assistant(self, session, cwd, reader):
         return self.history

@@ -466,11 +466,13 @@ class ManagementRuntimePort:
     it.
     """
 
-    __slots__ = ("__codex", "__ordinary", "local", "names")
+    __slots__ = ("__codex", "__ordinary", "local", "names", "local_summary")
 
     def __init__(self, runtime: CodexRuntime | None, *, ordinary: OrdinarySessionPort,
-                 local: LocalSessionManagement | None = None, names: SessionNames | None = None) -> None:
+                 local: LocalSessionManagement | None = None, names: SessionNames | None = None,
+                 local_summary: Callable[[str], Awaitable[NativeThreadMetadata]] | None = None) -> None:
         self.names = names if names is not None else SessionNames.from_runtime(runtime)
+        self.local_summary = local_summary
         self.__codex = runtime
         self.local = local
         self.__ordinary: OrdinarySessionPort = ordinary
@@ -725,6 +727,8 @@ class ManagementRuntimePort:
     async def thread_summary_exact(
         self, thread_id: str,
     ) -> NativeThreadMetadata:
+        if self.local_summary is not None:
+            return await self.local_summary(thread_id)
         return await self.__runtime.thread_summary(thread_id)
 
     async def thread_catalog_exact(
@@ -1430,7 +1434,8 @@ class InstanceManagementService:
                 created_before=datetime.fromtimestamp(query.created_before, timezone.utc).isoformat() if query.created_before is not None else None)
         local_page = await self._bindings.query_bindings(query=local_query, cursor=cursor, limit=limit,
                                                         deadline_seconds=self._query_seconds(deadline))
-        return self._session_page(local_page.items, native={}, next_cursor=local_page.next_cursor)
+        views = await self._local_display_views(tuple(record.binding for record in local_page.items), deadline)
+        return self._session_page(local_page.items, native=views, next_cursor=local_page.next_cursor)
 
     async def _native_session_page(
         self, query: SessionQuery, cursor: BindingCursor | SessionNativeCursor | None,
@@ -1511,7 +1516,8 @@ class InstanceManagementService:
             if current is None:
                 # A current session omitted by the native list stays reachable
                 # by its exact local identity, without hydrating all old rows.
-                views = await self._session_native_views((current_binding,), native=None, deadline=deadline) if native_catalog else {}
+                views = (await self._session_native_views((current_binding,), native=None, deadline=deadline)
+                         if native_catalog else await self._local_display_views((current_binding,), deadline))
                 current = SessionInventoryItem(
                     BindingInventoryRecord(current_binding, self._bindings.get_scope(scope.key)),
                     views.get(current_binding.native_thread_id), ChatLabelResolver.fallback(scope.chat_id),
@@ -1568,10 +1574,20 @@ class InstanceManagementService:
         return await self.session_reads.metadata(binding_id, deadline)
 
     async def _local_binding_metadata(self, binding_id: str, deadline: float) -> NativeThreadMetadata | None:
-        self._query_seconds(deadline)
-        self._bindings.get(binding_id)
-        # Claude init and Result do not attest a session title or a native creation time.
-        return None
+        binding = self._bindings.get(binding_id)
+        views = await self._local_display_views((binding,), deadline)
+        view = views.get(binding.native_thread_id)
+        return view.metadata if view is not None else None
+
+    async def _local_display_views(
+        self, bindings: Sequence[ThreadBinding], deadline: float,
+    ) -> dict[str, NativeThreadView]:
+        if self._runtime.local_summary is None:
+            return {}
+        # Optional names must leave time for the required status and paging reads.
+        now = asyncio.get_running_loop().time()
+        display_deadline = now + min(3.0, (deadline - now) / 2)
+        return await self._session_native_views(bindings, native=None, deadline=display_deadline)
 
     async def _native_binding_metadata(self, binding_id: str, deadline: float) -> NativeThreadMetadata | None:
         """Read an exact Binding's display summary with the shared worker budget.
@@ -2499,7 +2515,7 @@ class InstanceManagementService:
                     views[thread_id] = NativeThreadView(None, metadata)
             except Exception as diagnostic_error:
                 logger.warning(
-                    "archived thread metadata unavailable",
+                    "session display metadata unavailable",
                     extra={"thread_id": thread_id, "error_type": type(diagnostic_error).__name__},
                 )
 
