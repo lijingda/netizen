@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from lark_channel import (
@@ -107,7 +108,7 @@ class TurnFileChannel(SessionCardChannel):
         turn_file = require_turn_file_path(intent.path)
         await self._send_turn_file(intent, turn_file)
 
-    async def _update_manifest_page(self, intent: TurnFileActionIntent) -> bool:
+    async def _update_manifest_page(self, intent: TurnFileActionIntent, can_write: Callable[[], bool] = lambda: True) -> bool:
         assert intent.page is not None
         assert intent.answer is not None
         if intent.reply is not None:
@@ -144,7 +145,7 @@ class TurnFileChannel(SessionCardChannel):
                 additions=intent.additions,
                 deletions=intent.deletions,
             )
-        return await self._safe_update_card(intent.source_id, card)
+        return await self._safe_update_card(intent.source_id, card, can_write=can_write)
 
     async def _send_turn_file(
         self,

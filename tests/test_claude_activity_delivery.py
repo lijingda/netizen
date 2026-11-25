@@ -332,3 +332,46 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(mid, "first")
                     self.assertEqual(len(buttons(visible, "turn-file.send")), TURN_FILE_PAGE_SIZE)
                     self.assertIn("全部完成", str(visible))
+
+    async def test_contradicted_file_card_never_accepts_a_fallback_page(self):
+        async with running_channel(cards=True) as (app, channel, client, execution, _, ordinary):
+            page = await open_file_pages(channel, client, execution)
+            click = direct_button_event(page, message_id="first", form_value={"turn_file_page": "1"})
+            channel.card_update_results.append(sent_result("first", chat_id="foreign-chat"))
+            channel.send_results.extend([SendResult.ok(message_id="feedback")] * 3)
+            await app.handle_card_action(click)
+            self.assertIn("未确认本轮文件卡片翻页成功", channel.send_calls[-1][1])
+            for retired in (False, True):
+                if retired:
+                    start_wake(client)
+                    finish_wake(client)
+                    self.assertTrue(await ordinary.wait_idle(5))
+                before = len(channel.updates), len(channel.send_calls)
+                await app.handle_card_action(click)
+                self.assertEqual((len(channel.updates), len(channel.send_calls)), (before[0], before[1] + 1))
+                self.assertIn("未确认本轮文件卡片翻页成功", channel.send_calls[-1][1])
+
+    async def test_retired_page_rechecks_disqualification_before_retrying_a_feishu_lock(self):
+        from tests.test_channel_app import failed_card_update_result
+        async with running_channel(cards=True) as (app, channel, client, execution, _, ordinary):
+            page = await open_file_pages(channel, client, execution)
+            start_wake(client)
+            finish_wake(client)
+            self.assertTrue(await ordinary.wait_idle(5))
+            sibling = app._physical_card_location(execution.binding.id, FakeMessage("later", message_id="H2"))
+            update = channel.update_card
+            channel.card_update_results.append(failed_card_update_result())
+            channel.send_results.append(SendResult.ok(message_id="feedback"))
+
+            async def first_attempt(mid, card):
+                receipt = await update(mid, card)
+                if not receipt.success:
+                    # Another card's contradictory receipt disqualifies both message IDs.
+                    sibling.validate(sent_result(mid, chat_id="foreign-chat"), card=True, updated_id="sibling-card")
+                return receipt
+
+            before = len(channel.updates)
+            with patch.object(channel, "update_card", first_attempt):
+                await app.handle_card_action(direct_button_event(page, message_id="first", form_value={"turn_file_page": "1"}))
+            self.assertEqual(len(channel.updates), before + 1)
+            self.assertIn("未确认本轮文件卡片翻页成功", channel.send_calls[-1][1])

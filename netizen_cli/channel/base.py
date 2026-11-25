@@ -910,10 +910,12 @@ class ChannelState:
     async def _update_card(self, message_id: str, content: Any) -> SendResult:
         return await external_call(self._channel.update_card(message_id, content.card), isolate=self._local_sessions is not None)
 
-    async def _safe_update_card(self, message_id: str, content: Any) -> bool:
+    async def _safe_update_card(self, message_id: str, content: Any, *, can_write: Callable[[], bool] = lambda: True) -> bool:
         if not message_id:
             return False
         for attempt in range(len(constants.CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS) + 1):
+            if not can_write():
+                return False
             try:
                 result = await self._update_card(message_id, content)
             except Exception:

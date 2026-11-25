@@ -243,7 +243,7 @@ class _ReplyCardPresenter:
         return await self._reconcile_cards(display, cards)
 
     async def page_file_card(self, intent: TurnFileActionIntent,
-                             fallback: Callable[[TurnFileActionIntent], Awaitable[bool]]) -> bool:
+                             fallback: Callable[[TurnFileActionIntent, Callable[[], bool]], Awaitable[bool]]) -> bool:
         """Resolve the active view or self-contained fallback after earlier replacements settle."""
         mid = intent.source_id
         async with self._message_writer(mid):
@@ -258,12 +258,18 @@ class _ReplyCardPresenter:
                 view.content = replace(view.content, files=refresh_file_page(files, intent.page))
                 return await self._reconcile_locked_card(mid, view, cards)
 
+            def can_write() -> bool:
+                binding = self._binding_locations.get(intent.binding_id)
+                return binding is None or mid not in binding.unusable
+
+            if not can_write():
+                return False
             key = (intent.binding_id, mid)
             reply = intent.reply
             if reply and reply.activity and key in self._retired_file_lines:
                 activity = replace(reply.activity, state_line=self._retired_file_lines[key])
                 intent = replace(intent, reply=replace(reply, activity=activity))
-            return await fallback(intent)
+            return await fallback(intent, can_write)
 
     def _remember_file_line(self, mid: str, view: _PublishedCard, line: str | None) -> None:
         files = view.content.files
