@@ -2706,6 +2706,76 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(sum(content == INCOMPLETE for _, content in fx.channel.replies), int(outcome != "confirmed"))
                 self.assertEqual(mentions.assert_reminder(self), "first")
 
+    async def test_deadline_during_text_fallback_preserves_the_incomplete_notice(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
+        from lark_channel import OutboundCard
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.physical_delivery import BODY
+        from netizen_cli.ordinary_sessions import PhysicalAnswer
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                project_alias="test", creator_id="ou_user",
+                task_feedback=BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=False))
+            running, terminal, release_running = (asyncio.Event() for _ in range(3))
+            calls = []
+            present = app.handle_ordinary_completion
+
+            async def observe(event):
+                if isinstance(event, PhysicalAnswer):
+                    terminal.set()
+                await present(event)
+
+            async def update(mid, card):
+                if "final-answer" in str(card):
+                    if "notice" not in calls:
+                        calls.append("reject terminal")
+                    return SendResult(success=False, raw={"code": 99991400})
+                if not running.is_set() and "segment-one" in str(card):
+                    calls.append("running")
+                    running.set()
+                    await release_running.wait()
+                elif "body" in calls and "notice" not in calls:
+                    calls.append("freeze")
+                    await asyncio.Future()
+                return SendResult.ok(message_id=mid)
+
+            async def reply(origin, item, opts=None):
+                if isinstance(item, OutboundCard):
+                    return SendResult.ok(message_id="card")
+                if item == "final-answer":
+                    calls.append("body")
+                    await asyncio.Future()
+                if item == INCOMPLETE:
+                    calls.append("notice")
+                return SendResult.ok(message_id="post")
+
+            with (patch.object(app, "handle_ordinary_completion", observe), patch.object(fx.channel, "update_card", update),
+                  patch.object(fx.channel, "reply", reply), patch("netizen_cli.runtime.claude_ordinary._CONTROL_SECONDS", .2),
+                  patch.object(ordinary, "_remaining", side_effect=lambda seconds: .5 if seconds == 30 else seconds)):
+                app._progress_cards._poll_seconds = .005
+                await app.handle_message(FakeMessage("work", message_id="H"))
+                cli = clients.calls[-1]
+                cli.init()
+                await self.until(lambda: bool(app._progress_cards._sessions))
+                ledger = next(iter(app._progress_cards._sessions.values())).delivery
+                for block in (TextBlock("segment-one"), ToolUseBlock("tool", "Read", {})):
+                    cli.stream.put_nowait(AssistantMessage([block], "m", session_id=cli.session,
+                        uuid=type(block).__name__, message_id="model"))
+                await asyncio.wait_for(running.wait(), 3)
+                cli.result(result="final-answer", idle=False)
+                try:
+                    await asyncio.wait_for(terminal.wait(), 3)
+                finally:
+                    release_running.set()
+                await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
+                self.assertEqual(calls, ["running", "reject terminal", "body", "notice"])
+                self.assertTrue(ledger.settled)
+                self.assertEqual(ledger.items[BODY], "unknown")
+                cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+                self.assertTrue(await ordinary.wait_idle(3))
+
     async def test_terminal_replacement_settles_after_its_bounded_attempts(self):
         from netizen_cli.bindings import BindingTaskFeedback
         from netizen_cli.channel.physical_delivery import BODY, PhysicalDelivery

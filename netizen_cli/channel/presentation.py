@@ -216,15 +216,18 @@ class CompletionPresentationChannel(ChannelReplies):
                 content += policy.plain_suffix()
                 await self._send_receipted_items(outcome, policy, ledger, (*body_items, *matching_items), content, "final", location)
         finally:
-            if first_id and last_snapshot:
-                frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
-                    run_continues=outcome.run_continues, include_result=False, collapsed=True)
-                shown = tuple(("partial", part.item_id) for part in last_snapshot.partial_answers)
-                items = (*shown, *body_items) if any(item in matching_items for item in shown) else shown
-                await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False,
-                    delivery=ledger, items=items)
-            else:
-                await self._progress_cards.reconcile(display)
+            # A fallback cancelled at the content deadline must leave the notice its own budget.
+            if policy.deadline is None or asyncio.get_running_loop().time() < policy.deadline:
+                async with asyncio.timeout_at(policy.deadline):
+                    if first_id and last_snapshot:
+                        frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
+                            run_continues=outcome.run_continues, include_result=False, collapsed=True)
+                        shown = tuple(("partial", part.item_id) for part in last_snapshot.partial_answers)
+                        items = (*shown, *body_items) if any(item in matching_items for item in shown) else shown
+                        await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False,
+                            delivery=ledger, items=items)
+                    else:
+                        await self._progress_cards.reconcile(display)
 
     async def _send_receipted_items(self, outcome: TurnResult, policy: ItemDelivery, ledger: PhysicalDelivery, items: tuple[Item, ...],
                                    content: str | OutboundPost, operation: str, location: CardReplyLocation) -> None:
