@@ -2114,7 +2114,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 return await update(mid, card)
 
             async def observe(event):
-                if isinstance(event, PhysicalAnswer):
+                # Only the two fixture bodies create result cards. A bodyless wake
+                # still hands its physical verdict to the presenter.
+                if isinstance(event, PhysicalAnswer) and event.final_response:
                     physical["first" if event.final_response in ("first answer", "one answer") else "wake"] = event
                 await complete(event)
 
@@ -2249,6 +2251,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     before = len(attempts)
                 self.assertTrue(await ordinary.wait_idle(10))
                 assert_current("全部完成")
+                if wake == "bodyless":
+                    self.assertNotIn("wake", visible)
                 if matching_partial:
                     self.assertTrue(all(isinstance(item, OutboundCard) for _, item in fx.channel.replies))
                 self.assertEqual(redundant, [])
