@@ -11,7 +11,7 @@ from weakref import ref
 
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, HookJSONOutput, HookMatcher, Message, ResultMessage,
-    StreamEvent, SystemMessage, TextBlock, ToolUseBlock, get_session_info, get_session_messages,
+    StreamEvent, SystemMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage, get_session_info, get_session_messages,
 )
 
 from .. import claude_installation
@@ -61,6 +61,17 @@ def _content(value: Any) -> bool:
     )
 
 
+def _user_content(value: Any) -> bool:
+    if isinstance(value, str):
+        return True
+    return isinstance(value, list) and all(
+        isinstance(block, ContentBlock) and (
+            not isinstance(block, ToolResultBlock) or
+            (_identifier(block.tool_use_id) and (block.is_error is None or type(block.is_error) is bool))
+        ) for block in value
+    )
+
+
 def _origin(value: Any) -> bool:
     return isinstance(value, dict) and _identifier(value.get("kind")) and all(
         _identifier(value[key]) for key in ("producer", "runId") if key in value)
@@ -80,6 +91,7 @@ CONSUMED_FIELDS: dict[str, dict[str, Callable[[Any], bool]]] = {
     "task_notification": _session | {"task_id": _identifier, "status": _identifier},
     "assistant": _session | _human | {"parent_tool_use_id": _optional(_identifier), "content": _content,
         "uuid": _optional(_identifier), "message_id": _optional(_identifier)},
+    "user": {"parent_tool_use_id": _optional(lambda x: isinstance(x, str)), "content": _user_content},
     "stream": _session | _human | {"parent_tool_use_id": _optional(_identifier)},
     "result": _session | _human | {"uuid": _identifier, "subtype": _identifier, "is_error": lambda x: type(x) is bool,
                                    "terminal_reason": _optional(_identifier), "result": _optional(lambda x: isinstance(x, str)),
@@ -119,6 +131,8 @@ async def ordered_messages(client: ClaudeClient, session: str) -> AsyncGenerator
             validate_fields("result", message, session)
         elif isinstance(message, AssistantMessage):
             validate_fields("assistant", message, session)
+        elif isinstance(message, UserMessage):
+            validate_fields("user", message, session)
         elif isinstance(message, StreamEvent):
             validate_fields("stream", message, session)
         yield message

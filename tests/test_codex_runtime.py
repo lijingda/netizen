@@ -5606,7 +5606,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return opened.observe()
             def updates():
                 return [check_pairs(args[1]) for name, args, _ in wire.events if name == "process.update"]
-            with patch("netizen_cli.runtime.activity.time", side_effect=lambda: clock[0]):
+            with patch("netizen_cli.activity_accumulator.time", side_effect=lambda: clock[0]):
                 handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, plan_updated=True, steps=plan))
                 await presenter.open(replace(opened, observe=read))
                 state = presenter._process[key]
@@ -5750,7 +5750,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             presenter._process_port = wire.port
             presenter._clock = lambda: clock[0]
             presenter._poll_seconds = 60
-            with patch("netizen_cli.runtime.activity.time", side_effect=lambda: clock[0]):
+            with patch("netizen_cli.activity_accumulator.time", side_effect=lambda: clock[0]):
                 handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, plan_updated=True,
                     steps=(TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS),)))
                 await presenter.open(opened)

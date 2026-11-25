@@ -11,13 +11,12 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from ..bindings import BindingTaskFeedback
 from ..file_evidence import FileEvidence
-from ..ordinary_sessions import LogicalReply
+from ..ordinary_sessions import LogicalReply, TerminalStatus as TerminalStatus
 from ..partial_answers import PartialAnswer as NativePartial
 from ..runtime.contracts import SideTurnActivitySnapshot, TurnActivitySnapshot
 from .topics import CardReplyLocation
 
 Activity = TurnActivitySnapshot | SideTurnActivitySnapshot
-TerminalStatus = Literal["completed", "interrupted", "failed"]
 
 
 def terminal_view(

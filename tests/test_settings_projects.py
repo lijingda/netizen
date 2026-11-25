@@ -22,12 +22,13 @@ class SettingsTest(unittest.TestCase):
     def test_claude_pilot_policy_defaults_to_an_explicit_gap(self):
         self.assertIn("claude", KNOWN_BACKENDS)
         policy = BackendPolicy("claude", owner_id="owner")
-        for op in ("stop", "list_bindings", "context", "worktrees", "progress"):
+        for op in ("stop", "list_bindings", "context", "worktrees", "progress", "files"):
             self.assertIsNone(policy.operation_refusal(op, op))
         with_progress = policy.bind(lambda provider: provider is Provider.REPLY_PROGRESS)
-        self.assertTrue(with_progress.allows(OperationId.PROGRESS, "api"))
         without_progress = policy.bind(lambda provider: provider is not Provider.REPLY_PROGRESS)
-        self.assertFalse(without_progress.allows(OperationId.PROGRESS, "api"))
+        for operation in (OperationId.PROGRESS, OperationId.FILES):
+            self.assertTrue(with_progress.allows(operation, "api"))
+            self.assertFalse(without_progress.allows(operation, "api"))
         for op in ("goal", "schedules", "unknown"):
             self.assertIn(op, policy.operation_refusal(op, op))
             self.assertIsNone(BackendPolicy("codex").operation_refusal(op, op))

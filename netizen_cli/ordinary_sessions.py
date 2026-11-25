@@ -3,7 +3,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from .backends import BackendPolicy
 from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
@@ -17,6 +17,10 @@ from .runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, ReleaseDisposition, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TerminalStateUnknown, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
+
+
+TerminalStatus = Literal["completed", "interrupted", "failed"]
+PhysicalTerminalHandler = Callable[[TurnActivitySnapshot, TerminalStatus, bool], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +108,9 @@ class _ReplyMessage:
         return self.location_usable(self.message_id)
 
 
+ANSWER_ITEM_KINDS = frozenset({"body", "partial", "files"})
+
+
 @dataclass(slots=True, weakref_slot=True, eq=False)
 class LogicalReply:
     attempted: bool = False
@@ -114,7 +121,7 @@ class LogicalReply:
     def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], usable: Callable[[str], bool]) -> None:
         if self.messages is None:
             return
-        answers = {(turn_id, kind, item_id) for kind, item_id in items if kind in ("body", "partial")}
+        answers = {(turn_id, kind, item_id) for kind, item_id in items if kind in ANSWER_ITEM_KINDS}
         if mid:
             message = self.messages.setdefault(mid, _ReplyMessage(mid, usable))
             message.confirmed_any = True
@@ -159,6 +166,7 @@ class PhysicalAnswer(OrdinaryConclusion):
     reply: LogicalReply | None = None
     publishable: Callable[[], bool] = lambda: True
     delivery_deadline: float | None = None
+    has_content: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +307,7 @@ class LocalStatusSnapshot(BindingRuntimeSnapshot):
 
 
 class LocalSessionManagement(Protocol):
+    on_physical_terminal: PhysicalTerminalHandler | None
     on_binding_deleted: Callable[[str], Awaitable[None]] | None
 
     @property

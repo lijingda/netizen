@@ -9,13 +9,14 @@ from lark_channel import SendResult
 
 from ..cards.reply import feishu_answer_text
 from ..partial_answers import PartialAnswer
-from ..ordinary_sessions import LogicalReply
+from ..ordinary_sessions import ANSWER_ITEM_KINDS, LogicalReply
 from .messages import _confirmed_reply_id
 from .topics import CardReplyLocation, receipt
 
 Item = tuple[str, str]
 Outcome = Literal["unattempted", "unknown", "rejected", "confirmed"]
 BODY: Item = ("body", "")
+FILES: Item = ("files", "")
 INCOMPLETE = "部分内容未能确认送达。"
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class PhysicalDelivery:
     prepared_images: set[Item] = field(default_factory=set)
     posted: set[Item] = field(default_factory=set)
     settled: bool = False
+    file_limit_notice: str | None = None
 
     def expect(self, item: Item) -> None:
         self.items.setdefault(item, "unattempted")
@@ -61,7 +63,7 @@ class PhysicalDelivery:
         undisputed = tuple(item for item in items if self.items.get(item) != "unknown")
         if post:
             self.posted.update(items)
-        if reply and any(kind in ("body", "partial") for kind, _ in items):
+        if reply and any(kind in ANSWER_ITEM_KINDS for kind, _ in items):
             reply.attempted = True
         self.record(items, "unknown")
         return undisputed

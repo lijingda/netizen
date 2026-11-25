@@ -286,7 +286,7 @@ def _turn_progress_status_lines(
             if progress.plan_may_be_stale
             else ""
         )
-        lines.append(f"任务清单：Codex 尚未生成{suffix}")
+        lines.append(f"任务清单：尚未生成{suffix}")
         return tuple(lines)
 
     title = "任务清单"
@@ -910,12 +910,17 @@ class ChannelState:
     async def _update_card(self, message_id: str, content: Any) -> SendResult:
         return await external_call(self._channel.update_card(message_id, content.card), isolate=self._local_sessions is not None)
 
-    async def _safe_update_card(self, message_id: str, content: Any) -> bool:
+    async def _safe_update_card(self, message_id: str, content: Any, *, can_write: Callable[[], bool] = lambda: True,
+                                validate: Callable[[SendResult], SendResult] | None = None) -> bool:
         if not message_id:
             return False
         for attempt in range(len(constants.CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS) + 1):
+            if not can_write():
+                return False
             try:
                 result = await self._update_card(message_id, content)
+                if validate:
+                    result = validate(result)
             except Exception:
                 logger.exception("failed to render card action result")
                 return False

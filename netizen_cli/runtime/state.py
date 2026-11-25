@@ -33,7 +33,7 @@ from ..domain import (
 )
 from ..model_settings import TurnModelSettings
 from ..partial_answers import PartialAnswer
-from ..process_activity import ProcessActivityWindow
+from ..activity_accumulator import ActivityAccumulator
 from ..progress_card_settings import ProgressCardSettings
 from .thread_naming import ThreadNamer
 from .codex_contracts import RuntimeOutcome, CompletionHandler
@@ -69,10 +69,6 @@ from ..sdk_gap_adapter import (
     ThreadSubscriptionControl,
 )
 from ..terminal_cleanup import BackgroundTerminalInspector, TerminalCleanup
-from ..turn_activity import (
-    TurnActivityEntrySnapshot,
-    TurnPlanStepSnapshot,
-)
 from ..user_questions import (
     BindingQuestionTarget,
     QuestionRequest,
@@ -135,19 +131,9 @@ class _ActiveTurn:
     activity_observation_enabled: bool = True
     steer_count: int = 0
     plan_cursor: int = 0
-    plan_generated: bool = False
-    plan_available: bool = True
-    plan_may_be_stale: bool = False
+    activity: ActivityAccumulator = field(default_factory=ActivityAccumulator)
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
-    plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
-    activity_sequence: int = 0
-    activity_segment: int = 0
-    activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
-    activity_commentary_order: list[str] = field(default_factory=list)
-    activity_operations: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
-    activity_operation_order: list[str] = field(default_factory=list)
     partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
     task: asyncio.Task[None] | None = None
@@ -199,16 +185,7 @@ class _ActiveGoal:
     activity_turn_id: str | None = None
     activity_turn_ids: set[str] = field(default_factory=set)
     plan_cursor: int = 0
-    plan_generated: bool = False
-    plan_available: bool = True
-    plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
-    activity_sequence: int = 0
-    activity_segment: int = 0
-    activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
-    activity_commentary_order: list[str] = field(default_factory=list)
-    activity_operations: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
-    activity_operation_order: list[str] = field(default_factory=list)
+    activity: ActivityAccumulator = field(default_factory=ActivityAccumulator)
     partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
     pause_attempted: bool = False
@@ -283,19 +260,9 @@ class _ActiveSideTurn:
     activity_observation_enabled: bool = True
     steer_count: int = 0
     plan_cursor: int = 0
-    plan_generated: bool = False
-    plan_available: bool = True
-    plan_may_be_stale: bool = False
+    activity: ActivityAccumulator = field(default_factory=ActivityAccumulator)
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
-    plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
-    activity_sequence: int = 0
-    activity_segment: int = 0
-    activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
-    activity_commentary_order: list[str] = field(default_factory=list)
-    activity_operations: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
-    activity_operation_order: list[str] = field(default_factory=list)
     partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
     task: asyncio.Task[None] | None = None

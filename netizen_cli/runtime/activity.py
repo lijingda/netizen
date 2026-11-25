@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import logging
-from time import time
-from dataclasses import replace
 
 
-from ..process_activity import ProcessActivityWindow
+from ..activity_accumulator import ActivityAccumulator
 from ..partial_answers import PartialAnswer, partial_answers_from_items
 from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot
 from .contracts import (
@@ -18,14 +16,7 @@ from .contracts import (
     SideTurnActivitySnapshot,
     GoalActivitySnapshot,
 )
-from ..turn_activity import (
-    TurnPlanStepSnapshot,
-    TurnActivityEntrySnapshot,
-    TurnActivityEvent,
-    TurnActivityKind,
-    TurnActivityNotificationProjection,
-    TurnActivityStatus,
-)
+from ..turn_activity import TurnActivityNotificationProjection
 from ..turn_plan_observer import TurnActivityObservation, TurnActivityObserver
 
 from .state import (
@@ -111,13 +102,13 @@ class TurnActivityRuntime(NativeQueryRuntime):
             revision=active.activity_revision,
             state=active.state,
             steer_count=active.steer_count,
-            plan_available=active.plan_available,
-            plan_generated=active.plan_generated,
-            plan_may_be_stale=active.plan_may_be_stale,
-            steps=active.plan_steps,
-            process_items=active.process_activity.rows if active.process_activity is not None else None,
-            commentary=self._activity_commentary(active),
-            operations=self._activity_operations(active),
+            plan_available=active.activity.plan_available,
+            plan_generated=active.activity.plan_generated,
+            plan_may_be_stale=active.activity.plan_may_be_stale,
+            steps=active.activity.steps,
+            process_items=active.activity.process_items,
+            commentary=active.activity.commentary,
+            operations=active.activity.operations(active.task_feedback.progress_card_settings),
             partial_answers=tuple(active.partial_answers.values()),
             progress_card_settings=active.task_feedback.progress_card_settings,
         )
@@ -158,13 +149,13 @@ class TurnActivityRuntime(NativeQueryRuntime):
             revision=active.activity_revision,
             state=active.state,
             steer_count=active.steer_count,
-            plan_available=active.plan_available,
-            plan_generated=active.plan_generated,
-            plan_may_be_stale=active.plan_may_be_stale,
-            steps=active.plan_steps,
-            process_items=active.process_activity.rows if active.process_activity is not None else None,
-            commentary=self._activity_commentary(active),
-            operations=self._activity_operations(active),
+            plan_available=active.activity.plan_available,
+            plan_generated=active.activity.plan_generated,
+            plan_may_be_stale=active.activity.plan_may_be_stale,
+            steps=active.activity.steps,
+            process_items=active.activity.process_items,
+            commentary=active.activity.commentary,
+            operations=active.activity.operations(active.task_feedback.progress_card_settings),
             partial_answers=tuple(active.partial_answers.values()),
             progress_card_settings=active.task_feedback.progress_card_settings,
         )
@@ -177,13 +168,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
         return (
             active.state,
             active.steer_count,
-            active.plan_available,
-            (
-                active.plan_generated, active.plan_may_be_stale, active.plan_steps,
-            ) if settings.show_plan and active.plan_available else (),
-            self._activity_commentary(active) if settings.show_commentary else (),
-            self._activity_operations(active) if settings.show_operations else (),
-            active.process_activity.revision if active.process_activity is not None else None,
+            active.activity.visible_state(settings),
             tuple(active.partial_answers.values()),
         )
 
@@ -196,7 +181,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             return None
         observer = self._turn_plan_observer
         if observer is None:
-            active.plan_available = False
+            active.activity.plan_available = False
             active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
@@ -209,7 +194,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
                 progress_card_settings=active.task_feedback.progress_card_settings,
             )
         except Exception as error:
-            active.plan_available = False
+            active.activity.plan_available = False
             active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
@@ -222,7 +207,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
                 },
             )
             return None
-        active.plan_available = True
+        active.activity.plan_available = True
         active.plan_cursor = observation.next_cursor
         for request in observation.questions:
             self._deliver_question(active, active.handle.id, request)
@@ -231,111 +216,22 @@ class TurnActivityRuntime(NativeQueryRuntime):
             # Preserve the drain trigger; only handle.run() proves terminal.
             active.completion_notification_seen = True
         self._apply_partial_answers(active, observation.partial_answers)
-        self._apply_activity_events(active, observation.events)
+        active.activity.observe(observation.events, active.task_feedback)
         if observation.plan_updated:
-            self._apply_plan(active, observation.steps)
-            active.plan_generated = True
+            active.activity.apply_plan(observation.steps, active.task_feedback)
             active.plan_last_update_cursor = observation.plan_cursor
             stale_after = active.plan_stale_after_cursor
             if (
-                active.plan_may_be_stale
+                active.activity.plan_may_be_stale
                 and stale_after is not None
                 and observation.plan_cursor is not None
                 and observation.plan_cursor > stale_after
             ):
-                active.plan_may_be_stale = False
+                active.activity.plan_may_be_stale = False
                 active.plan_stale_after_cursor = None
         if self._turn_activity_visible_state(active) != before:
             active.activity_revision += 1
         return observation
-
-    @staticmethod
-    def _activity_commentary(
-        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
-    ) -> tuple[TurnActivityEntrySnapshot, ...]:
-        return tuple(
-            active.activity_commentary[item_id]
-            for item_id in active.activity_commentary_order
-        )
-
-    @staticmethod
-    def _activity_operations(
-        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
-    ) -> tuple[TurnActivityEntrySnapshot, ...]:
-        ordered: list[tuple[int, TurnActivityEntrySnapshot]] = []
-        subagents: dict[
-            tuple[int, TurnActivityStatus], tuple[int, TurnActivityEntrySnapshot]
-        ] = {}
-        by_time = active.task_feedback.progress_card_settings.organization == "time"
-        for position, item_id in enumerate(active.activity_operation_order):
-            entry = active.activity_operations[item_id]
-            if entry.kind is TurnActivityKind.SUBAGENT:
-                # Hidden/evicted commentary still separates operation segments.
-                # Within each segment keep the existing status-based grouping.
-                key = (entry.segment if by_time else 0, entry.status)
-                previous = subagents.get(key)
-                count = entry.count + (previous[1].count if previous else 0)
-                subagents[key] = (position, replace(entry, count=count))
-                continue
-            ordered.append((position, entry))
-        ordered.extend(subagents.values())
-        ordered.sort(key=lambda item: item[0])
-        return tuple(item for _position, item in ordered)
-
-    @staticmethod
-    def _process_window(active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal) -> ProcessActivityWindow | None:
-        if active.task_feedback.progress_card_enabled:
-            return None
-        if active.process_activity is None:
-            active.process_activity = ProcessActivityWindow(time)
-        return active.process_activity
-
-    def _apply_plan(self, active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal, steps: tuple[TurnPlanStepSnapshot, ...]) -> None:
-        active.plan_steps = steps
-        if active.task_feedback.progress_card_settings.show_plan and (window := self._process_window(active)):
-            window.plan(steps)
-
-    def _apply_activity_events(
-        self,
-        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
-        events: tuple[TurnActivityEvent, ...],
-    ) -> None:
-        settings = active.task_feedback.progress_card_settings
-        window = self._process_window(active) if events else None
-        for event in events:
-            if window is not None:
-                window.observe(event, settings)
-            commentary = event.kind is TurnActivityKind.COMMENTARY
-            if commentary and event.text is None:
-                continue
-            active.activity_sequence += 1
-            if commentary:
-                active.activity_segment += 1
-            entry = TurnActivityEntrySnapshot(
-                kind=event.kind,
-                status=event.status,
-                event_timestamp_ms=event.event_timestamp_ms,
-                text=event.text,
-                count=event.count,
-                sequence=active.activity_sequence,
-                segment=active.activity_segment,
-            )
-            if commentary:
-                entries = active.activity_commentary
-                order = active.activity_commentary_order
-                limit = settings.commentary_limit
-            else:
-                entries = active.activity_operations
-                order = active.activity_operation_order
-                limit = settings.operation_limit
-            item_id = event.item_id
-            entries[item_id] = entry
-            if item_id in order:
-                order.remove(item_id)
-            order.append(item_id)
-            while len(order) > limit:
-                discarded = order.pop(0)
-                entries.pop(discarded, None)
 
     @staticmethod
     def _apply_partial_answers(
@@ -379,18 +275,9 @@ class TurnActivityRuntime(NativeQueryRuntime):
 
     @staticmethod
     def _reset_activity(active: _ActiveGoal) -> None:
-        if active.process_activity is not None:
-            active.process_activity.close()
-            active.process_activity = None
+        active.activity.close()
+        active.activity = ActivityAccumulator()
         active.plan_cursor = 0
-        active.activity_sequence = 0
-        active.activity_segment = 0
-        active.plan_generated = False
-        active.plan_steps = ()
-        active.activity_commentary.clear()
-        active.activity_commentary_order.clear()
-        active.activity_operations.clear()
-        active.activity_operation_order.clear()
 
     def is_compacting(self, binding_id: str) -> bool:
         return binding_id in self._compacting
@@ -439,12 +326,12 @@ class TurnActivityRuntime(NativeQueryRuntime):
             physical_turn_id=active.activity_turn_id,
             revision=active.activity_revision,
             state=active.state,
-            plan_available=active.plan_available,
-            plan_generated=active.plan_generated,
-            steps=active.plan_steps,
-            process_items=active.process_activity.rows if active.process_activity is not None else None,
-            commentary=self._activity_commentary(active),
-            operations=self._activity_operations(active),
+            plan_available=active.activity.plan_available,
+            plan_generated=active.activity.plan_generated,
+            steps=active.activity.steps,
+            process_items=active.activity.process_items,
+            commentary=active.activity.commentary,
+            operations=active.activity.operations(active.task_feedback.progress_card_settings),
             partial_answers=tuple(active.partial_answers.values()),
             progress_card_settings=active.task_feedback.progress_card_settings,
         )
@@ -454,12 +341,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
         return (
             active.state,
             active.activity_turn_id,
-            active.plan_available,
-            (active.plan_generated, active.plan_steps)
-            if settings.show_plan and active.plan_available else (),
-            self._activity_commentary(active) if settings.show_commentary else (),
-            self._activity_operations(active) if settings.show_operations else (),
-            active.process_activity.revision if active.process_activity is not None else None,
+            active.activity.visible_state(settings),
             tuple(active.partial_answers.values()),
         )
 
@@ -472,14 +354,14 @@ class TurnActivityRuntime(NativeQueryRuntime):
             return
         before = self._goal_activity_visible_state(active)
         if projection is None:
-            active.plan_available = False
+            active.activity.plan_available = False
             if self._goal_activity_visible_state(active) != before:
                 active.activity_revision += 1
             return
         turn_id = projection.turn_id
         if turn_id is None:
             return
-        active.plan_available = True
+        active.activity.plan_available = True
         if projection.turn_started and turn_id != active.activity_turn_id:
             if turn_id in active.activity_turn_ids:
                 return
@@ -491,10 +373,9 @@ class TurnActivityRuntime(NativeQueryRuntime):
             # the new Turn's Activity Module.
             return
         if projection.plan_updated:
-            self._apply_plan(active, projection.steps)
-            active.plan_generated = True
+            active.activity.apply_plan(projection.steps, active.task_feedback)
         if projection.event is not None:
-            self._apply_activity_events(active, (projection.event,))
+            active.activity.observe((projection.event,), active.task_feedback)
         if projection.question is not None:
             self._deliver_question(active, turn_id, projection.question)
         if projection.partial_answer is not None:

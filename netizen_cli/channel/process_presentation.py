@@ -72,10 +72,15 @@ class ProcessList:
             key: item for key, item in self._window.items() if isinstance(item, StepItem) and not has_plan
         }
         for row in rows or ():
-            if row.kind == "step" and not has_plan:
-                continue
             item = self._item(row)
             key = item.item_id
+            if row.kind == "step" and not has_plan:
+                # An unavailable plan cannot add or remove steps. A retained END
+                # still proves completion even when both observations share a poll.
+                retained = current.get(key) or self.running_offers.get(key)
+                if retained is not None and row.finished_at is not None:
+                    current[key] = retained.finish(row.finished_at)
+                continue
             if key in current or (isinstance(item, StepItem) and item.text in outside and key not in self._step_pins):
                 continue
             pinned = self._step_pins.get(key) or self.running_offers.get(key) or self.pinned.get(key)

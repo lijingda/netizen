@@ -63,11 +63,8 @@
                   },
                   "elements": [
                     {
-                      "tag": "div",
-                      "text": {
-                        "tag": "plain_text",
-                        "content": "过程信息：暂不可用"
-                      }
+                      "tag": "markdown",
+                      "content": "**任务清单**：尚未生成"
                     }
                   ]
                 }
@@ -143,11 +140,16 @@
                 },
                 "elements": [
                   {
-                    "tag": "div",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "过程信息：暂不可用"
-                    }
+                    "tag": "markdown",
+                    "content": "**最近操作**"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 执行命令"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：尚未生成"
                   }
                 ]
               },
@@ -266,11 +268,16 @@
                 },
                 "elements": [
                   {
-                    "tag": "div",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "过程信息：暂不可用"
-                    }
+                    "tag": "markdown",
+                    "content": "**最近操作**"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 执行命令"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：尚未生成"
                   }
                 ]
               },
@@ -387,11 +394,8 @@
                   },
                   "elements": [
                     {
-                      "tag": "div",
-                      "text": {
-                        "tag": "plain_text",
-                        "content": "过程信息：暂不可用"
-                      }
+                      "tag": "markdown",
+                      "content": "**任务清单**：尚未生成"
                     }
                   ]
                 },
@@ -488,11 +492,16 @@
                 },
                 "elements": [
                   {
-                    "tag": "div",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "过程信息：暂不可用"
-                    }
+                    "tag": "markdown",
+                    "content": "**最近操作**"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 执行命令"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：尚未生成"
                   }
                 ]
               },
@@ -603,11 +612,8 @@
                 },
                 "elements": [
                   {
-                    "tag": "div",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "过程信息：暂不可用"
-                    }
+                    "tag": "markdown",
+                    "content": "**任务清单**：尚未生成"
                   }
                 ]
               },
@@ -953,11 +959,16 @@
                   },
                   "elements": [
                     {
-                      "tag": "div",
-                      "text": {
-                        "tag": "plain_text",
-                        "content": "过程信息：暂不可用"
-                      }
+                      "tag": "markdown",
+                      "content": "**最近操作**"
+                    },
+                    {
+                      "tag": "markdown",
+                      "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 执行命令"
+                    },
+                    {
+                      "tag": "markdown",
+                      "content": "**任务清单**：尚未生成"
                     }
                   ]
                 },
@@ -1095,11 +1106,8 @@
                   },
                   "elements": [
                     {
-                      "tag": "div",
-                      "text": {
-                        "tag": "plain_text",
-                        "content": "过程信息：暂不可用"
-                      }
+                      "tag": "markdown",
+                      "content": "**任务清单**：尚未生成"
                     }
                   ]
                 }
@@ -1175,11 +1183,16 @@
                 },
                 "elements": [
                   {
-                    "tag": "div",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "过程信息：暂不可用"
-                    }
+                    "tag": "markdown",
+                    "content": "**最近操作**"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 执行命令"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：尚未生成"
                   }
                 ]
               },
@@ -1271,11 +1284,8 @@
                   },
                   "elements": [
                     {
-                      "tag": "div",
-                      "text": {
-                        "tag": "plain_text",
-                        "content": "过程信息：暂不可用"
-                      }
+                      "tag": "markdown",
+                      "content": "**任务清单**：尚未生成"
                     }
                   ]
                 },
@@ -1372,11 +1382,16 @@
                 },
                 "elements": [
                   {
-                    "tag": "div",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "过程信息：暂不可用"
-                    }
+                    "tag": "markdown",
+                    "content": "**最近操作**"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "<local_datetime millisecond='1000' format_type='date_num'></local_datetime> <local_datetime millisecond='1000' format_type='time'></local_datetime> · ✓ 执行命令"
+                  },
+                  {
+                    "tag": "markdown",
+                    "content": "**任务清单**：尚未生成"
                   }
                 ]
               },
@@ -1524,11 +1539,8 @@
                   },
                   "elements": [
                     {
-                      "tag": "div",
-                      "text": {
-                        "tag": "plain_text",
-                        "content": "过程信息：暂不可用"
-                      }
+                      "tag": "markdown",
+                      "content": "**任务清单**：尚未生成"
                     }
                   ]
                 }
@@ -1604,11 +1616,8 @@
                 },
                 "elements": [
                   {
-                    "tag": "div",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "过程信息：暂不可用"
-                    }
+                    "tag": "markdown",
+                    "content": "**任务清单**：尚未生成"
                   }
                 ]
               },
@@ -1694,11 +1703,8 @@
                 },
                 "elements": [
                   {
-                    "tag": "div",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "过程信息：暂不可用"
-                    }
+                    "tag": "markdown",
+                    "content": "**任务清单**：尚未生成"
                   }
                 ]
               },

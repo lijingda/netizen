@@ -3228,6 +3228,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("状态：running", reply)
         self.assertIn("已接收调整：1 次", reply)
         self.assertIn("任务清单：暂不可用", reply)
+        self.runtime.turn_progress_values[binding.id] = replace(self.runtime.turn_progress_values[binding.id],
+                                                                plan_available=True, plan_may_be_stale=False)
+        await self.app.handle_message(FakeMessage("/status", message_id="om_status_again"))
+        self.assertIn("任务清单：尚未生成", _status_text(self.channel.replies[-1][1]))
         self.assertEqual(self.runtime.resolve_model_settings_calls, [])
         self.assertEqual(self.runtime.thread_metadata_calls, [])
 

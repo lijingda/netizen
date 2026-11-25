@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
+from ..activity_accumulator import ActivityAccumulator
 from ..bindings import (
     PROJECT_DELETE_LIMIT,
     SideTopicConflict,
@@ -512,10 +513,10 @@ class SideRuntime(SubmissionRuntime):
                 active.steer_count += 1
                 last_update = active.plan_last_update_cursor
                 if last_update is not None and last_update > stale_after_cursor:
-                    active.plan_may_be_stale = False
+                    active.activity.plan_may_be_stale = False
                     active.plan_stale_after_cursor = None
                 else:
-                    active.plan_may_be_stale = True
+                    active.activity.plan_may_be_stale = True
                     active.plan_stale_after_cursor = stale_after_cursor
                 active.activity_revision += 1
                 session.last_activity = asyncio.get_running_loop().time()
@@ -569,7 +570,7 @@ class SideRuntime(SubmissionRuntime):
                         receipt_attempted=receipt_attempted,
                         task_feedback=session.task_feedback,
                         feedback_revision=session.feedback_revision,
-                        plan_available=self._turn_plan_observer is not None,
+                        activity=ActivityAccumulator(plan_available=self._turn_plan_observer is not None),
                     )
                     session.active = active
                     session.last_activity = asyncio.get_running_loop().time()
@@ -990,7 +991,7 @@ class SideRuntime(SubmissionRuntime):
                     break
                 if observation.retained_count >= SIDE_ACTIVITY_QUEUE_HIGH_WATER:
                     before = self._turn_activity_visible_state(active)
-                    active.plan_available = False
+                    active.activity.plan_available = False
                     active.activity_observation_enabled = False
                     if self._turn_activity_visible_state(active) != before:
                         active.activity_revision += 1
@@ -1065,8 +1066,8 @@ class SideRuntime(SubmissionRuntime):
                     self._sides.get(session.side_id) is session
                     and session.active is active
                 ):
-                    if active.terminal_observed and active.process_activity is not None:
-                        active.process_activity.close()
+                    if active.terminal_observed:
+                        active.activity.close()
                     activity = self._side_turn_activity_snapshot(session.side_id, active)
                     cleanup_debt = (
                         active.cleanup_required and not active.cleanup_succeeded

@@ -13,10 +13,35 @@ CHANNEL = "tests.test_claude_channel.OwnerChannelTests."
 EXPLORE = ORDINARY + "test_explore_ordered_task_cuts"
 STOP = CHANNEL + "test_stop_all_uses_only_verified_membership_and_status_buttons_recheck_revision"
 WIRE = CHANNEL + "test_explore_owned_answers_on_the_channel"
+WIRE_SAFETY = CHANNEL + "test_only_allowlisted_activity_reaches_either_reply_transport"
 CANCEL = ORDINARY + "test_send_cancelled_during_shutdown_drains_following_body"
 
 # Each change represents one incorrect decision, with an independently observed consequence.
 MUTANTS = (
+    ("child tools become parent operation rows", "runtime/claude_activity",
+     "if parent is not None:", "if False:",
+     "tests.test_claude_activity.ClaudeToolsTest.test_child_frames_and_late_children_do_not_change_a_successor"),
+    ("tool description becomes public Activity", "runtime/claude_activity",
+     "operation_summary(label, *", 'operation_summary(label, args.get("description", ""), *',
+     WIRE_SAFETY),
+    ("Bash description added to the allowlist", "runtime/claude_activity",
+     '("command",)),', '("command", "description")),', WIRE_SAFETY),
+    ("Bash completion label taken from stdout", "runtime/claude_activity",
+     "replace(row, status=status, event_timestamp_ms=now)",
+     'replace(row, status=status, event_timestamp_ms=now, text=payload["stdout"] '
+     'if name == "Bash" and isinstance(payload, dict) and "stdout" in payload else row.text)', WIRE_SAFETY),
+    ("resumed client discards observed task deltas", "runtime/claude_ordinary",
+     "self.live = LiveSession(self.session, self.fail)",
+     "self.live = LiveSession(self.session, self.fail)\n        if self.binding.native_thread_id: self.checklist.rows = None",
+     ORDINARY + "test_resumed_client_tracks_new_steps_and_late_child_only_invalidates_checklist"),
+    ("requested path substitutes for missing effective path", "runtime/claude_activity",
+     "elif path := _output(name, payload):",
+     'elif (path := _output(name, payload)) or (name == "Write" and row and row.text and " · " in row.text'
+     ' and (path := OutputPath(row.text.partition(" · ")[2]))):',
+     "tests.test_claude_activity.ClaudeToolsTest.test_top_level_start_end_and_effective_files"),
+    ("display churn changes the admission and stop revision", "runtime/claude_ordinary",
+     "signature = (execution.input_id, execution.human.input_id,", "signature = (execution.display_revision, execution.input_id, execution.human.input_id,",
+     ORDINARY + "test_display_churn_preserves_control_revision_and_stop_target"),
     ("notify only when every item is unconfirmed", "channel/physical_delivery",
      'return any(state != "confirmed" for state in self.items.values())',
      'return bool(self.items) and all(state != "confirmed" for state in self.items.values())',
@@ -25,19 +50,19 @@ MUTANTS = (
      '(BODY, *(item for item in ledger.items if item[0] == "image"))',
      CHANNEL + "test_physical_delivery_settles_each_item_once_at_its_target"),
     ("contradicted card is revoked for this input only", "channel/topics", "self.binding.unusable.update(ids)",
-     "from dataclasses import replace\n            self.binding = replace(self.binding, unusable=self.binding.unusable | ids)",
+     "from dataclasses import replace\n        self.binding = replace(self.binding, unusable=self.binding.unusable | ids)",
      CHANNEL + "test_later_humans_share_the_verified_root_and_revoke_a_foreign_card"),
     ("final snapshot loses earlier partials", "runtime/claude_ordinary",
-     "snapshot = execution.activity(turn_id, source.binding.task_feedback, final=body)",
-     "snapshot = execution.activity(turn_id, source.binding.task_feedback, final=body)\n"
+     "snapshot = execution.activity(turn_id, source.feedback, state=state(), final=body)",
+     "snapshot = execution.activity(turn_id, source.feedback, state=state(), final=body)\n"
      "            snapshot = replace(snapshot, partial_answers=snapshot.partial_answers[-1:])",
      CHANNEL + "test_explore_bodyless_partial_handoff"),
-    ("bodyless anonymous wake drops its partials", "runtime/claude_ordinary", "or live.partials or (status",
-     "or (live.partials and not wake) or (status", CHANNEL + "test_explore_bodyless_partial_handoff"),
+    ("bodyless anonymous wake drops its partials", "runtime/claude_ordinary", "if text != final)",
+     "if text != final and not (self.physical_activity and self.physical_activity.anonymous))", CHANNEL + "test_explore_bodyless_partial_handoff"),
     ("healthy close precedes task stop acknowledgment", "runtime/claude_ordinary", "and not execution.awaiting_task_stop)",
      ")", CHANNEL + "test_explore_stop_acknowledgment_and_final_membership"),
-    ("bodyless background pulse keeps running", "channel/presentation", "if outcome.background:",
-     "if outcome.background and outcome.reply.attempted:", CHANNEL + "test_bodyless_human_tracks_background_and_best_effort_updates_do_not_gate_terminal"),
+    ("bodyless background pulse keeps running", "channel/presentation", "if event.background and event.target.run:",
+     "if event.background and event.target.run and display.reply.attempted:", CHANNEL + "test_bodyless_human_tracks_background_and_best_effort_updates_do_not_gate_terminal"),
     ("topic ID replaces verified root", "channel/base", "root = message.source.topic_root_id",
      "root = scope.topic_id", CHANNEL + "test_queued_cron_answer_resolves_the_topic_root_at_channel_handoff"),
     ("cached idle", "runtime/claude_client", "if removed - self.stopped:", "if False:", ORDINARY +
@@ -56,10 +81,10 @@ MUTANTS = (
      "if caller is not None:", CANCEL),
     ("stop intent lost at wake Result", "runtime/claude_ordinary", "                human.stop_requested = True",
      "                pass", WIRE),
-    ("unconfirmed content silently settles", "channel/presentation", "if ledger.settle() and outcome.publishable():",
+    ("unconfirmed content silently settles", "channel/presentation", "if ledger.settle() and display.publishable():",
      "if False:", CHANNEL + "test_physical_delivery_settles_each_item_once_at_its_target"),
-    ("partial IDs absent from Activity revision", "runtime/claude_ordinary", ", tuple(live.partials))", ")", WIRE),
-    ("disabled completion mention", "channel/presentation", "if outcome.mention_user_id and outcome.publishable():",
+    ("partial IDs absent from Activity revision", "runtime/claude_ordinary", ", tuple(self.live.partials), state.line)", ", state.line)", WIRE),
+    ("disabled completion mention", "channel/presentation", "if event.mention_user_id and display.publishable():",
      "if False:", WIRE),
     ("child text becomes partial", "runtime/claude_client", "if parent is None and frame.message_id and not frame.error:",
      "if frame.message_id and not frame.error:", WIRE),
@@ -77,10 +102,10 @@ COMBINED_EXITS = (
 )
 
 
-def run(directory, *cases):
+def run(directory, *cases, failfast=True):
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
-    return subprocess.run([sys.executable, "-B", "-m", "unittest", "-f", *cases], cwd=directory, env=env,
+    return subprocess.run([sys.executable, "-B", "-m", "unittest", *(["-f"] if failfast else []), *cases], cwd=directory, env=env,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90)
 
 
@@ -105,11 +130,17 @@ def main():
             if original.count(before) != 1:
                 raise SystemExit(f"Update the mutation site for {name}.")
             source.write_text(original.replace(before, after))
-            result = run(candidate, test)
+            result = run(candidate, test, failfast=test != WIRE_SAFETY)
             source.write_text(original)
             if result.returncode != 1 or "FAIL:" not in result.stdout:
                 raise SystemExit(f"Missing assertion failure for {name}:\n{result.stdout}")
-            print(f"Killed {name} ({test.rsplit('.', 1)[-1]}).", flush=True)
+            coverage = test.rsplit(".", 1)[-1]
+            if test == WIRE_SAFETY:
+                failures = [line for line in result.stdout.splitlines() if line.startswith("FAIL:")]
+                if not all(any(line.endswith(f"(cards={cards})") for line in failures) for cards in (True, False)):
+                    raise SystemExit(f"Missing a transport assertion for {name}: {failures}")
+                coverage += ", card and process"
+            print(f"Killed {name} ({coverage}).", flush=True)
 
 
 if __name__ == "__main__":

@@ -11,16 +11,20 @@ import os
 from functools import partial
 from pathlib import Path
 import time
+from time import time_ns
 from typing import Any
 from uuid import UUID, uuid4
 
-from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, StreamEvent, SystemMessage
+from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, StreamEvent, SystemMessage, UserMessage
 
+from ..activity_accumulator import ActivityAccumulator
+from ..file_evidence import FileEvidence
+from ..turn_activity import ACTIVITY_DETAIL_KINDS, TurnActivityStatus, bounded_activity_text
 from ..backends import BackendPolicy
 from ..bindings import BindingContextRevisionConflict, BindingNotFound, BindingStore, ProjectDeleting, ProjectNotFound, ScopeNotFound, ThreadBinding
 from ..bindings import BindingTaskFeedback, BindingTurnSettings
 from ..partial_answers import PartialAnswer
-from ..progress_card_settings import ProgressCardSettings
+from ..progress_card_settings import MAX_OPERATION_ROWS, MAX_OPERATION_TEXT_CHARS, ProgressCardSettings
 from ..completion_mention import valid_completion_mention_user_id
 from ..domain import ActiveState, FeishuScope, MessageContextAnchor, MentionContextMode
 from ..session_settings import require_local_settings
@@ -28,8 +32,9 @@ from ..external_calls import ExternalCallCancelled, external_call
 from ..ordinary_sessions import (
     ClaudeCliState, CliStateChanged, ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted,
     LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
-    OrdinarySessionDiverged, PreparedPrompt, ReleaseConfirmation, SessionShutdownPort, StopPreview,
+    OrdinarySessionDiverged, PhysicalTerminalHandler, PreparedPrompt, ReleaseConfirmation, SessionShutdownPort, StopPreview, TerminalStatus,
 )
+from .claude_activity import ClaudeChecklist, ClaudeTurnTools
 from .claude_delivery import AnchorDelivery
 from .claude_status import ClaudeObservations, DEFAULT_OBSERVATIONS, record_observation
 from .claude_client import ClaudeClient, ClaudeClients, LiveSession, SessionReader, live_messages, native_human, single_message, user_message
@@ -118,6 +123,43 @@ class _Publication:
         return self.allowed
 
 
+class _PhysicalActivity:
+    def __init__(self, physical_id: str, checklist: ClaudeChecklist, feedback: BindingTaskFeedback,
+                 *, anonymous: bool) -> None:
+        self.id = physical_id
+        self.anonymous = anonymous
+        if anonymous:
+            # The Result chooses the original input's settings. Keep only the bounded
+            # card window until then. An anonymous init never opens a process writer.
+            feedback = replace(feedback, progress_card_enabled=True,
+                               progress_card_settings=ProgressCardSettings(operation_limit=MAX_OPERATION_ROWS,
+                                                                           operation_max_chars=MAX_OPERATION_TEXT_CHARS))
+        self.feedback = feedback
+        settings = feedback.progress_card_settings
+        assert settings is not None
+        self.view = ActivityAccumulator()
+        self.tools = ClaudeTurnTools(checklist, settings.operation_max_chars)
+
+    def observe(self, frame: AssistantMessage | UserMessage) -> None:
+        now = time_ns() // 1_000_000
+        events = self.tools.assistant(frame, now) if isinstance(frame, AssistantMessage) else self.tools.user(frame, now)
+        self.view.observe(events, self.feedback)
+        rows = self.tools.checklist.rows
+        self.view.plan_generated = self.tools.plan_generated
+        self.view.plan_available = not (self.tools.plan_generated and rows is None)
+        if self.tools.plan_generated and rows is not None:
+            self.view.apply_plan(tuple(rows.values()), self.feedback)
+        else:
+            # Unknown is not an empty replacement plan. Offered steps remain running.
+            self.view.steps = ()
+
+    def finish(self, status: str) -> FileEvidence:
+        closed, files = self.tools.finish(TurnActivityStatus(status), time_ns() // 1_000_000)
+        self.view.observe(closed, self.feedback)
+        self.view.close()
+        return files
+
+
 @dataclass(slots=True)
 class _Execution:
     binding: ThreadBinding
@@ -137,6 +179,10 @@ class _Execution:
     close: asyncio.Task[None] | None = None
     timer: asyncio.TimerHandle | None = None
     signature: tuple[object, ...] | None = None
+    display_signature: tuple[object, ...] | None = None
+    display_revision: int = 1
+    checklist: ClaudeChecklist = field(default_factory=ClaudeChecklist)
+    physical_activity: _PhysicalActivity | None = None
     ending: bool = False
     publication: _Publication = field(default_factory=_Publication)
     started: bool = False
@@ -193,10 +239,30 @@ class _Execution:
     def activity(self, turn_id: str, feedback: BindingTaskFeedback, *, state: ClaudeCliState, final: str | None = None) -> TurnActivitySnapshot:
         partials = tuple(PartialAnswer(self.session, turn_id, key, text) for key, text in self.live.partials.items()
                          if text != final)
-        return TurnActivitySnapshot(self.binding.id, self.session, turn_id, self.revision,
-                                   ActiveState.RUNNING, 0, False, False, False, (), partial_answers=partials,
-                                   progress_card_settings=feedback.progress_card_settings or ProgressCardSettings(),
-                                   physical_turn_id=turn_id, state_line=state.line)
+        settings = feedback.progress_card_settings or ProgressCardSettings()
+        physical = self.physical_activity
+        view = physical.view if physical else ActivityAccumulator(plan_available=False)
+        operations = view.operations(settings)
+        if physical and physical.anonymous:
+            operations = tuple(replace(e, text=bounded_activity_text(e.text, settings.operation_max_chars))
+                               if e.text and e.kind in ACTIVITY_DETAIL_KINDS else e for e in operations)
+        return TurnActivitySnapshot(
+            self.binding.id, self.session, turn_id, self.display_revision, ActiveState.RUNNING, 0,
+            view.plan_available, view.plan_generated, False, view.steps, operations=operations,
+            partial_answers=partials, progress_card_settings=settings, process_items=view.process_items,
+            physical_turn_id=physical.id if physical else None, state_line=state.line,
+        )
+
+    def refresh_display(self, state: ClaudeCliState) -> None:
+        physical = self.physical_activity
+        if physical is None:
+            return
+        settings = physical.feedback.progress_card_settings
+        assert settings is not None
+        signature = (physical.id, physical.view.visible_state(settings), tuple(self.live.partials), state.line)
+        if signature != self.display_signature:
+            self.display_signature = signature
+            self.display_revision += 1
 
     @property
     def finishing(self) -> bool:
@@ -249,7 +315,7 @@ def _denial_notice(denials: object) -> str | None:
     return f"本次有 {len(denials)} 个操作被 Claude Code 的权限设置拒绝{tools}。如需允许，请在 Claude Code 设置中调整权限规则。"
 
 
-def _terminal(message: ResultMessage) -> tuple[str, str | None, str | None]:
+def _terminal(message: ResultMessage) -> tuple[TerminalStatus, str | None, str | None]:
     if type(message.is_error) is not bool:
         raise TerminalStateUnknown(UNKNOWN)
     match (message.subtype, message.terminal_reason, message.is_error):
@@ -301,6 +367,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self.on_physical_terminal: PhysicalTerminalHandler | None = None
         self.on_binding_deleted: Callable[[str], Awaitable[None]] | None = None
         self._activity: dict[str, _BindingActivity] = {}
         self._active: dict[str, _Execution] = {}
@@ -741,6 +808,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             execution.stopping = False
         submitted = execution.submitted(input_id)
         bodyless = (frame.subtype, frame.terminal_reason, frame.is_error) == ("success", None, False) and not frame.result
+        status: TerminalStatus
         status, body, detail = ("completed", None, None) if bodyless else _terminal(frame)
         source = human or execution.human
         if submitted:
@@ -755,24 +823,34 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         # Native error bodies only use the existing safe failure projection.
         # Even without a Result body, finish the proven human's running presenter
         # and transfer this physical turn's validated partials before clearing them.
-        finish_presentation = direct and isinstance(source.origin, ClaudeInputAnchor)
-        if frame.result or detail or live.partials or (status == "completed" and finish_presentation):
+        evidence = execution.physical_activity.finish(status) if execution.physical_activity else FileEvidence()
+        has_content = bool(frame.result or detail or live.partials or evidence.outputs)
+        if human is not None or has_content:
             turn_id = source.input_id if direct else frame.uuid
             state = partial(execution.cli_state, human.input_id if human else "")
+            execution.refresh_display(state())
             snapshot = execution.activity(turn_id, source.feedback, state=state(), final=body)
+            run_continues = human is not None and (
+                live.has_work(human.input_id) or (execution.pending is human and submitted is not human)
+            )
+            if human is not None and self.on_physical_terminal is not None:
+                # Freeze the process writer before any revocable publication is queued.
+                try:
+                    self.on_physical_terminal(snapshot, status, run_continues)
+                except Exception:
+                    logger.exception("Claude physical terminal presentation failed")
             event = PhysicalAnswer(source.binding.id, execution.session,
                                    turn_id, self._owner,
                                    human.source if human else execution.scope, status, body, detail,
                                    task_feedback=source.feedback, feedback_revision=source.binding.feedback_revision,
                                    cwd=self._owned_cwds[source.binding.id], logical_id=human.input_id if human else None,
-                                   run_continues=human is not None and (
-                                       live.has_work(human.input_id) or (execution.pending is human and submitted is not human)
-                                   ),
+                                   run_continues=run_continues,
                                    state=state, session_has_work=lambda: bool(live.tasks or live.crons),
-                                   activity=snapshot, partial_answers=snapshot.partial_answers,
-                                   wake=wake, reply=human.reply if human else None,
+                                   activity=snapshot, partial_answers=snapshot.partial_answers, file_evidence=lambda: evidence,
+                                   has_content=has_content, wake=wake, reply=human.reply if human else None,
                                    publishable=execution.publication.valid)
             self._queue(execution, source, event, conversation_id=None if human else frame.uuid)
+        execution.physical_activity = None
         live.partials.clear()
         live.candidate = None
         if submitted:
@@ -808,8 +886,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if handoff and close:
             execution.closing = True
             live.changed.set()
+        execution.refresh_display(execution.cli_state(live.init_human))
         signature = (execution.input_id, execution.human.input_id, execution.admissible, execution.closing,
-                     live.physical, live.state, live.crons, frozenset(live.tasks.items()), tuple(live.partials))
+                     live.physical, live.state, live.crons, frozenset(live.tasks.items()))
         if signature != execution.signature or invalidate:
             execution.signature = signature
             execution.revision = self._advance(execution.binding.id, execution_id=execution.human.input_id)
@@ -863,6 +942,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                         raise ValueError("unusable Claude session")
                     human = execution.pending
                     pending = human.input_id if human and human.written else None
+                    if isinstance(msg, AssistantMessage):
+                        execution.checklist.observe_child(msg)
                     if isinstance(msg, SystemMessage) and msg.subtype == "init":
                         data = msg.data
                         if Path(data["cwd"]).resolve() != cwd or not Path(data["cwd"]).is_absolute():
@@ -875,7 +956,11 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                             continue  # Cold notification init before the submitted input.
                         live.initialized = True
                         live.init(msg)
-                        execution.routable(live.init_human)
+                        owner = execution.routable(live.init_human)
+                        execution.physical_activity = _PhysicalActivity(
+                            data["uuid"], execution.checklist, (owner or execution.human).feedback,
+                            anonymous=owner is None,
+                        )
                         if not live.init_human:
                             execution.stopping = False
                             execution.stop_receipt = None
@@ -904,8 +989,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     elif isinstance(msg, SystemMessage):
                         live.system(msg)
                     elif isinstance(msg, AssistantMessage):
+                        if execution.physical_activity is not None:
+                            execution.physical_activity.observe(msg)
                         if human := execution.submitted(live.assistant(msg)):
                             await self._intake(execution, human)
+                    elif isinstance(msg, UserMessage):
+                        if execution.physical_activity is not None:
+                            execution.physical_activity.observe(msg)
                     elif isinstance(msg, StreamEvent) and msg.parent_tool_use_id is None:
                         if human := execution.submitted(native_human(msg)):
                             await self._intake(execution, human)

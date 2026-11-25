@@ -335,8 +335,8 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                         active, thread_id=active.handle.thread_id, turn_id=active.handle.id,
                         items=tuple(getattr(result, "items", ())),
                     )
-                if active.terminal_observed and active.process_activity is not None:
-                    active.process_activity.close()
+                if active.terminal_observed:
+                    active.activity.close()
                 activity = self._turn_activity_snapshot(active)
                 if active.terminal_observed:
                     usage_read = _UsageRead()

@@ -154,6 +154,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             stack = self.enterContext(ExitStack())
         stack.enter_context(patch("netizen_cli.runtime.claude_ordinary.uuid4",
                                side_effect=(UUID(int=1), UUID(int=2))))
+        stack.enter_context(patch("netizen_cli.runtime.claude_ordinary.time_ns", return_value=1_000_000_000))
         def expected_changes(trace):
             # PR 315, merged after the fixture was recorded on a1b9eee.
             hint = "如需在终端继续这个会话，请先 /release"
@@ -1057,6 +1058,260 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         last_initial = [card for mid, card in fx.channel.updates if mid == "initial"][-1]
                         self.assertNotIn("Claude：", str(last_initial))
 
+    async def test_only_allowlisted_activity_reaches_either_reply_transport(self):
+        from claude_agent_sdk import AssistantMessage, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock, UserMessage
+        from netizen_cli.bindings import BindingTaskFeedback
+        from tests.support.presenter_traces import delivery_recorder
+        from tests.support.process_transport import ProcessTransport, check_pairs
+
+        secret = "PRIVATEPAYLOAD7Q"
+        # Union of input property names from the pinned CLI's decoded tool catalogs.
+        fields = (
+            "-A -B -C -i -n -o action activeForm addBlockedBy addBlocks allow_large allowedPrompts "
+            "allowed_domains annotations answers args blocked_domains cell_id cell_type channel command "
+            "content context cron cursor dangerouslyDisableSandbox delaySeconds description "
+            "discard_changes durable edit_mode effort file_path findings glob head_limit id isolation "
+            "level limit max_results message metadata model multiline name new_source new_string noop "
+            "notebook_path notify_when_idle offset old_string output_mode owner pages path pattern prompt "
+            "q query questions reason recurring replace_all resumeFromRunId run_in_background script "
+            "scriptPath shell_id skill status stop subagent_type subject summary taskId task_id timeout "
+            "timeout_ms title to todos type url ws "
+        ).split()
+        names = (
+            "Agent AskUserQuestion Bash CronCreate CronDelete CronList DeferredToolPlaceholder Edit "
+            "EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree Glob Grep ListAgents Monitor "
+            "NotebookEdit Read ReportFindings ScheduleWakeup SendMessage Skill Task TaskCreate TaskGet "
+            "TaskList TaskStop TaskUpdate TodoWrite ToolSearch WebFetch WebSearch Workflow Write "
+        ).split() + ["mcp__" + secret, "custom_" + secret]
+        allowed = {"Bash": ("command",), "Read": ("file_path",), "Glob": ("pattern",), "Grep": ("pattern", "path"),
+                   "Write": ("file_path",), "Edit": ("file_path",), "NotebookEdit": ("notebook_path",),
+                   "WebFetch": ("url",), "WebSearch": ("query",)}
+        # Decoded SDK result envelopes. Keep the effective paths and checklist labels public,
+        # and poison the unprojected text, including nested file, patch, task and agent fields.
+        patch_hunk = {"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": [secret]}
+        task = {"id": "1", "subject": "safe-step", "status": "in_progress", "blockedBy": [secret]}
+        result_samples = {
+            "Agent": [{"status": "completed", "agentId": secret, "agentType": secret, "prompt": secret,
+                       "toolsUsed": [secret], "content": [{"type": "text", "text": secret}]},
+                      {"status": "async_launched", "isAsync": True, "description": secret, "prompt": secret,
+                       "agentId": secret, "outputFile": secret, "canReadOutputFile": True}],
+            "Bash": [{"stdout": secret, "stderr": secret, "interrupted": False, "isImage": False,
+                      "noOutputExpected": False}, secret],
+            "CronCreate": [{"id": secret, "humanSchedule": secret, "nextFireAt": 1000,
+                            "recurring": False, "durable": False}],
+            "Edit": [{"filePath": "safe.txt", "oldString": secret, "newString": secret, "originalFile": secret,
+                      "structuredPatch": [patch_hunk], "userModified": False, "replaceAll": False}],
+            "NotebookEdit": [{"notebook_path": "safe.ipynb", "new_source": secret, "old_source": secret,
+                              "original_file": secret, "updated_file": secret, "edit_mode": "replace",
+                              "cell_id": secret, "cell_type": "code", "language": "python", "error": ""}],
+            "Read": [{"type": "notebook", "file": {"filePath": secret, "cells": [
+                {"cellType": "code", "source": secret, "cell_id": secret, "language": "python"}]}},
+                     {"type": "text", "file": {"filePath": secret, "content": secret, "numLines": 1,
+                                              "startLine": 1, "totalLines": 1}}],
+            "TaskCreate": [{"task": {"id": "1", "subject": "safe-step", "description": secret}}],
+            "TaskGet": [{"task": {**task, "description": secret, "blocks": [secret]}}],
+            "TaskList": [{"tasks": [task]}],
+            "TaskUpdate": [{"success": True, "taskId": "1", "updatedFields": ["status"],
+                            "statusChange": {"from": "in_progress", "to": "completed"}},
+                           {"success": False, "taskId": "unknown", "updatedFields": [], "error": secret}],
+            "TodoWrite": [{"oldTodos": [{"content": secret, "activeForm": secret, "status": "completed"}],
+                           "newTodos": [{"content": "safe-step", "activeForm": secret, "status": "pending"}]}],
+            "Write": [{"type": "create", "filePath": "safe.txt", "content": secret, "originalFile": None,
+                       "structuredPatch": [], "userModified": False}],
+        }
+        samples = [(name, payload) for name in names for payload in result_samples.get(name, [secret])]
+        for cards in (True, False):
+            with self.subTest(cards=cards), ExitStack() as stack:
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    events = delivery_recorder(fx.channel, stack)
+                    process = ProcessTransport(events)
+                    app._progress_cards._process_port = process.port
+                    app._progress_cards._poll_seconds = .01
+                    clock[0] = 2.
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                    fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=cards, completion_mention_enabled=False))
+                    fx.channel.reply_results.append(SendResult.ok(message_id="reply"))
+                    await app.handle_message(FakeMessage("work", message_id="H"))
+                    cli = clients.calls[-1]
+                    cli.init()
+                    def assistant(blocks, parent=None):
+                        cli.stream.put_nowait(AssistantMessage(blocks, "model", session_id=cli.session, uuid="fragment",
+                                                              message_id="assistant", parent_tool_use_id=parent))
+                    def result(key, payload, *, failed=False, parent=None):
+                        cli.stream.put_nowait(UserMessage([ToolResultBlock(key, content=secret, is_error=failed)],
+                                                          tool_use_result=payload, parent_tool_use_id=parent))
+                    try:
+                        assistant([ThinkingBlock(secret, secret)])
+                        assistant([TextBlock(secret), ToolUseBlock("child", "Bash", {"command": secret})], "parent")
+                        result("child", result_samples["Bash"][0], parent="parent")
+                        for offset in range(0, len(samples), 5):
+                            for n, (name, payload) in enumerate(samples[offset:offset + 5], offset):
+                                key = f"tool-{n}"
+                                inputs = dict.fromkeys(fields, secret)
+                                inputs.update(dict.fromkeys(allowed.get(name, ()), "safe-detail"))
+                                assistant([ToolUseBlock(key, name, inputs)])
+                                result(key, payload)
+                            # Sample every batch on the live wire before bounded windows can evict it.
+                            mark = f"batch-{offset}"
+                            assistant([ToolUseBlock(mark, "Read", {"file_path": mark, "description": secret})])
+                            await self.until(lambda: mark in str(events))
+                            result(mark, secret, failed=True)
+                        assistant([ToolUseBlock("steps", "TaskList", {})])
+                        result("steps", {"tasks": [{"id": "1", "subject": "final-step", "status": "in_progress",
+                                                    "description": secret}], "raw": secret})
+                        await self.until(lambda: "final-step" in str(events))
+                        self.assertEqual(len(process.created), int(not cards))
+                        self.assertNotIn(secret, str(events))
+                    finally:
+                        cli.result(result="final answer", permission_denials=[{"tool_name": secret, "tool_input": secret}])
+                        self.assertTrue(await ordinary.wait_idle(10))
+                    if not cards:
+                        await self.until(lambda: bool(process.completed))
+                        frames = [args[1] for name, args, _ in events if name == "process.update"]
+                        offered, finished = set(), set()
+                        for update in frames:
+                            starts, ends = check_pairs(update)
+                            offered.update(starts)
+                            finished.update(ends)
+                        self.assertGreater(len(offered), len(names) // 2)
+                        self.assertEqual(offered, finished)
+                        self.assertEqual([args[1] for name, args, _ in events if name == "process.complete"], ["done"])
+                    self.assertIn("safe-detail", str(events))
+                    self.assertNotIn(secret, str(events))
+
+    @requires_claude_sdk
+    async def test_files_writer_settles_per_page_and_content_with_fresh_transport_nonces(self):
+        from pathlib import Path
+        from netizen_cli.cards import turn_files_card
+        from netizen_cli.cards.callbacks import without_callback_nonces
+        from netizen_cli.channel.reply_presenter import _CardWriter
+        from netizen_cli.turn_files import TurnFile, TURN_FILE_PAGE_SIZE
+
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        files = tuple(TurnFile(str(i), Path(f"/fixture/{i}"), 1, "file") for i in range(TURN_FILE_PAGE_SIZE + 1))
+        page, answer = 0, "first answer"
+        def render():
+            return turn_files_card(scope=scope, binding_id="binding", turn_id="turn", files=files,
+                                   final_response=answer, page=page)
+        one, two = render().card, render().card
+        self.assertNotEqual(one, two)
+        self.assertEqual(without_callback_nonces(one), without_callback_nonces(two))
+        writer = _CardWriter()
+        writes = []
+        async def write(card):
+            writes.append(card)
+            self.assertLessEqual(len(writes), 3)
+            return "confirmed"
+        for page, answer, count in ((0, "first answer", 1), (0, "first answer", 1),
+                                    (1, "first answer", 2), (1, "second answer", 3)):
+            self.assertTrue(await writer.reconcile(render, write))
+            self.assertEqual(len(writes), count)
+
+    @requires_claude_sdk
+    async def test_file_only_answers_offer_effective_outputs_and_owner_callbacks(self):
+        from claude_agent_sdk import AssistantMessage, ToolUseBlock, UserMessage, ToolResultBlock
+        from lark_channel import OutboundCard, OutboundFile
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.turn_files import TURN_FILE_PAGE_SIZE
+
+        for cards in (True, False):
+            with self.subTest(cards=cards):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                    binding = fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=cards, completion_mention_enabled=False))
+                    update = fx.channel.update_card
+                    async def bounded_update(mid, card):
+                        if len(fx.channel.updates) >= 8:
+                            self.fail("the Files card did not settle")
+                        return await update(mid, card)
+                    fx.channel.update_card = bounded_update
+                    fx.channel.reply_results.append(SendResult.ok(message_id="files"))
+                    await app.handle_message(FakeMessage("run", message_id="H"))
+                    cli = clients.calls[-1]
+                    cli.init(uuid="physical-files")
+                    await self.until(lambda: bool(app._progress_cards._sessions))
+                    decoy = cli.cwd / "requested.txt"
+                    decoy.touch()
+                    expected = []
+                    for index in range(TURN_FILE_PAGE_SIZE + 2):
+                        child = index == TURN_FILE_PAGE_SIZE + 1
+                        parent = "agent" if child else None
+                        path = cli.cwd / f"effective-{index}.txt"
+                        path.write_text("fixture")
+                        key = f"write-{index}"
+                        cli.stream.put_nowait(AssistantMessage([ToolUseBlock(key, "Write", {"file_path": str(decoy)})],
+                            "model", session_id=cli.session, parent_tool_use_id=parent))
+                        cli.stream.put_nowait(UserMessage([ToolResultBlock(key)], tool_use_result={"filePath": str(path)},
+                            parent_tool_use_id=parent))
+                        if not child:
+                            expected.append(str(path))
+                    cli.result(reason=None, result=None)
+                    self.assertTrue(await ordinary.wait_idle(10))
+                    def actions(card, intent):
+                        return [behavior["value"] for button in _elements(card, "button") for behavior in button["behaviors"]
+                                if behavior["value"].get("intent") == intent]
+                    card = (fx.channel.updates[-1][1] if cards else
+                            next(body.card for _, body in fx.channel.replies if isinstance(body, OutboundCard)))
+                    send = actions(card, "turn-file.send")
+                    page, = actions(card, "turn-file.page")
+                    self.assertEqual((send[0]["binding_id"], send[0]["turn_id"]), (f"binding:v1:{binding.id}", "turn:v1:physical-files"))
+                    for value, form in ((send[0], None), (page, {"turn_file_page": "1"})):
+                        event = direct_button_event(value, message_id="files", form_value=form)
+                        event.operator.open_id = "other"
+                        before = (len(fx.channel.send_calls), len(fx.channel.updates))
+                        await app.handle_card_action(event)
+                        self.assertIn("仅限所有者", fx.channel.replies[-1][1])
+                        self.assertEqual((len(fx.channel.send_calls), len(fx.channel.updates)), before)
+                    fx.channel.send_results.append(sent_result("attachment", chat_id=scope.chat_id, thread_id="topic",
+                                                              root_id="files", parent_id="files"))
+                    await app.handle_card_action(direct_button_event(send[0], message_id="files"))
+                    to, body, opts = fx.channel.send_calls[-1]
+                    self.assertIsInstance(body, OutboundFile)
+                    self.assertEqual((to, opts.reply_to, body.source.path), (scope.chat_id, "files", send[0]["path"]))
+                    await app.handle_card_action(direct_button_event(page, message_id="files", form_value={"turn_file_page": "1"}))
+                    mid, second = fx.channel.updates[-1]
+                    self.assertEqual(mid, "files")
+                    self.assertCountEqual([v["path"] for v in [*send, *actions(second, "turn-file.send")]], expected)
+
+    @requires_claude_sdk
+    async def test_anonymous_file_only_answer_uses_verified_root_and_settles_once(self):
+        from claude_agent_sdk import AssistantMessage, ToolUseBlock, UserMessage, ToolResultBlock
+        from lark_channel import OutboundCard
+        from netizen_cli.bindings import BindingTaskFeedback
+
+        for cards, lost in product((False, True), repeat=2):
+            with self.subTest(cards=cards, lost=lost):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.TOPIC, "topic")
+                    binding = fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=cards, completion_mention_enabled=False))
+                    await app.handle_message(FakeMessage("go", message_id="H", thread_id="topic", raw={"root_id": "root"}))
+                    cli = clients.calls[-1]
+                    cli.init()
+                    await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "cron"}]}, None, None)
+                    cli.result(reason=None, result=None)
+                    execution = ordinary._active[binding.id]
+                    await self.until(lambda: not execution.humans and not execution.delivery.queues)
+                    cli.init(uuid="cron-init", user_message_uuids=[])
+                    path = cli.cwd / "report.txt"
+                    path.touch()
+                    cli.stream.put_nowait(AssistantMessage([ToolUseBlock("write", "Write", {})], "model", session_id=cli.session))
+                    cli.stream.put_nowait(UserMessage([ToolResultBlock("write")], tool_use_result={"filePath": str(path)}))
+                    confirmed = sent_result("sent", chat_id=scope.chat_id, thread_id="topic", root_id="root")
+                    fx.channel.send_results.extend([TimeoutError() if lost else confirmed, confirmed])
+                    cli.result(user_message_uuid=None, uuid="cron-result", reason=None, result=None)
+                    await self.until(lambda: "cron-result" in cli.live.seen and not execution.delivery.queues)
+                    ((to, body, opts), *others) = fx.channel.send_calls
+                    self.assertIsInstance(body, OutboundCard)
+                    self.assertIn(str(path), str(body.card))
+                    self.assertEqual((to, opts.reply_to, opts.reply_in_thread), (scope.chat_id, "root", True))
+                    self.assertEqual([text for _, text, _ in others], [INCOMPLETE] if lost else [])
+
+    @requires_claude_sdk
     async def test_unauthorized_messages_and_cards_have_no_effects(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2.
@@ -1435,7 +1690,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             await self.until(lambda: activity() and (not cards or bool(confirmed)))
                             revision = activity().revision
                             assistant(TextBlock("initial-fragment"), "initial")
-                            assistant(ToolUseBlock("read", "Read", {}), "initial")
+                            assistant(ToolUseBlock("lookup", "TaskGet", {}), "initial")
                             await self.until(lambda: bool(activity().partial_answers))
                             self.assertGreater(activity().revision, revision)
                             launch("AB")
@@ -1859,7 +2114,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 return await update(mid, card)
 
             async def observe(event):
-                if isinstance(event, PhysicalAnswer):
+                # Only the two fixture bodies create result cards. A bodyless wake
+                # still hands its physical verdict to the presenter.
+                if isinstance(event, PhysicalAnswer) and event.final_response:
                     physical["first" if event.final_response in ("first answer", "one answer") else "wake"] = event
                 await complete(event)
 
@@ -1994,6 +2251,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     before = len(attempts)
                 self.assertTrue(await ordinary.wait_idle(10))
                 assert_current("全部完成")
+                if wake == "bodyless":
+                    self.assertNotIn("wake", visible)
                 if matching_partial:
                     self.assertTrue(all(isinstance(item, OutboundCard) for _, item in fx.channel.replies))
                 self.assertEqual(redundant, [])
