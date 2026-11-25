@@ -67,6 +67,11 @@ class _TaskFiles:
     summary: TurnDiffSummary = TurnDiffSummary()
 
 
+def _file_limit_notice(outcome: TurnResult, error: TurnFileCardLimitError) -> str:
+    logger.warning("completed Turn file manifest exceeds card limit", extra=outcome.target.key.log_context)
+    return f"⚠️ 本轮文件卡片未生成：{error}"
+
+
 async def _best_effort_update(operation: Awaitable[object]) -> None:
     try:
         async with asyncio.timeout(5):
@@ -110,7 +115,10 @@ class CompletionPresentationChannel(ChannelReplies):
         if ledger.settle() and display.publishable():
             try:
                 async with asyncio.timeout(5):
-                    sent = await external_call(policy.send(INCOMPLETE, "notice", policy.location))
+                    notice = ledger.file_limit_notice or INCOMPLETE
+                    if ledger.file_limit_notice and any(item != FILES and state != "confirmed" for item, state in ledger.items.items()):
+                        notice += "\n\n" + INCOMPLETE
+                    sent = await external_call(policy.send(notice, "notice", policy.location))
                 if receipt(sent) != "confirmed":
                     logger.warning("incomplete delivery notice was rejected")
             except Exception:
@@ -191,6 +199,8 @@ class CompletionPresentationChannel(ChannelReplies):
                     file_card = turn_files_card(scope=location.scope, files=files, binding_id=outcome.file_binding_id,
                         turn_id=outcome.physical_turn_id, final_response=body + policy.plain_suffix(),
                         run_continues=outcome.run_continues)
+                except TurnFileCardLimitError as error:
+                    ledger.file_limit_notice = _file_limit_notice(outcome, error)
                 except Exception:
                     logger.warning("physical answer file card unavailable", exc_info=True)
                 else:
@@ -546,17 +556,7 @@ class CompletionPresentationChannel(ChannelReplies):
         except asyncio.CancelledError:
             raise
         except TurnFileCardLimitError as error:
-            logger.warning(
-                "completed Turn file manifest exceeds card limit",
-                extra={
-                    "owner_id": outcome.target.key.owner_id,
-                    "turn_id": outcome.turn_id,
-                },
-            )
-            await self._reply_task_result(
-                outcome,
-                f"{final_response}\n\n⚠️ 本轮文件卡片未生成：{error}",
-            )
+            await self._reply_task_result(outcome, f"{final_response}\n\n{_file_limit_notice(outcome, error)}")
             return
         except Exception:
             logger.exception(

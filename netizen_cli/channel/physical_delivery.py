@@ -37,6 +37,7 @@ class PhysicalDelivery:
     prepared_images: set[Item] = field(default_factory=set)
     posted: set[Item] = field(default_factory=set)
     settled: bool = False
+    file_limit_notice: str | None = None
 
     def expect(self, item: Item) -> None:
         self.items.setdefault(item, "unattempted")

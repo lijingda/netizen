@@ -155,3 +155,22 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(await ordinary.wait_idle(5))
                     self.assertEqual([opts.reply_to for _, msg, opts in channel.send_calls if getattr(msg, "mentions", ())],
                                      ["wake-files"])
+
+    async def test_file_limits_deliver_body_and_precise_notice_in_both_modes(self):
+        from netizen_cli.cards import TURN_FILE_MANIFEST_LIMIT
+        from netizen_cli.cards import reply as renderer
+        for cards in (True, False):
+            for count, budget, reason in ((TURN_FILE_MANIFEST_LIMIT + 1, renderer.TURN_FILE_CARD_JSON_LIMIT_BYTES, "400"),
+                                          (2, 100, "100 bytes")):
+                with self.subTest(cards=cards, reason=reason):
+                    async with running_channel(cards=cards) as (_, channel, client, _, _, ordinary):
+                        for number in range(count):
+                            write_file(client, number)
+                        with patch.object(renderer, "TURN_FILE_CARD_JSON_LIMIT_BYTES", budget):
+                            client.result(result="final answer")
+                            self.assertTrue(await ordinary.wait_idle(10))
+                        texts = [msg for _, msg in channel.replies if isinstance(msg, str)]
+                        self.assertEqual(texts[0], "final answer")
+                        self.assertEqual(len(texts), 2)
+                        self.assertIn("本轮文件卡片未生成", texts[1])
+                        self.assertIn(reason, texts[1])
