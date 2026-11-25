@@ -250,6 +250,38 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(asyncio.gather(*pending), 2)
                 self.assertCountEqual([call.args for call in read.call_args_list], [("delayed",), ("available",)])
 
+    async def test_owner_controls_report_inflight_rename(self):
+        async with owner_channel() as (app, fx, clients, clock, _):
+            clock[0] = 2
+            binding = (await fx.create_binding(self.scope)).binding
+            fx.store.assign_native_thread_id(binding.id, "native")
+            entered, release = asyncio.Event(), threading.Event()
+            loop = asyncio.get_running_loop()
+
+            def write(session, name):
+                loop.call_soon_threadsafe(entered.set)
+                self.assertTrue(release.wait(4))
+                return name
+
+            await app.handle_message(FakeMessage("/config", message_id="config"))
+            form = form_values(fx.channel.replies[-1][1])
+            with patch.object(clients, "rename", side_effect=write):
+                rename = asyncio.create_task(app.handle_message(FakeMessage("/rename held", message_id="rename")))
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    for index, command in enumerate((f"/resume {binding.short_id}", "/release", "/stop")):
+                        count = len(fx.channel.replies)
+                        await app.handle_message(FakeMessage(command, message_id=f"control-{index}"))
+                        self.assertEqual(len(fx.channel.replies), count + 1)
+                        self.assertEqual(fx.channel.replies[-1][1], "会话正在改名，请稍后再试。")
+                    count = len(fx.channel.replies)
+                    await app.handle_card_action(direct_card_event(fx.channel, form, message_id="save-config"))
+                    self.assertEqual(len(fx.channel.replies), count + 1)
+                    self.assertEqual(fx.channel.replies[-1][1], "会话正在改名，请稍后再试。")
+                finally:
+                    release.set()
+                    await rename
+
     async def test_claude_owner_manual_rename_through_all_entries_without_generator(self):
         async with owner_channel() as (app, fx, clients, clock, _):
             clock[0] = 2

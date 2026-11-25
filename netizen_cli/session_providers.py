@@ -1,15 +1,74 @@
-"""Narrow read and naming providers consumed by session management."""
+"""Narrow providers for ordinary session operations."""
+
+from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from .bindings import BindingCursor, ThreadBinding
+from .bindings import BindingCursor, BindingStore, ThreadBinding
 from .ordinary_sessions import LocalExecutionSnapshot, LocalSessionManagement, LocalStatusSnapshot
 from .runtime.codex_contracts import BindingRuntimeSnapshot
 from .session_views import SessionInventoryPage, SessionObservations, SessionQuery
 from .session_inventory import NativeSessionCursor
 from .runtime.contracts import NativeThreadCatalogState, NativeThreadMetadata
+
+if TYPE_CHECKING:
+    from .codex_runtime import CodexRuntime
+
+
+@dataclass(frozen=True, slots=True)
+class PersistentFork:
+    child_id: str
+    source: ThreadBinding
+    verified_cwd: Path | None = None
+    adopt: Callable[[ThreadBinding], Awaitable[bool]] | None = None
+    release_unbound: Callable[[], Awaitable[bool]] | None = None
+
+
+class PartialFork(RuntimeError):
+    def __init__(self, child_id: str, detail: str):
+        super().__init__(detail)
+        self.child_id = child_id
+
+
+class PersistentForkProvider(Protocol):
+    def track_fork_creation(self, project_alias: str) -> AbstractAsyncContextManager[None]: ...
+    def require_fork_creation_open(self, project_alias: str) -> None: ...
+    def project_has_fork_creation(self, project_alias: str) -> bool: ...
+    async def copy_fork(self, source: ThreadBinding, *, expected_project_revision: int,
+                        title: str | None) -> PersistentFork: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CodexPersistentForks:
+    runtime: CodexRuntime
+    bindings: BindingStore
+
+    def track_fork_creation(self, project_alias: str) -> AbstractAsyncContextManager[None]:
+        return self.runtime.track_fork_creation(project_alias)
+
+    def require_fork_creation_open(self, project_alias: str) -> None:
+        self.runtime.require_fork_creation_open(project_alias)
+
+    def project_has_fork_creation(self, project_alias: str) -> bool:
+        return self.runtime.project_has_fork_creation(project_alias)
+
+    async def copy_fork(self, source: ThreadBinding, *, expected_project_revision: int,
+                        title: str | None) -> PersistentFork:
+        assert title
+        current = self.bindings.get(source.id)
+        cwd = await self.runtime.resolve_binding_cwd(
+            current.id, default_cwd=Path(self.bindings.get_project(current.project_alias).cwd))
+        project = self.bindings.get_project(source.project_alias)
+        worktree = self.bindings.worktrees.find_by_cwd(str(cwd), project_alias=project.alias,
+                                                       project_generation=project.generation)
+        source = replace(source, working_cwd=str(cwd), worktree_id=worktree.id if worktree else None)
+        thread = await self.runtime.fork_exact(source, expected_project_revision=expected_project_revision)
+        return PersistentFork(thread.id, source, adopt=lambda binding: self.runtime.adopt_fork(binding, thread, name=title),
+                              release_unbound=lambda: self.runtime.release_unbound_fork(thread))
 
 
 @runtime_checkable

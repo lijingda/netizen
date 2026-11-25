@@ -280,7 +280,8 @@ class ServiceCore:
         return BackendAssembly(
             self._claude, self._claude,
             ManagementRuntimePort(None, ordinary=self._claude, local=self._claude,
-                                  names=SessionNames(writer=self._claude), local_summary=clients.session_metadata),
+                                  names=SessionNames(writer=self._claude), local_summary=clients.session_metadata,
+                                  local_forks=self._claude),
         )
 
     async def _assemble_codex(

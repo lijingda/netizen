@@ -3,9 +3,9 @@ from dataclasses import replace
 from itertools import product
 import json
 from unittest.mock import AsyncMock, PropertyMock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from lark_channel import SendResult
+from lark_channel import OutboundCard, SendResult
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 from types import SimpleNamespace
 import unittest
@@ -14,13 +14,14 @@ from netizen_cli.backends import BackendPolicy, BackendUnsupported
 from netizen_cli.cards.controls import error_card, release_confirmation_card
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.channel.physical_delivery import INCOMPLETE
+from netizen_cli.chat_targets import ValidatedChatTarget
 from netizen_cli.domain import FeishuScope, MessageContextAnchor, ScopeKind
 from netizen_cli.ordinary_sessions import CLAUDE_RELEASE_HINT, ReleaseConfirmation
 from netizen_cli.session_providers import SessionNames
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from tests.support import has_claude_sdk, requires_claude_sdk
 
-from tests.support.channel_cards import _card_button_value, _elements, direct_button_event, direct_card_event, form_values, elements
+from tests.support.channel_cards import _card_button_value, _elements, callback, direct_button_event, direct_card_event, form_values, elements
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
 from tests.support.channel_results import sent_result
@@ -45,7 +46,8 @@ async def owner_channel():
             on_completion=completion, notice=fixture.channel.reply, clock=lambda: clock[0])
         management = InstanceManagementService(bindings=fixture.store, projects=fixture.projects,
             runtime=ManagementRuntimePort(None, ordinary=ordinary, local=ordinary, names=SessionNames(writer=ordinary),
-                                         local_summary=clients.session_metadata), scope_coordinator=ScopeCoordinator())
+                                         local_summary=clients.session_metadata, local_forks=ordinary),
+            scope_coordinator=ScopeCoordinator())
         app = ChannelApplication(app_id="cli_test", channel=fixture.channel, runtime=None, ordinary=ordinary,
             bindings=fixture.store, projects=fixture.projects, management=management, policy=BackendPolicy("claude", "ou_user"))
         ordinary.open_admission()
@@ -1737,10 +1739,10 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 await app.handle_message(FakeMessage(text, message_id="om"))
                 return fx.channel.replies[-1][1]
 
-            for body in ("go", "/new", "/defaults", "/config", "/rename"):
+            for body in ("go", "/new", "/defaults", "/config", "/rename", "/fork"):
                 self.assertEqual(await send(body), GRACE)
             clock[0] = 2.
-            for cmd in ("goal this", "side close", "fork", "usage", "compact", "cron", "archive", "delete",
+            for cmd in ("goal this", "side close", "usage", "compact", "cron", "archive", "delete",
                         "model", "effort", "fast", "speed", "threads archived", "quit", "plan"):
                 with self.subTest(command=cmd):
                     self.assertIn("试点暂不支持", await send("/" + cmd))
@@ -1760,6 +1762,97 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("Codex", content)
                 self.assertNotIn("binding.delete", content)
             self.assertEqual(clients.calls, [])
+
+    async def test_owner_persistent_fork_replaces_confirmed_main_with_unnamed_child(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            target = FeishuScope("cli_test", "oc_destination", ScopeKind.DIRECT)
+            source = (await fx.create_binding(scope)).binding
+            previous = (await fx.create_binding(target)).binding
+            native = str(uuid4())
+            fx.store.assign_native_thread_id(source.id, native)
+            clients.cwds[native], clients.titles[native] = fx.project, "来源方案"
+            app._management.validate_chat_target = AsyncMock(return_value=ValidatedChatTarget(target.chat_id, "p2p"))
+            await app.handle_message(FakeMessage("/fork", message_id="open"))
+            card = fx.channel.replies[-1][1]
+            self.assertIn("来源方案", str(card.card))
+            self.assertIn("来源会话设置的会话 cron 会随对话记录复制，新会话恢复时也会恢复。", str(card.card))
+            self.assertNotIn("归档", str(card.card))
+            form = form_values(card)
+            self.assertFalse(form["fork_name_v6"])
+            self.assertNotIn("fork_source_action_v6", form)
+            form.update(fork_mode_v6="id", fork_chat_id_v6=target.chat_id, fork_landing_v6="main")
+            event = direct_card_event(fx.channel, form)
+            event.action.value = callback(card, "创建分支")
+            event.operator.open_id = "other"
+            await app.handle_card_action(event)
+            event.operator.open_id = "ou_user"
+            clock[0] = 0
+            await app.handle_card_action(event)
+            self.assertEqual(fx.channel.replies[-1][1], GRACE)
+            clock[0] = 2
+            event.action.form_value["fork_source_action_v6"] = "archive"
+            await app.handle_card_action(event)
+            self.assertIn("只支持保留来源", fx.channel.replies[-1][1])
+            del event.action.form_value["fork_source_action_v6"]
+            app._management.validate_chat_target.assert_not_awaited()
+            await app.handle_card_action(event)
+            confirm = OutboundCard(card=fx.channel.updates[-1][1])
+            self.assertIn(previous.short_id, str(confirm.card))
+            value = callback(confirm, "确认创建")
+            event.action.value, event.action.form_value = value, None
+            value["draft"]["fork_source_action_v6"] = "archive"
+            await app.handle_card_action(event)
+            self.assertIn("只支持保留来源", fx.channel.replies[-1][1])
+            del value["draft"]["fork_source_action_v6"]
+            self.assertFalse(clients.forks)
+            fx.channel.send_results.append(sent_result("om_target", chat_id=target.chat_id))
+            with patch.object(ordinary, "binding_pointer_changed", wraps=ordinary.binding_pointer_changed) as switched:
+                await app.handle_card_action(event)
+                branch = fx.store.active_binding(target.key)
+                self.assertNotEqual(branch.id, previous.id, fx.channel.updates)
+                switched.assert_awaited_once_with(previous.id, branch.id)
+            self.assertEqual(clients.forks, [(native, fx.project, None, branch.native_thread_id)])
+            self.assertIsNone(branch.working_cwd)
+            self.assertEqual(fx.store.active_binding(scope.key).native_thread_id, native)
+            self.assertFalse(clients.calls)
+            self.assertIn("会话分支已创建", str(fx.channel.updates[-1][1]))
+
+    async def test_failed_fork_preserves_known_child_in_source_receipt(self):
+        for failure in ("verify", "publish", "bind"):
+            with self.subTest(failure=failure):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                    target = FeishuScope("cli_test", "oc_direct", ScopeKind.TOPIC, "omt_child")
+                    source = (await fx.create_binding(scope)).binding
+                    native = str(uuid4())
+                    fx.store.assign_native_thread_id(source.id, native)
+                    clients.cwds[native] = fx.project
+                    app._management.validate_chat_target = AsyncMock(return_value=ValidatedChatTarget(scope.chat_id, "p2p"))
+                    await app.handle_message(FakeMessage("/fork", message_id="open"))
+                    card = fx.channel.replies[-1][1]
+                    event = direct_card_event(fx.channel, {**form_values(card), "fork_name_v6": " draft   name "})
+                    event.action.value = callback(card, "创建分支")
+                    with ExitStack() as stack:
+                        if failure == "verify":
+                            stack.enter_context(patch.object(clients, "session_cwd", side_effect=[fx.project, None]))
+                        elif failure == "publish":
+                            fx.channel.send_results.append(SendResult(success=False))
+                        else:
+                            fx.channel.send_results.append(sent_result("om_child", chat_id=scope.chat_id, thread_id=target.topic_id))
+                            stack.enter_context(patch.object(fx.store, "create_fork_binding", side_effect=RuntimeError("已变化")))
+                        await app.handle_card_action(event)
+                    (source_id, cwd, title, child_id), = clients.forks
+                    self.assertEqual((source_id, cwd, title), (native, fx.project, "draft name"))
+                    receipt = fx.channel.updates[-1][1]
+                    self.assertIn(child_id, str(receipt))
+                    self.assertIn("可在 Claude Code 中查看", str(receipt))
+                    self.assertFalse(elements(receipt, "button"))
+                    self.assertIsNone(fx.store.active_binding(target.key))
+                    self.assertEqual(fx.store.active_binding(scope.key).native_thread_id, native)
+                    self.assertFalse(clients.calls)
 
     async def test_running_session_and_status_cards_stop_the_exact_turn(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
@@ -2149,7 +2242,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
             fx.channel.fetch_message = AsyncMock(wraps=fx.channel.fetch_message)
             fx.channel.get_chat_info = AsyncMock(wraps=fx.channel.get_chat_info)
-            for kind, feature in (("netizen_cron", "定时任务"), ("netizen_fork", "会话分支"), ("netizen_question", "原生提问")):
+            for kind, feature in (("netizen_cron", "定时任务"), ("netizen_fork", "分支卡片"), ("netizen_question", "原生提问")):
                 event = direct_card_event(fx.channel, {})
                 event.action.value = {"kind": kind}
                 await app.handle_card_action(event)

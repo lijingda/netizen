@@ -12,7 +12,7 @@ from weakref import ref
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, HookJSONOutput, HookMatcher, Message, ResultMessage,
     StreamEvent, SystemMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage, get_session_info, get_session_messages,
-    rename_session,
+    fork_session, rename_session,
 )
 
 from .. import claude_installation
@@ -378,6 +378,7 @@ async def last_assistant(session: str, cwd: Path, reader: SessionReader | None =
 class ClaudeClients(Protocol):
     async def session_metadata(self, session_id: str) -> NativeThreadMetadata: ...
     def rename(self, session_id: str, name: str) -> str: ...
+    def fork(self, session_id: str, cwd: Path, title: str | None) -> str: ...
     async def last_assistant(self, session: str, cwd: Path, reader: SessionReader) -> str | None: ...
     def create(self, session_id: str, cwd: Path, *, resume: bool, live: LiveSession | None = None) -> ClaudeClient: ...
     async def session_cwd(self, session_id: str, candidates: tuple[Path, ...] = ()) -> Path | None: ...
@@ -385,6 +386,14 @@ class ClaudeClients(Protocol):
 
 class BundledClaudeClients:
     last_assistant = staticmethod(last_assistant)
+
+    @staticmethod
+    def fork(session_id: str, cwd: Path, title: str | None) -> str:
+        try:
+            result = fork_session(session_id, directory=str(cwd), title=title)
+        except (ValueError, FileNotFoundError):
+            raise ThreadLifecycleError("Claude 拒绝创建分支，请检查原会话。") from None
+        return result.session_id
 
     async def session_metadata(self, session_id: str) -> NativeThreadMetadata:
         def read() -> NativeThreadMetadata:

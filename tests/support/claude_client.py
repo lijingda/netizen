@@ -88,6 +88,7 @@ class FakeClaudeClient:
 class FakeClaudeClients:
     def __init__(self):
         self.titles = {}
+        self.forks = []
         self.calls = []
         self.lookups = []
         self.cwds = {}
@@ -102,6 +103,12 @@ class FakeClaudeClients:
     def rename(self, session, name):
         self.titles[session] = name
         return name
+
+    def fork(self, session_id, cwd, title):
+        child_id = str(uuid4())
+        self.forks.append((session_id, cwd, title, child_id))
+        self.cwds[child_id] = cwd
+        return child_id
 
     async def last_assistant(self, session, cwd, reader):
         return self.history

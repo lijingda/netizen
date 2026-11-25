@@ -157,7 +157,8 @@ class CommandChannel(CardControlChannel):
         self, message: Any, intent: ControlIntent, *, expected_binding_id: str | None = None,
     ) -> None:
         if self._local_sessions is not None:
-            if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.RENAME, ControlName.DEFAULTS}:
+            if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.RENAME,
+                               ControlName.DEFAULTS, ControlName.FORK}:
                 self._local_sessions.require_admission()
         refusal = self._policy.command_refusal(intent.name.value, archived=bool(intent.arguments))
         if refusal:

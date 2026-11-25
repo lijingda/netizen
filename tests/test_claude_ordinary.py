@@ -18,6 +18,7 @@ from netizen_cli.ordinary_sessions import (
     ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, PhysicalAnswer, LogicalTerminal, OrdinaryConclusion, OrdinaryInputRejected, OrdinarySessionDiverged, PreparedPrompt, PromptImage, ReleaseConfirmation,
 )
 from netizen_cli.runtime.contracts import ContextCursorCommit, ReleaseDisposition, SessionRenameUnconfirmed, StopDisposition, TerminalStateUnknown, ThreadActivityChanged, ThreadLifecycleError
+from netizen_cli.session_providers import PartialFork
 from tests.support import has_claude_sdk, requires_claude_sdk
 
 if has_claude_sdk:
@@ -219,6 +220,172 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                 await self.runtime.rename_exact(self.binding.id, "during cron")
             self.assertEqual((cli.closes, cli.interrupts, cli.stopped_tasks), (0, 0, []))
             write.assert_not_called()
+
+    async def fork(self, source=None, title=None):
+        source = source or self.store.get(self.binding.id)
+        async with self.runtime.track_fork_creation(source.project_alias):
+            return await self.runtime.copy_fork(source, expected_project_revision=1, title=title)
+
+    async def test_fork_validates_unscoped_source_and_child_and_never_repeats_copy(self):
+        source, child = str(uuid4()), str(uuid4())
+        self.store.assign_native_thread_id(self.binding.id, source)
+        self.clients.session_cwd = BundledClaudeClients().session_cwd
+        self.clients.fork = BundledClaudeClients.fork
+        for returned, child_info, expected in (
+            (FileNotFoundError(), None, "拒绝"), (ValueError(), None, "拒绝"),
+            (OSError(), None, "未确认"), (None, None, "未确认"), ("bad-id", None, "未确认"),
+            (source.upper(), None, "未确认"), (child, None, "实际目录"),
+            (child, SimpleNamespace(session_id=source, cwd=str(self.cwd)), "实际目录"),
+            (child, SimpleNamespace(session_id=child, cwd=str(self.cwd.parent)), "实际目录"),
+            (child, SimpleNamespace(session_id=child, cwd=str(self.cwd)), None),
+        ):
+            with (self.subTest(returned=returned, info=child_info),
+                  patch("netizen_cli.runtime.claude_client.fork_session") as copy,
+                  patch("netizen_cli.runtime.claude_client.get_session_info", side_effect=[
+                      SimpleNamespace(session_id=source, cwd=str(self.cwd)), child_info,
+                  ]) as info):
+                if isinstance(returned, Exception):
+                    copy.side_effect = returned
+                else:
+                    copy.return_value = SimpleNamespace(session_id=returned)
+                if expected:
+                    with self.assertRaisesRegex(PartialFork if returned == child else ThreadLifecycleError, expected) as exc:
+                        await self.fork(title="example")
+                    if returned == child:
+                        self.assertEqual(exc.exception.child_id, child)
+                else:
+                    fork = await self.fork(title="example")
+                    self.assertEqual((fork.child_id, fork.verified_cwd), (child, self.cwd))
+                copy.assert_called_once_with(source, directory=str(self.cwd), title="example")
+                self.assertEqual([c.args for c in info.call_args_list], [(source,), (child,)] if returned == child else [(source,)])
+                self.assertFalse(any(c.kwargs for c in info.call_args_list))
+        with (patch("netizen_cli.runtime.claude_client.get_session_info", return_value=None),
+              patch("netizen_cli.runtime.claude_client.fork_session") as copy):
+            with self.assertRaisesRegex(OrdinaryInputRejected, "无法恢复原 Claude 会话的实际目录"):
+                await self.fork()
+            copy.assert_not_called()
+
+    async def test_fork_child_cold_resume_preserves_only_previously_selected_workspace(self):
+        for managed in (False, True):
+            with self.subTest(managed=managed):
+                cwd, worktree_id = self.cwd, None
+                if managed:
+                    cwd = self.cwd / "checkout"
+                    cwd.mkdir()
+                    worktree = self.store.worktrees.register(project_alias="work", expected_project_revision=1,
+                        root=str(cwd), cwd=str(cwd), common_dir=str(self.cwd))
+                    self.store.worktrees.mark_ready(worktree.id, git_dir=str(cwd), identity_token="fixture")
+                    worktree_id = worktree.id
+                source = self.store.create_channel_binding(scope=FeishuScope("app", "source", ScopeKind.DIRECT),
+                    project_alias="work", creator_id="owner", working_cwd=str(cwd) if managed else None, worktree_id=worktree_id)
+                native = str(uuid4())
+                self.store.assign_native_thread_id(source.id, native)
+                source = self.store.get(source.id)
+                self.clients.cwds[native] = cwd
+                fork = await self.fork(source)
+                child = self.store.create_fork_binding(
+                    scope=FeishuScope("app", "destination", ScopeKind.DIRECT), source=fork.source,
+                    native_thread_id=fork.child_id, root_message_id="root", creator_id="owner",
+                    expected_project_revision=1, target_chat_kind="p2p", verified_cwd=str(fork.verified_cwd)).binding
+                self.assertEqual((child.working_cwd, child.worktree_id), (source.working_cwd, worktree_id))
+                self.assertEqual(self.clients.forks[-1], (native, cwd, None, child.native_thread_id))
+                with patch.object(self.clients, "session_cwd", wraps=self.clients.session_cwd) as lookup:
+                    receipt = await self.submit(child)
+                    lookup.assert_awaited_once()
+                    self.assertEqual(lookup.await_args.args[0], fork.child_id)
+                    self.assertIn(cwd, lookup.await_args.args[1])
+                    self.assertEqual((self.clients.calls[-1].session, self.clients.calls[-1].cwd,
+                                      self.clients.calls[-1].resume), (fork.child_id, cwd, True))
+                    await self.finish(receipt)
+                self.assertEqual(self.store.active_binding(source.scope_key), source)
+
+    async def test_fork_requires_idle_without_tasks_and_detects_native_wake_during_copy(self):
+        from claude_agent_sdk import SystemMessage
+        native = str(uuid4())
+        self.store.assign_native_thread_id(self.binding.id, native)
+        self.clients.cwds[native] = self.cwd
+        self.clients.configure = lambda client: client.connect_gate.clear()
+        opening = asyncio.create_task(self.submit())
+        await asyncio.wait_for(self.clients.created.wait(), 2)
+        cli = self.clients.calls[0]
+        with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
+            await self.fork()
+        cli.connect_gate.set()
+        receipt = await opening
+        receipt.release_receipt_attempt()
+        cli.init()
+        await self.cron(cli, True)
+        with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
+            await self.fork()
+        def tasks(values):
+            cli.stream.put_nowait(SystemMessage("background_tasks_changed", {"session_id": native, "tasks": values}))
+        tasks([{"task_id": "one", "run_id": "one"}])
+        cli.result()
+        await self.wait_for_history_baseline()
+        with self.assertRaisesRegex(OrdinaryInputRejected, "仍有后台任务运行"):
+            await self.fork()
+        self.assertFalse(self.clients.forks)
+        tasks([])
+        cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": native, "state": "idle"}))
+        await self.wait_until(lambda: not cli.live.tasks and cli.live.ordered_idle)
+        first = await self.fork()
+        self.assertEqual(first.child_id, self.clients.forks[0][-1])
+        entered, release = asyncio.Event(), threading.Event()
+        loop, normal = asyncio.get_running_loop(), self.clients.fork
+        def copy(*args):
+            loop.call_soon_threadsafe(entered.set)
+            self.assertTrue(release.wait(5))
+            return normal(*args)
+        with patch.object(self.clients, "fork", side_effect=copy):
+            copying = asyncio.create_task(self.fork())
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                with self.assertRaisesRegex(OrdinaryInputRejected, "正在创建分支"):
+                    await self.submit()
+                cli.init(user_message_uuids=[])
+                await self.wait_until(lambda: cli.live.physical is not None)
+                cli.result(user_message_uuid=None, result="cron")
+                cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": native, "state": "idle"}))
+                await self.wait_until(lambda: cli.live.ordered_idle and cli.live.physical is None)
+            finally:
+                release.set()
+            with self.assertRaisesRegex(PartialFork, "状态已变化") as exc:
+                await copying
+        self.assertEqual(exc.exception.child_id, self.clients.forks[1][-1])
+        self.assertEqual((cli.closes, cli.interrupts, len(cli.inputs)), (0, 0, 1))
+
+    async def test_abandoned_copy_owns_source_until_worker_finishes(self):
+        native = str(uuid4())
+        self.store.assign_native_thread_id(self.binding.id, native)
+        self.clients.cwds[native] = self.cwd
+        for cancel in (False, True):
+            entered, release = asyncio.Event(), threading.Event()
+            loop = asyncio.get_running_loop()
+            def copy(session, cwd, title):
+                loop.call_soon_threadsafe(entered.set)
+                self.assertTrue(release.wait(4))
+                return str(uuid4())
+            with self.subTest(cancel=cancel), patch.object(self.clients, "fork", side_effect=copy) as worker, (
+                patch("netizen_cli.runtime.claude_ordinary._FORK_SECONDS", 2 if cancel else 0.05)
+            ):
+                pending = asyncio.create_task(self.fork())
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    if cancel:
+                        pending.cancel()
+                    with self.assertRaises(asyncio.CancelledError if cancel else ThreadLifecycleError):
+                        await pending
+                    self.assertTrue(self.runtime.project_has_fork_creation("work"))
+                    for operation in (self.submit, self.fork):
+                        with self.assertRaisesRegex(OrdinaryInputRejected, "正在创建分支"):
+                            await operation()
+                    if cancel:
+                        await asyncio.wait_for(self.runtime.interrupt_all(deadline=loop.time()), 0.5)
+                finally:
+                    release.set()
+                await self.wait_until(lambda: not self.runtime.project_has_fork_creation("work"))
+                worker.assert_called_once()
+                self.assertEqual(self.clients.calls, [])
 
     async def test_reply_settings_capture_instance_defaults_per_input(self):
         current = ProgressCardSettings(operation_limit=2)

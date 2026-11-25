@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
 from ..backends import BackendPolicy, BackendUnsupported as BackendUnsupported, OperationId, Provider
-from ..session_providers import CodexStatusSource, LocalStatusSource, ManualTitleWriter, SessionListReads, SessionNames, StatusCapture, StatusSource
+from ..session_providers import CodexPersistentForks, CodexStatusSource, LocalStatusSource, ManualTitleWriter, PersistentForkProvider, SessionListReads, SessionNames, StatusCapture, StatusSource
 from ..session_views import (
     NativeThreadView as NativeThreadView, ScopeSessionPage as ScopeSessionPage,
     SessionInventoryItem as SessionInventoryItem, SessionInventoryPage as SessionInventoryPage,
@@ -466,11 +466,13 @@ class ManagementRuntimePort:
     it.
     """
 
-    __slots__ = ("__codex", "__ordinary", "local", "names", "local_summary")
+    __slots__ = ("__codex", "__ordinary", "local", "names", "local_summary", "local_forks")
 
     def __init__(self, runtime: CodexRuntime | None, *, ordinary: OrdinarySessionPort,
                  local: LocalSessionManagement | None = None, names: SessionNames | None = None,
-                 local_summary: Callable[[str], Awaitable[NativeThreadMetadata]] | None = None) -> None:
+                 local_summary: Callable[[str], Awaitable[NativeThreadMetadata]] | None = None,
+                 local_forks: PersistentForkProvider | None = None) -> None:
+        self.local_forks = local_forks
         self.names = names if names is not None else SessionNames.from_runtime(runtime)
         self.local_summary = local_summary
         self.__codex = runtime
@@ -482,6 +484,9 @@ class ManagementRuntimePort:
         if self.__codex is None:
             raise BackendUnsupported("原生 Codex 操作")
         return self.__codex
+
+    def fork_provider(self, bindings: BindingStore) -> PersistentForkProvider | None:
+        return CodexPersistentForks(self.__codex, bindings) if self.__codex is not None else self.local_forks
 
     async def read_scheduled_turn(
         self, binding_id: str, turn_id: str, *, deadline: float | None = None,
@@ -688,7 +693,7 @@ class ManagementRuntimePort:
 
     def project_has_fork_creation(self, alias: str) -> bool:
         if self.local is not None:
-            return False
+            return self.local_forks is not None and self.local_forks.project_has_fork_creation(alias)
         return self.__runtime.project_has_fork_creation(alias)
 
     async def worktree_usage(self, binding_id: str) -> dict[str, Any]:
@@ -793,6 +798,7 @@ class InstanceManagementService:
         self._projects = projects
         self._runtime = runtime
         self.local = runtime.local if isinstance(runtime, ManagementRuntimePort) else None
+        self.forks = runtime.fork_provider(bindings) if isinstance(runtime, ManagementRuntimePort) else None
         self.names = runtime.names if isinstance(runtime, ManagementRuntimePort) else SessionNames.from_runtime(runtime)
         identity = self.local.backend_policy if self.local is not None else BackendPolicy("codex")
         self.policy = identity.bind(self.has_provider)
@@ -937,6 +943,8 @@ class InstanceManagementService:
                 return self.schedules is not None
             case Provider.TITLE_WRITER:
                 return self.names.writer is not None
+            case Provider.PERSISTENT_FORK:
+                return self.forks is not None
             case Provider.NAME_GENERATOR:
                 return self.names.generate is not None
 
