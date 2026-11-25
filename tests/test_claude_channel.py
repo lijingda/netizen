@@ -1064,7 +1064,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         from tests.support.presenter_traces import delivery_recorder
         from tests.support.process_transport import ProcessTransport, check_pairs
 
-        secret = "PRIVATE_PAYLOAD"
+        secret = "PRIVATEPAYLOAD7Q"
         # Union of input property names from the pinned CLI's decoded tool catalogs.
         fields = (
             "-A -B -C -i -n -o action activeForm addBlockedBy addBlocks allow_large allowedPrompts "
@@ -1086,6 +1086,40 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         allowed = {"Bash": ("command",), "Read": ("file_path",), "Glob": ("pattern",), "Grep": ("pattern", "path"),
                    "Write": ("file_path",), "Edit": ("file_path",), "NotebookEdit": ("notebook_path",),
                    "WebFetch": ("url",), "WebSearch": ("query",)}
+        # Decoded SDK result envelopes. Keep the effective paths and checklist labels public,
+        # and poison the unprojected text, including nested file, patch, task and agent fields.
+        patch_hunk = {"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": [secret]}
+        task = {"id": "1", "subject": "safe-step", "status": "in_progress", "blockedBy": [secret]}
+        result_samples = {
+            "Agent": [{"status": "completed", "agentId": secret, "agentType": secret, "prompt": secret,
+                       "toolsUsed": [secret], "content": [{"type": "text", "text": secret}]},
+                      {"status": "async_launched", "isAsync": True, "description": secret, "prompt": secret,
+                       "agentId": secret, "outputFile": secret, "canReadOutputFile": True}],
+            "Bash": [{"stdout": secret, "stderr": secret, "interrupted": False, "isImage": False,
+                      "noOutputExpected": False}, secret],
+            "CronCreate": [{"id": secret, "humanSchedule": secret, "nextFireAt": 1000,
+                            "recurring": False, "durable": False}],
+            "Edit": [{"filePath": "safe.txt", "oldString": secret, "newString": secret, "originalFile": secret,
+                      "structuredPatch": [patch_hunk], "userModified": False, "replaceAll": False}],
+            "NotebookEdit": [{"notebook_path": "safe.ipynb", "new_source": secret, "old_source": secret,
+                              "original_file": secret, "updated_file": secret, "edit_mode": "replace",
+                              "cell_id": secret, "cell_type": "code", "language": "python", "error": ""}],
+            "Read": [{"type": "notebook", "file": {"filePath": secret, "cells": [
+                {"cellType": "code", "source": secret, "cell_id": secret, "language": "python"}]}},
+                     {"type": "text", "file": {"filePath": secret, "content": secret, "numLines": 1,
+                                              "startLine": 1, "totalLines": 1}}],
+            "TaskCreate": [{"task": {"id": "1", "subject": "safe-step", "description": secret}}],
+            "TaskGet": [{"task": {**task, "description": secret, "blocks": [secret]}}],
+            "TaskList": [{"tasks": [task]}],
+            "TaskUpdate": [{"success": True, "taskId": "1", "updatedFields": ["status"],
+                            "statusChange": {"from": "in_progress", "to": "completed"}},
+                           {"success": False, "taskId": "unknown", "updatedFields": [], "error": secret}],
+            "TodoWrite": [{"oldTodos": [{"content": secret, "activeForm": secret, "status": "completed"}],
+                           "newTodos": [{"content": "safe-step", "activeForm": secret, "status": "pending"}]}],
+            "Write": [{"type": "create", "filePath": "safe.txt", "content": secret, "originalFile": None,
+                       "structuredPatch": [], "userModified": False}],
+        }
+        samples = [(name, payload) for name in names for payload in result_samples.get(name, [secret])]
         for cards in (True, False):
             with self.subTest(cards=cards), ExitStack() as stack:
                 async with owner_channel() as (app, fx, clients, clock, ordinary):
@@ -1110,23 +1144,23 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     try:
                         assistant([ThinkingBlock(secret, secret)])
                         assistant([TextBlock(secret), ToolUseBlock("child", "Bash", {"command": secret})], "parent")
-                        result("child", {"output": secret}, parent="parent")
-                        for offset in range(0, len(names), 5):
-                            for n, name in enumerate(names[offset:offset + 5], offset):
+                        result("child", result_samples["Bash"][0], parent="parent")
+                        for offset in range(0, len(samples), 5):
+                            for n, (name, payload) in enumerate(samples[offset:offset + 5], offset):
                                 key = f"tool-{n}"
                                 inputs = dict.fromkeys(fields, secret)
                                 inputs.update(dict.fromkeys(allowed.get(name, ()), "safe-detail"))
                                 assistant([ToolUseBlock(key, name, inputs)])
-                                result(key, {"raw": secret, "stderr": secret, "content": secret})
+                                result(key, payload)
                             # Sample every batch on the live wire before bounded windows can evict it.
                             mark = f"batch-{offset}"
                             assistant([ToolUseBlock(mark, "Read", {"file_path": mark, "description": secret})])
                             await self.until(lambda: mark in str(events))
                             result(mark, secret, failed=True)
                         assistant([ToolUseBlock("steps", "TaskList", {})])
-                        result("steps", {"tasks": [{"id": "1", "subject": "safe-step", "status": "in_progress",
+                        result("steps", {"tasks": [{"id": "1", "subject": "final-step", "status": "in_progress",
                                                     "description": secret}], "raw": secret})
-                        await self.until(lambda: "safe-step" in str(events))
+                        await self.until(lambda: "final-step" in str(events))
                         self.assertEqual(len(process.created), int(not cards))
                         self.assertNotIn(secret, str(events))
                     finally:
