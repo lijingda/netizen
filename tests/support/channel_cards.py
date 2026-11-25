@@ -175,6 +175,8 @@ def config_form_values(
     ):
         if enabled is not None:
             label = "开启" if enabled else "关闭"
+            if name == "config_progress_card":
+                label = "卡片" if enabled else "过程消息"
             values[name] = next(
                 option["value"]
                 for option in fields[name]["options"]

@@ -53,6 +53,7 @@ from openai_codex import AsyncCodex, CodexConfig
 
 from .admin.web import AdminWebRunner
 from .admin.port_config import ConfigFileEditor
+from .process_messages import ProcessMessages
 from .progress_card_config import ProgressCardConfigService
 from .group_access import GroupAccessService
 from .question_notifications import QuestionNotificationConfigService
@@ -259,7 +260,7 @@ class ServiceCore:
 
     async def _assemble_claude(
         self, owner: AdminIdentity, clients: ClaudeClients,
-        _editor: ConfigFileEditor | None, _progress: ProgressCardConfigService,
+        _editor: ConfigFileEditor | None, progress_card_config: ProgressCardConfigService,
     ) -> BackendAssembly:
         from .runtime.claude_ordinary import ClaudeOrdinarySessions
 
@@ -273,7 +274,7 @@ class ServiceCore:
 
         self._claude = ClaudeOrdinarySessions(
             bindings=self._store, clients=clients, owner_id=owner.open_id,
-            on_completion=completed, notice=notice,
+            on_completion=completed, notice=notice, progress_card_defaults=lambda: progress_card_config.current,
         )
         return BackendAssembly(
             self._claude, self._claude,
@@ -464,6 +465,7 @@ class ServiceCore:
                 runtime=self._runtime, ordinary=backend.ordinary,
                 bindings=self._store,
                 projects=self._projects,
+                process_messages=ProcessMessages(self._feishu_read_client),
                 message_history=FeishuMessageHistoryReader(
                     self._feishu_read_client
                 ),

@@ -557,7 +557,7 @@ async function chooseScheduleTarget(value) {
   changeScheduleSessionSettings("tier");
   scheduleInput("reactions").checked = true;
   changeScheduleSessionSettings("reactions");
-  scheduleInput("progress").checked = true;
+  scheduleInput("progress").value = "card";
   changeScheduleSessionSettings("progress");
   scheduleInput("completion-mention").checked = false;
   changeScheduleSessionSettings("completion-mention");
@@ -616,7 +616,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("effort").disabled, true);
   assert.match(scheduleInput("session-note").textContent, /配置保持不变/);
   assert.deepEqual(scheduleSessionPatch(), {});
-  scheduleInput("progress").checked = true;
+  scheduleInput("progress").value = "card";
   changeScheduleSessionSettings("progress");
   assert.deepEqual(scheduleSessionPatch(), { progress_card_enabled: true });
   assert.deepEqual(scheduleEditor.sessionDraft.progress_card_settings, retired.session_settings.progress_card_settings);
@@ -1558,12 +1558,12 @@ async function chooseScheduleTarget(value) {
   workspaceOptions.delete("project-one");
   await openScheduleEditor(unavailable);
   assert(scheduleInput("workspace-help").textContent.includes("读取超时"));
-  scheduleInput("progress").checked = true;
+  scheduleInput("progress").value = "card";
   scheduleInput("progress").dispatch("change");
   scheduleInput("name").value = "keep all drafts";
   await loadScheduleSessionOptions();
   assert.equal(scheduleInput("name").value, "keep all drafts");
-  assert.equal(scheduleInput("progress").checked, true);
+  assert.equal(scheduleInput("progress").value, "card");
   assert.equal(scheduleInput("worktree").value, "wt-deleted-exact");
   await previewSchedule();
   assert.equal(scheduleInput("save").disabled, false);
@@ -1688,7 +1688,7 @@ async function chooseScheduleTarget(value) {
 
   defaultSessionSettings.progress_card_settings = null;
   await openNewScheduleEditor();
-  scheduleInput("progress").checked = !defaultSessionSettings.progress_card_enabled;
+  scheduleInput("progress").value = defaultSessionSettings.progress_card_enabled ? "process" : "card";
   changeScheduleSessionSettings("progress");
   await previewSchedule();
   assert.equal(JSON.parse(new URL(gets.at(-1), "http://localhost").searchParams.get("session_settings"))

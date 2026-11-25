@@ -494,8 +494,7 @@ class SideRuntime(SubmissionRuntime):
                     raise SideSessionClosing(
                         "当前 Side Turn 正在停止，暂不接受新消息。"
                     )
-                if active.task_feedback.progress_card_enabled:
-                    self._refresh_turn_activity(active)
+                self._refresh_turn_activity(active)
                 stale_after_cursor = active.plan_cursor
                 self._notify_input_received(
                     active.handle.thread_id, active.handle.id, active.handle.id,
@@ -583,6 +582,7 @@ class SideRuntime(SubmissionRuntime):
                         session.thread.id,
                         handle.id,
                         receipt_attempted.set,
+                        parent_binding_id=session.parent_binding_id, root_message_id=session.root_message_id,
                         task_feedback=active.task_feedback,
                         feedback_revision=active.feedback_revision,
                     )
@@ -792,6 +792,7 @@ class SideRuntime(SubmissionRuntime):
             turn_state=active.state if active is not None else None,
             last_activity=session.last_activity,
             revision=session.revision,
+            task_feedback=session.task_feedback,
         )
 
     def _require_side(self, side_id: str) -> _SideSession:
@@ -976,6 +977,7 @@ class SideRuntime(SubmissionRuntime):
         result: object | None = None
         error: BaseException | None = None
         activity: SideTurnActivitySnapshot | None = None
+        execution_unknown = False
         try:
             # Side Threads are ephemeral. Intentionally use the normal SDK
             # handle path and do not apply persisted-thread completion recovery.
@@ -1063,17 +1065,16 @@ class SideRuntime(SubmissionRuntime):
                     self._sides.get(session.side_id) is session
                     and session.active is active
                 ):
-                    if active.task_feedback.progress_card_enabled:
-                        activity = self._side_turn_activity_snapshot(
-                            session.side_id,
-                            active,
-                        )
+                    if active.terminal_observed and active.process_activity is not None:
+                        active.process_activity.close()
+                    activity = self._side_turn_activity_snapshot(session.side_id, active)
                     cleanup_debt = (
                         active.cleanup_required and not active.cleanup_succeeded
                     )
                     if error is not None:
                         session.state = SideSessionState.CLOSING
                         session.turn_terminal_state_unknown = True
+                        execution_unknown = True
                         session.revision += 1
                         self._cancel_side_idle(session)
                         self.close_admission()
@@ -1089,6 +1090,7 @@ class SideRuntime(SubmissionRuntime):
 
         await active.receipt_attempted.wait()
         outcome = SideTurnOutcome(
+            root_message_id=session.root_message_id, execution_unknown=execution_unknown,
             side_id=session.side_id,
             parent_binding_id=session.parent_binding_id,
             thread_id=session.thread.id,

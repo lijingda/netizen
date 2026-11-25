@@ -119,7 +119,8 @@ async function openFromList(id = "binding-exact") {
   return button;
 }
 function change(name, value) {
-  if (["reactions", "progress", "completion-mention"].includes(name) || name.startsWith("progress-show-")) field(name).checked = value;
+  if (name === "progress") field(name).value = value ? "card" : "process";
+  else if (["reactions", "completion-mention"].includes(name) || name.startsWith("progress-show-")) field(name).checked = value;
   else field(name).value = value;
   field(name).dispatch("change");
 }
@@ -206,7 +207,7 @@ const cases = {
     assert.equal(field("effort").value, "high");
     assert.equal(field("tier").value, "priority");
     assert.equal(field("reactions").checked, true);
-    assert.equal(field("progress").checked, false);
+    assert.equal(field("progress").value, "process");
     assert.equal(field("completion-mention").checked, true);
     assert.equal(field("context").value, "catch-up");
     assert.deepEqual(gets.filter((path) => path === "/api/v1/sessions/options"), ["/api/v1/sessions/options"]);
@@ -273,7 +274,7 @@ const cases = {
     const configured = structuredClone(sessionSettingsEditor.settings.progress_card_settings);
     assert.equal(sessionSettingsEditor.settings.progress_card_enabled, true);
     change("progress", false);
-    assert.equal(field("progress-settings").hidden, true);
+    assert.equal(field("progress-settings").hidden, false);
     assert.equal(field("progress-commentary-limit").disabled, true);
     change("progress", true);
     assert.equal(field("progress-settings").hidden, false);
@@ -312,12 +313,12 @@ const cases = {
     globalProgress.commentary_limit = 3;
     await openFromList();
     assert.equal(field("progress-commentary-limit").value, 7, "saved explicit settings do not follow global changes");
-    assert.equal(field("progress-source").hidden, true);
+    assert.equal(field("progress-source").textContent.includes("单独配置"), true);
   },
   async restore_global_progress() {
     serverSessions[0].sessionSettings.progress_card_enabled = true;
     await loadSessions();
-    assert.match(document.querySelector("#sessions-body").textContent, /过程卡：单独配置/);
+    assert.match(document.querySelector("#sessions-body").textContent, /展示细项：单独配置/);
     await openFromList();
     const original = structuredClone(sessionSettingsEditor.settings);
     assert.equal(field("progress-reset").hidden, false);
@@ -341,7 +342,7 @@ const cases = {
     change("model", "model-two");
     await submit();
     assert.equal(posts.at(-1).body.sessionSettings.progress_card_settings, null);
-    assert.match(document.querySelector("#sessions-body").textContent, /过程卡：跟随全局/);
+    assert.match(document.querySelector("#sessions-body").textContent, /展示细项：跟随全局/);
     await openFromList();
     assert.equal(field("progress-reset").hidden, true);
     assert.equal(sessionSettingsHasChanges(), false);
@@ -510,7 +511,7 @@ const cases = {
     await flush();
     assert(field("drawer").open);
     assert.deepEqual(sessionSettingsEditor.settings, draft);
-    assert.equal(field("progress").checked, true);
+    assert.equal(field("progress").value, "card");
     assert.equal(field("fields").disabled, false);
     assert.equal(sessionSettingsEditor.action, null);
     assert.equal(sessionLists.session.snapshot().items[0].actions.configure, null);
@@ -634,7 +635,7 @@ const cases = {
       () => field("drawer").dispatch("cancel")]) {
       cancel(); await flush();
       assert.equal(field("drawer").open, true);
-      assert.equal(field("progress").checked, true);
+      assert.equal(field("progress").value, "card");
     }
     assert.equal(await confirmDiscardEditors(), false);
     assert(sessionSettingsEditor.action, "declining discard does not consume the action");

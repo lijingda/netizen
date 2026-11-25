@@ -10,7 +10,7 @@ from ..ordinary_sessions import OrdinaryCompletionHandler, OrdinaryConclusion
 from .codex_contracts import CompletionHandler, GoalOutcome, RuntimeOutcome
 from .contracts import (
     CompactionOutcome, SideLifecycleOutcome, SideTurnOutcome, ThreadActivityDiscardedOutcome,
-    TurnObservationUnavailableOutcome, TurnOutcome,
+    TerminalStateUnknown, TurnObservationUnavailableOutcome, TurnOutcome,
 )
 
 CodexFeatureEvent = (
@@ -47,6 +47,7 @@ def ordinary_conclusion(turn: TurnOutcome) -> OrdinaryConclusion:
         binding_id=turn.binding_id, thread_id=turn.thread_id, turn_id=turn.turn_id,
         owner_id=turn.owner_id, origin=turn.origin, status=turn.status,
         final_response=turn.final_response, file_evidence=file_evidence, cwd=turn.cwd,
+        execution_unknown=isinstance(turn.error, TerminalStateUnknown),
         error_detail=describe_error(turn.error) if turn.error is not None else None,
         native_failure_detail=native_failure_detail(turn.result),
         background_cleanup_requested=turn.background_cleanup_requested,

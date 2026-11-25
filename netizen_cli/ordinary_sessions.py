@@ -37,6 +37,7 @@ class OrdinaryConclusion:
     partial_answers: tuple[PartialAnswer, ...] = ()
     cwd: Path | None = None
     file_evidence: Callable[[], FileEvidence] = FileEvidence
+    execution_unknown: bool = False
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -298,7 +299,7 @@ class LocalStatusSnapshot(BindingRuntimeSnapshot):
 
 
 class LocalSessionManagement(Protocol):
-    on_binding_deleted: Callable[[str], None] | None
+    on_binding_deleted: Callable[[str], Awaitable[None]] | None
 
     @property
     def backend_policy(self) -> BackendPolicy: ...

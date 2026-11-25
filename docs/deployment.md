@@ -1818,7 +1818,7 @@ Admin 矩阵须从另一台受信内网主机，经 `/admin` 给出的实际端�
 
    | 场景／注入 | 预期观察 | 证据类型 | 当前契约 |
    | --- | --- | --- | --- |
-   | F01 保持 Pulse 关闭、手动关闭 Progress 后发送首条 prompt 并 steer；覆盖三种终态 | accepted 后原消息常驻 `Typing`，零 `THINKING`、进度卡、心跳；steer 成功消息有 `OnIt` 且锚点不迁移。终态先加 completed/failed/interrupted 对应 `DONE`/`ERROR`/`CrossMark` 再移除 `Typing`；无文件用富文本/静态文本，有文件仅现有“最终回复＋本轮文件”卡。手机少量独立生命周期表情消息是接受的取舍。 | 原生结果＋桌面/手机飞书 | [表情][验收13] |
+   | F01 保持 Pulse 关闭、选择过程消息后发送首条 prompt 并 steer；覆盖三种终态 | accepted 后原消息常驻 `Typing`，有可见活动时发送独立过程消息，零 `THINKING`、进度卡、心跳；steer 成功消息有 `OnIt` 且锚点不迁移。终态先加 completed/failed/interrupted 对应 `DONE`/`ERROR`/`CrossMark` 再移除 `Typing`；无文件用富文本/静态文本，有文件仅现有“最终回复＋本轮文件”卡。手机少量独立生命周期表情消息是接受的取舍。 | 原生结果＋桌面/手机飞书 | [表情][验收13] |
    | F02 使 `OnIt` 失败；`/config` 只开 Pulse 后启动长 Turn | 仅 native steer 成功后有文字 fallback；Lifecycle Reaction 同关闭组，`THINKING` 低频显隐，终态与 `Typing` 一起清理。 | 投递故障注入＋真实长 Turn | [表情][验收13] |
    | F03 只开 Progress，产生 checklist、无 plan、observer unavailable | accepted 后除表情外仅一张运行卡、顶部过程展开；status/checklist `✓/→/○` 更新同一 message ID；无 plan 为“Codex 尚未生成”，不可观察为“暂不可用”。无耗时/百分比/ETA、reasoning、raw command/tool output、arguments、MCP server。 | 原生 Activity＋真实卡；故障注入 | [投影][验收14]、[呈现][验收15] |
    | F04 至少一条最近进展和操作；操作 started→completed | Card 2.0 本地化日期/分钟正确，完成后切 exact completion 时间，checklist 无时间；进展最多四条，正文直接跟 `·`、无额外 `•`。 | 原生时间证据＋客户端渲染 | [投影][验收14] |

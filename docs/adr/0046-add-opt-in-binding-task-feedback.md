@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-27
 amends: 0016, 0020, 0024, 0027, 0039
-amended_by: 0047, 0048, 0051
+amended_by: 0047, 0048, 0051, 0107
 ---
 
 # 增加默认关闭的 Binding 任务反馈与有界进度卡

@@ -120,6 +120,8 @@ class TurnOpened:
     location: CardReplyLocation | None = None
     reuse_existing: bool = False
     run_reply: LogicalReply | None = None
+    process_root_id: str | None = None
+    process_binding_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +186,15 @@ class TurnResult:
     end: RunEnded | None
     receipt: DeliveryReceipt | None = None
     items: ItemDelivery | None = None
+    process_root_id: str | None = None
+    execution_unknown: bool = False
     partial_answers: tuple[NativePartial, ...] = field(init=False)
+
+    @property
+    def process_reason(self) -> Literal["done", "error", "timeout"]:
+        if self.execution_unknown:
+            return "timeout"
+        return "done" if self.status in ("completed", "interrupted") else "error"
 
     @property
     def origin(self) -> object:

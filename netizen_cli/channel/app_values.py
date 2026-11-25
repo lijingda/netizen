@@ -212,6 +212,7 @@ def _side_reply_target(
         message_id=message.message_id,
         chat_id=message.chat_id,
         conversation=_CardReplyConversation(thread_id=topic_id),
+        root_id=message.root_id or message.message_id,
     )
 
 
@@ -445,6 +446,8 @@ def _goal_reply_activity(snapshot: GoalActivitySnapshot) -> TurnActivitySnapshot
         ),
         steer_count=0, plan_available=snapshot.plan_available,
         plan_generated=snapshot.plan_generated, plan_may_be_stale=False,
+        physical_turn_id=snapshot.physical_turn_id,
+        process_items=snapshot.process_items,
         steps=snapshot.steps, commentary=snapshot.commentary,
         operations=snapshot.operations, partial_answers=snapshot.partial_answers,
         progress_card_settings=snapshot.progress_card_settings,

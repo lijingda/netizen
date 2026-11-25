@@ -118,7 +118,7 @@ class SessionStatusView:
             project_alias=binding.project_alias, state=state, state_label=label,
             metadata_lines=(layout.provider, f"本地任务：{label}"), workspace_lines=observed.lines(layout.workspace),
             model_rows=tuple(lines for group in layout.model_rows if (lines := observed.lines(group))),
-            context_lines=observed.lines(layout.usage), progress_lines=(),
+            context_lines=(*observed.lines(layout.usage), f"回复消息类型：{binding.task_feedback.reply_type_label}"), progress_lines=(),
             identity_lines=(f"Netizen 会话编号（/resume）：{binding.short_id}",
                             f"{layout.identity_label}：{binding.native_thread_id or '尚未建立'}"),
             subscription_lines=observed.lines(layout.details),

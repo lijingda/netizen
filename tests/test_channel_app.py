@@ -56,6 +56,7 @@ from netizen_cli.cards import (
     goal_generation,
     reply_card,
 )
+from netizen_cli.process_activity import ObservedProcessItem
 from netizen_cli.channel_app import ChannelApplication, SideTopicCreateFailed
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.management import (
@@ -6923,7 +6924,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         rendered = str(self.channel.updates[-1][1])
         self.assertIn("执行中表情闪烁：开启", rendered)
-        self.assertIn("进度卡：开启", rendered)
+        self.assertIn("回复消息类型：卡片", rendered)
 
     async def test_config_replaces_persistent_settings_without_starting_turn(self) -> None:
         await self.fixture.new()
@@ -7067,7 +7068,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(values["new_progress_card"].startswith("progress-card:v1:[true,"))
         control = next(item for item in form_controls(card.card) if item["name"] == "new_progress_card")
         values["new_progress_card"] = next(
-            option["value"] for option in control["options"] if option["text"]["content"] == "关闭"
+            option["value"] for option in control["options"] if option["text"]["content"] == "过程消息"
         )
 
         await self.app.handle_card_action(direct_card_event(self.channel, values))
@@ -8961,7 +8962,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         binding, record = await self.open_direct_side()
-        expect_presenter_trace(self, self.fixture, "side_plain")
+        events = expect_presenter_trace(self, self.fixture, "side_plain", process_mode=True)
         prompt = FakeMessage(
             "work quietly",
             message_id="om-side-prompt",
@@ -8971,6 +8972,15 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             mentioned_bot=False,
         )
 
+        process_id = "synthetic-process-1"
+        self.channel.fetched_messages[process_id] = {"code": 0, "data": {"items": [{
+            "message_id": process_id, "chat_id": "oc-direct", "thread_id": record.topic_id,
+            "root_id": record.root_message_id, "parent_id": prompt.id, "deleted": False,
+        }]}}
+        activity = replace(side_turn_activity_snapshot(side_id=record.id), process_items=(
+            ObservedProcessItem("read", "operation", "Read", 1_800_000_000),
+        ))
+        self.runtime.side_turn_activity_values[record.id] = activity
         await self.app.handle_message(prompt)
 
         self.assertEqual(
@@ -8978,6 +8988,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             [("om-side-prompt", "Typing")],
         )
         self.assertEqual(self.channel.replies, [])
+        state, = self.app._progress_cards._process.values()
+        await state.ready.wait()
         await self.app.handle_completion(
             SideTurnOutcome(
                 side_id=record.id,
@@ -8988,9 +9000,14 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 origin=prompt,
                 cwd=self.project,
                 result=completed_turn_result(final_response="side answer"),
+                root_message_id=record.root_message_id,
+                activity=activity,
             )
         )
 
+        await state.task
+        self.assertEqual([event[0] for event in events if event[0].startswith("process.")],
+                         ["process.create", "process.update", "process.update", "process.complete"])
         self.assertEqual(self.channel.replies, [(prompt.id, completion_post("side answer"))])
         self.assertEqual(
             self.channel.reactions,
@@ -9200,7 +9217,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_side_turn_without_progress_uses_result_files_card(self) -> None:
         binding, record = await self.open_direct_side()
-        expect_presenter_trace(self, self.fixture, "side_files")
+        expect_presenter_trace(self, self.fixture, "side_files", process_mode=True)
         side_cwd = self.project.parent / "side-cwd"
         side_cwd.mkdir()
         artifact = side_cwd / "side-output.txt"

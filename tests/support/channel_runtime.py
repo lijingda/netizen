@@ -785,6 +785,7 @@ class StubRuntime:
             snapshot.thread_id,
             f"side-turn-{len(self.submit_side_calls)}",
             lambda: None,
+            parent_binding_id=snapshot.parent_binding_id, root_message_id=snapshot.root_message_id,
             task_feedback=task_feedback,
             feedback_revision=feedback_revision,
         )

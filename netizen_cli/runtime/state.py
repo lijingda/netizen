@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -33,6 +33,7 @@ from ..domain import (
 )
 from ..model_settings import TurnModelSettings
 from ..partial_answers import PartialAnswer
+from ..process_activity import ProcessActivityWindow
 from ..progress_card_settings import ProgressCardSettings
 from .thread_naming import ThreadNamer
 from .codex_contracts import RuntimeOutcome, CompletionHandler
@@ -140,6 +141,7 @@ class _ActiveTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
     activity_sequence: int = 0
     activity_segment: int = 0
     activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
@@ -200,6 +202,7 @@ class _ActiveGoal:
     plan_generated: bool = False
     plan_available: bool = True
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
     activity_sequence: int = 0
     activity_segment: int = 0
     activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
@@ -286,6 +289,7 @@ class _ActiveSideTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    process_activity: ProcessActivityWindow | None = field(default=None, repr=False)
     activity_sequence: int = 0
     activity_segment: int = 0
     activity_commentary: dict[str, TurnActivityEntrySnapshot] = field(default_factory=dict)
@@ -362,9 +366,7 @@ class RuntimeState:
 
     def _capture_task_feedback(self, feedback: BindingTaskFeedback) -> BindingTaskFeedback:
         """Freeze presentation defaults without changing the Binding's intent."""
-        if feedback.progress_card_settings is not None:
-            return feedback
-        return replace(feedback, progress_card_settings=self._progress_card_defaults())
+        return feedback.capture(self._progress_card_defaults)
 
     def set_completion_handler(self, handler: CompletionHandler) -> None:
         self._on_completion = handler

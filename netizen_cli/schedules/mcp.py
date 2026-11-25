@@ -256,7 +256,7 @@ _FIELD_HINTS = {
     "session_settings.turn_settings.service_tier_id": "Supply a supported nonempty service_tier_id from options and all three model-setting IDs.",
     "session_settings.reaction_pulse_enabled": "Use the boolean true or false for reaction pulse.",
     "session_settings.completion_mention_enabled": "Use the boolean true or false to mention the human task initiator at completion. Automatic scheduled first turns have no human initiator and do not mention anyone.",
-    "session_settings.progress_card_enabled": "Use the boolean true or false for progress cards.",
+    "session_settings.progress_card_enabled": "Reply type: true for a card, false for a process message with separate answers.",
     "session_settings.message_context_mode": "Use current-only or catch-up. Private chat targets support only current-only.",
     "schedule.kind": "Set schedule.kind to once, daily, weekly or interval.",
     "schedule.timezone": "Supply an IANA timezone string matching the outer timezone, or omit this field.",

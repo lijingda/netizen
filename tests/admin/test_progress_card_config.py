@@ -12,6 +12,7 @@ from netizen_cli.admin.auth import AdminAuth
 from netizen_cli.admin.transport import Request
 from netizen_cli.admin.users import AdminIdentity, AdminUsers
 from netizen_cli.admin.web import AdminWebApplication
+from netizen_cli.backends import BackendPolicy
 from netizen_cli.progress_card_config import ProgressCardConfigService
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from tests.support.channel_fixtures import channel_fixture
@@ -75,6 +76,16 @@ class AdminProgressCardConfigTest(unittest.IsolatedAsyncioTestCase):
         status, _, result = await self.json_get("/api/v1/progress-card/settings", session)
         self.assertEqual(status, 200, result)
         return result
+
+    async def test_claude_owner_can_edit_shared_reply_details(self):
+        self.application._backend_policy = BackendPolicy("claude", "ou_admin")
+        session = await self.login()
+        before = await self.settings_view(session)
+        settings = ProgressCardSettings(show_plan=False)
+        body = {**_action_payload(before["actions"]["save"]), "settings": settings.to_dict()}
+        status, _, result = await self.json_post("/api/v1/progress-card/settings", session, body)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.config.current, settings)
 
     async def test_settings_require_authentication_and_save_uses_single_use_grant(self):
         status, _, _ = await self.request("GET", "/static/progress-card.js")

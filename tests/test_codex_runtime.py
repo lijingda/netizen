@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -772,6 +772,10 @@ class FakeGoalHandle:
         )
         control.codex.goal_turns.append((self.thread_id, self.record))
 
+    def fail_activity(self):
+        sink, self.activity_sink = self.activity_sink, None
+        sink(None)
+
     def current_physical_turn_id(self) -> str | None:
         return self.record.id if self.record.status.value == "inProgress" else None
 
@@ -811,6 +815,7 @@ class FakeGoalHandle:
             for update in self.activity_updates:
                 activity_sink(update)
         await self.terminal.wait()
+        self.activity_sink = None
         return GoalStreamTerminal(
             self.terminal_logical_turn_id or self.id,
             self.record.id,
@@ -1214,6 +1219,26 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.parent_binding_id, binding.id)
         self.assertEqual(snapshot.topic_id, record.topic_id)
         self.assertEqual(snapshot.state, SideSessionState.OPEN)
+
+    async def test_side_outcome_keeps_its_own_verdict_across_a_held_receipt(self) -> None:
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+
+        _, record, _ = await self.open_side()
+        async with asyncio.timeout(3):
+            first = await self.runtime.submit_side(side_id=record.id, input="A", owner_id="owner", origin=object())
+            self.codex.handles[-1].complete(response="A")
+            while self.runtime.side_snapshot(record.id).turn_id is not None:
+                await asyncio.sleep(0)
+            second = await self.runtime.submit_side(side_id=record.id, input="B", owner_id="owner", origin=object())
+            self.codex.handles[-1].notifications.put_nowait(OSError("drain lost"))
+            second.release_receipt_attempt()
+            while not self.outcomes:
+                await asyncio.sleep(0)
+            first.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(timeout=2))
+        reasons = {row.turn_id: CodexReplyEvents.result(row).process_reason
+                   for row in self.outcomes if isinstance(row, SideTurnOutcome)}
+        self.assertEqual(reasons, {first.turn_id: "done", second.turn_id: "timeout"})
 
     async def test_interrupted_side_with_native_error_keeps_terminal_and_admission(self) -> None:
         _binding, record, snapshot = await self.open_side()
@@ -2498,7 +2523,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(outcome, SideTurnOutcome)
         self.assertIs(outcome.patch_children, children)
         self.assertFalse(outcome.task_feedback.progress_card_enabled)
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
         self.assertIsNone(outcome.error)
         collect.assert_awaited_once_with(
             self.codex,
@@ -2623,7 +2648,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             first, PartialAnswer(started.thread_id, started.turn_id, "p2", "after fallback"),
         ))
         self.assertEqual(outcome.final_response, "separate final")
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
         self.assertEqual(handle.run_calls, 1)
         self.assertEqual(handle.stream_calls, 0)
         self.assertFalse(any(include_turns for _, include_turns in self.codex.read_calls))
@@ -2725,7 +2750,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.task_feedback, BindingTaskFeedback(
             progress_card_settings=ProgressCardSettings(),
         ))
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
 
     async def test_side_questions_share_observer_with_or_without_progress(self) -> None:
         for progress_enabled in (False, True):
@@ -2779,9 +2804,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(handle.run_calls, 1)
                     self.assertEqual(handle.stream_calls, 0)
                     self.assertEqual(handler.await_count, turn_number + 1)
-                    self.assertEqual(
-                        self.outcomes[-1].activity is not None, progress_enabled,
-                    )
+                    self.assertIsNotNone(self.outcomes[-1].activity)
                 self.assertTrue(all(
                     thread_id == started.thread_id
                     for thread_id, _, _ in observer.calls
@@ -2998,6 +3021,99 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         # In-flight sends remain bounded, service-owned best-effort work.
         await self.runtime.cancel_tasks()
         self.assertTrue(cancelled.is_set())
+
+    async def test_side_offered_step_survives_position_thirteen(self):
+        from netizen_cli.channel.reply_events import PresentationKey
+        from tests.support.process_transport import check_displaced_step
+
+        self.runtime._turn_plan_observer = observer = FakeTurnPlanObserver()
+        _, record, _ = await self.open_side()
+        sub = await self.runtime.submit_side(side_id=record.id, input="work", owner_id="ou_owner", origin=object())
+        def observe(steps):
+            observer.append(thread_id=sub.thread_id, turn_id=sub.turn_id, steps=steps)
+            return self.runtime.side_turn_activity(record.id, refresh_plan=True)
+        try:
+            await check_displaced_step(self, PresentationKey(record.id, sub.thread_id, sub.turn_id, True), observe)
+        finally:
+            await self.finish_side_turn(sub)
+
+    async def test_side_retains_command_after_drain_failure_while_steer_holds_the_lock(self):
+        await self.check_retained_side_drain(fails=True)
+
+    async def test_side_retains_command_after_freshness_read_sees_high_water_and_completion(self):
+        await self.check_retained_side_drain(fails=False)
+
+    async def check_retained_side_drain(self, *, fails):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport
+
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding, record, _ = await self.open_side()
+        origin = FakeMessage("side", message_id="in", chat_id=self.scope.chat_id, thread_id=record.topic_id,
+                             raw={"root_id": record.root_message_id})
+        start = await self.runtime.submit_side(side_id=record.id, input="work", owner_id="ou_owner", origin=origin)
+        key = PresentationKey(record.id, start.thread_id, start.turn_id, True)
+        handle = self.codex.handles[-1]
+        observer.append_activity(thread_id=start.thread_id, turn_id=start.turn_id,
+            event=TurnActivityEvent("read", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 1, text="Read"))
+        drain, release = asyncio.Event(), asyncio.Event()
+        run = handle.run
+        async def held():
+            drain.set()
+            if fails:
+                raise RuntimeError("drain failed")
+            await release.wait()
+            return await run()
+        async with channel_fixture() as fx, asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            wire = ProcessTransport([])
+            presenter = fx.app._progress_cards
+            presenter._process_port = wire.port
+            mid = "synthetic-process-1"
+            fx.channel.fetched_messages[mid] = {"code": 0, "data": {"items": [{
+                "message_id": mid, "chat_id": self.scope.chat_id, "thread_id": record.topic_id,
+                "root_id": record.root_message_id, "parent_id": "in", "deleted": False,
+            }]}}
+            opened = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime)).opened(
+                key, origin, BindingTaskFeedback(), parent_binding_id=binding.id, root_message_id=record.root_message_id,
+                reply=AsyncMock(), reply_partial=AsyncMock())
+            with patch.object(handle, "run", side_effect=held):
+                steer = None
+                if fails:
+                    handle.steer_gate = asyncio.Event()
+                    steer = asyncio.create_task(self.runtime.submit_side(side_id=record.id, input="steer",
+                                                                          owner_id="ou_owner", origin=origin))
+                    await handle.steer_started.wait()
+                else:
+                    observer.retained_count_override = observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
+                observer.complete(thread_id=start.thread_id, turn_id=start.turn_id)
+                if not fails:
+                    self.runtime.side_turn_activity(record.id, refresh_plan=True)
+                try:
+                    await drain.wait()
+                    self.assertEqual(len(opened.observe().snapshot.process_items), 1)
+                    await presenter.open(opened)
+                    state = presenter._process[key]
+                    await state.ready.wait()
+                    self.assertFalse(wire.completed)
+                finally:
+                    if steer is not None:
+                        handle.steer_gate.set()
+                        await steer
+                    else:
+                        handle.complete()
+                    release.set()
+                    start.release_receipt_attempt()
+                await self.runtime.wait_idle()
+                outcome = self.outcomes[-1]
+                self.assertEqual(outcome.execution_unknown, fails)
+                await fx.app.handle_completion(outcome)
+                await state.task
+                wire.assert_retained_completion(self, "timeout" if fails else "done")
 
     async def test_side_activity_observer_failure_and_high_water_fall_back(
         self,
@@ -5416,6 +5532,250 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.finalization, GoalFinalizationStatus.CLEARED)
         self.assertEqual(handle.control.clear_calls, [submission.thread_id])
         self.assertIsNone(self.runtime.active_goal(binding.id))
+
+    async def test_goal_retains_the_observed_command_after_tap_loss_and_rejected_delete(self):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport
+
+        binding, handle, submission = await self.start_fake_goal()
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        events = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime))
+        opened = events.opened(key, FakeMessage("go", message_id="in"), BindingTaskFeedback(), goal=True,
+                               reply=AsyncMock(), reply_partial=AsyncMock())
+        async with channel_fixture() as fx, asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            wire = ProcessTransport([])
+            presenter = fx.app._progress_cards
+            presenter._process_port = wire.port
+            polled = asyncio.Event()
+            observe = opened.observe
+            def read():
+                polled.set()
+                return observe()
+            presenter._poll_seconds = .001
+            await presenter.open(replace(opened, observe=read))
+            handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id,
+                event=TurnActivityEvent("read", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 1, text="Read")))
+            retained = observe().snapshot.process_items
+            handle.fail_activity()
+            self.delete_control.errors.append(ThreadDeleteRejected("fork references history"))
+            with self.assertRaises(ThreadLifecycleError):
+                await self.runtime.delete_exact(binding.id, expected_native_thread_id=submission.thread_id)
+            self.assertIsNone(handle.activity_sink)
+            snapshot = observe().snapshot
+            self.assertEqual(len(snapshot.process_items), 1)
+            polled.clear()
+            await polled.wait()
+            writer = presenter._process[key]
+            await writer.ready.wait()
+            self.assertEqual(snapshot.process_items, retained)
+            self.assertFalse(wire.completed)
+            handle.finish(response="done")
+            self.assertTrue(await self.runtime.wait_idle(timeout=2))
+            await fx.app.handle_completion(replace(self.outcomes[-1], origin=opened.target.origin))
+            await writer.task
+            wire.assert_retained_completion(self, "done")
+
+    async def test_goal_rollover_reuses_one_wire_step_after_an_empty_poll(self):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport
+        from tests.support.process_transport import check_pairs
+
+        binding, handle, submission = await self.start_fake_goal()
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        opened = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime)).opened(
+            key, FakeMessage("go", message_id="in"), BindingTaskFeedback(), goal=True, reply=AsyncMock(), reply_partial=AsyncMock())
+        plan = (TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS),)
+        clock = [1_800_000_000]
+        async with channel_fixture() as fx, asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            wire = ProcessTransport([])
+            presenter = fx.app._progress_cards
+            presenter._process_port = wire.port
+            presenter._poll_seconds = .001
+            presenter._clock = lambda: clock[0]
+            polled = asyncio.Event()
+            def read():
+                polled.set()
+                return opened.observe()
+            def updates():
+                return [check_pairs(args[1]) for name, args, _ in wire.events if name == "process.update"]
+            with patch("netizen_cli.runtime.activity.time", side_effect=lambda: clock[0]):
+                handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, plan_updated=True, steps=plan))
+                await presenter.open(replace(opened, observe=read))
+                state = presenter._process[key]
+                await state.ready.wait()
+                self.assertEqual(updates(), [({("step", "Inspect"): clock[0]}, set())])
+                clock[0] += 1
+                handle.rollover("next")
+                handle.emit_activity(TurnActivityNotificationProjection(turn_id="next", turn_started=True))
+                polled.clear()
+                await polled.wait()
+                clock[0] += 1
+                handle.emit_activity(TurnActivityNotificationProjection(turn_id="next", plan_updated=True, steps=plan,
+                    event=TurnActivityEvent("read", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 1, text="Read")))
+                while len(updates()) < 2:
+                    await asyncio.sleep(0)
+                for starts, ends in updates():
+                    self.assertEqual(starts[("step", "Inspect")], 1_800_000_000)
+                    self.assertNotIn(("step", "Inspect"), ends)
+                presenter.end_process_run(key, "done")
+                await state.task
+                starts, ends = updates()[-1]
+                self.assertEqual(set(starts), ends)
+                self.assertEqual(starts[("step", "Inspect")], 1_800_000_000)
+                self.assertEqual(len(wire.completed), 1)
+        handle.finish(response="done")
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
+
+    async def test_held_goal_delete_can_first_show_only_previously_observed_rows(self):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport
+
+        binding, handle, submission = await self.start_fake_goal()
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        origin = FakeMessage("go", message_id="in")
+        opened = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime)).opened(
+            key, origin, BindingTaskFeedback(), goal=True, reply=AsyncMock(), reply_partial=AsyncMock())
+        entered, release, poll = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async def reject(_):
+            entered.set()
+            await release.wait()
+            raise ThreadDeleteRejected("fork references history")
+        async with channel_fixture() as fx, asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            presenter = fx.app._progress_cards
+            wire = ProcessTransport([])
+            presenter._process_port = wire.port
+            presenter._poll_seconds = .001
+            initial = opened.observe()
+            await presenter.open(replace(opened, observe=lambda: opened.observe() if poll.is_set() else initial))
+            handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id,
+                event=TurnActivityEvent("read-A", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 1, text="read A")))
+            observed = opened.observe().snapshot
+            with patch.object(self.delete_control, "delete", side_effect=reject):
+                pending = asyncio.create_task(self.runtime.delete_exact(binding.id, expected_native_thread_id=submission.thread_id))
+                try:
+                    await entered.wait()
+                    handle.rollover("B")
+                    handle.emit_activity(TurnActivityNotificationProjection(turn_id="B", turn_started=True))
+                    handle.emit_activity(TurnActivityNotificationProjection(turn_id="B",
+                        event=TurnActivityEvent("read-B", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 2, text="read B")))
+                    retained = opened.observe().snapshot
+                    self.assertEqual(retained.physical_turn_id, observed.physical_turn_id)
+                    self.assertEqual(retained.process_items, observed.process_items)
+                    self.assertFalse(wire.events)
+                    poll.set()
+                    state = presenter._process[key]
+                    await state.ready.wait()
+                    self.assertFalse(wire.completed)
+                finally:
+                    release.set()
+                    with self.assertRaises(ThreadLifecycleError):
+                        await pending
+            handle.finish(response="done")
+            await self.runtime.wait_idle()
+            await fx.app.handle_completion(replace(self.outcomes[-1], origin=origin))
+            await state.task
+            wire.assert_retained_completion(self, "done")
+
+    async def test_ordinary_offered_step_survives_position_thirteen(self):
+        from netizen_cli.channel.reply_events import PresentationKey
+        from tests.support.process_transport import check_displaced_step
+
+        self.runtime._turn_plan_observer = observer = FakeTurnPlanObserver()
+        binding = self.binding()
+        sub = await self.submit(binding)
+        def observe(steps):
+            observer.append(thread_id=sub.thread_id, turn_id=sub.turn_id, steps=steps)
+            return self.runtime.turn_activity(binding.id, refresh_plan=True)
+        try:
+            await check_displaced_step(self, PresentationKey(binding.id, sub.thread_id, sub.turn_id), observe)
+        finally:
+            await self.finish(self.codex.handles[-1], sub)
+
+    async def test_goal_offered_step_survives_position_thirteen(self):
+        await self.check_displaced_goal_step(rollover=False)
+
+    async def test_goal_offered_step_survives_position_thirteen_on_first_plan_after_rollover(self):
+        await self.check_displaced_goal_step(rollover=True)
+
+    async def check_displaced_goal_step(self, *, rollover):
+        from netizen_cli.channel.app_values import _goal_reply_activity
+        from netizen_cli.channel.reply_events import PresentationKey
+        from tests.support.process_transport import check_displaced_step
+
+        binding, handle, submission = await self.start_fake_goal()
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        def observe(steps):
+            handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.record.id, plan_updated=True, steps=steps))
+            return _goal_reply_activity(self.runtime.goal_activity(binding.id))
+        def advance():
+            handle.rollover("next")
+            handle.emit_activity(TurnActivityNotificationProjection(turn_id="next", turn_started=True))
+            return _goal_reply_activity(self.runtime.goal_activity(binding.id))
+        try:
+            await check_displaced_step(self, key, observe, advance if rollover else None)
+        finally:
+            handle.finish(response="done")
+            await self.runtime.wait_idle()
+
+    async def test_goal_terminal_uses_finished_checklist_rows_since_the_last_poll(self):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport, check_pairs
+
+        binding, handle, submission = await self.start_fake_goal()
+        key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
+        origin = FakeMessage("go", message_id="in")
+        opened = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime)).opened(
+            key, origin, BindingTaskFeedback(), goal=True, reply=AsyncMock(), reply_partial=AsyncMock())
+        start = 1_800_000_000
+        clock = [start]
+        async with channel_fixture() as fx, asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            wire = ProcessTransport([])
+            presenter = fx.app._progress_cards
+            presenter._process_port = wire.port
+            presenter._clock = lambda: clock[0]
+            presenter._poll_seconds = 60
+            with patch("netizen_cli.runtime.activity.time", side_effect=lambda: clock[0]):
+                handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, plan_updated=True,
+                    steps=(TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS),)))
+                await presenter.open(opened)
+                state = presenter._process[key]
+                await state.ready.wait()
+                clock[0] += 2
+                handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, plan_updated=True,
+                    steps=tuple(TurnPlanStepSnapshot(name, TurnPlanStepState.COMPLETED) for name in ("Inspect", "Verify"))))
+                clock[0] = start + 9
+                handle.finish(response="done")
+                await self.runtime.wait_idle()
+                outcome = self.outcomes[-1]
+                self.assertEqual([(row.text, row.finished_at) for row in outcome.activity.process_items],
+                                 [("Inspect", start + 2), ("Verify", start + 2)])
+                await fx.app.handle_completion(replace(outcome, origin=origin))
+                await state.task
+            frames = [args[1] for name, args, _ in wire.events if name == "process.update"]
+            self.assertEqual(len(frames), 2)
+            self.assertEqual(check_pairs(frames[0]), ({("step", "Inspect"): start}, set()))
+            starts, ends = check_pairs(frames[-1])
+            self.assertEqual(starts, {("step", "Inspect"): start, ("step", "Verify"): start + 2})
+            self.assertEqual(ends, set(starts))
+            self.assertEqual([int(frame["timestamp"]) for frame in frames[-1] if frame["event_type"] == "STEP_FINISHED"],
+                             [start + 2, start + 2])
+            self.assertEqual([args[1] for name, args, _ in wire.events if name == "process.complete"], ["done"])
 
     async def test_delete_rejection_preserves_compaction_observer_and_reservation(self) -> None:
         binding = self.binding()
@@ -8404,7 +8764,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         answered = self.runtime.goal_activity(binding.id)
         self.assertEqual(answered.revision, hidden.revision + 1)
         self.assertEqual(answered.partial_answers, (answer,))
-        handle.activity_sink(None)
+        handle.fail_activity()
         unavailable = self.runtime.goal_activity(binding.id)
         self.assertFalse(unavailable.plan_available)
         self.assertEqual(unavailable.revision, answered.revision + 1)
@@ -8447,7 +8807,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             first, second, PartialAnswer(handle.thread_id, "physical-two", "last", "last stage"),
         ))
         self.assertEqual(outcome.final_response, "paused final")
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
         resumed = await self.runtime.resume_goal(
             binding=self.store.get(binding.id), owner_id="ou_user", origin=object(),
         )
@@ -8480,14 +8840,21 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self._configure_feedback(before)
         self.assertEqual(self.store.get(binding.id), before)
 
-        control.handles[0].finish()
+        handle = control.handles[0]
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            while handle.activity_sink is None:
+                await asyncio.sleep(0)
+        answer = PartialAnswer(handle.thread_id, handle.id, "answer", "visible partial")
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, partial_answer=answer))
+        handle.finish()
         await self.runtime.wait_idle()
 
         self.assertEqual(observer.calls, [])
-        self.assertIsNotNone(control.handles[0].activity_sink)
+        self.assertEqual(handle.wait_terminal_calls, 1)
+        self.assertIsNone(handle.activity_sink)
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, GoalOutcome)
-        self.assertIsNone(outcome.activity)
+        self.assertEqual(outcome.partial_answers, (answer,))
 
     async def test_goal_questions_use_unique_tap_with_progress_off_and_exact_turn_dedup(
         self,
@@ -8533,7 +8900,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([call.args[3] for call in handler.await_args_list], ["ou_user"] * 2)
         self.assertEqual(self.outcomes[-1].final_response, "final")
-        self.assertIsNone(self.outcomes[-1].activity)
+        self.assertIsNotNone(self.outcomes[-1].activity)
 
     async def test_goal_question_delivery_does_not_wait_for_initial_receipt(self) -> None:
         control = FakeGoalControl(self.codex)
@@ -8592,7 +8959,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(outcome, GoalOutcome)
         self.assertIs(outcome.patch_children, children)
         self.assertFalse(outcome.task_feedback.progress_card_enabled)
-        self.assertIsNone(outcome.activity)
+        self.assertIsNotNone(outcome.activity)
         self.assertEqual(outcome.final_physical_turn_id, "physical-final")
         self.assertEqual(outcome.final_items, tuple(handle.record.items))
         collect.assert_awaited_once_with(
@@ -12455,6 +12822,51 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(submission.turn_id, " ".join(logs.output))
         self.assertEqual(self.codex.resume_calls, [])
         self.assertEqual(len(self.codex.handles), 1)
+
+    async def test_parked_command_stays_running_until_the_typed_unknown_notice(self):
+        from netizen_cli.channel.codex_reply_events import CodexReplyEvents
+        from netizen_cli.channel.reply_events import PresentationKey
+        from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
+        from tests.support.channel_fixtures import channel_fixture
+        from tests.support.channel_messages import FakeMessage
+        from tests.support.process_transport import ProcessTransport
+
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.binding()
+        submission = await self.submit(binding)
+        observer.append_activity(thread_id=submission.thread_id, turn_id=submission.turn_id,
+            event=TurnActivityEvent("read", TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS, 1, text="Read"))
+        self.codex.read_errors.extend(InternalRpcError(-32603, "history unavailable") for _ in range(4))
+        try:
+            async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+                while self.runtime.active_turn(binding.id).state is not ActiveState.OBSERVATION_UNAVAILABLE:
+                    await asyncio.sleep(0)
+            key = PresentationKey(binding.id, submission.thread_id, submission.turn_id)
+            origin = FakeMessage("work", message_id="in")
+            events = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime))
+            opened = events.opened(key, origin, BindingTaskFeedback(), reply=AsyncMock(), reply_partial=AsyncMock())
+            snapshot = opened.observe().snapshot
+            self.assertEqual(snapshot.state, ActiveState.OBSERVATION_UNAVAILABLE)
+            self.assertEqual(len(snapshot.process_items), 1)
+            self.assertFalse(self.outcomes)
+            async with channel_fixture() as fx:
+                wire = ProcessTransport([])
+                presenter = fx.app._progress_cards
+                presenter._process_port = wire.port
+                await presenter.open(opened)
+                writer = presenter._process[key]
+                await asyncio.wait_for(writer.ready.wait(), EXPECTED_PROGRESS_TIMEOUT)
+                self.assertFalse(wire.completed)
+                submission.release_receipt_attempt()
+                await self.runtime.wait_idle()
+                await fx.app.handle_ordinary_completion(replace(self.outcomes[-1], origin=origin))
+                await asyncio.wait_for(writer.task, EXPECTED_PROGRESS_TIMEOUT)
+                wire.assert_retained_completion(self, "timeout")
+        finally:
+            submission.release_receipt_attempt()
+            await self.runtime.wait_idle()
+        self.assertIsInstance(self.outcomes[-1], TurnObservationUnavailableOutcome)
 
     async def _park_turn_for_recovery(self, binding):
         submission = await self.submit(binding)

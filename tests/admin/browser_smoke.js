@@ -338,7 +338,8 @@ async function run() {
           result.interactions.push(step);
         } else if (config.ownerOnly && path !== "/login") {
           step += " · owner controls";
-          const unsupported = ["#nav-temporary", "#nav-schedules", "#nav-progress-card", "#nav-question-notifications", "#nav-session-tools", "#admin-user-add"];
+          if (!mobile && !await evaluate(visible("#nav-progress-card"))) throw Error("Missing shared presentation settings");
+          const unsupported = ["#nav-temporary", "#nav-schedules", "#nav-question-notifications", "#nav-session-tools", "#admin-user-add"];
           for (const selector of unsupported) {
             if (await evaluate(visible(selector))) throw Error("Unsupported owner action is visible: " + selector);
           }

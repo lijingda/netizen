@@ -538,7 +538,7 @@ def _session_settings_sections(
         sections.append(_form_section("消息上下文", context))
     feedback_hints = (
         "执行时闪烁；关闭仍保留状态表情。部分移动端会显示为消息。",
-        "展示执行状态与清单，结束后自动折叠。",
+        "选择在卡片中展示过程，或用独立过程消息展示活动。",
         "完成或失败时 @ 发起人；主动停止、定时自动首轮不提醒。",
     )
     sections.append(_form_section("任务反馈", [
@@ -795,21 +795,20 @@ def _task_feedback_form_elements(
             "开启后，执行中还会间歇显示动态表情；"
             "部分移动端可能将其显示为单独消息。"
         ),
-        _form_label("进度卡"),
+        _form_label("回复消息类型"),
         _static_select(
             name=f"{prefix}_progress_card",
-            placeholder="选择是否使用进度卡",
+            placeholder="选择回复消息类型",
             options=(
-                ("关闭", _progress_card_reference(False, initial.progress_card_settings)),
-                ("开启（默认）", _progress_card_reference(True, initial.progress_card_settings)),
+                ("过程消息", _progress_card_reference(False, initial.progress_card_settings)),
+                ("卡片（默认）", _progress_card_reference(True, initial.progress_card_settings)),
             ),
             initial_option=_progress_card_reference(
                 initial.progress_card_enabled, initial.progress_card_settings,
             ),
         ),
         _form_hint(
-            "开启后会逐步更新任务状态与清单；"
-            "完成后执行过程自动折叠。"
+            "卡片在同一条回复里展示过程和答案；过程消息单独展示活动，答案按普通消息发送。"
         ),
         _form_label("结束时 @ 提醒"),
         _static_select(
@@ -2065,9 +2064,8 @@ def _context_mode_summary(mode: MentionContextMode) -> str:
 
 def _task_feedback_summary(feedback: BindingTaskFeedback) -> str:
     pulse = "开启" if feedback.reaction_pulse_enabled else "关闭"
-    progress = "开启" if feedback.progress_card_enabled else "关闭"
     mention = "开启" if feedback.completion_mention_enabled else "关闭"
-    return f"执行中表情闪烁：{pulse}\n进度卡：{progress}\n结束时 @ 提醒：{mention}"
+    return f"执行中表情闪烁：{pulse}\n回复消息类型：{feedback.reply_type_label}\n结束时 @ 提醒：{mention}"
 
 
 def error_card(message: str, *, scope: FeishuScope | None = None) -> OutboundCard:

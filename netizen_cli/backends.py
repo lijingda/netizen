@@ -278,8 +278,8 @@ OPERATIONS = {
     ),
     OperationId.REPLY_CARD: Operation("执行回复卡", Provider.REPLY_PROGRESS),
     OperationId.PROGRESS: Operation(
-        "过程卡",
-        Provider.CODEX_RUNTIME,
+        "过程展示设置",
+        Provider.REPLY_PROGRESS,
         routes=(
             ("GET", "/progress-card/settings"),
             ("POST", "/progress-card/settings"),

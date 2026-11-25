@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from time import time
 from dataclasses import replace
 
 
+from ..process_activity import ProcessActivityWindow
 from ..partial_answers import PartialAnswer, partial_answers_from_items
 from .codex_contracts import ActiveGoalSnapshot, BindingRuntimeSnapshot
 from .contracts import (
@@ -17,6 +19,7 @@ from .contracts import (
     GoalActivitySnapshot,
 )
 from ..turn_activity import (
+    TurnPlanStepSnapshot,
     TurnActivityEntrySnapshot,
     TurnActivityEvent,
     TurnActivityKind,
@@ -104,6 +107,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             binding_id=active.binding_id,
             thread_id=active.handle.thread_id,
             turn_id=active.handle.id,
+            physical_turn_id=active.handle.id,
             revision=active.activity_revision,
             state=active.state,
             steer_count=active.steer_count,
@@ -111,6 +115,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_generated=active.plan_generated,
             plan_may_be_stale=active.plan_may_be_stale,
             steps=active.plan_steps,
+            process_items=active.process_activity.rows if active.process_activity is not None else None,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
@@ -157,6 +162,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_generated=active.plan_generated,
             plan_may_be_stale=active.plan_may_be_stale,
             steps=active.plan_steps,
+            process_items=active.process_activity.rows if active.process_activity is not None else None,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
@@ -177,6 +183,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             ) if settings.show_plan and active.plan_available else (),
             self._activity_commentary(active) if settings.show_commentary else (),
             self._activity_operations(active) if settings.show_operations else (),
+            active.process_activity.revision if active.process_activity is not None else None,
             tuple(active.partial_answers.values()),
         )
 
@@ -226,7 +233,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
         self._apply_partial_answers(active, observation.partial_answers)
         self._apply_activity_events(active, observation.events)
         if observation.plan_updated:
-            active.plan_steps = observation.steps
+            self._apply_plan(active, observation.steps)
             active.plan_generated = True
             active.plan_last_update_cursor = observation.plan_cursor
             stale_after = active.plan_stale_after_cursor
@@ -276,12 +283,28 @@ class TurnActivityRuntime(NativeQueryRuntime):
         return tuple(item for _position, item in ordered)
 
     @staticmethod
+    def _process_window(active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal) -> ProcessActivityWindow | None:
+        if active.task_feedback.progress_card_enabled:
+            return None
+        if active.process_activity is None:
+            active.process_activity = ProcessActivityWindow(time)
+        return active.process_activity
+
+    def _apply_plan(self, active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal, steps: tuple[TurnPlanStepSnapshot, ...]) -> None:
+        active.plan_steps = steps
+        if active.task_feedback.progress_card_settings.show_plan and (window := self._process_window(active)):
+            window.plan(steps)
+
     def _apply_activity_events(
+        self,
         active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
         events: tuple[TurnActivityEvent, ...],
     ) -> None:
         settings = active.task_feedback.progress_card_settings
+        window = self._process_window(active) if events else None
         for event in events:
+            if window is not None:
+                window.observe(event, settings)
             commentary = event.kind is TurnActivityKind.COMMENTARY
             if commentary and event.text is None:
                 continue
@@ -356,6 +379,9 @@ class TurnActivityRuntime(NativeQueryRuntime):
 
     @staticmethod
     def _reset_activity(active: _ActiveGoal) -> None:
+        if active.process_activity is not None:
+            active.process_activity.close()
+            active.process_activity = None
         active.plan_cursor = 0
         active.activity_sequence = 0
         active.activity_segment = 0
@@ -416,6 +442,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             plan_available=active.plan_available,
             plan_generated=active.plan_generated,
             steps=active.plan_steps,
+            process_items=active.process_activity.rows if active.process_activity is not None else None,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
             partial_answers=tuple(active.partial_answers.values()),
@@ -432,6 +459,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             if settings.show_plan and active.plan_available else (),
             self._activity_commentary(active) if settings.show_commentary else (),
             self._activity_operations(active) if settings.show_operations else (),
+            active.process_activity.revision if active.process_activity is not None else None,
             tuple(active.partial_answers.values()),
         )
 
@@ -463,7 +491,7 @@ class TurnActivityRuntime(NativeQueryRuntime):
             # the new Turn's Activity Module.
             return
         if projection.plan_updated:
-            active.plan_steps = projection.steps
+            self._apply_plan(active, projection.steps)
             active.plan_generated = True
         if projection.event is not None:
             self._apply_activity_events(active, (projection.event,))

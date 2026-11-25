@@ -380,6 +380,30 @@ def project_plan_steps(items: object) -> tuple[TurnPlanStepSnapshot, ...]:
     return tuple(steps)
 
 
+def activity_operation_label(kind: str, text: str | None, count: int) -> str:
+    labels = {
+        TurnActivityKind.COMMAND.value: "执行命令",
+        TurnActivityKind.TOOL.value: "调用工具",
+        TurnActivityKind.FILE_CHANGE.value: "修改文件",
+        TurnActivityKind.WEB_SEARCH.value: "搜索网页",
+        TurnActivityKind.IMAGE.value: "处理图片",
+        TurnActivityKind.SUBAGENT.value: "子任务",
+        TurnActivityKind.REVIEW.value: "代码审查",
+        TurnActivityKind.COMPACTION.value: "压缩上下文",
+    }
+    label = labels.get(kind, "执行操作")
+    if kind in ACTIVITY_DETAIL_KINDS and text:
+        label = text
+    if kind in {
+        TurnActivityKind.FILE_CHANGE.value,
+        TurnActivityKind.SUBAGENT.value,
+    } and count != 1:
+        label += f"（{max(0, count)} 项）"
+    if kind == TurnActivityKind.TOOL.value and text:
+        label += f"：{text}"
+    return label
+
+
 def sanitize_activity_text(
     value: str, *, limit: int = ACTIVITY_TEXT_LIMIT,
 ) -> str | None:
@@ -392,7 +416,7 @@ def sanitize_activity_text(
     redacted = _ELAPSED.sub("[时间信息已隐藏]", redacted)
     redacted = _PERCENT.sub("[百分比已隐藏]", redacted)
     redacted = _ETA.sub("[时间估算已隐藏]", redacted)
-    return _bounded_activity_text(redacted, limit)
+    return bounded_activity_text(redacted, limit)
 
 
 def sanitize_activity_operation_text(
@@ -405,7 +429,7 @@ def sanitize_activity_operation_text(
         return None
     # Filter before truncation so a clipped credential never becomes visible.
     redacted = _redact_activity_credentials(normalized)
-    return _bounded_activity_text(" ".join(redacted.split()), limit)
+    return bounded_activity_text(" ".join(redacted.split()), limit)
 
 
 def _redact_activity_credentials(value: str) -> str:
@@ -421,7 +445,7 @@ def _redact_activity_credentials(value: str) -> str:
     return _KNOWN_TOKEN.sub("[敏感内容已隐藏]", value)
 
 
-def _bounded_activity_text(value: str, limit: int = ACTIVITY_TEXT_LIMIT) -> str:
+def bounded_activity_text(value: str, limit: int = ACTIVITY_TEXT_LIMIT) -> str:
     if len(value) > limit:
         return value[: limit - 1].rstrip() + "…"
     return value
@@ -613,7 +637,7 @@ def _operation_summary(label: str, *details: str | None, limit: int) -> str:
             safe = sanitize_activity_operation_text(detail, limit=limit)
             if safe:
                 parts.append(safe)
-    return _bounded_activity_text(" · ".join(parts), limit)
+    return bounded_activity_text(" · ".join(parts), limit)
 
 
 def _command_activity_summary(item: CommandExecutionThreadItem, *, limit: int) -> str:
@@ -639,7 +663,7 @@ def _command_activity_summary(item: CommandExecutionThreadItem, *, limit: int) -
     if item.exit_code is not None and item.exit_code != 0:
         suffix = f" · 退出码 {item.exit_code}"
         summary = (
-            _bounded_activity_text(summary, max(1, limit - len(suffix)))
+            bounded_activity_text(summary, max(1, limit - len(suffix)))
             + suffix
         )
     return summary

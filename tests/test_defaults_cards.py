@@ -79,7 +79,7 @@ class DefaultsCardsTest(unittest.TestCase):
         card = self.card()
         form = form_values(card)
         progress = next(item for item in form_controls(card.card) if item["name"] == "defaults_session_progress_card")
-        enabled = next(option["value"] for option in progress["options"] if option["text"]["content"] == "开启（默认）")
+        enabled = next(option["value"] for option in progress["options"] if option["text"]["content"] == "卡片（默认）")
         form.update(defaults_session_model="new-model:v1:inherit",
             defaults_session_task_reactions="task-feedback:v2:off",
             defaults_session_progress_card=enabled,

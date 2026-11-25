@@ -210,7 +210,7 @@ class QuestionChannel(ScheduleChannel):
                 origin = CardAnswerOrigin(
                     self._app_id, chat_id, sent.message_id,
                     CardAnswerConversation(chat_id, chat_kind, scope.topic_id),
-                    message_id, context.target,
+                    message_id, context.target, root_id=sent.root_id,
                 )
             projection = CardAnswerProjection(
                 message_id=sent.message_id, source_card_id=message_id,

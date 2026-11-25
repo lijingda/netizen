@@ -998,6 +998,8 @@ class GoalRuntime(TurnObservationRuntime):
 
         try:
             await active.receipt_attempted.wait()
+            if active.terminal_observed and active.process_activity is not None:
+                active.process_activity.close()
             outcome = GoalOutcome(
                 binding_id=active.binding_id,
                 thread_id=active.thread_id,
@@ -1023,11 +1025,7 @@ class GoalRuntime(TurnObservationRuntime):
                 background_cleanup_requested=active.cleanup_succeeded,
                 task_feedback=active.task_feedback,
                 feedback_revision=active.feedback_revision,
-                activity=(
-                    self._goal_activity_snapshot(active)
-                    if active.task_feedback.progress_card_enabled
-                    else None
-                ),
+                activity=self._goal_activity_snapshot(active),
                 partial_answers=tuple(active.partial_answers.values()),
                 finalization=finalization,
                 finalization_error=finalization_error,

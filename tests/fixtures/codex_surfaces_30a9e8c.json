@@ -326,7 +326,7 @@
                                       "elements": [
                                         {
                                           "tag": "markdown",
-                                          "content": "进度卡\n<font color='grey'>展示执行状态与清单，结束后自动折叠。</font>"
+                                          "content": "回复消息类型\n<font color='grey'>选择在卡片中展示过程，或用独立过程消息展示活动。</font>"
                                         }
                                       ]
                                     },
@@ -343,20 +343,20 @@
                                           "required": true,
                                           "placeholder": {
                                             "tag": "plain_text",
-                                            "content": "选择是否使用进度卡"
+                                            "content": "选择回复消息类型"
                                           },
                                           "options": [
                                             {
                                               "text": {
                                                 "tag": "plain_text",
-                                                "content": "关闭"
+                                                "content": "过程消息"
                                               },
                                               "value": "progress-card:v1:[false,null]"
                                             },
                                             {
                                               "text": {
                                                 "tag": "plain_text",
-                                                "content": "开启（默认）"
+                                                "content": "卡片（默认）"
                                               },
                                               "value": "progress-card:v1:[true,null]"
                                             }
@@ -819,7 +819,7 @@
                                       "elements": [
                                         {
                                           "tag": "markdown",
-                                          "content": "进度卡\n<font color='grey'>展示执行状态与清单，结束后自动折叠。</font>"
+                                          "content": "回复消息类型\n<font color='grey'>选择在卡片中展示过程，或用独立过程消息展示活动。</font>"
                                         }
                                       ]
                                     },
@@ -836,20 +836,20 @@
                                           "required": true,
                                           "placeholder": {
                                             "tag": "plain_text",
-                                            "content": "选择是否使用进度卡"
+                                            "content": "选择回复消息类型"
                                           },
                                           "options": [
                                             {
                                               "text": {
                                                 "tag": "plain_text",
-                                                "content": "关闭"
+                                                "content": "过程消息"
                                               },
                                               "value": "progress-card:v1:[false,null]"
                                             },
                                             {
                                               "text": {
                                                 "tag": "plain_text",
-                                                "content": "开启（默认）"
+                                                "content": "卡片（默认）"
                                               },
                                               "value": "progress-card:v1:[true,null]"
                                             }
@@ -1102,6 +1102,13 @@
                       }
                     },
                     {
+                      "tag": "div",
+                      "text": {
+                        "tag": "plain_text",
+                        "content": "回复消息类型：过程消息"
+                      }
+                    },
+                    {
                       "tag": "collapsible_panel",
                       "expanded": false,
                       "header": {
@@ -1158,7 +1165,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -1209,7 +1218,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -1260,7 +1271,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -1311,7 +1324,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -1362,7 +1377,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -1666,7 +1683,7 @@
                                       "elements": [
                                         {
                                           "tag": "markdown",
-                                          "content": "进度卡\n<font color='grey'>展示执行状态与清单，结束后自动折叠。</font>"
+                                          "content": "回复消息类型\n<font color='grey'>选择在卡片中展示过程，或用独立过程消息展示活动。</font>"
                                         }
                                       ]
                                     },
@@ -1683,20 +1700,20 @@
                                           "required": true,
                                           "placeholder": {
                                             "tag": "plain_text",
-                                            "content": "选择是否使用进度卡"
+                                            "content": "选择回复消息类型"
                                           },
                                           "options": [
                                             {
                                               "text": {
                                                 "tag": "plain_text",
-                                                "content": "关闭"
+                                                "content": "过程消息"
                                               },
                                               "value": "progress-card:v1:[false,null]"
                                             },
                                             {
                                               "text": {
                                                 "tag": "plain_text",
-                                                "content": "开启（默认）"
+                                                "content": "卡片（默认）"
                                               },
                                               "value": "progress-card:v1:[true,null]"
                                             }
@@ -2872,6 +2889,13 @@
                       }
                     },
                     {
+                      "tag": "div",
+                      "text": {
+                        "tag": "plain_text",
+                        "content": "回复消息类型：过程消息"
+                      }
+                    },
+                    {
                       "tag": "collapsible_panel",
                       "expanded": false,
                       "header": {
@@ -2928,7 +2952,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂不可用（下次可观测 Turn 完成后更新）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -2979,7 +3005,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂不可用（下次可观测 Turn 完成后更新）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -3030,7 +3058,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂不可用（下次可观测 Turn 完成后更新）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -3081,7 +3111,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂不可用（下次可观测 Turn 完成后更新）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -3132,7 +3164,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂不可用（下次可观测 Turn 完成后更新）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：继承 Codex",
                                         "Effort：继承 Codex",
@@ -3746,6 +3780,13 @@
                       }
                     },
                     {
+                      "tag": "div",
+                      "text": {
+                        "tag": "plain_text",
+                        "content": "回复消息类型：过程消息"
+                      }
+                    },
+                    {
                       "tag": "collapsible_panel",
                       "expanded": false,
                       "header": {
@@ -3802,7 +3843,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：gpt-future-codex",
                                         "Effort：ultra",
@@ -3853,7 +3896,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：gpt-future-codex",
                                         "Effort：ultra",
@@ -3904,7 +3949,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：gpt-future-codex",
                                         "Effort：ultra",
@@ -3955,7 +4002,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：gpt-future-codex",
                                         "Effort：ultra",
@@ -4006,7 +4055,9 @@
                                         "工作目录：<root>/project"
                                       ],
                                       "context_window_line": "上下文窗口：暂无（首条消息后生成）",
-                                      "context_mode_lines": [],
+                                      "context_mode_lines": [
+                                        "回复消息类型：过程消息"
+                                      ],
                                       "model_lines": [
                                         "Model：gpt-future-codex",
                                         "Effort：ultra",

@@ -3,6 +3,7 @@ status: accepted
 date: 2026-10-21
 amends: 0046, 0052, 0073
 related: 0075, 0076, 0079, 0084
+amended_by: 0107
 ---
 
 # 用有界活动分段配置过程卡展示

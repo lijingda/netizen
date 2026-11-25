@@ -18,6 +18,7 @@ from ..domain import ActiveState, GoalOperationState, MessageContextAnchor
 from ..partial_answers import PartialAnswer
 from ..prompt_projection import ConversationInput
 from ..progress_card_settings import ProgressCardSettings
+from ..process_activity import ObservedProcessItem
 from ..turn_activity import TurnActivityEntrySnapshot, TurnPlanStepSnapshot
 from ..turn_patch_children import TaskPatchChildren
 
@@ -368,6 +369,8 @@ class SideSubmission:
     release_receipt_attempt: Callable[[], None] | None = None
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
+    parent_binding_id: str | None = None
+    root_message_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -434,6 +437,10 @@ class TurnActivitySnapshot:
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
     state_line: str | None = None
+    physical_turn_id: str | None = field(default=None, repr=False, compare=False, kw_only=True)
+
+    # None means this physical Turn has no process window. An empty tuple is an observed empty window.
+    process_items: tuple[ObservedProcessItem, ...] | None = field(default=None, repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.turn_id:
@@ -463,6 +470,13 @@ class SideTurnActivitySnapshot:
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
+    # None means this physical Turn has no process window. An empty tuple is an observed empty window.
+    process_items: tuple[ObservedProcessItem, ...] | None = field(default=None, repr=False, compare=False, kw_only=True)
+
+    @property
+    def physical_turn_id(self) -> str:
+        return self.turn_id
+
     def __post_init__(self) -> None:
         if not self.side_id or not self.thread_id or not self.turn_id:
             raise ValueError("Side Turn activity identity must not be empty")
@@ -491,6 +505,9 @@ class GoalActivitySnapshot:
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
+
+    # None means this physical Turn has no process window. An empty tuple is an observed empty window.
+    process_items: tuple[ObservedProcessItem, ...] | None = field(default=None, repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.logical_turn_id:
@@ -618,6 +635,7 @@ class SideSessionSnapshot:
     turn_state: ActiveState | None
     last_activity: float
     revision: int = 0
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,6 +780,8 @@ class SideTurnOutcome:
     activity: SideTurnActivitySnapshot | None = None
     patch_children: TaskPatchChildren = TaskPatchChildren()
     partial_answers: tuple[PartialAnswer, ...] = ()
+    root_message_id: str | None = None
+    execution_unknown: bool = False
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:

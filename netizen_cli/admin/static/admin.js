@@ -3445,9 +3445,13 @@ function renderProgressCardSettings(input, settings) {
   const container = input("progress-settings");
   if (!container) return;
   const progress = progressCardSettings(settings);
-  container.hidden = !settings.progress_card_enabled;
+  container.hidden = false;
   const source = input("progress-source");
-  if (source) source.hidden = settings.progress_card_settings !== null;
+  if (source) {
+    source.hidden = false;
+    source.textContent = settings.progress_card_settings === null
+      ? "跟随全局配置。修改细项后将保存为独立配置。" : "当前使用单独配置的展示细项。";
+  }
   const reset = input("progress-reset");
   if (reset) reset.hidden = settings.progress_card_settings === null;
   for (const node of container.querySelectorAll("input, select")) {
@@ -3455,14 +3459,14 @@ function renderProgressCardSettings(input, settings) {
     const key = field.replaceAll("-", "_");
     if (field.startsWith("show-")) node.checked = progress?.[key] || false;
     else node.value = progress?.[key] ?? "";
-    node.disabled = !progress || !settings.progress_card_enabled
+    node.disabled = !progress
       || (field.startsWith("commentary-") && !progress.show_commentary)
       || (field.startsWith("operation-") && !progress.show_operations);
   }
   for (const [kind, shown] of [["commentary", progress?.show_commentary], ["operation", progress?.show_operations]]) {
     input(`progress-${kind}-capacity`).hidden = !shown;
   }
-  const error = progress ? progressCardSettingsError(settings) : "读取全局配置后可编辑过程卡细项。";
+  const error = progress ? progressCardSettingsError(settings) : "读取全局配置后可编辑展示细项。";
   const note = input("progress-error");
   note.textContent = error;
   note.hidden = !error;
@@ -3492,7 +3496,7 @@ function sessionConfigurationSummary(settings, models = []) {
 }
 
 function progressCardSourceLabel(settings) {
-  return settings.progress_card_enabled ? `过程卡：${settings.progress_card_settings === null ? "跟随全局" : "单独配置"}` : "";
+  return `${settings.progress_card_enabled ? "卡片" : "过程消息"} · 展示细项：${settings.progress_card_settings === null ? "跟随全局" : "单独配置"}`;
 }
 
 async function restoreGlobalProgress(editor, isCurrent, render) {
@@ -3511,7 +3515,7 @@ async function restoreGlobalProgress(editor, isCurrent, render) {
 function sessionFeedbackLabels(settings, { progressSource = false } = {}) {
   const labels = [];
   if (settings.reaction_pulse_enabled) labels.push("表情反馈");
-  if (settings.progress_card_enabled) labels.push(progressSource ? progressCardSourceLabel(settings) : "进度卡片");
+  labels.push(progressSource ? progressCardSourceLabel(settings) : (settings.progress_card_enabled ? "卡片" : "过程消息"));
   if (settings.completion_mention_enabled) labels.push("结束时 @ 提醒");
   return labels;
 }
@@ -3556,7 +3560,7 @@ function renderSessionSettingsFields(input, settings, models, contextAvailable) 
   }
   input("reactions").checked = settings.reaction_pulse_enabled;
   input("completion-mention").checked = settings.completion_mention_enabled;
-  input("progress").checked = settings.progress_card_enabled;
+  input("progress").value = settings.progress_card_enabled ? "card" : "process";
   if (replyCardUnavailable) hideProviderElement(input("progress").closest("label"));
   if (progressUnavailable) {
     hideProviderElement(input("progress-settings"));
@@ -3579,7 +3583,7 @@ function changeSessionSettingsField(input, settings, models, field, baseTurn = n
   else if (field === "tier" && settings.turn_settings) settings.turn_settings.service_tier_id = input("tier").value;
   else if (field === "context") settings.message_context_mode = input("context").value;
   else if (field === "reactions") settings.reaction_pulse_enabled = input("reactions").checked;
-  else if (field === "progress") settings.progress_card_enabled = input("progress").checked;
+  else if (field === "progress") settings.progress_card_enabled = input("progress").value === "card";
   else if (field === "completion-mention") settings.completion_mention_enabled = input("completion-mention").checked;
   else if (field.startsWith("progress-") && progressCardFields.includes(field.slice(9))) {
     const progress = progressCardSettings(settings);

@@ -52,6 +52,7 @@ from ..schedules.models import ScheduleNotFound
 from . import constants
 from .app_values import (
     _ClaudeReplyTarget,
+    _inbound_root_message_id,
     _message_id,
     _ScheduledCompletion,
 )
@@ -60,6 +61,7 @@ from .base import (
 )
 from .claude_reply_events import ClaudeReplyEvents
 from .codex_reply_events import CodexReplyEvents
+from .process_presentation import ProcessLocation
 from .presentation import CompletionPresentationChannel
 from .reply_events import DeliveryReceipt, PresentationKey, ReplyTarget, RunEnded, RunState, TurnResult
 from .topics import CardReplyLocation
@@ -89,9 +91,14 @@ class NativeReplyChannel(CompletionPresentationChannel):
                     await self._present_run_end(lifecycle)
                 else:
                     await self._present_run_state(lifecycle)
+            elif isinstance(outcome, LogicalTerminal):
+                key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+                self._progress_cards.end_process_run(key, "done" if outcome.status in ("completed", "interrupted") else "error")
             return
         if isinstance(outcome, DegradedTurn):
             key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+            for input_id in outcome.affected_inputs or (outcome.turn_id,):
+                self._progress_cards.end_process_run(replace(key, turn_id=input_id), "timeout")
             location = self._physical_card_location(outcome.binding_id, outcome.origin)
             await self._present_run_state(RunState(ReplyTarget(key, outcome.origin, None), str(outcome.error),
                 send_notice=lambda notice: self._physical_reply(outcome.origin, notice, location)))
@@ -103,6 +110,10 @@ class NativeReplyChannel(CompletionPresentationChannel):
             if outcome.publishable():
                 location = self._physical_card_location(outcome.binding_id, outcome.origin)
                 await self._complete_task(ClaudeReplyEvents.result(outcome, location, self._physical_reply))
+            else:
+                key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+                confirmed = outcome.error_detail is None and outcome.status in ("completed", "interrupted")
+                self._progress_cards.process_result(key, "done" if confirmed else "error", outcome.activity, outcome.run_continues)
             return
         scheduled = outcome.origin if isinstance(outcome.origin, ScheduledOrigin) else None
         completion = _ScheduledCompletion()
@@ -118,6 +129,29 @@ class NativeReplyChannel(CompletionPresentationChannel):
                 await self._archive_scheduled_completion(outcome)
         finally:
             self._finish_ordinary_completion(outcome)
+
+    def _process_reply_location(self, origin: object, root_id: str | None) -> ProcessLocation | None:
+        if getattr(origin, "app_id", self._app_id) != self._app_id:
+            return None
+        if isinstance(origin, ConversationTarget):
+            if not origin.publishable():
+                return None
+            scope = origin.scope
+            parent = root = None
+            if scope.topic_id:
+                if not isinstance(origin.source, ClaudeInputAnchor) or origin.source.scope != scope:
+                    return None
+                parent = root = origin.source.topic_root_id
+        elif isinstance(origin, _ClaudeReplyTarget):
+            scope, parent, root = origin.location.scope, origin.location.parent, origin.location.root
+        else:
+            scope, parent = self._scope(origin), _message_id(origin)
+            root = getattr(origin, "root_id", None) or _inbound_root_message_id(origin)
+            if not parent:
+                return None
+        if scope.app_id != self._app_id or (root_id is not None and (not scope.topic_id or root not in (None, root_id))):
+            return None
+        return ProcessLocation(scope, parent, root or root_id)
 
     def _physical_card_location(self, binding_id: str, origin: object) -> CardReplyLocation:
         if isinstance(origin, _ClaudeReplyTarget):
@@ -173,13 +207,13 @@ class NativeReplyChannel(CompletionPresentationChannel):
     async def _projection_failed(self, outcome: TurnOutcome | GoalOutcome) -> None:
         turn_id = (outcome.turn_id if isinstance(outcome, TurnOutcome)
                    else outcome.logical_turn_id or outcome.final_physical_turn_id or "goal")
+        key = PresentationKey(outcome.binding_id, outcome.thread_id, turn_id)
+        self._progress_cards.end_process_run(key, "error")
         try:
             try:
                 await self._finish_task_reactions(outcome.origin, turn_id, constants.ERROR_REACTION)
             finally:
-                await self._progress_cards.abandon(
-                    key=PresentationKey(outcome.binding_id, outcome.thread_id, turn_id),
-                )
+                await self._progress_cards.abandon(key=key)
         finally:
             if isinstance(outcome, TurnOutcome):
                 self._finish_ordinary_completion(outcome)
@@ -256,6 +290,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
             "状态仍无法确认时，新消息不会执行。"
         )
         key = PresentationKey(outcome.binding_id, outcome.thread_id, outcome.turn_id)
+        self._progress_cards.tombstone_unknown_process(key)
         await self._present_run_state(RunState(ReplyTarget(key, outcome.origin, key), message))
 
     async def _complete_side_lifecycle(

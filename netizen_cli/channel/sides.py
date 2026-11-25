@@ -276,6 +276,7 @@ class SideChannel(PromptChannel):
             key = PresentationKey(submission.side_id, submission.thread_id, submission.turn_id, side=True)
             event = CodexReplyEvents(self._runtime, self._ordinary).opened(
                 key, reply_origin, submission.task_feedback,
+                parent_binding_id=submission.parent_binding_id, root_message_id=submission.root_message_id,
                 reply=lambda card: (self._reply_to_origin(reply_origin, card) if isinstance(reply_origin, CardAnswerOrigin)
                                     else self._channel.reply(reply_origin, card)),
                 reply_partial=lambda post: self._reply_to_origin(reply_origin, post),
@@ -375,7 +376,7 @@ class SideChannel(PromptChannel):
                     parent_short_id=record.parent_binding_id[:8],
                     state=snapshot.state.value,
                     turn_state=turn_state,
-                    git_branch_lines=git_branch_lines,
+                    git_branch_lines=(*git_branch_lines, f"回复消息类型：{snapshot.task_feedback.reply_type_label}"),
                 ),
             )
             return

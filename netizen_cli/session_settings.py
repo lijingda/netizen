@@ -42,6 +42,15 @@ class BindingTaskFeedback:
     completion_mention_enabled: bool = True
     progress_card_settings: ProgressCardSettings | None = None
 
+    @property
+    def reply_type_label(self) -> str:
+        return "卡片" if self.progress_card_enabled else "过程消息"
+
+    def capture(self, defaults: Callable[[], ProgressCardSettings]) -> BindingTaskFeedback:
+        if self.progress_card_settings is not None:
+            return self
+        return replace(self, progress_card_settings=defaults())
+
     def __post_init__(self) -> None:
         values = (self.reaction_pulse_enabled, self.progress_card_enabled, self.completion_mention_enabled)
         if not all(type(value) is bool for value in values):
@@ -132,7 +141,7 @@ class SessionSettings:
                 progress_card_settings,
             )
         except ValueError as error:
-            raise SessionSettingsError("执行中表情闪烁、进度卡和结束时 @ 提醒必须是布尔值。") from error
+            raise SessionSettingsError("执行中表情闪烁、回复消息类型和结束时 @ 提醒必须使用布尔字段。") from error
         try:
             mode = MentionContextMode(value["message_context_mode"])
         except (ValueError, TypeError) as error:

@@ -73,6 +73,7 @@ class _Human:
     input_id: str
     ready: asyncio.Future[Submission]
     commit: ContextCursorCommit | None
+    feedback: BindingTaskFeedback
     receipt: asyncio.Event = field(default_factory=asyncio.Event)
     proof: asyncio.Event = field(default_factory=asyncio.Event)
     reply: LogicalReply = field(default_factory=LogicalReply)
@@ -103,7 +104,7 @@ class _Human:
             return
         if error is None:
             self.ready.set_result(Submission(SubmitDisposition.STARTED, self.binding.id, session, self.input_id,
-                                             self.receipt.set, self.binding.task_feedback, self.binding.feedback_revision))
+                                             self.receipt.set, self.feedback, self.binding.feedback_revision))
         else:
             self.ready.set_exception(error)
             self.receipt.set()  # No Channel receipt will follow a rejected or uncertain submission.
@@ -195,7 +196,7 @@ class _Execution:
         return TurnActivitySnapshot(self.binding.id, self.session, turn_id, self.revision,
                                    ActiveState.RUNNING, 0, False, False, False, (), partial_answers=partials,
                                    progress_card_settings=feedback.progress_card_settings or ProgressCardSettings(),
-                                   state_line=state.line)
+                                   physical_turn_id=turn_id, state_line=state.line)
 
     @property
     def finishing(self) -> bool:
@@ -283,11 +284,13 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self, *, bindings: BindingStore, clients: ClaudeClients, owner_id: str,
         on_completion: OrdinaryCompletionHandler, notice: Callable[[object, str], Awaitable[None]],
         clock: Callable[[], float] = time.monotonic,
+        progress_card_defaults: Callable[[], ProgressCardSettings] = ProgressCardSettings,
     ) -> None:
         if not owner_id:
             raise ValueError("Claude 实例需要一名所有者。")
         self._bindings = bindings
         self.observations = ClaudeObservations()
+        self._progress_card_defaults = progress_card_defaults
         self._clients = clients
         self._owner = owner_id
         self.backend_policy = BackendPolicy("claude", owner_id)
@@ -298,7 +301,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
-        self.on_binding_deleted: Callable[[str], None] | None = None
+        self.on_binding_deleted: Callable[[str], Awaitable[None]] | None = None
         self._activity: dict[str, _BindingActivity] = {}
         self._active: dict[str, _Execution] = {}
         self._tasks: dict[asyncio.Task[None], _Execution] = {}
@@ -432,7 +435,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 raise OrdinaryInputRejected(STALE)
             input_id = str(uuid4())
             message = user_message(input, input_id)
-            human = _Human(current, origin, input_id, asyncio.get_running_loop().create_future(), context_commit)
+            human = _Human(current, origin, input_id, asyncio.get_running_loop().create_future(), context_commit,
+                           current.task_feedback.capture(self._progress_card_defaults))
             active = self._active.get(binding.id)
             if active is None:
                 scope = self._bindings.get_scope(current.scope_key).scope
@@ -755,11 +759,11 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if frame.result or detail or live.partials or (status == "completed" and finish_presentation):
             turn_id = source.input_id if direct else frame.uuid
             state = partial(execution.cli_state, human.input_id if human else "")
-            snapshot = execution.activity(turn_id, source.binding.task_feedback, state=state(), final=body)
+            snapshot = execution.activity(turn_id, source.feedback, state=state(), final=body)
             event = PhysicalAnswer(source.binding.id, execution.session,
                                    turn_id, self._owner,
                                    human.source if human else execution.scope, status, body, detail,
-                                   task_feedback=source.binding.task_feedback, feedback_revision=source.binding.feedback_revision,
+                                   task_feedback=source.feedback, feedback_revision=source.binding.feedback_revision,
                                    cwd=self._owned_cwds[source.binding.id], logical_id=human.input_id if human else None,
                                    run_continues=human is not None and (
                                        live.has_work(human.input_id) or (execution.pending is human and submitted is not human)
@@ -841,7 +845,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                 continue
             human.terminal_sent = True
             mention = None
-            if human.binding.task_feedback.completion_mention_enabled and not human.stop_requested and human.status != "interrupted":
+            if human.feedback.completion_mention_enabled and not human.stop_requested and human.status != "interrupted":
                 mention = valid_completion_mention_user_id(self._owner)
             self._queue(execution, human, LogicalTerminal(human.binding.id, execution.session, human.input_id, self._owner,
                         human.source, human.status, human.reply, mention, lambda: not execution.broken, partial(execution.cli_state, human.input_id)))
@@ -882,7 +886,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                 def active(physical=physical, anchor=human.origin) -> bool:
                                     return live.physical == physical and not execution.broken and not anchor.retired
                                 self._queue(execution, human, PhysicalStarted(execution.binding.id, execution.session,
-                                    human.input_id, human.source, human.binding.task_feedback, active,
+                                    human.input_id, human.source, human.feedback, active,
                                     human.origin.retained, human.reply))
                             if confirmed_write and human.ready.done() and not human.ready.cancelled():
                                 await self._intake(execution, human)
@@ -947,9 +951,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             removed = self._bindings.delete_binding(binding_id)
             self._activity.pop(binding_id, None)
             self.observations.discard(binding_id)
-            if self.on_binding_deleted:
-                self.on_binding_deleted(binding_id)
-            return removed
+        if self.on_binding_deleted:
+            await self.on_binding_deleted(binding_id)
+        return removed
 
     observation_defaults = DEFAULT_OBSERVATIONS
 
@@ -1009,7 +1013,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         if execution and execution.session == thread_id and not execution.broken:
             human = execution.humans.get(turn_id)
             if human and human.written and execution.live.init_human == turn_id:
-                return execution.activity(turn_id, human.binding.task_feedback, state=execution.cli_state(turn_id))
+                return execution.activity(turn_id, human.feedback, state=execution.cli_state(turn_id))
         return None
 
     def reply_blocked_by_lifecycle(self, binding_id: str) -> bool:

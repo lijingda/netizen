@@ -12,6 +12,7 @@ from uuid import UUID
 from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.file_evidence import FileEvidence
+from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.ordinary_sessions import (
     ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, PhysicalAnswer, LogicalTerminal, OrdinaryConclusion, OrdinaryInputRejected, OrdinarySessionDiverged, PreparedPrompt, PromptImage, ReleaseConfirmation,
 )
@@ -113,6 +114,19 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         arguments = dict(scope_key=self.binding.scope_key, sender_id="owner",
                          revision=preview.revision if preview else None, turn_id=preview.turn_id if preview else None)
         return await self.runtime.release_control(self.binding.id, **(arguments | overrides))
+
+    async def test_reply_settings_capture_instance_defaults_per_input(self):
+        current = ProgressCardSettings(operation_limit=2)
+        self.runtime._progress_card_defaults = lambda: current
+        first = await self.submit()
+        current = ProgressCardSettings(operation_limit=5)
+        await self.finish(first)
+        self.assertEqual(first.task_feedback.progress_card_settings.operation_limit, 2)
+        self.assertEqual(self.events[-1].activity.progress_card_settings.operation_limit, 2)
+        second = await self.submit()
+        await self.finish(second)
+        self.assertEqual(second.task_feedback.progress_card_settings.operation_limit, 5)
+        self.assertIsNone(self.store.get(self.binding.id).task_feedback.progress_card_settings)
 
     async def test_public_history_uses_exact_cwd_and_last_visible_assistant(self):
         from types import SimpleNamespace

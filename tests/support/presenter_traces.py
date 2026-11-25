@@ -8,6 +8,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.support.process_transport import ProcessTransport
+
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "codex_presenter_a1b9eee.json"
 CLAUDE_FIXTURE = FIXTURE.with_name("claude_presenter_a1b9eee.json")
@@ -50,7 +52,7 @@ def _encode_media(value):
     raise TypeError(f"Unexpected transport value {type(value).__name__}")
 
 
-def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE, expected_edits=None, stack=None):
+def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE, expected_edits=None, stack=None, process_mode=False):
     """Compare the complete ordered trace after the scenario finishes."""
     if stack is None:
         stack = case.enterContext(ExitStack())
@@ -58,8 +60,11 @@ def expect_presenter_trace(case, fixture, name, *, reference=FIXTURE, expected_e
     stack.enter_context(patch("secrets.token_hex", side_effect=lambda n: next(nonces).to_bytes(n, "big").hex()))
     events = delivery_recorder(fixture.channel, stack, include_reads=True)
 
+    process = ProcessTransport(events)
+    stack.enter_context(patch.object(fixture.app._progress_cards, "_process_port", process.port))
+
     def compare():
-        serialized = json.dumps(events, default=_encode_media, ensure_ascii=False)
+        serialized = json.dumps(process.content_trace() if process_mode else events, default=_encode_media, ensure_ascii=False)
         root = fixture.project_root
         actual = json.loads(serialized.replace(str(root.resolve()), "<root>").replace(str(root), "<root>"))
         expected = json.loads(reference.read_text(encoding="utf-8"))[name]
