@@ -37,6 +37,8 @@ class ReplacementWriter(asyncio.Lock, Generic[Payload]):
             outcome = await write(payload)
             if outcome == "confirmed":
                 self.known = payload
+                if unknown_retry_delays:
+                    return True  # Queued state changes reconcile after terminal delivery settles.
                 delivered = True
             elif outcome == "unknown" and (delay := next(delays, None)) is not None:
                 await asyncio.sleep(delay)

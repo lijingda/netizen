@@ -2911,6 +2911,49 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(peak, 1)
                     self.assertEqual([item for _, item in fx.channel.replies if isinstance(item, str)], posts)
 
+    async def test_idle_during_a_confirmed_terminal_retry_updates_the_card_after_settlement(self):
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.physical_delivery import BODY
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                project_alias="test", creator_id="ou_user",
+                task_feedback=BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=False))
+            fx.channel.reply_results.append(SendResult.ok(message_id="card"))
+            await app.handle_message(FakeMessage("work", message_id="H"))
+            cli = clients.calls[-1]
+            cli.init()
+            await self.until(lambda: bool(app._progress_cards._sessions))
+            ledger = next(iter(app._progress_cards._sessions.values())).delivery
+            second, release = asyncio.Event(), asyncio.Event()
+            writes = []
+
+            async def update(mid, card):
+                if "final-answer" in str(card):
+                    writes.append((ledger.settled, "idle" if "全部完成" in str(card) else "running"))
+                    if len(writes) == 2:
+                        second.set()
+                        await release.wait()
+                    elif not ledger.settled:
+                        raise OSError("lost receipt")
+                return SendResult.ok(message_id=mid)
+
+            with (patch.object(fx.channel, "update_card", update),
+                  patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", .005)):
+                cli.result(result="final-answer", idle=False)
+                await asyncio.wait_for(second.wait(), 3)
+                try:
+                    _system_frame(cli, "session_state_changed", state="idle")
+                    await self.until(lambda: ordinary._active[binding.id].human.terminal_sent)
+                finally:
+                    release.set()
+                self.assertTrue(await ordinary.wait_idle(3))
+            self.assertEqual([state for settled, state in writes if not settled], ["running", "running"])
+            self.assertIn((True, "idle"), writes)
+            self.assertEqual(ledger.items[BODY], "confirmed")
+            self.assertNotIn(("H", INCOMPLETE), fx.channel.replies)
+
     async def test_writer_recomputes_after_each_unknown_delay(self):
         from netizen_cli.channel.replacement_writer import ReplacementWriter
 
