@@ -113,7 +113,7 @@ class ClaudeReplyEvents:
             partials=tuple(target.partial(p) for p in event.partial_answers),
             file_evidence=event.file_evidence,
             file_binding_id=key.owner_id,
-            physical_turn_id=key.turn_id,
+            physical_turn_id=(event.activity and event.activity.physical_turn_id) or key.turn_id,
             allow_suppression=False,
             run_continues=event.run_continues,
             end=None,

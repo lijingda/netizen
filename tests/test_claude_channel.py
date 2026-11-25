@@ -154,6 +154,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             stack = self.enterContext(ExitStack())
         stack.enter_context(patch("netizen_cli.runtime.claude_ordinary.uuid4",
                                side_effect=(UUID(int=1), UUID(int=2))))
+        stack.enter_context(patch("netizen_cli.runtime.claude_ordinary.time_ns", return_value=1_000_000_000))
         def expected_changes(trace):
             # PR 315, merged after the fixture was recorded on a1b9eee.
             hint = "如需在终端继续这个会话，请先 /release"

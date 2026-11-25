@@ -128,6 +128,65 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.task_feedback.progress_card_settings.operation_limit, 5)
         self.assertIsNone(self.store.get(self.binding.id).task_feedback.progress_card_settings)
 
+    async def test_display_churn_preserves_control_revision_and_stop_target(self):
+        from claude_agent_sdk import AssistantMessage, ToolResultBlock, ToolUseBlock, UserMessage
+        h = await self.submit()
+        h.release_receipt_attempt()
+        cli = self.clients.calls[-1]
+        cli.init(uuid="physical-one")
+        def snapshot():
+            return self.runtime.turn_activity(self.binding.id, thread_id=cli.session, turn_id=h.turn_id)
+        await self.wait_until(snapshot)
+        initial = snapshot()
+        preview = await self.runtime.preview_stop(self.binding)
+        before = self.runtime._admission(self.store.get(self.binding.id))
+        cli.stream.put_nowait(AssistantMessage([ToolUseBlock("write", "Write", {"file_path": "requested"})],
+                                               "model", session_id=cli.session))
+        await self.wait_until(lambda: snapshot().operations)
+        self.assertGreater(snapshot().revision, initial.revision)
+        self.assertEqual(snapshot().physical_turn_id, "physical-one")
+        cli.stream.put_nowait(UserMessage([ToolResultBlock("write")], tool_use_result={"filePath": "effective"}))
+        await self.wait_until(lambda: snapshot().operations[0].status.value == "completed")
+        self.assertEqual(self.runtime._admission(self.store.get(self.binding.id)), before)
+        fields = dict(expected_activity_revision=preview.activity_revision, expected_turn_id=preview.turn_id)
+        self.assertEqual((await self.runtime.recheck_turn_exact(self.binding.id, **fields)).turn_id, h.turn_id)
+        await self.runtime.stop_exact(self.binding.id, **fields)
+        self.assertEqual(cli.interrupts, 1)
+        cli.result()
+        self.assertTrue(await self.runtime.wait_idle(2))
+        event = next(e for e in self.events if isinstance(e, PhysicalAnswer))
+        self.assertEqual(event.activity.physical_turn_id, "physical-one")
+        self.assertEqual([f.path for f in event.file_evidence().outputs], ["effective"])
+
+    async def test_resumed_client_tracks_new_steps_and_late_child_only_invalidates_checklist(self):
+        from claude_agent_sdk import AssistantMessage, ToolResultBlock, ToolUseBlock, UserMessage
+        first = await self.submit()
+        await self.finish(first)
+        cli = self.clients.calls[-1]
+        self.clients.cwds[cli.session] = self.cwd
+        h = await self.submit()
+        h.release_receipt_attempt()
+        cli = self.clients.calls[-1]
+        self.assertTrue(cli.resume)
+        cli.init(uuid="current")
+        def snapshot():
+            return self.runtime.turn_activity(self.binding.id, thread_id=cli.session, turn_id=h.turn_id)
+        def start(key, name, parent=None):
+            cli.stream.put_nowait(AssistantMessage([ToolUseBlock(key, name, {})], "model", session_id=cli.session,
+                                                   parent_tool_use_id=parent))
+        start("create", "TaskCreate")
+        cli.stream.put_nowait(UserMessage([ToolResultBlock("create")], tool_use_result={"task":{"id":"1","subject":"First"}}))
+        start("update", "TaskUpdate")
+        cli.stream.put_nowait(UserMessage([ToolResultBlock("update")], tool_use_result={
+            "success":True, "taskId":"1", "updatedFields":["status"], "statusChange":{"to":"in_progress"}}))
+        await self.wait_until(lambda: snapshot() and snapshot().steps and snapshot().steps[0].status.value == "inProgress")
+        start("child-update", "TaskUpdate", parent="earlier-agent")
+        await self.wait_until(lambda: not snapshot().plan_available)
+        self.assertEqual(snapshot().operations, ())
+        self.assertTrue(all(item.finished_at is None for item in snapshot().process_items or ()))
+        cli.result()
+        self.assertTrue(await self.runtime.wait_idle(2))
+
     async def test_public_history_uses_exact_cwd_and_last_visible_assistant(self):
         from types import SimpleNamespace
         rows = [SimpleNamespace(type="assistant", uuid=id_, session_id="s") for id_ in ("a", "b")]

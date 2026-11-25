@@ -57,7 +57,7 @@ class ActivityAccumulator:
             tuple[int, TurnActivityStatus], tuple[int, TurnActivityEntrySnapshot]
         ] = {}
         by_time = settings.organization == "time"
-        for position, item_id in enumerate(self._operation_order):
+        for position, item_id in enumerate(self._operation_order[-settings.operation_limit:]):
             entry = self._operations[item_id]
             if entry.kind is TurnActivityKind.SUBAGENT:
                 # Hidden/evicted commentary still separates operation segments.
