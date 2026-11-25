@@ -26,7 +26,7 @@ from .replacement_writer import ReplacementWriter
 from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, RunDisplay, TerminalStatus, TurnOpened, TurnResult
 from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
-from .topics import BindingCardLocation, CardReplyLocation
+from .topics import BindingCardLocation, CardReplyLocation, receipt
 from .physical_delivery import BODY, Item, Outcome, PhysicalDelivery, record_sent_answer
 
 
@@ -256,7 +256,7 @@ class _ReplyCardPresenter:
                         or not view.location.can_write(mid)):
                     return False
                 view.content = replace(view.content, files=refresh_file_page(files, intent.page))
-                return await self._reconcile_locked_card(mid, view, cards)
+                return await self._reconcile_locked_card(mid, view, cards, page_request=True)
 
             owner = self._card_owners.get(mid)
             def destination() -> CardReplyLocation:
@@ -351,7 +351,19 @@ class _ReplyCardPresenter:
             reply.published(mid, key.turn_id, items, location.usable)
         return outcome
 
-    async def _reconcile_locked_card(self, mid: str, view: _PublishedCard, cards: dict[str, _PublishedCard]) -> bool:
+    async def _write_file_page(self, mid: str, card: OutboundCard, view: _PublishedCard) -> Outcome:
+        attempt = await self._attempt_update_message(mid, card, binding_id=view.key.owner_id,
+            operation_id=view.key.turn_id, location=view.location, policy=DeliveryPolicy.ITEM_RECEIPTS,
+            validate=lambda result: view.location.validate_page_receipt(result, mid))
+        outcome = receipt(attempt.result)
+        reply = view.display.reply
+        if outcome == "confirmed" and reply and reply.messages is not None and view.location.can_write(mid):
+            view.delivery.record(view.items, "confirmed")
+            reply.published(mid, view.key.turn_id, view.items, view.location.usable)
+        return outcome
+
+    async def _reconcile_locked_card(self, mid: str, view: _PublishedCard, cards: dict[str, _PublishedCard], *,
+                                     page_request: bool = False) -> bool:
         reply = view.display.reply
 
         def desired() -> OutboundCard | None:
@@ -361,12 +373,15 @@ class _ReplyCardPresenter:
             return render_run_card(view.content, view.display.current() if mid == self._newest_card(reply, cards) else None)
 
         def write(card: OutboundCard) -> Awaitable[Outcome]:
+            if page_request:
+                return self._write_file_page(mid, card, view)
             return self._write_card(mid, card, view.key, view.location, view.delivery, view.items, reply)
 
         try:
             current = await external_call(view.writer.reconcile_locked(desired, write))
             if not view.location.can_write(mid):
-                return False
+                # The issued page can be acknowledged after retirement. desired() bars any further write.
+                return current and page_request
             if current and view.writer.known is not None and mid != self._newest_card(reply, cards) and cards.get(mid) is view:
                 self._remember_file_line(mid, view, None)
                 cards.pop(mid)  # A confirmed, immutable card no longer needs a writer.
@@ -919,6 +934,7 @@ class _ReplyCardPresenter:
         operation_id: str,
         location: CardReplyLocation | None = None,
         policy: DeliveryPolicy,
+        validate: Callable[[SendResult], SendResult] | None = None,
     ) -> _CardUpdateAttempt:
         if location and not location.can_write(message_id):
             return _CardUpdateAttempt("", None)
@@ -942,7 +958,9 @@ class _ReplyCardPresenter:
                 },
             )
             return _CardUpdateAttempt(message_id, None)
-        if location:
+        if validate:
+            result = validate(result)
+        elif location:
             result = location.validate(result, card=True, updated_id=message_id)
         attempt = _CardUpdateAttempt(message_id, result)
         if not attempt.updated:

@@ -274,12 +274,13 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("后台任务 1 个运行中", str(cleared))
 
     async def test_file_pages_serialize_through_retirement_and_last_click_wins(self):
-        for click_after_retirement in (True, False):
-            with self.subTest(click_after_retirement=click_after_retirement):
+        for second_click in ("before retirement", "after retirement", "single click", "wrong parent"):
+            with self.subTest(second_click=second_click):
                 async with running_channel(cards=True, mention=True) as (app, channel, client, execution, _, ordinary):
                     page = await open_file_pages(channel, client, execution)
                     mention, finish_mention, writing, finish_write, next_click = (asyncio.Event() for _ in range(5))
                     update, send, action = channel.update_card, channel.send, app._turn_file_action
+                    logical_reply = execution.human.reply
                     active, peak = 0, 0
                     channel.send_results.extend([sent_result("mention", chat_id="oc_direct", root_id="H", parent_id="first"),
                                                  sent_result("feedback", chat_id="oc_direct", parent_id="first")])
@@ -298,6 +299,9 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                             if len(buttons(card, "turn-file.send")) == 1:
                                 writing.set()
                                 await finish_write.wait()
+                                await update(mid, card)
+                                return sent_result(mid, chat_id="oc_direct", root_id="H",
+                                                   parent_id="other" if second_click == "wrong parent" else "H")
                             return await update(mid, card)
                         finally:
                             active -= 1
@@ -316,11 +320,12 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                             await asyncio.wait_for(mention.wait(), 5)
                             clicks.append(asyncio.create_task(select_page(app, channel, page, "first", 1)))
                             await asyncio.wait_for(writing.wait(), 5)
-                            if click_after_retirement:
+                            if second_click != "before retirement":
                                 finish_mention.set()
                                 self.assertTrue(await ordinary.wait_idle(5))
-                            clicks.append(asyncio.create_task(select_page(app, channel, page, "first", 0)))
-                            await asyncio.wait_for(next_click.wait(), 5)
+                            if second_click in ("before retirement", "after retirement"):
+                                clicks.append(asyncio.create_task(select_page(app, channel, page, "first", 0)))
+                                await asyncio.wait_for(next_click.wait(), 5)
                             finish_mention.set()
                             self.assertTrue(await ordinary.wait_idle(5))
                         finally:
@@ -330,7 +335,16 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(peak, 1)
                     mid, visible = channel.updates[-1]
                     self.assertEqual(mid, "first")
-                    self.assertEqual(len(buttons(visible, "turn-file.send")), TURN_FILE_PAGE_SIZE)
+                    expected_count = TURN_FILE_PAGE_SIZE if len(clicks) == 2 else 1
+                    self.assertEqual(len(buttons(visible, "turn-file.send")), expected_count)
+                    feedback = [body for _, body, _ in channel.send_calls if isinstance(body, str)]
+                    self.assertEqual(len(feedback), int(second_click == "wrong parent"))
+                    if feedback:
+                        self.assertIn("未确认本轮文件卡片翻页成功", feedback[0])
+                    self.assertIsNone(logical_reply.messages)
+                    binding = app._progress_cards.binding_location(execution.binding.id)
+                    self.assertNotIn("first", binding.owners)
+                    self.assertEqual("first" in binding.unusable, second_click == "wrong parent")
                     self.assertIn("全部完成", str(visible))
 
     async def test_contradicted_file_card_never_accepts_a_fallback_page(self):
@@ -385,16 +399,6 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                     start_wake(client)
                     finish_wake(client)
                     self.assertTrue(await ordinary.wait_idle(5))
-                    updates = len(channel.updates)
-                    matching = sent_result("first", chat_id="oc_direct", thread_id=topic, root_id="root" if topic else "H", parent_id="H")
-                    channel.card_update_results.extend([matching] * 3)
-                    await asyncio.gather(*(app.handle_card_action(direct_button_event(
-                        page, message_id="first", form_value={"turn_file_page": str(index)})) for index in (1, 1, 0)))
-                    cards = [card for mid, card in channel.updates[updates:] if mid == "first"]
-                    self.assertEqual([len(buttons(card, "turn-file.send")) for card in cards], [1, 1, TURN_FILE_PAGE_SIZE])
-                    self.assertTrue(all("全部完成" in str(card) for card in cards))
-                    self.assertFalse(channel.send_calls)
-
                     mid = "another-card" if conflict == "message" else "first"
                     channel.card_update_results.append(sent_result(mid, chat_id="elsewhere" if conflict == "chat" else "oc_direct",
                                                                   thread_id="elsewhere" if conflict == "thread" else topic,
@@ -408,3 +412,49 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app._progress_cards.binding_location(execution.binding.id).unusable, {"first", mid})
                     self.assertEqual(len(channel.send_calls), 2)
                     self.assertTrue(all("未确认本轮文件卡片翻页成功" in body for _, body, _ in channel.send_calls))
+
+    async def test_three_retired_clicks_validate_matching_receipts_and_preserve_order(self):
+        async with running_channel(cards=True) as (app, channel, client, execution, _, ordinary):
+            page = await open_file_pages(channel, client, execution)
+            start_wake(client)
+            finish_wake(client)
+            self.assertTrue(await ordinary.wait_idle(5))
+            arrived = asyncio.Queue()
+            writing, release = asyncio.Event(), asyncio.Event()
+            update, handle = channel.update_card, app._turn_file_action
+            active, peak = 0, 0
+            before = len(channel.updates)
+
+            async def observe_click(intent):
+                arrived.put_nowait(intent.page)
+                await handle(intent)
+
+            async def held_update(mid, card):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                try:
+                    writing.set()
+                    await release.wait()
+                    await update(mid, card)
+                    return sent_result(mid, chat_id="oc_direct", root_id="H", parent_id="H")
+                finally:
+                    active -= 1
+
+            with patch.object(channel, "update_card", held_update), patch.object(app, "_turn_file_action", observe_click):
+                pending = []
+                try:
+                    for index in (1, 1, 0):
+                        click = direct_button_event(page, message_id="first", form_value={"turn_file_page": str(index)})
+                        pending.append(asyncio.create_task(app.handle_card_action(click)))
+                        self.assertEqual(await asyncio.wait_for(arrived.get(), 5), index)
+                        await asyncio.wait_for(writing.wait(), 5)
+                    self.assertTrue(all(not task.done() for task in pending))
+                finally:
+                    release.set()
+                    await asyncio.gather(*pending)
+            cards = [card for mid, card in channel.updates[before:] if mid == "first"]
+            self.assertEqual(peak, 1)
+            self.assertEqual([len(buttons(card, "turn-file.send")) for card in cards], [1, 1, TURN_FILE_PAGE_SIZE])
+            self.assertTrue(all("全部完成" in str(card) for card in cards))
+            self.assertFalse(channel.send_calls)
