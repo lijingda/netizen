@@ -186,6 +186,34 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
             port.complete.assert_awaited_once_with("cot", "process-mid", "done")
             self.assertNotIn("process-mid", reply.messages)
 
+    async def test_creation_slower_than_the_card_bound_stays_owned_and_completes(self):
+        async with channel_fixture() as fx:
+            origin = await fx.new()
+            port = process_port()
+            created = port.create.return_value
+            async def slow_create(*_):
+                await asyncio.sleep(0.05)
+                return created
+            port.create.side_effect = slow_create
+            reply = LogicalReply()
+            presenter = fx.app._progress_cards
+            presenter._process_port = port
+            presenter._operation_timeout_seconds = 0.01
+            snapshot = process_snapshot(1)
+            key = PresentationKey(snapshot.binding_id, snapshot.thread_id, snapshot.turn_id)
+            with patch.object(fx.app._ordinary, "turn_activity", return_value=snapshot):
+                await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
+                    BindingTaskFeedback(), lambda: True, lambda: True, reply))
+            state = presenter._process[key]
+            async with asyncio.timeout(1):
+                await state.ready.wait()
+                await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "user", origin, "completed",
+                    "final", logical_id=key.turn_id, activity=snapshot, reply=reply))
+                await state.task
+            self.assertIs(state.created, created)
+            self.assertGreaterEqual(port.update.await_count, 1)
+            port.complete.assert_awaited_once_with("cot", "process-mid", "done")
+
     async def test_topic_requires_one_exact_placement_read_before_writes(self):
         key = PresentationKey("binding", "native-one", "turn-one")
         scope = FeishuScope("app", "chat", ScopeKind.TOPIC, "topic")

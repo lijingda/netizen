@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 _PROGRESS_CARD_POLL_SECONDS = 1.0
 _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
+# Process I/O never blocks content, so its bound only detects a lost request. Creation has no
+# deduplication key: a bound shorter than Feishu's slow tail leaves a created message that
+# can never be updated or completed.
+_PROCESS_OPERATION_TIMEOUT_SECONDS = 30.0
 _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES = 3
 _TERMINAL_CARD_UPDATE_ATTEMPTS = 3
 _TERMINAL_CARD_RETRY_SECONDS = 0.5
@@ -165,7 +169,7 @@ class _ReplyCardPresenter:
             return state
         resolve = self._process_location
         state = ProcessPresentation(target.key, target.run, self._process_port, self._channel,
-            lambda: resolve(target.origin, root_id), self._supersede_process, self._clock, self.operation_timeout,
+            lambda: resolve(target.origin, root_id), self._supersede_process, self._clock, _PROCESS_OPERATION_TIMEOUT_SECONDS,
             self._forget_process, claimed_cot_ids=self._claimed_cot_ids, binding_id=binding_id)
         self._process[target.key] = state
         return state
