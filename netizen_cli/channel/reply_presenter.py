@@ -16,6 +16,7 @@ from ..external_calls import external_call
 from ..cards import reply_card, turn_progress_card
 from ..domain import ReplyCardProjection
 from ..ordinary_sessions import LogicalReply
+from ..cards.callbacks import without_callback_nonces
 from ..cards.reply import feishu_answer_text, turn_progress_projection
 from ..partial_answers import PartialAnswer
 from .process_presentation import ProcessLocation, ProcessPresentation, Reason
@@ -63,7 +64,7 @@ class _CardUpdateAttempt:
 
 class _CardWriter(ReplacementWriter[OutboundCard]):
     def __init__(self) -> None:
-        super().__init__(lambda card: card.card)
+        super().__init__(lambda card: without_callback_nonces(card.card))
 
 
 @dataclass(slots=True)

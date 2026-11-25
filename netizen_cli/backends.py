@@ -296,7 +296,7 @@ OPERATIONS = {
     OperationId.SKILLS: Operation(
         "显式 Skill 调用", Provider.CODEX_RUNTIME, command_probe=NativeCapability.SKILLS
     ),
-    OperationId.FILES: Operation("本轮文件", Provider.CODEX_RUNTIME),
+    OperationId.FILES: Operation("本轮文件", Provider.REPLY_PROGRESS),
 }
 _COMMANDS = {
     command: name for name, op in OPERATIONS.items() for command in op.commands

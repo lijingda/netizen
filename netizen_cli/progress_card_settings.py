@@ -6,6 +6,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 
+MAX_OPERATION_ROWS = 16
+MAX_OPERATION_TEXT_CHARS = 240
+
+
 @dataclass(frozen=True, slots=True)
 class ProgressCardSettings:
     show_commentary: bool = True
@@ -23,8 +27,8 @@ class ProgressCardSettings:
         )):
             raise ValueError("过程卡内容开关必须是布尔值。")
         for name, maximum in (
-            ("commentary_limit", 8), ("operation_limit", 16),
-            ("commentary_max_chars", 320), ("operation_max_chars", 240),
+            ("commentary_limit", 8), ("operation_limit", MAX_OPERATION_ROWS),
+            ("commentary_max_chars", 320), ("operation_max_chars", MAX_OPERATION_TEXT_CHARS),
         ):
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= maximum:

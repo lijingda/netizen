@@ -24,7 +24,7 @@ from ..backends import BackendPolicy
 from ..bindings import BindingContextRevisionConflict, BindingNotFound, BindingStore, ProjectDeleting, ProjectNotFound, ScopeNotFound, ThreadBinding
 from ..bindings import BindingTaskFeedback, BindingTurnSettings
 from ..partial_answers import PartialAnswer
-from ..progress_card_settings import ProgressCardSettings
+from ..progress_card_settings import MAX_OPERATION_ROWS, MAX_OPERATION_TEXT_CHARS, ProgressCardSettings
 from ..completion_mention import valid_completion_mention_user_id
 from ..domain import ActiveState, FeishuScope, MessageContextAnchor, MentionContextMode
 from ..session_settings import require_local_settings
@@ -132,7 +132,8 @@ class _PhysicalActivity:
             # The Result chooses the original input's settings. Keep only the bounded
             # card window until then. An anonymous init never opens a process writer.
             feedback = replace(feedback, progress_card_enabled=True,
-                               progress_card_settings=ProgressCardSettings(operation_limit=16, operation_max_chars=240))
+                               progress_card_settings=ProgressCardSettings(operation_limit=MAX_OPERATION_ROWS,
+                                                                           operation_max_chars=MAX_OPERATION_TEXT_CHARS))
         self.feedback = feedback
         settings = feedback.progress_card_settings
         assert settings is not None
@@ -822,7 +823,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         # and transfer this physical turn's validated partials before clearing them.
         evidence = execution.physical_activity.finish(status) if execution.physical_activity else FileEvidence()
         finish_presentation = direct and isinstance(source.origin, ClaudeInputAnchor)
-        if frame.result or detail or live.partials or (status == "completed" and finish_presentation):
+        if frame.result or detail or live.partials or evidence.outputs or (status == "completed" and finish_presentation):
             turn_id = source.input_id if direct else frame.uuid
             state = partial(execution.cli_state, human.input_id if human else "")
             execution.refresh_display(state())

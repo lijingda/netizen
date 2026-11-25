@@ -16,6 +16,7 @@ from .topics import CardReplyLocation, receipt
 Item = tuple[str, str]
 Outcome = Literal["unattempted", "unknown", "rejected", "confirmed"]
 BODY: Item = ("body", "")
+FILES: Item = ("files", "")
 INCOMPLETE = "部分内容未能确认送达。"
 logger = logging.getLogger(__name__)
 

@@ -48,7 +48,7 @@ from .base import (
 )
 from .completion_mentions import send_completion_mention
 from .messages import _confirmed_reply_id
-from .physical_delivery import BODY, INCOMPLETE, Item, PhysicalDelivery, record_sent_answer
+from .physical_delivery import BODY, FILES, INCOMPLETE, Item, PhysicalDelivery, record_sent_answer
 from .replies import ChannelReplies
 from .reply_events import ItemDelivery, RunEnded, RunState, TurnResult
 from .reply_presenter import (
@@ -91,10 +91,20 @@ class CompletionPresentationChannel(ChannelReplies):
         try:
             async with asyncio.timeout_at(policy.deadline):
                 content = outcome.content
+                files: tuple[TurnFile, ...] = ()
                 if outcome.status == "completed":
+                    task_files = self._prepare_task_files(outcome.cwd, outcome.file_evidence)
+                    if has_file_evidence(task_files.evidence, task_files.summary):
+                        try:
+                            _, files, _ = self._task_completion_files(outcome, task_files, scope=policy.location.scope)
+                        except Exception:
+                            logger.warning("could not resolve physical answer Files", exc_info=True)
+                            ledger.expect(FILES)
+                        if files:
+                            ledger.expect(FILES)
                     content = await self._prepare_task_result_images(outcome, ledger=ledger) or content
                 if display.publishable():
-                    await self._deliver_receipted_items(outcome, policy, content, ledger)
+                    await self._deliver_receipted_items(outcome, policy, content, ledger, files)
         except Exception as error:
             logger.warning("item delivery ended without full confirmation (%s)", type(error).__name__)
         if ledger.settle() and display.publishable():
@@ -106,7 +116,9 @@ class CompletionPresentationChannel(ChannelReplies):
             except Exception:
                 logger.warning("incomplete delivery notice was not confirmed")
 
-    async def _deliver_receipted_items(self, outcome: TurnResult, policy: ItemDelivery, content: str, ledger: PhysicalDelivery) -> None:
+    async def _deliver_receipted_items(
+        self, outcome: TurnResult, policy: ItemDelivery, content: str, ledger: PhysicalDelivery, files: tuple[TurnFile, ...],
+    ) -> None:
         display = policy.display
         reply = display.reply
         snapshot = outcome.activity
@@ -122,15 +134,17 @@ class CompletionPresentationChannel(ChannelReplies):
         matching_items = tuple(item for item, text in ledger.partial_text.items() if content and text == content)
         location = partials.location or policy.location
         in_card_mode = outcome.task_feedback.progress_card_enabled and not partials.text_only
-        has_answer = bool(content or outcome.partial_answers)
+        has_answer = bool(content or outcome.partial_answers or files)
         if in_card_mode and snapshot and (has_answer or first_id):
             card_partials = {("partial", part.item_id) for part in outcome.partial_answers}
             # A Result can represent a running partial that the terminal snapshot coalesced.
             shown_partials = tuple(item for item in ledger.partial_text if item in card_partials or item in matching_items)
-            items = (*body_items, *shown_partials)
+            items = (*body_items, *shown_partials, *((FILES,) if files else ()))
             try:
                 projection = turn_progress_projection(snapshot=snapshot, partial_answers=outcome.partial_answers,
-                    final_response=content or None, include_result=bool(content), terminal_status=status,
+                    final_response=content or (constants.TURN_FILES_WITHOUT_FINAL_RESPONSE if files else None),
+                    include_result=bool(content or files), terminal_status=status, files=files, scope=location.scope if files else None,
+                    binding_id=outcome.file_binding_id if files else None, turn_id=outcome.physical_turn_id if files else None,
                     run_continues=outcome.run_continues, collapsed=True)
                 card = render_run_card(projection, display.current())
             except Exception:
@@ -164,9 +178,29 @@ class CompletionPresentationChannel(ChannelReplies):
                     post = OutboundPost(markdown=f"**阶段性答案**\n\n{feishu_answer_text(fragment.text)}")
                     await self._send_receipted_items(outcome, policy, ledger, (item,), post, f"partial/{index}", location)
             matching = ledger.partial_receipt(matching_items)
-            if matching in ("confirmed", "unknown") or (matching == "rejected" and ledger.posted.intersection(matching_items)):
+            coalesced = matching in ("confirmed", "unknown") or (
+                matching == "rejected" and not ledger.posted.isdisjoint(matching_items))
+            if coalesced:
                 ledger.record(body_items, matching)
-            elif content and ledger.can_post(BODY):
+            post_body = bool(content and not coalesced and ledger.can_post(BODY))
+            if files and ledger.can_post(FILES):
+                # A confirmed or uncertain matching partial already accounts for the
+                # body. Deliver the file list independently without replaying that text.
+                body = content if post_body else constants.TURN_FILES_WITHOUT_FINAL_RESPONSE
+                try:
+                    file_card = turn_files_card(scope=location.scope, files=files, binding_id=outcome.file_binding_id,
+                        turn_id=outcome.physical_turn_id, final_response=body + policy.plain_suffix(),
+                        run_continues=outcome.run_continues)
+                except Exception:
+                    logger.warning("physical answer file card unavailable", exc_info=True)
+                else:
+                    offered = (*body_items, *matching_items, FILES) if post_body else (FILES,)
+                    if publishable():
+                        _, sent = await ledger.send(offered, reply, external_call(policy.send(file_card, "files", location)),
+                                                    timeout=self._progress_cards.operation_timeout)
+                        if sent is not None:
+                            record_sent_answer(reply, location, key.turn_id, offered, sent)
+            if post_body and ledger.can_post(BODY):
                 content += policy.plain_suffix()
                 await self._send_receipted_items(outcome, policy, ledger, (*body_items, *matching_items), content, "final", location)
         finally:
@@ -461,9 +495,9 @@ class CompletionPresentationChannel(ChannelReplies):
         return _TaskFiles(evidence, summary)
 
     def _task_completion_files(
-        self, outcome: TurnResult, task_files: _TaskFiles,
+        self, outcome: TurnResult, task_files: _TaskFiles, *, scope: FeishuScope | None = None,
     ) -> tuple[FeishuScope, tuple[TurnFile, ...], str]:
-        scope = self._scope(outcome.origin)
+        scope = scope or self._scope(outcome.origin)
         key = outcome.target.key
         if key.side:
             record = self._bindings.get_side_topic(key.owner_id)
