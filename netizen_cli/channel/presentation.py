@@ -213,7 +213,6 @@ class CompletionPresentationChannel(ChannelReplies):
                         if sent is not None:
                             record_sent_answer(reply, location, key.turn_id, offered, sent)
             if post_body and ledger.can_post(BODY):
-                content += policy.plain_suffix()
                 await self._send_receipted_items(outcome, policy, ledger, (*body_items, *matching_items), content, "final", location)
         finally:
             # A fallback cancelled at the content deadline must leave the notice its own budget.
@@ -243,6 +242,8 @@ class CompletionPresentationChannel(ChannelReplies):
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
+        if operation == "final" and isinstance(content, str):
+            content += policy.plain_suffix()
         if (allow_inline_mention and isinstance(content, str) and reply and reply.messages is not None
                 and reply.mention_user_id and not reply.mention_attempted):
             try:

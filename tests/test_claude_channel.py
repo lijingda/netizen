@@ -1013,6 +1013,43 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                                       for _, item, opts in fx.channel.send_calls], [(anchor, ["ou_user"])] if anchor else [])
 
     @requires_claude_sdk
+    async def test_background_task_appearing_during_the_mention_wait_is_in_the_final_text(self):
+        from netizen_cli.channel import constants
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+            await app.handle_message(FakeMessage("work", message_id="H"))
+            cli = clients.calls[-1]
+            cli.init()
+            _start_background_tool(cli, "A")
+            execution = ordinary._active[binding.id]
+            human = execution.human
+            entered = asyncio.Event()
+            wait = human.reply.mention_decided.wait
+
+            async def observe_wait():
+                entered.set()
+                return await wait()
+
+            fx.channel.reply_results.append(SendResult.ok(message_id="first"))
+            with (patch.object(human.reply.mention_decided, "wait", observe_wait),
+                  patch.object(constants, "COMPLETION_MENTION_DECISION_TIMEOUT_SECONDS", .5)):
+                cli.result(result="first", idle=False)
+                await asyncio.wait_for(entered.wait(), 3)
+                _system_frame(cli, "background_tasks_changed", tasks=[{"task_id": "A", "run_id": "A"}])
+                _system_frame(cli, "session_state_changed", state="idle")
+                await self.until(lambda: bool(fx.channel.replies))
+                self.assertEqual(execution.cli_state(human.input_id).tasks, 1)
+                self.assertEqual(fx.channel.replies, [("H", f"first\n\n后台任务 1 个运行中，可继续发送消息\n\n{CLAUDE_RELEASE_HINT}")])
+            _system_frame(cli, "background_tasks_changed", tasks=[])
+            cli.init(user_message_uuids=[])
+            cli.result(result="wake-A", user_message_uuid=None, idle=False,
+                       origin={"kind": "task-notification", "producer": "session-task", "runId": "A"})
+            _system_frame(cli, "session_state_changed", state="idle")
+            self.assertTrue(await ordinary.wait_idle(3))
+
+    @requires_claude_sdk
     async def test_attributed_wake_queued_behind_separate_reminder_mentions_once(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):
             clock[0] = 2.
