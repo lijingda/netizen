@@ -10,6 +10,7 @@ from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.domain import FeishuScope, ScopeKind
 from tests.support import has_claude_sdk, requires_claude_sdk
 from tests.support.channel_messages import FakeMessage
+from tests.support.channel_results import sent_result
 from tests.support.process_transport import ProcessTransport, check_pairs
 from tests.test_claude_channel import owner_channel
 
@@ -60,6 +61,13 @@ def background(client):
     system(client, "task_started", task_id="t", run_id="r", tool_use_id="bg")
     system(client, "background_tasks_changed", tasks=[{"task_id": "t", "run_id": "r"}])
     result(client, "bg", {"backgroundTaskId": "t"})
+
+
+def write_file(client, number):
+    name = f"fixture-{number}.txt"
+    (client.cwd / name).write_text("fixture")
+    tool(client, "Write", name, {"file_path": name})
+    result(client, name, {"filePath": name})
 
 
 def start_wake(client):
@@ -119,3 +127,31 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
             start_wake(client)
             finish_wake(client)
             self.assertTrue(await ordinary.wait_idle(5))
+
+    async def test_lost_file_only_receipt_suppresses_mention(self):
+        from netizen_cli.channel.physical_delivery import INCOMPLETE
+        async with running_channel(mention=True) as (_, channel, client, _, _, ordinary):
+            write_file(client, 0)
+            channel.reply_results.extend([TimeoutError(), SendResult.ok(message_id="notice")])
+            client.result(reason=None, result=None)
+            self.assertTrue(await ordinary.wait_idle(5))
+            self.assertEqual([text for _, text in channel.replies if isinstance(text, str)], [INCOMPLETE])
+            self.assertFalse(channel.send_calls)
+
+    async def test_confirmed_file_only_wake_is_latest_answer_anchor(self):
+        for cards in (True, False):
+            with self.subTest(cards=cards):
+                async with running_channel(cards=cards, mention=True) as (_, channel, client, execution, _, ordinary):
+                    background(client)
+                    if not cards:
+                        channel.reply_results.append(SendResult.ok(message_id="first"))
+                    client.result(result="first answer")
+                    await until(lambda: execution.admissible and not execution.delivery.queues)
+                    start_wake(client)
+                    write_file(client, 0)
+                    channel.reply_results.append(SendResult.ok(message_id="wake-files"))
+                    channel.send_results.append(sent_result("mention", chat_id="oc_direct", root_id="H", parent_id="wake-files"))
+                    finish_wake(client)
+                    self.assertTrue(await ordinary.wait_idle(5))
+                    self.assertEqual([opts.reply_to for _, msg, opts in channel.send_calls if getattr(msg, "mentions", ())],
+                                     ["wake-files"])

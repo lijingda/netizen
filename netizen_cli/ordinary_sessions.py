@@ -104,6 +104,9 @@ class _ReplyMessage:
         return self.location_usable(self.message_id)
 
 
+ANSWER_ITEM_KINDS = frozenset({"body", "partial", "files"})
+
+
 @dataclass(slots=True, weakref_slot=True, eq=False)
 class LogicalReply:
     attempted: bool = False
@@ -114,7 +117,7 @@ class LogicalReply:
     def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], usable: Callable[[str], bool]) -> None:
         if self.messages is None:
             return
-        answers = {(turn_id, kind, item_id) for kind, item_id in items if kind in ("body", "partial")}
+        answers = {(turn_id, kind, item_id) for kind, item_id in items if kind in ANSWER_ITEM_KINDS}
         if mid:
             message = self.messages.setdefault(mid, _ReplyMessage(mid, usable))
             message.confirmed_any = True
