@@ -2817,7 +2817,10 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 task_feedback=BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=False))
             running, terminal, release_running = (asyncio.Event() for _ in range(3))
             calls = []
+            notice_receipts = []
+            updates_after_notice = []
             present = app.handle_ordinary_completion
+            channel_reply, channel_update = fx.channel.reply, fx.channel.update_card
 
             async def observe(event):
                 if isinstance(event, PhysicalAnswer):
@@ -2825,9 +2828,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 await present(event)
 
             async def update(mid, card):
-                if "final-answer" in str(card):
-                    if "notice" not in calls:
-                        calls.append("reject terminal")
+                if "final-answer" in str(card) and "notice" not in calls:
+                    calls.append("reject terminal")
                     return SendResult(success=False, raw={"code": 99991400})
                 if not running.is_set() and "segment-one" in str(card):
                     calls.append("running")
@@ -2836,9 +2838,13 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 elif "body" in calls and "notice" not in calls:
                     calls.append("freeze")
                     await asyncio.Future()
+                await channel_update(mid, card)
+                if "notice" in calls:
+                    updates_after_notice.append(card)
                 return SendResult.ok(message_id=mid)
 
             async def reply(origin, item, opts=None):
+                await channel_reply(origin, item, opts)
                 if isinstance(item, OutboundCard):
                     return SendResult.ok(message_id="card")
                 if item == "final-answer":
@@ -2846,6 +2852,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.Future()
                 if item == INCOMPLETE:
                     calls.append("notice")
+                    notice_receipts.append((ledger.settled, ledger.items[BODY]))
                 return SendResult.ok(message_id="post")
 
             with (patch.object(app, "handle_ordinary_completion", observe), patch.object(fx.channel, "update_card", update),
@@ -2868,10 +2875,16 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                     release_running.set()
                 await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
                 self.assertEqual(calls, ["running", "reject terminal", "body", "notice"])
-                self.assertTrue(ledger.settled)
-                self.assertEqual(ledger.items[BODY], "unknown")
                 cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
                 self.assertTrue(await ordinary.wait_idle(3))
+            self.assertEqual(notice_receipts, [(True, "unknown")])
+            self.assertEqual([post for _, post in fx.channel.replies if isinstance(post, str)], ["final-answer", INCOMPLETE])
+            self.assertTrue(updates_after_notice)
+            elements = {item.get("element_id"): item for item in updates_after_notice[-1]["body"]["elements"]}
+            self.assertIn("segment-one", str(elements["partialanswerv1"]))
+            self.assertNotIn("turnanswerv1", elements)
+            self.assertNotIn("final-answer", str(fx.channel.updates))
+            self.assertEqual(ledger.items[BODY], "unknown")
 
     async def test_terminal_replacement_settles_after_its_bounded_attempts(self):
         from netizen_cli.bindings import BindingTaskFeedback

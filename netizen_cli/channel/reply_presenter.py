@@ -225,18 +225,29 @@ class _ReplyCardPresenter:
         if state := self._process.get(key):
             state.finish("timeout")
 
-    async def publish_card(
+    def register_card(
         self, display: RunDisplay, message_id: str, key: PresentationKey, location: CardReplyLocation,
         content: ReplyCardProjection, *, delivery: PhysicalDelivery, items: tuple[Item, ...],
-        confirmed: OutboundCard | None = None, tracks_run: bool = True, retry_unknown: bool = False,
-    ) -> bool:
+        confirmed: OutboundCard | None = None, tracks_run: bool = True,
+    ) -> dict[str, _PublishedCard] | None:
         if not location.can_write(message_id) or (display.reply and display.reply.messages is None):
-            return False
+            return None
         writer = self._message_writer(message_id)
         if confirmed is not None:
             writer.known = confirmed
         cards = self._published.setdefault(display.reply, {}) if display.reply else {}
         cards[message_id] = _PublishedCard(display, key, location, content, writer, tracks_run, delivery, items)
+        return cards
+
+    async def publish_card(
+        self, display: RunDisplay, message_id: str, key: PresentationKey, location: CardReplyLocation,
+        content: ReplyCardProjection, *, delivery: PhysicalDelivery, items: tuple[Item, ...],
+        confirmed: OutboundCard | None = None, tracks_run: bool = True, retry_unknown: bool = False,
+    ) -> bool:
+        cards = self.register_card(display, message_id, key, location, content, delivery=delivery, items=items,
+                                   confirmed=confirmed, tracks_run=tracks_run)
+        if cards is None:
+            return False
         return (await self._reconcile_cards(display, cards, retry_mid=message_id if retry_unknown else None))[message_id]
 
     async def reconcile(self, display: RunDisplay) -> dict[str, bool]:

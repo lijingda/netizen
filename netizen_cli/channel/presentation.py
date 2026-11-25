@@ -175,11 +175,15 @@ class CompletionPresentationChannel(ChannelReplies):
                     return
                 if state == "unknown":
                     return
-        # Freeze any partials the running card may already show. The ledger
-        # independently decides which items can safely take a new text post.
-        if first_id and not location.can_write(first_id):
-            first_id = None
+        # Later reconciles must use the partial-only view even if a fallback post loses its receipt.
         last_snapshot = partials.freeze_snapshot
+        if first_id and last_snapshot and location.can_write(first_id):
+            frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
+                run_continues=outcome.run_continues, include_result=False, collapsed=True)
+            shown = tuple(("partial", part.item_id) for part in last_snapshot.partial_answers)
+            items = (*shown, *body_items) if any(item in matching_items for item in shown) else shown
+            self._progress_cards.register_card(display, first_id, key, location, frozen, tracks_run=False,
+                delivery=ledger, items=items)
         try:
             for index, fragment in enumerate(outcome.partial_answers):
                 item = ("partial", fragment.item_id)
@@ -218,15 +222,7 @@ class CompletionPresentationChannel(ChannelReplies):
             # A fallback cancelled at the content deadline must leave the notice its own budget.
             if policy.deadline is None or asyncio.get_running_loop().time() < policy.deadline:
                 async with asyncio.timeout_at(policy.deadline):
-                    if first_id and last_snapshot:
-                        frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
-                            run_continues=outcome.run_continues, include_result=False, collapsed=True)
-                        shown = tuple(("partial", part.item_id) for part in last_snapshot.partial_answers)
-                        items = (*shown, *body_items) if any(item in matching_items for item in shown) else shown
-                        await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False,
-                            delivery=ledger, items=items)
-                    else:
-                        await self._progress_cards.reconcile(display)
+                    await self._progress_cards.reconcile(display)
 
     async def _send_receipted_items(self, outcome: TurnResult, policy: ItemDelivery, ledger: PhysicalDelivery, items: tuple[Item, ...],
                                    content: str | OutboundPost, operation: str, location: CardReplyLocation) -> None:
