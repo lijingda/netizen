@@ -49,7 +49,7 @@ from .base import (
 from .completion_mentions import send_completion_mention
 from .messages import _confirmed_reply_id
 from .physical_delivery import BODY, FILES, INCOMPLETE, Item, PhysicalDelivery, record_sent_answer
-from .replies import ChannelReplies
+from .replies import ChannelReplies, mentioned_answer
 from .reply_events import ItemDelivery, RunEnded, RunState, TurnResult
 from .reply_presenter import (
     _CardUpdateAttempt,
@@ -231,7 +231,17 @@ class CompletionPresentationChannel(ChannelReplies):
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
-        _, result = await ledger.send(items, policy.display.reply, external_call(policy.send(content, operation, location)),
+        reply = policy.display.reply
+        if (operation == "final" and isinstance(content, str) and not outcome.task_feedback.progress_card_enabled
+                and reply and reply.mention_user_id and not reply.mention_carried):
+            try:
+                content = mentioned_answer(content, reply.mention_user_id)
+            except Exception:
+                logger.warning("could not prepare inline completion mention", exc_info=True)
+            else:
+                # The first SDK chunk may notify even if a later chunk is rejected.
+                reply.mention_carried = True
+        _, result = await ledger.send(items, reply, external_call(policy.send(content, operation, location)),
                                       post=True, timeout=constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS)
         if result is not None:
             record_sent_answer(policy.display.reply, location, outcome.turn_id, items, result)
@@ -285,7 +295,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 return
             await _best_effort_update(self._reactions.freeze(run.turn_id))
             await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
-            if event.mention_user_id and display.publishable():
+            if event.mention_user_id and not reply.mention_carried and display.publishable():
                 location = event.location
                 assert location is not None
                 source_id = _message_id(event.target.origin)

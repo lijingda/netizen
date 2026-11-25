@@ -117,6 +117,8 @@ class LogicalReply:
     # Insertion order is publication order. Replacing an existing message never promotes it.
     messages: dict[str, _ReplyMessage] | None = field(default_factory=dict)
     unaddressed_confirmation: bool = False
+    mention_user_id: str | None = None
+    mention_carried: bool = False
 
     def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], usable: Callable[[str], bool]) -> None:
         if self.messages is None:

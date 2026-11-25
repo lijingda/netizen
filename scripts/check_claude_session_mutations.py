@@ -18,6 +18,10 @@ CANCEL = ORDINARY + "test_send_cancelled_during_shutdown_drains_following_body"
 
 # Each change represents one incorrect decision, with an independently observed consequence.
 MUTANTS = (
+    ("inline mention also triggers a separate reminder", "channel/presentation",
+     "event.mention_user_id and not reply.mention_carried and display.publishable()",
+     "event.mention_user_id and display.publishable()",
+     CHANNEL + "test_final_post_mention_at_the_logical_terminal_boundary"),
     ("child tools become parent operation rows", "runtime/claude_activity",
      "if parent is not None:", "if False:",
      "tests.test_claude_activity.ClaudeToolsTest.test_child_frames_and_late_children_do_not_change_a_successor"),
@@ -84,7 +88,7 @@ MUTANTS = (
     ("unconfirmed content silently settles", "channel/presentation", "if ledger.settle() and display.publishable():",
      "if False:", CHANNEL + "test_physical_delivery_settles_each_item_once_at_its_target"),
     ("partial IDs absent from Activity revision", "runtime/claude_ordinary", ", tuple(self.live.partials), state.line)", ", state.line)", WIRE),
-    ("disabled completion mention", "channel/presentation", "if event.mention_user_id and display.publishable():",
+    ("disabled separate completion mention", "channel/presentation", "if event.mention_user_id and not reply.mention_carried and display.publishable():",
      "if False:", WIRE),
     ("child text becomes partial", "runtime/claude_client", "if parent is None and frame.message_id and not frame.error:",
      "if frame.message_id and not frame.error:", WIRE),

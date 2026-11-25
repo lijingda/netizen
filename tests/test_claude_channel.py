@@ -184,6 +184,15 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             while not predicate():
                 await asyncio.sleep(.005)
 
+    async def result_before_idle(self, cli, ordinary, **fields):
+        """Observe the separate-reminder path after this result has finished sending."""
+        from claude_agent_sdk import SystemMessage
+        execution = next(iter(ordinary._active.values()))
+        previous = len(cli.live.seen)
+        cli.result(idle=False, **fields)
+        await self.until(lambda: len(cli.live.seen) > previous and not execution.delivery.queues)
+        cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+
     async def test_slow_first_card_terminal_takeover_and_text_fallback(self):
         from netizen_cli.bindings import BindingTaskFeedback
         from lark_channel import OutboundCard
@@ -983,16 +992,82 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             for block in (TextBlock("answer"), ToolUseBlock("tool", "Read", {})):
                                 cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session,
                                     uuid=type(block).__name__, message_id="model"))
-                        if kind == "body":
-                            cli.result(result="answer")
-                        else:
-                            cli.result(result=None, reason=None)
+                        await self.result_before_idle(cli, ordinary, result="answer" if kind == "body" else None,
+                                                      reason="completed" if kind == "body" else None)
                         self.assertTrue(await ordinary.wait_idle(10))
                         self.assertEqual(sends.await_count, int(kind != "empty") + int(not anchor))
                         if not anchor:
                             self.assertEqual(sends.await_args.args[1], INCOMPLETE)
                     self.assertEqual([(opts.reply_to, [m.open_id for m in item.mentions])
                                       for _, item, opts in fx.channel.send_calls], [(anchor, ["ou_user"])] if anchor else [])
+
+    @requires_claude_sdk
+    async def test_final_post_mention_at_the_logical_terminal_boundary(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
+        from netizen_cli.bindings import BindingTaskFeedback
+
+        for order, receipt in (*product(("early", "late"), ("confirmed", "unknown", "rejected")),
+                               ("stop", "confirmed"), ("build failure", "confirmed")):
+            with self.subTest(order=order, receipt=receipt):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    binding = fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                        project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=False, completion_mention_enabled=True))
+                    app._progress_cards._poll_seconds = 60
+                    sent = []
+                    segment, body, release_segment, release_body = (asyncio.Event() for _ in range(4))
+                    async def send(origin, post, opts=None):
+                        text = getattr(post, "markdown", post)
+                        sent.append((text, [m.open_id for m in getattr(post, "mentions", ()) or ()]))
+                        if text == "**阶段性答案**\n\nsegment":
+                            segment.set()
+                            await release_segment.wait()
+                            return SendResult.ok(message_id="segment")
+                        if text == "final answer":
+                            body.set()
+                            await release_body.wait()
+                            if receipt == "unknown":
+                                raise OSError("final receipt lost")
+                            if receipt == "rejected":
+                                return SendResult(success=False, raw={"code": 99991400})
+                            return SendResult.ok(message_id="final")
+                        return SendResult.ok(message_id="other")
+
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(fx.channel, "reply", side_effect=send))
+                        if order == "build failure":
+                            stack.enter_context(patch("netizen_cli.channel.presentation.mentioned_answer", side_effect=ValueError))
+                        await app.handle_message(FakeMessage("work", message_id="H"))
+                        cli = clients.calls[-1]
+                        cli.init()
+                        ex = ordinary._active[binding.id]
+                        await self.until(lambda: bool(app._progress_cards._sessions))
+                        if order == "stop":
+                            await app.handle_message(FakeMessage("/stop", message_id="stop"))
+                        for block in (TextBlock("segment"), ToolUseBlock("tool", "Read", {})):
+                            cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session,
+                                uuid=type(block).__name__, message_id="model"))
+                        cli.result(result="final answer", idle=False)
+                        try:
+                            await asyncio.wait_for(segment.wait(), 3)
+                            if order == "late":
+                                release_segment.set()
+                                await asyncio.wait_for(body.wait(), 3)
+                            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+                            await self.until(lambda: ex.human.terminal_sent)
+                        finally:
+                            release_segment.set()
+                            release_body.set()
+                        self.assertTrue(await ordinary.wait_idle(5))
+                    inline = order == "early"
+                    self.assertEqual([(t, ids) for t, ids in sent if ids], [("final answer", ["ou_user"])] if inline else [])
+                    self.assertEqual(sum(t == "final answer" for t, _ in sent), 1)
+                    self.assertEqual(sum(t == INCOMPLETE for t, _ in sent), int(receipt != "confirmed"))
+                    self.assertEqual([(post.text, [m.open_id for m in post.mentions], opts.reply_to)
+                                      for _, post, opts in fx.channel.send_calls],
+                                     [] if inline or order == "stop" else [
+                                         ("本轮任务已结束。", ["ou_user"], "final" if receipt == "confirmed" else "segment")])
 
     @requires_claude_sdk
     async def test_bodyless_human_tracks_background_and_best_effort_updates_do_not_gate_terminal(self):
@@ -1613,7 +1688,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cli.interrupts, 1)
             cli.init()
             fx.channel.reply_results.append(SendResult.ok(message_id="answer"))
-            cli.result()
+            await self.result_before_idle(cli, ordinary)
             self.assertTrue(await ordinary.wait_idle(10))
             self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
                              ["answer"])
@@ -1732,6 +1807,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                                     membership()
                                     cli.init(user_message_uuids=[])
                                     result(k)
+                                    if not cards and k == "C":
+                                        await self.until(lambda: "wake-C" in wire["H2"])
                                     system("session_state_changed", state="idle")
                                 await self.until(lambda: cli.closes == 1)
                             finally:
@@ -1741,9 +1818,13 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(any("child-secret" in s for s in last_version.values()))
                         self.assertTrue(any("wake-fragment" in s and confirmed[mid] == "H1" for mid, s in last_version.items()))
                         reminders = [opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())]
-                        self.assertCountEqual([confirmed[mid] for mid in reminders], ["H2"] if stop_wake else ["H1", "H2"])
+                        inline = [(anchor, post.markdown, [m.open_id for m in post.mentions])
+                                  for anchor, post in fx.channel.replies if getattr(post, "mentions", ())]
+                        self.assertEqual(inline, [("H1", "wake-A", ["ou_user"])] if not cards and not stop_wake else [])
+                        separate_h1 = cards and not stop_wake
+                        self.assertCountEqual([confirmed[mid] for mid in reminders], ["H1", "H2"] if separate_h1 else ["H2"])
                         self.assertCountEqual([next(b for b in bodies if b in last_version[mid]) for mid in reminders],
-                                              ["wake-C"] if stop_wake else ["wake-B", "wake-C"])
+                                              ["wake-B", "wake-C"] if separate_h1 else ["wake-C"])
                         if cards:
                             for mid, text in last_version.items():
                                 if any(body in text for body in ("launch-AB", "launch-C", "wake-A")):
@@ -1842,7 +1923,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             await self.until(lambda: ("H1", "wake") in fx.channel.replies)
             cli.init()
             fx.channel.reply_results.append(SendResult.ok(message_id="h2-answer"))
-            cli.result(result="second")
+            await self.result_before_idle(cli, ordinary, result="second")
             self.assertTrue(await ordinary.wait_idle(10))
             self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
                              ["h2-answer"])
@@ -2769,7 +2850,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 cli = clients.calls[-1]
                 cli.init()
                 await self.until(lambda: bool(app._progress_cards._sessions))
-                cli.result(result=body, reason="completed" if body else None)
+                await self.result_before_idle(cli, ordinary, result=body, reason="completed" if body else None)
                 self.assertTrue(await ordinary.wait_idle(10))
                 if case.startswith("preparation"):
                     prepare.assert_called_once()
@@ -3007,6 +3088,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 assistant(TextBlock("physical two"), "final")
                 cli.result(user_message_uuid=None, result="physical two", origin={"kind": "task-notification",
                            "producer": "session-task", "runId": "r"})
+                if not cards:
+                    await self.until(lambda: ("H1", "physical two") in fx.channel.replies)
                 system("session_state_changed", state="idle")
                 self.assertTrue(await ordinary.wait_idle(5))
                 _, mention, opts = fx.channel.send_calls[-1]
@@ -3036,7 +3119,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             cli = clients.calls[-1]
             cli.init()
             await self.until(lambda: bool(app._progress_cards._sessions))
-            cli.result(result="body")
+            await self.result_before_idle(cli, ordinary, result="body")
             self.assertTrue(await ordinary.wait_idle(5))
             self.assertEqual(fx.channel.replies, [("H", "body"), ("H", INCOMPLETE)])
             self.assertFalse(fx.channel.send_calls)
@@ -3061,7 +3144,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     fx.channel.reply_results.append(SendResult.ok(message_id="om_result"))
                     fx.channel.send_results.append(SendResult.ok(message_id="reminder"))
-                    client.result(result="answer with ![file](unavailable.png)")
+                    await self.result_before_idle(client, ordinary, result="answer with ![file](unavailable.png)")
                 self.assertTrue(await ordinary.wait_idle(2))
                 reply = fx.channel.replies[-1][1]
                 if index:
