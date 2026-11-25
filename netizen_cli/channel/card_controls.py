@@ -420,7 +420,6 @@ class CardControlChannel(TurnFileChannel):
                 message_context_mode=binding.message_context_mode,
                 workspace_cwd=workspace_cwd,
                 form_view=self._session_form,
-                backend_name=self._policy.display_name,
             ),
         )
         if not updated and self._local_sessions is not None:
@@ -509,7 +508,6 @@ class CardControlChannel(TurnFileChannel):
                 task_feedback=binding.task_feedback,
                 message_context_mode=binding.message_context_mode,
                 form_view=self._session_form,
-                backend_name=self._policy.display_name,
             ),
         )
         if not updated:

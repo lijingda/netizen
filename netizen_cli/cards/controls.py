@@ -412,7 +412,7 @@ def _new_binding_form(
             inherit_initial_when_unset=False,
         )
     context = (
-        _context_mode_form_elements(prefix="new", initial_mode=message_context_mode)
+        _context_mode_form_elements(prefix="new", initial_mode=message_context_mode, backend_name=form_view.backend_name)
         if allow_context_mode else []
     )
     feedback = _task_feedback_form_elements(prefix="new", initial=task_feedback)
@@ -648,7 +648,7 @@ def _binding_config_form(
         form_view=form_view,
         model_fields=model_fields,
         context_fields=(
-            _context_mode_form_elements(prefix="config", initial_mode=message_context_mode)
+            _context_mode_form_elements(prefix="config", initial_mode=message_context_mode, backend_name=form_view.backend_name)
             if allow_context_mode else []
         ),
         feedback_fields=_task_feedback_form_elements(prefix="config", initial=task_feedback),
@@ -746,6 +746,7 @@ def _context_mode_form_elements(
     *,
     prefix: str,
     initial_mode: MentionContextMode,
+    backend_name: str = "Codex",
 ) -> list[dict[str, Any]]:
     return [
         _form_label("@ 时读取的消息范围"),
@@ -767,7 +768,7 @@ def _context_mode_form_elements(
         _form_hint(
             "机器人始终只响应 @ 它的消息。选择“自动带上”后，"
             "两次 @ 之间群里其他成员未 @ 机器人的消息，"
-            "也会在下一次 @ 时被读取，作为背景交给 Codex。"
+            f"也会在下一次 @ 时被读取，作为背景交给 {backend_name}。"
         ),
     ]
 
@@ -916,7 +917,7 @@ def session_settings_form_elements(
                             options=((value, value),) if value else (), initial_option=value or None),
                     ])
     context = (
-        _context_mode_form_elements(prefix=prefix, initial_mode=settings.message_context_mode)
+        _context_mode_form_elements(prefix=prefix, initial_mode=settings.message_context_mode, backend_name=form_view.backend_name)
         if allow_context_mode else []
     )
     feedback = _task_feedback_form_elements(prefix=prefix, initial=settings.task_feedback)
@@ -1995,7 +1996,6 @@ def binding_created_card(
     task_feedback: BindingTaskFeedback | None = None,
     form_view: SessionFormView = SessionFormView(),
     workspace_cwd: str | None = None,
-    backend_name: str = "Codex",
 ) -> OutboundCard:
     builder = _builder(
         "会话创建成功",
@@ -2014,7 +2014,7 @@ def binding_created_card(
         "在群聊和群话题中，每条消息都需要 @机器人。"
     )
     builder.markdown(_model_source_summary(settings, form_view))
-    builder.markdown(_context_mode_summary(message_context_mode, backend_name))
+    builder.markdown(_context_mode_summary(message_context_mode, form_view.backend_name))
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
     )
@@ -2029,7 +2029,6 @@ def binding_configured_card(
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
     form_view: SessionFormView = SessionFormView(),
-    backend_name: str = "Codex",
 ) -> OutboundCard:
     builder = _builder(
         "会话配置已保存",
@@ -2037,7 +2036,7 @@ def binding_configured_card(
         template="green",
     )
     builder.markdown(_model_source_summary(settings, form_view))
-    builder.markdown(_context_mode_summary(message_context_mode, backend_name))
+    builder.markdown(_context_mode_summary(message_context_mode, form_view.backend_name))
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
     )

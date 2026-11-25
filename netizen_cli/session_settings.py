@@ -65,10 +65,11 @@ class SessionFormView:
     model_editable: bool = True
     progress_editable: bool = True
     inherited_source: str = "继承 Codex"
+    backend_name: str = "Codex"
 
     @classmethod
-    def from_operations(cls, allows: Callable[[OperationId], bool], *, inherited_source: str) -> SessionFormView:
-        return cls(allows(OperationId.MODEL), allows(OperationId.REPLY_CARD), inherited_source)
+    def from_operations(cls, allows: Callable[[OperationId], bool], *, inherited_source: str, backend_name: str) -> SessionFormView:
+        return cls(allows(OperationId.MODEL), allows(OperationId.REPLY_CARD), inherited_source, backend_name)
 
     def defaults(self, catalog: ModelCatalog | None) -> SessionSettings:
         settings = SessionSettings.new_defaults(catalog if self.model_editable else None)

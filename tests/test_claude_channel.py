@@ -2021,6 +2021,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 fx.channel.reply_results.append(SendResult.ok(message_id=mid))
                 await app.handle_message(FakeMessage(f"/{command}", message_id=command, chat_id="oc_group", chat_type="group"))
                 picker = fx.channel.replies[-1][1]
+                self.assertIn("作为背景交给 Claude Code。", str(picker.card))
+                self.assertNotIn("Codex", str(picker.card))
                 form = form_values(picker)
                 options = {item["name"]: item["options"] for item in elements(picker.card, "select_static")}
                 if command == "new":
