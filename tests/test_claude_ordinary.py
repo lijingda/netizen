@@ -299,6 +299,63 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                     await self.finish(receipt)
                 self.assertEqual(self.store.active_binding(source.scope_key), source)
 
+    async def assert_cron_only_fork(self, cli):
+        await self.wait_for_history_baseline()
+        self.assertTrue(cli.live.crons)
+        self.assertFalse(cli.live.tasks)
+        self.assertIsNone(cli.live.physical)
+        try:
+            child = await self.fork()
+        except OrdinaryInputRejected as exc:
+            self.fail(f"Fork refused after the source reached ordered idle: {exc}")
+        self.assertEqual(self.clients.forks[-1][-1], child.child_id)
+
+    async def test_can_fork_after_a_cron_wake_rolls_back_a_reserved_input(self):
+        from claude_agent_sdk import SystemMessage
+        _, cli = await self.retain()
+        await self.wait_for_history_baseline()
+        reserved, proceed = asyncio.Event(), asyncio.Event()
+        write = self.runtime._write_next
+
+        async def wait_to_write(*args):
+            reserved.set()
+            await proceed.wait()
+            await write(*args)
+
+        with patch.object(self.runtime, "_write_next", side_effect=wait_to_write):
+            submission = asyncio.create_task(self.submit())
+            try:
+                await asyncio.wait_for(reserved.wait(), 3)
+                with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
+                    await self.fork()
+                cli.init(user_message_uuids=[])
+                await self.wait_until(lambda: cli.live.physical is not None)
+            finally:
+                proceed.set()
+            with self.assertRaisesRegex(OrdinaryInputRejected, "未发送"):
+                await submission
+        self.assertEqual(len(cli.inputs), 1)
+        cli.result(user_message_uuid=None, result="cron")
+        cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+        await self.assert_cron_only_fork(cli)
+        later = await self.submit()
+        later.release_receipt_attempt()
+        cli.init()
+        cli.result()
+        await self.assert_cron_only_fork(cli)
+
+    async def test_can_fork_after_a_stop_before_native_init_has_settled(self):
+        _, cli = await self.retain()
+        await self.wait_for_history_baseline()
+        later = await self.submit()
+        later.release_receipt_attempt()
+        self.assertIsNone(cli.live.physical)
+        await self.runtime.stop_exact(self.binding.id)
+        self.assertEqual(cli.interrupts, 1)
+        cli.init()
+        cli.result()
+        await self.assert_cron_only_fork(cli)
+
     async def test_fork_requires_idle_without_tasks_and_detects_native_wake_during_copy(self):
         from claude_agent_sdk import SystemMessage
         native = str(uuid4())

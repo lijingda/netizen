@@ -493,7 +493,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         execution = self._active.get(source.id)
         if execution is not None and not execution.close_finished:
             if (not execution.admissible or not execution.live.initialized or execution.reserved is not None
-                    or execution.unwritten or execution.stopping or execution.awaiting_task_stop):
+                    or execution.awaiting_task_stop):
                 raise OrdinaryInputRejected(_FORK_BUSY)
             if execution.live.tasks:
                 raise OrdinaryInputRejected("来源会话仍有后台任务运行，任务结束后才能创建分支。")
