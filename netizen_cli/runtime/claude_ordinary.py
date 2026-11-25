@@ -933,6 +933,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                         raise ValueError("unusable Claude session")
                     human = execution.pending
                     pending = human.input_id if human and human.written else None
+                    if isinstance(msg, AssistantMessage):
+                        execution.checklist.observe_child(msg)
                     if isinstance(msg, SystemMessage) and msg.subtype == "init":
                         data = msg.data
                         if Path(data["cwd"]).resolve() != cwd or not Path(data["cwd"]).is_absolute():
@@ -978,7 +980,6 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                     elif isinstance(msg, SystemMessage):
                         live.system(msg)
                     elif isinstance(msg, AssistantMessage):
-                        execution.checklist.observe_child(msg)
                         if execution.physical_activity is not None:
                             execution.physical_activity.observe(msg)
                         if human := execution.submitted(live.assistant(msg)):

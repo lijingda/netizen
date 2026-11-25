@@ -189,6 +189,29 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
         cli.result()
         self.assertTrue(await self.runtime.wait_idle(2))
 
+    async def test_cold_child_checklist_invalidates_resumed_client_before_human_init(self):
+        from claude_agent_sdk import AssistantMessage, ToolResultBlock, ToolUseBlock, UserMessage
+        first = await self.submit()
+        await self.finish(first)
+        self.clients.cwds[first.thread_id] = self.cwd
+        human = await self.submit()
+        human.release_receipt_attempt()
+        client = self.clients.calls[-1]
+        self.assertTrue(client.resume)
+        client.init(user_message_uuids=[], uuid="cold")
+        client.stream.put_nowait(AssistantMessage([ToolUseBlock("child", "TaskUpdate", {})], "model",
+                                                 session_id=client.session, parent_tool_use_id="earlier-agent"))
+        client.init(uuid="accepted")
+        client.stream.put_nowait(AssistantMessage([ToolUseBlock("create", "TaskCreate", {})], "model", session_id=client.session))
+        client.stream.put_nowait(UserMessage([ToolResultBlock("create")], tool_use_result={"task": {"id":"1", "subject":"new"}}))
+        client.result()
+        self.assertTrue(await self.runtime.wait_idle(5))
+        event = next(e for e in self.events if isinstance(e, PhysicalAnswer) and e.turn_id == human.turn_id)
+        self.assertEqual(event.activity.physical_turn_id, "accepted")
+        self.assertTrue(event.activity.plan_generated)
+        self.assertFalse(event.activity.plan_available)
+        self.assertEqual(event.activity.steps, ())
+
     async def test_public_history_uses_exact_cwd_and_last_visible_assistant(self):
         from types import SimpleNamespace
         rows = [SimpleNamespace(type="assistant", uuid=id_, session_id="s") for id_ in ("a", "b")]
