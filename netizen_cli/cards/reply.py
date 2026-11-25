@@ -1202,7 +1202,7 @@ def _turn_activity_elements(
         elements.append(
             {
                 "tag": "markdown",
-                "content": f"**任务清单**：Codex 尚未生成{suffix}",
+                "content": f"**任务清单**：尚未生成{suffix}",
             }
         )
         return elements

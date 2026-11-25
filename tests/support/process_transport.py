@@ -120,7 +120,7 @@ async def check_displaced_step(case, key, observe_plan, rollover=None):
     def updates():
         return [check_pairs(args[1]) for name, args, _ in wire.events if name == "process.update"]
     try:
-        with patch("netizen_cli.runtime.activity.time", new=lambda: now):
+        with patch("netizen_cli.activity_accumulator.time", new=lambda: now):
             async with asyncio.timeout(2):
                 await sample(observe_plan((inspect,)))
                 case.assertEqual(updates(), [({("step", "Inspect"): start}, set())])

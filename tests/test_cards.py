@@ -1521,7 +1521,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIn("**最近进展**", markdown_visible)
         self.assertIn("**最近操作**", markdown_visible)
-        self.assertIn("**任务清单**：Codex 尚未生成", markdown_visible)
+        self.assertIn("**任务清单**：尚未生成", markdown_visible)
 
     def test_activity_steps_filter_chinese_adjacent_sensitive_patterns(self) -> None:
         fully_hidden = (

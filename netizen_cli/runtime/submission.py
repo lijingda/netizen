@@ -15,6 +15,7 @@ from openai_codex import (
     TextInput,
 )
 
+from ..activity_accumulator import ActivityAccumulator
 from ..bindings import (
     BindingTaskFeedback,
     BindingTurnSettings,
@@ -591,7 +592,7 @@ class SubmissionRuntime(CompactionRuntime):
                 # one more input.
                 self._refresh_turn_activity(active)
                 active.steer_count += 1
-                active.plan_may_be_stale = True
+                active.activity.plan_may_be_stale = True
                 active.plan_stale_after_cursor = active.plan_cursor
                 active.activity_revision += 1
                 return Submission(
@@ -614,7 +615,7 @@ class SubmissionRuntime(CompactionRuntime):
                 cwd=execution_cwd,
                 task_feedback=task_feedback,
                 feedback_revision=binding.feedback_revision,
-                plan_available=self._turn_plan_observer is not None,
+                activity=ActivityAccumulator(plan_available=self._turn_plan_observer is not None),
             )
             if initial_run_id is not None:
                 try:
@@ -803,10 +804,10 @@ class SubmissionRuntime(CompactionRuntime):
         if last_update is not None and last_update > stale_after_cursor:
             # A concurrent /status may already have observed a plan
             # emitted after steer began but before its RPC returned.
-            active.plan_may_be_stale = False
+            active.activity.plan_may_be_stale = False
             active.plan_stale_after_cursor = None
         else:
-            active.plan_may_be_stale = True
+            active.activity.plan_may_be_stale = True
             active.plan_stale_after_cursor = stale_after_cursor
         active.activity_revision += 1
         self._commit_context_cursor_locked(

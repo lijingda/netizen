@@ -195,7 +195,6 @@ class GoalRuntime(TurnObservationRuntime):
                 persisted=persisted,
                 task_feedback=self._capture_task_feedback(binding.task_feedback),
                 feedback_revision=binding.feedback_revision,
-                plan_available=True,
             )
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
@@ -371,7 +370,6 @@ class GoalRuntime(TurnObservationRuntime):
                 generation_token_budget=persisted.token_budget,
                 task_feedback=self._capture_task_feedback(binding.task_feedback),
                 feedback_revision=binding.feedback_revision,
-                plan_available=True,
             )
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
@@ -998,8 +996,8 @@ class GoalRuntime(TurnObservationRuntime):
 
         try:
             await active.receipt_attempted.wait()
-            if active.terminal_observed and active.process_activity is not None:
-                active.process_activity.close()
+            if active.terminal_observed:
+                active.activity.close()
             outcome = GoalOutcome(
                 binding_id=active.binding_id,
                 thread_id=active.thread_id,
