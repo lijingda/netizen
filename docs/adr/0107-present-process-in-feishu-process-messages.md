@@ -91,7 +91,7 @@ Codex 普通 Turn、Goal 和 Side 与 Claude 都采用这一规则。Side 的每
 | 清单步骤 | pending 步骤不展示。进行中发送 `STEP_STARTED`，完成后同时发送原 START 和 `STEP_FINISHED`。配对使用同一份固定的 `stepName`。 |
 | 已完成的进展文字 | 一次发送 `TEXT_MESSAGE_START`（`messageId`、`role=assistant`）、`TEXT_MESSAGE_CONTENT`（相同 `messageId` 和安全文字 `delta`）、`TEXT_MESSAGE_END`（相同 `messageId`）。 |
 
-每次写入发送当前完整的条目列表，每个 END 都带上其 START。过程消息靠原生配对表达完成勾选。
+每次写入发送当前完整的条目列表，每个 END 都带上其 START。过程消息靠原生配对表达完成状态：实测运行中的条目以动效显示，配对 END 后停止，不另显示勾号。
 不发送 `TOOL_CALL_ARGS`、`TOOL_CALL_RESULT` 或 `REASONING_*`，不包含推理内容、原始工具参数或原始输出。
 
 - **写入。** 按当前状态计算期望列表，与已知列表不同时才写入。结果未知时，下次触发重写。每条消息只有一个写入者，中间状态不排队，失败只影响本次写入。
