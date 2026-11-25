@@ -130,8 +130,13 @@ def _start(block: ToolUseBlock, name: str, now: int, limit: int) -> TurnActivity
     if detail := _DETAILS.get(name):
         kind, label, fields = detail
         args = block.input if isinstance(block.input, dict) else {}
-        values = tuple(args.get(key) for key in fields)
-        text = operation_summary(label, *(v for v in values if isinstance(v, str)), limit=limit)
+        details = []
+        for key in fields:
+            value = args.get(key)
+            if not isinstance(value, str) or not value.strip():
+                break
+            details.append(value)
+        text = operation_summary(label, *details, limit=limit)
     elif name in ("Agent", "Task"):
         kind = TurnActivityKind.SUBAGENT
     elif name in _PUBLIC_TOOLS:

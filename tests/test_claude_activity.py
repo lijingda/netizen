@@ -113,6 +113,16 @@ class ClaudeToolsTest(unittest.TestCase):
         checklist.apply("TodoWrite", {"todos": []})
         self.assertIsNone(checklist.rows)
 
+    def test_grep_details_preserve_pattern_then_location(self):
+        for pattern, path, expected in ((42, "target-dir", "搜索内容"), ("  ", "target-dir", "搜索内容"),
+                                        ("needle", None, "搜索内容 · needle"),
+                                        ("needle", "target-dir", "搜索内容 · needle · target-dir")):
+            with self.subTest(pattern=pattern, path=path):
+                turn = ClaudeTurnTools(ClaudeChecklist(), 120)
+                row, = turn.assistant(AssistantMessage([ToolUseBlock("call", "Grep", {
+                    "pattern": pattern, "path": path})], "model"), 1)
+                self.assertEqual(row.text, expected)
+
     def test_missing_metadata_has_local_display_effects_and_end_requires_proof(self):
         turn = ClaudeTurnTools(ClaudeChecklist(), 50)
         result = turn.assistant(AssistantMessage([
