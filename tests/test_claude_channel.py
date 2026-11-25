@@ -814,16 +814,15 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.sleep(.5)  # Each request fits in 5 s; twelve exceed it together.
                         order.append("ack")
                         return SendResult.ok(message_id=f"reply-{len(attempted)}")
-                    with (patch.object(fx.channel, "reply", side_effect=send),
+                    with (patch("netizen_cli.channel.constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS",
+                                1 if case.startswith("deadline") else 15),
+                          patch.object(fx.channel, "reply", side_effect=send),
                           patch.object(fx.channel, "add_reaction", side_effect=react),
                           patch.object(ordinary, "_notice", side_effect=notice)):
                         await app.handle_message(FakeMessage("launch", message_id="H"))
                         cli = clients.calls[-1]
                         cli.init()
                         await self.until(lambda: bool(app._progress_cards._sessions))
-                        if case in ("deadline", "deadline exhausted"):
-                            # The first request times out while the physical turn still has time for more items.
-                            app._progress_cards._operation_timeout_seconds = 1
                         for i in range(12):
                             mid = f"model-{i}"
                             answer = f"fragment[{i}]" + ("字" * 3600 if cards else "")
@@ -2607,6 +2606,113 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(settles, [({BODY: outcome, image_item: outcome}, True)])
                 self.assertEqual(sum(content == INCOMPLETE for _, content in fx.channel.replies), int(outcome != "confirmed"))
                 self.assertEqual(mentions.assert_reminder(self), "first")
+
+    async def test_terminal_replacement_settles_after_its_bounded_attempts(self):
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.physical_delivery import BODY, PhysicalDelivery
+
+        for responses, expected, posts in (
+            (("slow",), "confirmed", []),
+            (("unknown", "confirmed"), "confirmed", []),
+            (("unknown", "unknown", "unknown"), "unknown", [INCOMPLETE]),
+            (("unknown", "rejected"), "unknown", [INCOMPLETE]),
+            (("rejected",), "confirmed", ["final answer"]),
+            (("deadline",), "unknown", [INCOMPLETE]),
+        ):
+            with self.subTest(responses=responses):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    binding = fx.store.create_channel_binding(
+                        scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                        project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=False))
+                    fx.channel.reply_results.append(SendResult.ok(message_id="running"))
+                    app._progress_cards._operation_timeout_seconds = .005
+                    calls = []
+                    settlements = []
+                    settle = PhysicalDelivery.settle
+
+                    def at_settlement(ledger):
+                        # Subsequent CLI state updates may write this card again.
+                        settlements.append((calls.copy(), ledger.items[BODY]))
+                        return settle(ledger)
+
+                    inflight = peak = 0
+                    entered, release = asyncio.Event(), asyncio.Event()
+
+                    async def update(mid, card):
+                        nonlocal inflight, peak
+                        self.assertEqual(mid, "running")
+                        inflight += 1
+                        peak = max(peak, inflight)
+                        try:
+                            if "final answer" in str(card):
+                                response = responses[len(calls)] if len(calls) < len(responses) else "extra"
+                                calls.append(response)
+                                if response in {"slow", "deadline"}:
+                                    entered.set()
+                                    await release.wait()
+                                if response == "unknown":
+                                    raise OSError("lost replacement receipt")
+                                if response == "rejected":
+                                    return SendResult(success=False, raw={"code": 99991400})
+                            return SendResult.ok(message_id=mid)
+                        finally:
+                            inflight -= 1
+
+                    with (patch.object(fx.channel, "update_card", side_effect=update),
+                          patch.object(PhysicalDelivery, "settle", at_settlement),
+                          patch("netizen_cli.channel.constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS", 1.0),
+                          patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", .001),
+                          patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_UPDATE_ATTEMPTS", 3)):
+                        await app.handle_message(FakeMessage("work", message_id="H"))
+                        cli = clients.calls[-1]
+                        cli.init()
+                        await self.until(lambda: bool(app._progress_cards._sessions))
+                        ledger = next(iter(app._progress_cards._sessions.values())).delivery
+                        budget = .05 if responses == ("deadline",) else 2.
+                        with patch.object(ordinary, "_remaining", side_effect=lambda seconds: budget if seconds == 30 else seconds):
+                            cli.result(result="final answer", idle=False)
+                            if responses == ("slow",):
+                                await asyncio.wait_for(entered.wait(), 2)
+                                # Release after the old request bound and before the item-receipt bound.
+                                asyncio.get_running_loop().call_later(.025, release.set)
+                            await self.until(lambda: ledger.settled and not ordinary._active[binding.id].delivery.queues)
+                    self.assertEqual(settlements, [(list(responses), expected)])
+                    self.assertEqual(peak, 1)
+                    self.assertEqual([item for _, item in fx.channel.replies if isinstance(item, str)], posts)
+
+    async def test_writer_recomputes_after_each_unknown_delay(self):
+        from netizen_cli.channel.replacement_writer import ReplacementWriter
+
+        for receipts, next_desired, expected_calls, expected_known in (
+            (["confirmed"], "B", ["A"], "A"),
+            (["rejected"], "B", ["A"], "previous"),
+            (["unknown", "confirmed"], "B", ["A", "B"], "B"),
+            (["unknown", "rejected"], "B", ["A", "B"], None),
+            (["unknown"] * 3, "B", ["A", "B", "B"], None),
+            (["unknown"], None, ["A"], None),
+        ):
+            with self.subTest(receipts=receipts, next_desired=next_desired):
+                writer = ReplacementWriter(str)
+                writer.known = "previous"
+                desired = "A"
+                write = AsyncMock(side_effect=receipts)
+                waits = []
+
+                async def delay(seconds):
+                    nonlocal desired
+                    self.assertTrue(writer.locked())
+                    waits.append(seconds)
+                    desired = next_desired
+
+                async with writer:
+                    with patch("netizen_cli.channel.replacement_writer.asyncio.sleep", delay):
+                        confirmed = await writer.reconcile_locked(lambda: desired, write, unknown_retry_delays=(1, 2))
+                self.assertEqual([call.args[0] for call in write.await_args_list], expected_calls)
+                self.assertEqual(waits, [1, 2][:min(receipts.count("unknown"), 2)])
+                self.assertEqual(writer.known, expected_known)
+                self.assertEqual(confirmed, receipts[-1] == "confirmed")
 
     def fail_preparation(self, stack, app, case):
         from dataclasses import replace

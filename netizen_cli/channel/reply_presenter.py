@@ -23,6 +23,7 @@ from ..cards.reply import feishu_answer_text, refresh_file_page, turn_progress_p
 from ..partial_answers import PartialAnswer
 from .process_presentation import ProcessLocation, ProcessPresentation, Reason
 from .replacement_writer import ReplacementWriter
+from . import constants
 from .reply_events import Activity, ActivityChanged, DeliveryPolicy, PresentationKey, ReplyTarget, RunDisplay, TerminalStatus, TurnOpened, TurnResult
 from .messages import _confirmed_reply_id, _send_result_error_code, _receipt_message_id
 from .ports import ReplyChannel
@@ -227,7 +228,7 @@ class _ReplyCardPresenter:
     async def publish_card(
         self, display: RunDisplay, message_id: str, key: PresentationKey, location: CardReplyLocation,
         content: ReplyCardProjection, *, delivery: PhysicalDelivery, items: tuple[Item, ...],
-        confirmed: OutboundCard | None = None, tracks_run: bool = True,
+        confirmed: OutboundCard | None = None, tracks_run: bool = True, retry_unknown: bool = False,
     ) -> bool:
         if not location.can_write(message_id) or (display.reply and display.reply.messages is None):
             return False
@@ -236,7 +237,7 @@ class _ReplyCardPresenter:
             writer.known = confirmed
         cards = self._published.setdefault(display.reply, {}) if display.reply else {}
         cards[message_id] = _PublishedCard(display, key, location, content, writer, tracks_run, delivery, items)
-        return (await self._reconcile_cards(display, cards))[message_id]
+        return (await self._reconcile_cards(display, cards, retry_mid=message_id if retry_unknown else None))[message_id]
 
     async def reconcile(self, display: RunDisplay) -> dict[str, bool]:
         cards = self._published.get(display.reply, {}) if display.reply else {}
@@ -363,7 +364,7 @@ class _ReplyCardPresenter:
         return outcome
 
     async def _reconcile_locked_card(self, mid: str, view: _PublishedCard, cards: dict[str, _PublishedCard], *,
-                                     page_request: bool = False) -> bool:
+                                     page_request: bool = False, retry_unknown: bool = False) -> bool:
         reply = view.display.reply
 
         def desired() -> OutboundCard | None:
@@ -378,7 +379,8 @@ class _ReplyCardPresenter:
             return self._write_card(mid, card, view.key, view.location, view.delivery, view.items, reply)
 
         try:
-            current = await external_call(view.writer.reconcile_locked(desired, write))
+            delays = (_TERMINAL_CARD_RETRY_SECONDS,) * (_TERMINAL_CARD_UPDATE_ATTEMPTS - 1) if retry_unknown else ()
+            current = await external_call(view.writer.reconcile_locked(desired, write, unknown_retry_delays=delays))
             if not view.location.can_write(mid):
                 # The issued page can be acknowledged after retirement. desired() bars any further write.
                 return current and page_request
@@ -391,10 +393,10 @@ class _ReplyCardPresenter:
             logger.warning("optional reply update failed", extra=view.key.log_context)
             return False
 
-    async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard]) -> dict[str, bool]:
+    async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard], *, retry_mid: str | None = None) -> dict[str, bool]:
         async def reconcile_message(mid: str, view: _PublishedCard) -> bool:
             async with view.writer:
-                return await self._reconcile_locked_card(mid, view, cards)
+                return await self._reconcile_locked_card(mid, view, cards, retry_unknown=mid == retry_mid)
 
         pending = tuple(cards.items())
         for _, view in pending:
@@ -424,6 +426,9 @@ class _ReplyCardPresenter:
     @property
     def operation_timeout(self) -> float:
         return self._operation_timeout_seconds
+
+    def _request_timeout(self, policy: DeliveryPolicy) -> float:
+        return constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS if policy.confirms_items else self._operation_timeout_seconds
 
     def physical_delivery(self, key: PresentationKey) -> PhysicalDelivery:
         session = self._sessions_for(key).get(key.index)
@@ -463,7 +468,7 @@ class _ReplyCardPresenter:
                         return None
                     return location.validate(sent, card=True) if location else sent
 
-                async with asyncio.timeout(self._operation_timeout_seconds):
+                async with asyncio.timeout(self._request_timeout(event.policy)):
                     if delivery:
                         items = tuple(delivery.partial(item) for item in snapshot.partial_answers)
                         _, result = await delivery.send(items, event.run_reply, send_card())
@@ -602,7 +607,7 @@ class _ReplyCardPresenter:
                 if ledger.items.get(item, "unattempted") != "unattempted":
                     continue
             try:
-                async with asyncio.timeout(self._operation_timeout_seconds):
+                async with asyncio.timeout(self._request_timeout(session.policy)):
                     operation = external_call(reply(post), isolate=session.policy.confirms_items)
                     if ledger:
                         outcome, result = await ledger.send((item,), run_reply, operation, post=True)
@@ -939,7 +944,7 @@ class _ReplyCardPresenter:
         if location and not location.can_write(message_id):
             return _CardUpdateAttempt("", None)
         try:
-            async with asyncio.timeout(self._operation_timeout_seconds):
+            async with asyncio.timeout(self._request_timeout(policy)):
                 result = await external_call(self._channel.update_card(
                     message_id,
                     card.card,

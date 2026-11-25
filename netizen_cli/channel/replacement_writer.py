@@ -25,9 +25,11 @@ class ReplacementWriter(asyncio.Lock, Generic[Payload]):
 
     async def reconcile_locked(
         self, desired: Callable[[], Payload | None], write: Callable[[Payload], Awaitable[Outcome]],
+        *, unknown_retry_delays: tuple[float, ...] = (),
     ) -> bool:
         """Recompute while the caller holds this message's replacement lock."""
         delivered = False
+        delays = iter(unknown_retry_delays)
         while (payload := desired()) is not None:
             if self.known is not None and self.key(self.known) == self.key(payload):
                 return True
@@ -36,6 +38,8 @@ class ReplacementWriter(asyncio.Lock, Generic[Payload]):
             if outcome == "confirmed":
                 self.known = payload
                 delivered = True
+            elif outcome == "unknown" and (delay := next(delays, None)) is not None:
+                await asyncio.sleep(delay)
             else:
                 if outcome == "rejected":
                     self.known = previous

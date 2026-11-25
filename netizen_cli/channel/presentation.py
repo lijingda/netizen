@@ -158,14 +158,16 @@ class CompletionPresentationChannel(ChannelReplies):
             except Exception:
                 card = None
             if card and first_id and location.can_write(first_id):
-                if await self._progress_cards.publish_card(display, first_id, key, location, projection, delivery=ledger, items=items):
+                if await self._progress_cards.publish_card(display, first_id, key, location, projection,
+                                                          delivery=ledger, items=items, retry_unknown=True):
                     ledger.record(items, "confirmed")
                     return
                 if not any(ledger.items.get(item) == "rejected" and ledger.can_post(item) for item in items):
                     return
             if (card and not first_id and publishable()
                     and all(ledger.items[item] not in ("unknown", "rejected") for item in ledger.partial_text)):
-                state, sent = await ledger.send(items, reply, policy.send(card, None, location))
+                state, sent = await ledger.send(items, reply, policy.send(card, None, location),
+                                                timeout=constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS)
                 if state == "confirmed" and sent is not None:
                     record_sent_answer(reply, location, key.turn_id, items, sent)
                     if reply and (mid := _confirmed_reply_id(sent)):
@@ -207,7 +209,7 @@ class CompletionPresentationChannel(ChannelReplies):
                     offered = (*body_items, *matching_items, FILES) if post_body else (FILES,)
                     if publishable():
                         _, sent = await ledger.send(offered, reply, external_call(policy.send(file_card, "files", location)),
-                                                    timeout=self._progress_cards.operation_timeout)
+                                                    timeout=constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS)
                         if sent is not None:
                             record_sent_answer(reply, location, key.turn_id, offered, sent)
             if post_body and ledger.can_post(BODY):
@@ -230,7 +232,7 @@ class CompletionPresentationChannel(ChannelReplies):
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
         _, result = await ledger.send(items, policy.display.reply, external_call(policy.send(content, operation, location)),
-                                      post=True, timeout=self._progress_cards.operation_timeout)
+                                      post=True, timeout=constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS)
         if result is not None:
             record_sent_answer(policy.display.reply, location, outcome.turn_id, items, result)
 
