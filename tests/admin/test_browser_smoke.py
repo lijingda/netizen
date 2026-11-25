@@ -77,6 +77,7 @@ async def seed(fixture):
     attachments.publish(attachments.prepare([AttachmentInput("note.md", b"# Smoke attachment")]))
     fixture.management.attachments = AttachmentFileService(attachments, fixture.management.file_reads)
     fixture.management.enable_worktrees(settings=WorktreeSettingsService(default_root=project.parent / "worktrees"))
+    return created.binding.id
 
 
 async def run_in_group(args, *, deadline, data=None):
@@ -151,6 +152,7 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
         from netizen_cli.admin.users import AdminUsers
         from netizen_cli.admin.web import AdminWebRunner, _ADMIN_PAGE_PATHS
         from netizen_cli.group_access import GroupAccessService
+        from netizen_cli.session_providers import SessionNames
         from netizen_cli.sessions.policy import SessionPolicyService
         from tests.support.channel_fixtures import channel_fixture
 
@@ -160,7 +162,7 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.dict(os.environ, NETIZEN_ROOT=str(root)))
         self.enterContext(patch("netizen_cli.cli_services.ServiceManager.inspect", return_value=None))
         fixture = await self.enterAsyncContext(channel_fixture())
-        await seed(fixture)
+        materialized_id = await seed(fixture)
         users = AdminUsers(root, "cli_test")
         member = users.add_initial("ou_admin", name="Smoke Admin")
         auth = AdminAuth(users)
@@ -181,10 +183,15 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
                                                 project_alias="pending", creator_id="ou_admin")
             owner = users.restrict_to_owner()
             policy = BackendPolicy("claude", owner.open_id)
-            local = ClaudeOrdinarySessions(bindings=fixture.store, owner_id=owner.open_id, clients=FakeClaudeClients(),
-                                          on_completion=AsyncMock(), notice=AsyncMock())
+            clients = FakeClaudeClients()
+            clock = Mock(return_value=0.)
+            local = ClaudeOrdinarySessions(bindings=fixture.store, owner_id=owner.open_id, clients=clients,
+                                          on_completion=AsyncMock(), notice=AsyncMock(), clock=clock)
+            local.open_admission()
+            clock.return_value = 2.
             management = InstanceManagementService(bindings=fixture.store, projects=fixture.projects,
-                scope_coordinator=ScopeCoordinator(), runtime=ManagementRuntimePort(None, ordinary=local, local=local))
+                scope_coordinator=ScopeCoordinator(), runtime=ManagementRuntimePort(None, ordinary=local, local=local,
+                    names=SessionNames(writer=local), local_summary=clients.session_metadata))
             management.enable_defaults(app_id="cli_test", chat_info=fixture.channel)
             self.addAsyncCleanup(management.close)
         else:
@@ -200,7 +207,6 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
             self.enterContext(patch.object(BackendPolicy, "allows",
                 lambda policy, operation, surface="command": operation is not OperationId.DELETE and allows(policy, operation, surface)))
         if manual_only:
-            from netizen_cli.session_providers import SessionNames
             management.names = SessionNames(writer=management.names.writer)
         runner.attach_management(management, group_access=GroupAccessService(), backend_policy=policy,
                                  session_policy=SessionPolicyService())
@@ -229,8 +235,13 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
             "paths": ["/admins", "/sessions/ordinary", "/defaults", "/projects", "/maintenance"] if owner_only else
                      ["/sessions/ordinary"] if manual_only else ["/projects"] if delete_limited else sorted(_ADMIN_PAGE_PATHS),
             "ownerOnly": owner_only, "manualOnly": manual_only, "deleteLimited": delete_limited,
+            "materializedId": materialized_id,
         })
         output = report(result)
         self.assertEqual(status, 0, output)
         self.assertNotIn("error", result)
+        if owner_only:
+            self.assertEqual(clients.titles, {"smoke-thread": "🦊" * 61})
+        elif manual_only:
+            self.assertEqual(fixture.runtime.rename_binding_calls, [(materialized_id, "🦊" * 30)])
         print(output)

@@ -282,6 +282,29 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
                     release.set()
                     await rename
 
+    async def test_codex_admin_rename_accepts_up_to_120_utf8_bytes(self):
+        for count, status in ((30, 200), (31, 400), (61, 400)):
+            with self.subTest(count=count):
+                grant = (await self.actions())["rename"]
+                result = await self.request("/api/v1/sessions/rename", self.payload(grant, name="🦊" * count))
+                self.assertEqual(result.status, status, result.body)
+        self.assertEqual(self.fx.runtime.rename_binding_calls, [(self.binding.id, "🦊" * 30)])
+
+    async def test_claude_admin_rename_accepts_up_to_120_normalized_code_points(self):
+        async with owner_channel() as (app, fx, clients, clock, _):
+            clock[0] = 2
+            row = (await fx.create_binding(self.scope)).binding
+            fx.store.assign_native_thread_id(row.id, "native")
+            self.open_admin(fx.project_root, app._management, "ou_user")
+            for raw, status in (("🦊" * 61, 200), ("\u0085" + "🦊" * 118 + " " * 121 + "🦊\x1f", 200),
+                                (" \u0085 ", 400), ("a" * 121, 400)):
+                with self.subTest(length=len(" ".join(raw.split()))):
+                    grant = (await self.actions())["rename"]
+                    result = await self.request("/api/v1/sessions/rename", self.payload(grant, name=raw))
+                    self.assertEqual(result.status, status, result.body)
+                    if status == 200:
+                        self.assertEqual(clients.titles["native"], " ".join(raw.split()))
+
     async def test_claude_owner_manual_rename_through_all_entries_without_generator(self):
         async with owner_channel() as (app, fx, clients, clock, _):
             clock[0] = 2

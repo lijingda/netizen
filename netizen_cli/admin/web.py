@@ -689,6 +689,9 @@ class AdminWebApplication:
                 if self._backend_policy.owner_only and self._backend_policy.allows(OperationId.MANUAL_RENAME):
                     rename_hint = "Claude 客户端关闭后可以改名。后台任务或会话 cron 保留连接时，请等待工作结束。" + rename_hint
             page = page.replace(b"__NETIZEN_RENAME_HINT__", html.escape(rename_hint).encode()).replace(
+                b" data-netizen-rename-limit",
+                b' data-max-code-points="120"' if self._backend_policy.backend == "claude" else b' maxlength="120"',
+            ).replace(
                 b" data-netizen-generate-name-visibility",
                 b"" if can_generate else b" hidden data-provider-hidden",
             ).replace(b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(self._instance_root)).encode())

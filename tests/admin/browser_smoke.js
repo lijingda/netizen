@@ -218,6 +218,36 @@ async function run() {
       }
       checkErrors();
     }
+    async function checkRename() {
+      await clickInViewport(`[data-binding-id="${config.materializedId}"] [aria-haspopup="menu"]`);
+      await click('[role="menuitem"]', "重命名");
+      const input = element("#session-rename-name");
+      const save = element("#session-rename-save");
+      const enter = async text => {
+        await evaluate(input + ".select()");
+        await page("Input.insertText", { text });
+        return evaluate(`[${input}.value, ${save}.disabled]`);
+      };
+      const title = "🦊".repeat(61);
+      if (config.ownerOnly) {
+        assert.deepEqual(await enter(" \u0085 "), [" \u0085 ", true]);
+        assert.deepEqual(await enter("x".repeat(121)), ["x".repeat(121), true]);
+        await evaluate('document.querySelector("#session-rename-editor").requestSubmit()');
+        const spaced = "🦊".repeat(118) + " ".repeat(121) + "🦊";
+        assert.deepEqual(await enter(spaced), [spaced, false]);
+        assert.deepEqual(await enter(title), [title, false]);
+      } else {
+        assert.equal(await evaluate(input + ".maxLength"), 120);
+        assert.deepEqual(await enter(title), ["🦊".repeat(60), false]);
+        assert.deepEqual(await enter("\ufeff"), ["\ufeff", true]);
+        await evaluate('document.querySelector("#session-rename-editor").requestSubmit()');
+        await enter("🦊".repeat(30));
+      }
+      await click("#session-rename-save");
+      await until("confirmed rename", () => evaluate('!document.querySelector("#session-rename-dialog").open'));
+      await settled(null);
+      result.interactions.push(step + " · rename input and authenticated save");
+    }
     for (const [viewport, width, height, mobile] of [["desktop", 1280, 800, false], ["phone", 390, 844, true]]) {
       const phoneWidth = mobile ? width : null;
       await page("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile });
@@ -320,6 +350,7 @@ async function run() {
           }
           await click("#session-settings-cancel");
           result.interactions.push(step + " · session configuration");
+          if (!mobile && (config.ownerOnly || config.manualOnly)) await checkRename();
         }
         if (path === "/login") {
           const cookie = await page("Network.setCookie", { ...config.cookie, url: config.origin, httpOnly: true });

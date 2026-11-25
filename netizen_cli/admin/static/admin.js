@@ -1943,10 +1943,12 @@ let sessionRenameEditor = null;
 const sessionRenameInput = (name) => document.querySelector(`#session-rename-${name}`);
 
 function sessionRenameDraft() {
+  const input = sessionRenameInput("name");
+  if (!input.dataset.maxCodePoints) return { name: input.value.trim(), tooLong: false };
   // Match Python str.split(), including the four additional ASCII separators.
-  const words = sessionRenameInput("name").value.match(/[^\p{White_Space}\u001c-\u001f]+/gu);
+  const words = input.value.match(/[^\p{White_Space}\u001c-\u001f]+/gu);
   const name = (words || []).join(" ");
-  return { name, tooLong: [...name].length > 120 };
+  return { name, tooLong: [...name].length > Number(input.dataset.maxCodePoints) };
 }
 
 function renderSessionRenameEditor() {
