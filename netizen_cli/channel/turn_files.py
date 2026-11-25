@@ -94,48 +94,10 @@ class TurnFileChannel(SessionCardChannel):
 
     async def _turn_file_action(self, intent: TurnFileActionIntent) -> None:
         if intent.name is TurnFileActionName.PAGE:
-            assert intent.page is not None
-            assert intent.answer is not None
-            if intent.reply is not None:
-                updated = await self._progress_cards.page_published_card(intent)
-                if updated is False:
-                    raise TurnFileError("飞书未确认本轮文件卡片翻页成功。")
-                if updated:
-                    return
-                card = reply_card_from_manifest(
-                    scope=intent.scope,
-                    binding_id=intent.binding_id,
-                    turn_id=intent.turn_id,
-                    manifest=intent.files,
-                    reply=self._progress_cards.retired_file_reply(intent, intent.reply),
-                    page=intent.page,
-                    additions=intent.additions,
-                    deletions=intent.deletions,
-                )
-            elif intent.progress is None:
-                card = turn_files_card_from_manifest(
-                    scope=intent.scope,
-                    binding_id=intent.binding_id,
-                    turn_id=intent.turn_id,
-                    final_response=intent.answer,
-                    manifest=intent.files,
-                    page=intent.page,
-                    additions=intent.additions,
-                    deletions=intent.deletions,
-                )
+            if self._policy.backend == "claude":
+                updated = await self._progress_cards.page_file_card(intent, self._update_manifest_page)
             else:
-                card = turn_progress_card_from_manifest(
-                    scope=intent.scope,
-                    binding_id=intent.binding_id,
-                    turn_id=intent.turn_id,
-                    final_response=intent.answer,
-                    manifest=intent.files,
-                    progress=intent.progress,
-                    page=intent.page,
-                    additions=intent.additions,
-                    deletions=intent.deletions,
-                )
-            updated = await self._safe_update_card(intent.source_id, card)
+                updated = await self._update_manifest_page(intent)
             if not updated:
                 raise TurnFileError("飞书未确认本轮文件卡片翻页成功。")
             return
@@ -144,6 +106,45 @@ class TurnFileChannel(SessionCardChannel):
         assert intent.path is not None
         turn_file = require_turn_file_path(intent.path)
         await self._send_turn_file(intent, turn_file)
+
+    async def _update_manifest_page(self, intent: TurnFileActionIntent) -> bool:
+        assert intent.page is not None
+        assert intent.answer is not None
+        if intent.reply is not None:
+            card = reply_card_from_manifest(
+                scope=intent.scope,
+                binding_id=intent.binding_id,
+                turn_id=intent.turn_id,
+                manifest=intent.files,
+                reply=intent.reply,
+                page=intent.page,
+                additions=intent.additions,
+                deletions=intent.deletions,
+            )
+        elif intent.progress is None:
+            card = turn_files_card_from_manifest(
+                scope=intent.scope,
+                binding_id=intent.binding_id,
+                turn_id=intent.turn_id,
+                final_response=intent.answer,
+                manifest=intent.files,
+                page=intent.page,
+                additions=intent.additions,
+                deletions=intent.deletions,
+            )
+        else:
+            card = turn_progress_card_from_manifest(
+                scope=intent.scope,
+                binding_id=intent.binding_id,
+                turn_id=intent.turn_id,
+                final_response=intent.answer,
+                manifest=intent.files,
+                progress=intent.progress,
+                page=intent.page,
+                additions=intent.additions,
+                deletions=intent.deletions,
+            )
+        return await self._safe_update_card(intent.source_id, card)
 
     async def _send_turn_file(
         self,

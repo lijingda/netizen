@@ -21,17 +21,23 @@ class ReplacementWriter(asyncio.Lock, Generic[Payload]):
         self, desired: Callable[[], Payload | None], write: Callable[[Payload], Awaitable[Outcome]],
     ) -> bool:
         async with self:
-            delivered = False
-            while (payload := desired()) is not None:
-                if self.known is not None and self.key(self.known) == self.key(payload):
-                    return True
-                previous, self.known = self.known, None
-                outcome = await write(payload)
-                if outcome == "confirmed":
-                    self.known = payload
-                    delivered = True
-                else:
-                    if outcome == "rejected":
-                        self.known = previous
-                    return False
-            return delivered
+            return await self.reconcile_locked(desired, write)
+
+    async def reconcile_locked(
+        self, desired: Callable[[], Payload | None], write: Callable[[Payload], Awaitable[Outcome]],
+    ) -> bool:
+        """Recompute while the caller holds this message's replacement lock."""
+        delivered = False
+        while (payload := desired()) is not None:
+            if self.known is not None and self.key(self.known) == self.key(payload):
+                return True
+            previous, self.known = self.known, None
+            outcome = await write(payload)
+            if outcome == "confirmed":
+                self.known = payload
+                delivered = True
+            else:
+                if outcome == "rejected":
+                    self.known = previous
+                return False
+        return delivered

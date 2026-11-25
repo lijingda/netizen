@@ -141,6 +141,7 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 entered.set()
                 await release.wait()
 
+            channel.send_results.append(sent_result("notice", chat_id="oc_direct"))
             stop = asyncio.create_task(ordinary.stop_exact(execution.binding.id, acknowledge=acknowledge))
             try:
                 await asyncio.wait_for(entered.wait(), 5)
@@ -271,3 +272,63 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 await app._progress_cards.retire_binding(binding_id)
                 cleared = await select_page(app, channel, pages[1], "second", 0)
                 self.assertIn("后台任务 1 个运行中", str(cleared))
+
+    async def test_file_pages_serialize_through_retirement_and_last_click_wins(self):
+        for click_after_retirement in (True, False):
+            with self.subTest(click_after_retirement=click_after_retirement):
+                async with running_channel(cards=True, mention=True) as (app, channel, client, execution, _, ordinary):
+                    page = await open_file_pages(channel, client, execution)
+                    mention, finish_mention, writing, finish_write, next_click = (asyncio.Event() for _ in range(5))
+                    update, send, action = channel.update_card, channel.send, app._turn_file_action
+                    active, peak = 0, 0
+                    channel.send_results.extend([sent_result("mention", chat_id="oc_direct", root_id="H", parent_id="first"),
+                                                 sent_result("feedback", chat_id="oc_direct", parent_id="first")])
+
+                    async def hold_mention(to, content, opts):
+                        if getattr(content, "mentions", ()):
+                            mention.set()
+                            await finish_mention.wait()
+                        return await send(to, content, opts)
+
+                    async def hold_page_two(mid, card):
+                        nonlocal active, peak
+                        active += 1
+                        peak = max(peak, active)
+                        try:
+                            if len(buttons(card, "turn-file.send")) == 1:
+                                writing.set()
+                                await finish_write.wait()
+                            return await update(mid, card)
+                        finally:
+                            active -= 1
+
+                    async def observe_click(intent):
+                        if intent.page == 0:
+                            next_click.set()
+                        await action(intent)
+
+                    with (patch.object(channel, "send", hold_mention), patch.object(channel, "update_card", hold_page_two),
+                          patch.object(app, "_turn_file_action", observe_click)):
+                        start_wake(client)
+                        finish_wake(client)
+                        clicks = []
+                        try:
+                            await asyncio.wait_for(mention.wait(), 5)
+                            clicks.append(asyncio.create_task(select_page(app, channel, page, "first", 1)))
+                            await asyncio.wait_for(writing.wait(), 5)
+                            if click_after_retirement:
+                                finish_mention.set()
+                                self.assertTrue(await ordinary.wait_idle(5))
+                            clicks.append(asyncio.create_task(select_page(app, channel, page, "first", 0)))
+                            await asyncio.wait_for(next_click.wait(), 5)
+                            finish_mention.set()
+                            self.assertTrue(await ordinary.wait_idle(5))
+                        finally:
+                            finish_mention.set()
+                            finish_write.set()
+                            await asyncio.gather(*clicks)
+                    self.assertEqual(peak, 1)
+                    mid, visible = channel.updates[-1]
+                    self.assertEqual(mid, "first")
+                    self.assertEqual(len(buttons(visible, "turn-file.send")), TURN_FILE_PAGE_SIZE)
+                    self.assertIn("全部完成", str(visible))

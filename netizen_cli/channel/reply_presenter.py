@@ -14,7 +14,7 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 from ..process_messages import ProcessMessages
 from ..external_calls import external_call
 from ..cards import reply_card, turn_progress_card
-from ..domain import ReplyCardManifest, ReplyCardProjection, TurnFileActionIntent
+from ..domain import ReplyCardProjection, TurnFileActionIntent
 from ..turn_files import TURN_FILE_PAGE_SIZE
 from ..ordinary_sessions import LogicalReply
 from ..runtime.contracts import TurnActivitySnapshot
@@ -242,26 +242,28 @@ class _ReplyCardPresenter:
         cards = self._published.get(display.reply, {}) if display.reply else {}
         return await self._reconcile_cards(display, cards)
 
-    async def page_published_card(self, intent: TurnFileActionIntent) -> bool | None:
-        """Select the page on the owning writer if the card is still active."""
+    async def page_file_card(self, intent: TurnFileActionIntent,
+                             fallback: Callable[[TurnFileActionIntent], Awaitable[bool]]) -> bool:
+        """Resolve the active view or self-contained fallback after earlier replacements settle."""
         mid = intent.source_id
-        for cards in self._published.values():
-            if (view := cards.get(mid)) is None:
-                continue
-            files = view.content.files
-            if (files is None or intent.page is None or view.location.scope != intent.scope
-                    or (files.binding_id, files.turn_id) != (intent.binding_id, intent.turn_id)
-                    or not view.location.can_write(mid)):
-                return False
-            view.content = replace(view.content, files=refresh_file_page(files, intent.page))
-            return (await self._reconcile_cards(view.display, cards, only=mid))[mid]
-        return None
+        async with self._message_writer(mid):
+            for cards in self._published.values():
+                if (view := cards.get(mid)) is None:
+                    continue
+                files = view.content.files
+                if (files is None or intent.page is None or view.location.scope != intent.scope
+                        or (files.binding_id, files.turn_id) != (intent.binding_id, intent.turn_id)
+                        or not view.location.can_write(mid)):
+                    return False
+                view.content = replace(view.content, files=refresh_file_page(files, intent.page))
+                return await self._reconcile_locked_card(mid, view, cards)
 
-    def retired_file_reply(self, intent: TurnFileActionIntent, reply: ReplyCardManifest) -> ReplyCardManifest:
-        key = (intent.binding_id, intent.source_id)
-        if reply.activity is not None and key in self._retired_file_lines:
-            return replace(reply, activity=replace(reply.activity, state_line=self._retired_file_lines[key]))
-        return reply
+            key = (intent.binding_id, mid)
+            reply = intent.reply
+            if reply and reply.activity and key in self._retired_file_lines:
+                activity = replace(reply.activity, state_line=self._retired_file_lines[key])
+                intent = replace(intent, reply=replace(reply, activity=activity))
+            return await fallback(intent)
 
     def _remember_file_line(self, mid: str, view: _PublishedCard, line: str | None) -> None:
         files = view.content.files
@@ -339,34 +341,37 @@ class _ReplyCardPresenter:
             reply.published(mid, key.turn_id, items, location.usable)
         return outcome
 
-    async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard], *,
-                               only: str | None = None) -> dict[str, bool]:
-        reply = display.reply
+    async def _reconcile_locked_card(self, mid: str, view: _PublishedCard, cards: dict[str, _PublishedCard]) -> bool:
+        reply = view.display.reply
 
-        async def reconcile_message(mid: str, view: _PublishedCard) -> bool:
-            def desired() -> OutboundCard | None:
-                if ((reply and self._published.get(reply) is not cards) or cards.get(mid) is not view
-                        or not view.display.publishable() or not view.location.can_write(mid)):
-                    return None
-                return render_run_card(view.content, view.display.current() if mid == self._newest_card(reply, cards) else None)
+        def desired() -> OutboundCard | None:
+            if ((reply and self._published.get(reply) is not cards) or cards.get(mid) is not view
+                    or not view.display.publishable() or not view.location.can_write(mid)):
+                return None
+            return render_run_card(view.content, view.display.current() if mid == self._newest_card(reply, cards) else None)
 
-            def write(card: OutboundCard) -> Awaitable[Outcome]:
-                return self._write_card(mid, card, view.key, view.location, view.delivery, view.items, reply)
+        def write(card: OutboundCard) -> Awaitable[Outcome]:
+            return self._write_card(mid, card, view.key, view.location, view.delivery, view.items, reply)
 
-            try:
-                current = await external_call(view.writer.reconcile(desired, write))
-                if not view.location.can_write(mid):
-                    return False
-                if current and view.writer.known is not None and mid != self._newest_card(reply, cards) and cards.get(mid) is view:
-                    self._remember_file_line(mid, view, None)
-                    cards.pop(mid)  # A confirmed, immutable card no longer needs a writer.
-                    view.writer.known = None
-                return current
-            except Exception:
-                logger.warning("optional reply update failed", extra=view.key.log_context)
+        try:
+            current = await external_call(view.writer.reconcile_locked(desired, write))
+            if not view.location.can_write(mid):
                 return False
+            if current and view.writer.known is not None and mid != self._newest_card(reply, cards) and cards.get(mid) is view:
+                self._remember_file_line(mid, view, None)
+                cards.pop(mid)  # A confirmed, immutable card no longer needs a writer.
+                view.writer.known = None
+            return current
+        except Exception:
+            logger.warning("optional reply update failed", extra=view.key.log_context)
+            return False
 
-        pending = ((only, cards[only]),) if only is not None else tuple(cards.items())
+    async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard]) -> dict[str, bool]:
+        async def reconcile_message(mid: str, view: _PublishedCard) -> bool:
+            async with view.writer:
+                return await self._reconcile_locked_card(mid, view, cards)
+
+        pending = tuple(cards.items())
         for _, view in pending:
             view.display = display
         results = await asyncio.gather(*(reconcile_message(mid, view) for mid, view in pending))
