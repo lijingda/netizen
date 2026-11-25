@@ -18,6 +18,18 @@ CANCEL = ORDINARY + "test_send_cancelled_during_shutdown_drains_following_body"
 
 # Each change represents one incorrect decision, with an independently observed consequence.
 MUTANTS = (
+    ("retained client allows a rename", "runtime/claude_ordinary",
+     "if execution is not None and not execution.close_finished:\n                if execution.admissible",
+     "if execution is not None and not execution.close_finished and not execution.admissible:\n                if execution.admissible",
+     ORDINARY + "test_rename_rejects_opening_and_retained_client_without_stopping_it"),
+    ("fork accepts a running background task", "runtime/claude_ordinary",
+     "if execution.live.tasks:\n                raise OrdinaryInputRejected", "if False:\n                raise OrdinaryInputRejected",
+     ORDINARY + "test_fork_requires_idle_without_tasks_and_detects_native_wake_during_copy"),
+    ("child cwd verification skipped", "runtime/claude_ordinary", "if verified != cwd:", "if False:",
+     ORDINARY + "test_fork_validates_unscoped_source_and_child_and_never_repeats_copy"),
+    ("retry a fork with unknown result", "runtime/claude_client",
+     "return result.session_id", "except OSError:\n            result = fork_session(session_id, directory=str(cwd), title=title)\n        return result.session_id",
+     ORDINARY + "test_fork_validates_unscoped_source_and_child_and_never_repeats_copy"),
     ("final text skips the logical-end wait", "channel/presentation",
      "await reply.mention_decided.wait()", "pass",
      CHANNEL + "test_final_post_mention_at_the_logical_terminal_boundary"),

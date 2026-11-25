@@ -682,10 +682,13 @@ class AdminWebApplication:
                 attributes.append(f'data-inherited-model="{html.escape(self._backend_policy.inherited_model_label)}"')
             page = page.replace(b"<body>", ("<body " + " ".join(attributes) + ">").encode(), 1)
             can_generate = self._backend_policy.allows(OperationId.GENERATE_NAME)
-            page = page.replace(b"__NETIZEN_RENAME_HINT__", (
-                "自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。" if can_generate else
-                html.escape(self._management.names.sync_hint)
-            ).encode()).replace(
+            if can_generate:
+                rename_hint = "自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。"
+            else:
+                rename_hint = self._management.names.sync_hint
+                if self._backend_policy.owner_only and self._backend_policy.allows(OperationId.MANUAL_RENAME):
+                    rename_hint = "Claude 客户端关闭后可以改名。后台任务或会话 cron 保留连接时，请等待工作结束。" + rename_hint
+            page = page.replace(b"__NETIZEN_RENAME_HINT__", html.escape(rename_hint).encode()).replace(
                 b" data-netizen-generate-name-visibility",
                 b"" if can_generate else b" hidden data-provider-hidden",
             ).replace(b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(self._instance_root)).encode())
