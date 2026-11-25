@@ -14,10 +14,11 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 from ..process_messages import ProcessMessages
 from ..external_calls import external_call
 from ..cards import reply_card, turn_progress_card
-from ..domain import ReplyCardProjection
+from ..domain import ReplyCardManifest, ReplyCardProjection, TurnFileActionIntent
+from ..turn_files import TURN_FILE_PAGE_SIZE
 from ..ordinary_sessions import LogicalReply
 from ..cards.callbacks import without_callback_nonces
-from ..cards.reply import feishu_answer_text, turn_progress_projection
+from ..cards.reply import feishu_answer_text, refresh_file_page, turn_progress_projection
 from ..partial_answers import PartialAnswer
 from .process_presentation import ProcessLocation, ProcessPresentation, Reason
 from .replacement_writer import ReplacementWriter
@@ -30,6 +31,7 @@ from .physical_delivery import BODY, Item, Outcome, PhysicalDelivery, record_sen
 
 logger = logging.getLogger(__name__)
 
+_RETIRED_FILE_CARD_LIMIT = 256
 _PROGRESS_CARD_POLL_SECONDS = 1.0
 _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
 # Process I/O never blocks content, so its bound only detects a lost request. Creation has no
@@ -69,6 +71,7 @@ class _CardWriter(ReplacementWriter[OutboundCard]):
 
 @dataclass(slots=True)
 class _PublishedCard:
+    display: RunDisplay
     key: PresentationKey
     location: CardReplyLocation
     content: ReplyCardProjection
@@ -161,6 +164,7 @@ class _ReplyCardPresenter:
         self._card_owners: dict[str, CardReplyLocation] = {}
         self._binding_locations: dict[str, BindingCardLocation] = {}
         self._published: WeakKeyDictionary[LogicalReply, dict[str, _PublishedCard]] = WeakKeyDictionary()
+        self._retired_file_lines: dict[tuple[str, str], str | None] = {}
         self._closed = False
 
     def _process_for(self, target: ReplyTarget, binding_id: str | None, root_id: str | None = None) -> ProcessPresentation | None:
@@ -226,16 +230,55 @@ class _ReplyCardPresenter:
         if confirmed is not None:
             writer.known = confirmed
         cards = self._published.setdefault(display.reply, {}) if display.reply else {}
-        cards[message_id] = _PublishedCard(key, location, content, writer, tracks_run, delivery, items)
+        cards[message_id] = _PublishedCard(display, key, location, content, writer, tracks_run, delivery, items)
         return (await self._reconcile_cards(display, cards))[message_id]
 
     async def reconcile(self, display: RunDisplay) -> dict[str, bool]:
         cards = self._published.get(display.reply, {}) if display.reply else {}
         return await self._reconcile_cards(display, cards)
 
-    def retire_run(self, reply: LogicalReply) -> None:
-        cards = self._published.pop(reply, {})
-        for view in cards.values():
+    async def page_published_card(self, intent: TurnFileActionIntent) -> bool | None:
+        """Select the page on the owning writer if the card is still active."""
+        mid = intent.source_id
+        for cards in self._published.values():
+            if (view := cards.get(mid)) is None:
+                continue
+            files = view.content.files
+            if (files is None or intent.page is None or view.location.scope != intent.scope
+                    or (files.binding_id, files.turn_id) != (intent.binding_id, intent.turn_id)
+                    or not view.location.can_write(mid)):
+                return False
+            view.content = replace(view.content, files=refresh_file_page(files, intent.page))
+            return (await self._reconcile_cards(view.display, cards, only=mid))[mid]
+        return None
+
+    def retired_file_reply(self, intent: TurnFileActionIntent, reply: ReplyCardManifest) -> ReplyCardManifest:
+        key = (intent.binding_id, intent.source_id)
+        if reply.activity is not None and key in self._retired_file_lines:
+            return replace(reply, activity=replace(reply.activity, state_line=self._retired_file_lines[key]))
+        return reply
+
+    def _remember_file_line(self, mid: str, view: _PublishedCard, line: str | None) -> None:
+        files = view.content.files
+        if files is None or len(files.items) <= TURN_FILE_PAGE_SIZE or not view.location.can_write(mid):
+            return
+        key = (files.binding_id, mid)
+        self._retired_file_lines.pop(key, None)
+        self._retired_file_lines[key] = line
+        if len(self._retired_file_lines) > _RETIRED_FILE_CARD_LIMIT:
+            del self._retired_file_lines[next(iter(self._retired_file_lines))]
+
+    @staticmethod
+    def _newest_card(reply: LogicalReply | None, cards: dict[str, _PublishedCard]) -> str | None:
+        order = reply.messages if reply and reply.messages is not None else cards
+        return next((mid for mid in reversed(order) if mid in cards and cards[mid].tracks_run), None)
+
+    def retire_run(self, display: RunDisplay) -> None:
+        reply = display.reply
+        cards = self._published.pop(reply, {}) if reply else {}
+        newest = self._newest_card(reply, cards)
+        for mid, view in cards.items():
+            self._remember_file_line(mid, view, display.current() if mid == newest else None)
             view.writer.known = None
         cards.clear()
 
@@ -266,7 +309,7 @@ class _ReplyCardPresenter:
                 collapsed=True, include_result=status != "completed")
             items = tuple(("partial", part.item_id) for part in session.snapshot.partial_answers)
             cards = self._published.setdefault(display.reply, {})
-            cards[session.message_id] = _PublishedCard(session.target.key, session.location, content,
+            cards[session.message_id] = _PublishedCard(display, session.target.key, session.location, content,
                 session.writer, True, session.delivery, (*items, BODY) if content.result else items)
 
         if sessions:
@@ -291,19 +334,16 @@ class _ReplyCardPresenter:
             reply.published(mid, key.turn_id, items, location.usable)
         return outcome
 
-    async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard]) -> dict[str, bool]:
+    async def _reconcile_cards(self, display: RunDisplay, cards: dict[str, _PublishedCard], *,
+                               only: str | None = None) -> dict[str, bool]:
         reply = display.reply
-
-        def newest() -> str | None:
-            order = reply.messages if reply and reply.messages is not None else cards
-            return next((mid for mid in reversed(order) if mid in cards and cards[mid].tracks_run), None)
 
         async def reconcile_message(mid: str, view: _PublishedCard) -> bool:
             def desired() -> OutboundCard | None:
                 if ((reply and self._published.get(reply) is not cards) or cards.get(mid) is not view
-                        or not display.publishable() or not view.location.can_write(mid)):
+                        or not view.display.publishable() or not view.location.can_write(mid)):
                     return None
-                return render_run_card(view.content, display.current() if mid == newest() else None)
+                return render_run_card(view.content, view.display.current() if mid == self._newest_card(reply, cards) else None)
 
             def write(card: OutboundCard) -> Awaitable[Outcome]:
                 return self._write_card(mid, card, view.key, view.location, view.delivery, view.items, reply)
@@ -312,7 +352,8 @@ class _ReplyCardPresenter:
                 current = await external_call(view.writer.reconcile(desired, write))
                 if not view.location.can_write(mid):
                     return False
-                if current and view.writer.known is not None and mid != newest() and cards.get(mid) is view:
+                if current and view.writer.known is not None and mid != self._newest_card(reply, cards) and cards.get(mid) is view:
+                    self._remember_file_line(mid, view, None)
                     cards.pop(mid)  # A confirmed, immutable card no longer needs a writer.
                     view.writer.known = None
                 return current
@@ -320,7 +361,9 @@ class _ReplyCardPresenter:
                 logger.warning("optional reply update failed", extra=view.key.log_context)
                 return False
 
-        pending = tuple(cards.items())
+        pending = ((only, cards[only]),) if only is not None else tuple(cards.items())
+        for _, view in pending:
+            view.display = display
         results = await asyncio.gather(*(reconcile_message(mid, view) for mid, view in pending))
         return {mid: result for (mid, _), result in zip(pending, results, strict=True)}
 
@@ -328,6 +371,9 @@ class _ReplyCardPresenter:
         return self._binding_locations.setdefault(binding_id, BindingCardLocation(self._card_owners, release_cards=self._release_cards))
 
     async def retire_binding(self, binding_id: str) -> None:
+        for cache_key in tuple(self._retired_file_lines):
+            if cache_key[0] == binding_id:
+                del self._retired_file_lines[cache_key]
         for key, (_, owner_binding) in tuple(self._process_tombstones.items()):
             if owner_binding == binding_id:
                 del self._process_tombstones[key]

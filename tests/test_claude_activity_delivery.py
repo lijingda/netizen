@@ -8,7 +8,9 @@ from lark_channel import SendResult
 
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.turn_files import TURN_FILE_PAGE_SIZE
 from tests.support import has_claude_sdk, requires_claude_sdk
+from tests.support.channel_cards import _elements, direct_button_event
 from tests.support.channel_messages import FakeMessage
 from tests.support.channel_results import sent_result
 from tests.support.process_transport import ProcessTransport, check_pairs
@@ -80,6 +82,30 @@ def finish_wake(client, *, failed=False):
                   result=None, user_message_uuid=None, uuid="wake-result",
                   origin={"kind": "task-notification", "producer": "session-task", "runId": "r"})
     system(client, "session_state_changed", state="idle")
+
+
+def buttons(card, intent):
+    return [entry["value"] for button in _elements(card, "button") for entry in button["behaviors"]
+            if entry["value"].get("intent") == intent]
+
+
+async def open_file_pages(channel, client, execution):
+    background(client)
+    for number in range(TURN_FILE_PAGE_SIZE + 1):
+        write_file(client, number)
+    client.result(result="body")
+    await until(lambda: execution.admissible and not execution.delivery.queues)
+    card = channel.updates[-1][1]
+    assert "后台任务 1 个运行中" in str(card)
+    action, = buttons(card, "turn-file.page")
+    return action
+
+
+async def select_page(app, channel, action, mid, page):
+    await app.handle_card_action(direct_button_event(action, message_id=mid, form_value={"turn_file_page": str(page)}))
+    updated_mid, card = channel.updates[-1]
+    assert updated_mid == mid
+    return card
 
 
 @requires_claude_sdk
@@ -174,3 +200,44 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(texts), 2)
                         self.assertIn("本轮文件卡片未生成", texts[1])
                         self.assertIn(reason, texts[1])
+
+    async def test_selected_page_survives_completion_and_late_page_uses_final_line(self):
+        async with running_channel(cards=True) as (app, channel, client, execution, _, ordinary):
+            page = await open_file_pages(channel, client, execution)
+            card = await select_page(app, channel, page, "first", 1)
+            self.assertEqual(len(buttons(card, "turn-file.send")), 1)
+            start_wake(client)
+            finish_wake(client)
+            self.assertTrue(await ordinary.wait_idle(5))
+            final = channel.updates[-1][1]
+            self.assertEqual(len(buttons(final, "turn-file.send")), 1)
+            self.assertIn("全部完成", str(final))
+            late = await select_page(app, channel, page, "first", 0)
+            self.assertEqual(len(buttons(late, "turn-file.send")), TURN_FILE_PAGE_SIZE)
+            self.assertIn("全部完成", str(late))
+            self.assertNotIn("后台任务 1 个运行中", str(late))
+
+    async def test_oldest_retired_file_card_falls_back_then_binding_retirement_clears_the_rest(self):
+        with patch("netizen_cli.channel.reply_presenter._RETIRED_FILE_CARD_LIMIT", 1):
+            async with running_channel(cards=True) as (app, channel, client, execution, _, ordinary):
+                pages = []
+                binding_id = execution.binding.id
+                for mid in ("first", "second"):
+                    if mid == "second":
+                        channel.reply_results.append(SendResult.ok(message_id=mid))
+                        await app.handle_message(FakeMessage("again", message_id="H2"))
+                        execution = ordinary._active[binding_id]
+                        client = execution.client
+                        client.init(uuid="second-init")
+                        await until(lambda: bool(app._progress_cards._sessions))
+                    pages.append(await open_file_pages(channel, client, execution))
+                    start_wake(client)
+                    finish_wake(client)
+                    self.assertTrue(await ordinary.wait_idle(5))
+                first = await select_page(app, channel, pages[0], "first", 1)
+                second = await select_page(app, channel, pages[1], "second", 1)
+                self.assertIn("后台任务 1 个运行中", str(first))
+                self.assertIn("全部完成", str(second))
+                await app._progress_cards.retire_binding(binding_id)
+                cleared = await select_page(app, channel, pages[1], "second", 0)
+                self.assertIn("后台任务 1 个运行中", str(cleared))

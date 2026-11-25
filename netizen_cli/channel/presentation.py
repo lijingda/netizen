@@ -293,7 +293,7 @@ class CompletionPresentationChannel(ChannelReplies):
                     user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
                 )
         finally:
-            self._progress_cards.retire_run(reply)
+            self._progress_cards.retire_run(display)
             reply.retire()
 
     async def _terminal_partials(self, outcome: TurnResult) -> _PartialAnswerDelivery:

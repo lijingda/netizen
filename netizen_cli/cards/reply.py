@@ -178,7 +178,6 @@ def reply_card_from_manifest(
             f"本轮文件共 {len(manifest)} 个，超过卡片完整分页上限 "
             f"{TURN_FILE_MANIFEST_LIMIT} 个；未截断文件清单。"
         )
-    inspected = tuple(_inspect_manifest_file(entry) for entry in manifest)
     return reply_card(
         ReplyCardProjection(
             scope=scope,
@@ -190,7 +189,7 @@ def reply_card_from_manifest(
             files=ReplyCardFilesModule(
                 binding_id=binding_id,
                 turn_id=turn_id,
-                items=tuple(_reply_file_item(item) for item in inspected),
+                items=_inspect_file_items(manifest),
                 page=page,
                 action_version=REPLY_CARD_ACTION_VERSION,
                 additions=additions,
@@ -444,6 +443,19 @@ def _optional_line_counts(
         _bounded_nonnegative_int(additions, f"{field}.additions"),
         _bounded_nonnegative_int(deletions, f"{field}.deletions"),
     )
+
+
+def _file_manifest(items: tuple[ReplyCardFileItem, ...]) -> tuple[TurnFileManifestItem, ...]:
+    return tuple(TurnFileManifestItem(item.path, item.label, item.additions, item.deletions, deleted=item.deleted)
+                 for item in items)
+
+
+def _inspect_file_items(manifest: tuple[TurnFileManifestItem, ...]) -> tuple[ReplyCardFileItem, ...]:
+    return tuple(_reply_file_item(_inspect_manifest_file(entry)) for entry in manifest)
+
+
+def refresh_file_page(files: ReplyCardFilesModule, page: int) -> ReplyCardFilesModule:
+    return replace(files, items=_inspect_file_items(_file_manifest(files.items)), page=page)
 
 
 def _inspect_manifest_file(entry: TurnFileManifestItem) -> TurnFile:
@@ -797,16 +809,7 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
             binding_id=files.binding_id,
             turn_id=files.turn_id,
             page=visible,
-            manifest=tuple(
-                TurnFileManifestItem(
-                    item.path,
-                    item.label,
-                    item.additions,
-                    item.deletions,
-                    deleted=item.deleted,
-                )
-                for item in files.items
-            ),
+            manifest=_file_manifest(files.items),
             final_response=(
                 projection.result.content
                 if projection.result is not None

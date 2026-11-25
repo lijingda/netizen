@@ -97,12 +97,17 @@ class TurnFileChannel(SessionCardChannel):
             assert intent.page is not None
             assert intent.answer is not None
             if intent.reply is not None:
+                updated = await self._progress_cards.page_published_card(intent)
+                if updated is False:
+                    raise TurnFileError("飞书未确认本轮文件卡片翻页成功。")
+                if updated:
+                    return
                 card = reply_card_from_manifest(
                     scope=intent.scope,
                     binding_id=intent.binding_id,
                     turn_id=intent.turn_id,
                     manifest=intent.files,
-                    reply=intent.reply,
+                    reply=self._progress_cards.retired_file_reply(intent, intent.reply),
                     page=intent.page,
                     additions=intent.additions,
                     deletions=intent.deletions,
