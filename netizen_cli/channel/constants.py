@@ -17,6 +17,9 @@ TERMINAL_ANSWER_DELIVERY_TIMEOUT_SECONDS = 10.0
 # A bound shorter than Feishu's slow tail can mark a delivered item unknown and trigger
 # a false incomplete notice. For an idempotent replacement a longer bound costs only waiting.
 ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS = 15.0
+# Ordered idle follows the Result within milliseconds. This bound only caps the
+# answer delay when it does not, and the content deadline still applies.
+COMPLETION_MENTION_DECISION_TIMEOUT_SECONDS = 1.0
 DONE_REACTION = "DONE"
 ERROR_REACTION = "ERROR"
 INTERRUPTED_REACTION = "CrossMark"

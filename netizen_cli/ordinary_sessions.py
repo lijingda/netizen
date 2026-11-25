@@ -1,5 +1,6 @@
 """Netizen-owned values for ordinary session inputs and completion."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -118,6 +119,7 @@ class LogicalReply:
     messages: dict[str, _ReplyMessage] | None = field(default_factory=dict)
     unaddressed_confirmation: bool = False
     mention_user_id: str | None = None
+    mention_decided: asyncio.Event = field(default_factory=asyncio.Event)
     mention_carried: bool = False
 
     def published(self, mid: str, turn_id: str, items: tuple[tuple[str, str], ...], usable: Callable[[str], bool]) -> None:
@@ -144,6 +146,7 @@ class LogicalReply:
             self.messages.clear()
             self.messages = None
         self.unaddressed_confirmation = False
+        self.mention_decided.set()
 
 
 @dataclass(frozen=True, slots=True)

@@ -228,12 +228,19 @@ class CompletionPresentationChannel(ChannelReplies):
 
     async def _send_receipted_items(self, outcome: TurnResult, policy: ItemDelivery, ledger: PhysicalDelivery, items: tuple[Item, ...],
                                    content: str | OutboundPost, operation: str, location: CardReplyLocation) -> None:
+        reply = policy.display.reply
+        allow_inline_mention = operation == "final" and not outcome.task_feedback.progress_card_enabled
+        if (allow_inline_mention and outcome.target.run is not None and reply and outcome.task_feedback.completion_mention_enabled
+                and not outcome.run_continues and not reply.mention_decided.is_set() and policy.display.publishable()):
+            try:
+                async with asyncio.timeout(constants.COMPLETION_MENTION_DECISION_TIMEOUT_SECONDS):
+                    await reply.mention_decided.wait()
+            except TimeoutError:
+                allow_inline_mention = False
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
-        reply = policy.display.reply
-        if (operation == "final" and isinstance(content, str) and not outcome.task_feedback.progress_card_enabled
-                and reply and reply.mention_user_id and not reply.mention_carried):
+        if allow_inline_mention and isinstance(content, str) and reply and reply.mention_user_id and not reply.mention_carried:
             try:
                 content = mentioned_answer(content, reply.mention_user_id)
             except Exception:

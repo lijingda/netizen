@@ -1005,8 +1005,9 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
     async def test_final_post_mention_at_the_logical_terminal_boundary(self):
         from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
         from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel import constants
 
-        for order, receipt in (*product(("early", "late"), ("confirmed", "unknown", "rejected")),
+        for order, receipt in (*product(("early", "waiting", "late"), ("confirmed", "unknown", "rejected")),
                                ("stop", "confirmed"), ("build failure", "confirmed")):
             with self.subTest(order=order, receipt=receipt):
                 async with owner_channel() as (app, fx, clients, clock, ordinary):
@@ -1036,12 +1037,23 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
 
                     with ExitStack() as stack:
                         stack.enter_context(patch.object(fx.channel, "reply", side_effect=send))
+                        if order == "late":
+                            stack.enter_context(patch.object(constants, "COMPLETION_MENTION_DECISION_TIMEOUT_SECONDS", .03))
                         if order == "build failure":
                             stack.enter_context(patch("netizen_cli.channel.presentation.mentioned_answer", side_effect=ValueError))
                         await app.handle_message(FakeMessage("work", message_id="H"))
                         cli = clients.calls[-1]
                         cli.init()
                         ex = ordinary._active[binding.id]
+                        decision = ex.human.reply.mention_decided
+                        wait_for_decision = decision.wait
+                        waiting = asyncio.Event()
+
+                        async def observe_wait():
+                            waiting.set()
+                            return await wait_for_decision()
+
+                        stack.enter_context(patch.object(decision, "wait", observe_wait))
                         await self.until(lambda: bool(app._progress_cards._sessions))
                         if order == "stop":
                             await app.handle_message(FakeMessage("/stop", message_id="stop"))
@@ -1051,16 +1063,20 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         cli.result(result="final answer", idle=False)
                         try:
                             await asyncio.wait_for(segment.wait(), 3)
-                            if order == "late":
+                            if order in ("waiting", "late", "stop"):
                                 release_segment.set()
+                                await self.until(lambda: waiting.is_set() or body.is_set())
+                            if order == "late":
                                 await asyncio.wait_for(body.wait(), 3)
+                                self.assertTrue(waiting.is_set())
+                                self.assertFalse(decision.is_set())
                             cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
                             await self.until(lambda: ex.human.terminal_sent)
                         finally:
                             release_segment.set()
                             release_body.set()
                         self.assertTrue(await ordinary.wait_idle(5))
-                    inline = order == "early"
+                    inline = order in ("early", "waiting")
                     self.assertEqual([(t, ids) for t, ids in sent if ids], [("final answer", ["ou_user"])] if inline else [])
                     self.assertEqual(sum(t == "final answer" for t, _ in sent), 1)
                     self.assertEqual(sum(t == INCOMPLETE for t, _ in sent), int(receipt != "confirmed"))

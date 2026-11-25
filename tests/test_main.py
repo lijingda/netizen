@@ -971,16 +971,14 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 first, = clients.calls
                 from lark_channel import SendResult
                 channel.reply_results.extend([SendResult.ok(), SendResult.ok(message_id="om_answer")])
-                channel.send_results.append(SendResult.ok(message_id="om_mention"))
                 first.init("default")
                 first.result(result="native answer")
                 self.assertTrue(await core._claude.wait_idle(2))
                 self.assertIn(DEFAULT_MODE, [reply for _, reply in channel.replies])
-                reply = channel.replies[-1][1]
-                self.assertEqual(reply, "native answer")
-                _, reminder, opts = channel.send_calls[-1]
-                self.assertEqual(opts.reply_to, "om_answer")
-                self.assertEqual([mention.open_id for mention in reminder.mentions], ["ou_admin"])
+                origin, reply = channel.replies[-1]
+                self.assertEqual((origin, reply.markdown), ("om_first", "native answer"))
+                self.assertEqual([mention.open_id for mention in reply.mentions], ["ou_admin"])
+                self.assertEqual(channel.send_calls, [])
                 await send("second", "om_second")
                 second = clients.calls[-1]
                 second.init()

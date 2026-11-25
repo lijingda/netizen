@@ -18,6 +18,9 @@ CANCEL = ORDINARY + "test_send_cancelled_during_shutdown_drains_following_body"
 
 # Each change represents one incorrect decision, with an independently observed consequence.
 MUTANTS = (
+    ("final text skips the logical-end wait", "channel/presentation",
+     "await reply.mention_decided.wait()", "pass",
+     CHANNEL + "test_final_post_mention_at_the_logical_terminal_boundary"),
     ("inline mention also triggers a separate reminder", "channel/presentation",
      "event.mention_user_id and not reply.mention_carried and display.publishable()",
      "event.mention_user_id and display.publishable()",

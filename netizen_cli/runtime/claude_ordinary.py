@@ -927,6 +927,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             if human.feedback.completion_mention_enabled and not human.stop_requested and human.status != "interrupted":
                 mention = valid_completion_mention_user_id(self._owner)
             human.reply.mention_user_id = mention
+            human.reply.mention_decided.set()
             self._queue(execution, human, LogicalTerminal(human.binding.id, execution.session, human.input_id, self._owner,
                         human.source, human.status, human.reply, mention, lambda: not execution.broken, partial(execution.cli_state, human.input_id)))
         live.prune({key for key, human in execution.humans.items() if not human.terminal_sent})
