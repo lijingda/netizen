@@ -946,6 +946,7 @@ class InstanceManagementService:
         return SessionFormView.from_operations(
             self.policy.allows,
             inherited_source=self.policy.inherited_model_label,
+            backend_name=self.policy.display_name,
         )
 
     def title_writer_for(self, binding: ThreadBinding) -> ManualTitleWriter:

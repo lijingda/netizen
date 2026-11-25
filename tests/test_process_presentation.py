@@ -201,14 +201,15 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
             presenter._operation_timeout_seconds = 0.01
             snapshot = process_snapshot(1)
             key = PresentationKey(snapshot.binding_id, snapshot.thread_id, snapshot.turn_id)
+            feedback = BindingTaskFeedback(completion_mention_enabled=False)
             with patch.object(fx.app._ordinary, "turn_activity", return_value=snapshot):
                 await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
-                    BindingTaskFeedback(), lambda: True, lambda: True, reply))
+                    feedback, lambda: True, lambda: True, reply))
             state = presenter._process[key]
             async with asyncio.timeout(1):
                 await state.ready.wait()
                 await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "user", origin, "completed",
-                    "final", logical_id=key.turn_id, activity=snapshot, reply=reply))
+                    "final", logical_id=key.turn_id, activity=snapshot, reply=reply, task_feedback=feedback))
                 await state.task
             self.assertIs(state.created, created)
             self.assertGreaterEqual(port.update.await_count, 1)

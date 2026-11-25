@@ -14,7 +14,7 @@ from netizen_cli.backends import BackendPolicy, BackendUnsupported
 from netizen_cli.cards.controls import error_card, release_confirmation_card
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.channel.physical_delivery import INCOMPLETE
-from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.domain import FeishuScope, MessageContextAnchor, ScopeKind
 from netizen_cli.ordinary_sessions import CLAUDE_RELEASE_HINT, ReleaseConfirmation
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from tests.support import has_claude_sdk, requires_claude_sdk
@@ -57,6 +57,17 @@ async def owner_channel():
 
 def _has_card_answer(card):
     return any(element.get("element_id") in {"turnanswerv1", "partialanswerv1"} for element in card["body"]["elements"])
+
+
+def _system_frame(cli, kind, **data):
+    from claude_agent_sdk import SystemMessage
+    cli.stream.put_nowait(SystemMessage(kind, {"session_id": cli.session, **data}))
+
+
+def _start_background_tool(cli, task):
+    from claude_agent_sdk import AssistantMessage, ToolUseBlock
+    cli.stream.put_nowait(AssistantMessage([ToolUseBlock(task, "Bash", {})], "model", session_id=cli.session))
+    _system_frame(cli, "task_started", task_id=task, run_id=task, tool_use_id=task)
 
 
 class _MentionTrace:
@@ -183,6 +194,15 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(10):
             while not predicate():
                 await asyncio.sleep(.005)
+
+    async def result_before_idle(self, cli, ordinary, **fields):
+        """Observe the separate-reminder path after this result has finished sending."""
+        from claude_agent_sdk import SystemMessage
+        execution = next(iter(ordinary._active.values()))
+        previous = len(cli.live.seen)
+        cli.result(idle=False, **fields)
+        await self.until(lambda: len(cli.live.seen) > previous and not execution.delivery.queues)
+        cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
 
     async def test_slow_first_card_terminal_takeover_and_text_fallback(self):
         from netizen_cli.bindings import BindingTaskFeedback
@@ -814,16 +834,15 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.sleep(.5)  # Each request fits in 5 s; twelve exceed it together.
                         order.append("ack")
                         return SendResult.ok(message_id=f"reply-{len(attempted)}")
-                    with (patch.object(fx.channel, "reply", side_effect=send),
+                    with (patch("netizen_cli.channel.constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS",
+                                1 if case.startswith("deadline") else 15),
+                          patch.object(fx.channel, "reply", side_effect=send),
                           patch.object(fx.channel, "add_reaction", side_effect=react),
                           patch.object(ordinary, "_notice", side_effect=notice)):
                         await app.handle_message(FakeMessage("launch", message_id="H"))
                         cli = clients.calls[-1]
                         cli.init()
                         await self.until(lambda: bool(app._progress_cards._sessions))
-                        if case in ("deadline", "deadline exhausted"):
-                            # The first request times out while the physical turn still has time for more items.
-                            app._progress_cards._operation_timeout_seconds = 1
                         for i in range(12):
                             mid = f"model-{i}"
                             answer = f"fragment[{i}]" + ("字" * 3600 if cards else "")
@@ -984,16 +1003,184 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             for block in (TextBlock("answer"), ToolUseBlock("tool", "Read", {})):
                                 cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session,
                                     uuid=type(block).__name__, message_id="model"))
-                        if kind == "body":
-                            cli.result(result="answer")
-                        else:
-                            cli.result(result=None, reason=None)
+                        await self.result_before_idle(cli, ordinary, result="answer" if kind == "body" else None,
+                                                      reason="completed" if kind == "body" else None)
                         self.assertTrue(await ordinary.wait_idle(10))
                         self.assertEqual(sends.await_count, int(kind != "empty") + int(not anchor))
                         if not anchor:
                             self.assertEqual(sends.await_args.args[1], INCOMPLETE)
                     self.assertEqual([(opts.reply_to, [m.open_id for m in item.mentions])
                                       for _, item, opts in fx.channel.send_calls], [(anchor, ["ou_user"])] if anchor else [])
+
+    @requires_claude_sdk
+    async def test_background_task_appearing_during_the_mention_wait_is_in_the_final_text(self):
+        from netizen_cli.channel import constants
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+            await app.handle_message(FakeMessage("work", message_id="H"))
+            cli = clients.calls[-1]
+            cli.init()
+            _start_background_tool(cli, "A")
+            execution = ordinary._active[binding.id]
+            human = execution.human
+            entered = asyncio.Event()
+            wait = human.reply.mention_decided.wait
+
+            async def observe_wait():
+                entered.set()
+                return await wait()
+
+            fx.channel.reply_results.append(SendResult.ok(message_id="first"))
+            with (patch.object(human.reply.mention_decided, "wait", observe_wait),
+                  patch.object(constants, "COMPLETION_MENTION_DECISION_TIMEOUT_SECONDS", .5)):
+                cli.result(result="first", idle=False)
+                await asyncio.wait_for(entered.wait(), 3)
+                _system_frame(cli, "background_tasks_changed", tasks=[{"task_id": "A", "run_id": "A"}])
+                _system_frame(cli, "session_state_changed", state="idle")
+                await self.until(lambda: bool(fx.channel.replies))
+                self.assertEqual(execution.cli_state(human.input_id).tasks, 1)
+                self.assertEqual(fx.channel.replies, [("H", f"first\n\n后台任务 1 个运行中，可继续发送消息\n\n{CLAUDE_RELEASE_HINT}")])
+            _system_frame(cli, "background_tasks_changed", tasks=[])
+            cli.init(user_message_uuids=[])
+            cli.result(result="wake-A", user_message_uuid=None, idle=False,
+                       origin={"kind": "task-notification", "producer": "session-task", "runId": "A"})
+            _system_frame(cli, "session_state_changed", state="idle")
+            self.assertTrue(await ordinary.wait_idle(3))
+
+    @requires_claude_sdk
+    async def test_attributed_wake_queued_behind_separate_reminder_mentions_once(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = (await fx.create_binding(FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT))).binding
+            await app.handle_message(FakeMessage("work", message_id="H"))
+            cli = clients.calls[-1]
+            cli.init()
+            await self.until(lambda: bool(app._progress_cards._sessions))
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "retain"}]}, None, None)
+            execution = ordinary._active[binding.id]
+            human = execution.human
+            sending, release = asyncio.Event(), asyncio.Event()
+            send = fx.channel.send
+
+            async def hold_reminder(to, content, opts=None):
+                sending.set()
+                await release.wait()
+                return await send(to, content, opts)
+
+            fx.channel.send_results.append(sent_result("reminder", chat_id="oc_direct", parent_id="H", root_id="H"))
+            fx.channel.reply_results.append(SendResult.ok(message_id="wake"))
+            with patch.object(fx.channel, "send", hold_reminder):
+                _start_background_tool(cli, "A")
+                _system_frame(cli, "background_tasks_changed", tasks=[{"task_id": "A", "run_id": "A"}])
+                cli.result(reason=None, result=None)
+                await self.until(lambda: execution.admissible and not execution.delivery.queues)
+                _system_frame(cli, "background_tasks_changed", tasks=[])
+                _system_frame(cli, "session_state_changed", state="idle")
+                await asyncio.wait_for(sending.wait(), 3)
+                try:
+                    self.assertTrue(human.terminal_sent)
+                    self.assertTrue(human.reply.mention_attempted, "the in-flight reminder must own the mention attempt")
+                    cli.init(user_message_uuids=[])
+                    cli.result(result="wake-A", user_message_uuid=human.input_id, idle=False,
+                               origin={"kind": "task-notification", "producer": "session-task", "runId": "A"})
+                    await self.until(lambda: len(cli.live.seen) == 2)
+                finally:
+                    release.set()
+                await self.until(lambda: not execution.delivery.queues)
+                self.assertIsNone(human.reply.messages)
+                self.assertEqual([(opts.reply_to, post.text, [m.open_id for m in post.mentions])
+                                  for _, post, opts in fx.channel.send_calls], [("H", "本轮任务已结束。", ["ou_user"])])
+                self.assertIn(("H", f"wake-A\n\n{CLAUDE_RELEASE_HINT}"), fx.channel.replies)
+                self.assertFalse(any(getattr(post, "mentions", ()) for _, post in fx.channel.replies))
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": []}, None, None)
+            _system_frame(cli, "session_state_changed", state="idle")
+            self.assertTrue(await ordinary.wait_idle(3))
+
+    @requires_claude_sdk
+    async def test_final_post_mention_at_the_logical_terminal_boundary(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel import constants
+
+        for order, receipt in (*product(("early", "waiting", "late"), ("confirmed", "unknown", "rejected")),
+                               ("stop", "confirmed"), ("build failure", "confirmed")):
+            with self.subTest(order=order, receipt=receipt):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    binding = fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                        project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=False, completion_mention_enabled=True))
+                    app._progress_cards._poll_seconds = 60
+                    sent = []
+                    segment, body, release_segment, release_body = (asyncio.Event() for _ in range(4))
+                    async def send(origin, post, opts=None):
+                        text = getattr(post, "markdown", post)
+                        sent.append((text, [m.open_id for m in getattr(post, "mentions", ()) or ()]))
+                        if text == "**阶段性答案**\n\nsegment":
+                            segment.set()
+                            await release_segment.wait()
+                            return SendResult.ok(message_id="segment")
+                        if text == "final answer":
+                            body.set()
+                            await release_body.wait()
+                            if receipt == "unknown":
+                                raise OSError("final receipt lost")
+                            if receipt == "rejected":
+                                return SendResult(success=False, raw={"code": 99991400})
+                            return SendResult.ok(message_id="final")
+                        return SendResult.ok(message_id="other")
+
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(fx.channel, "reply", side_effect=send))
+                        if order == "late":
+                            stack.enter_context(patch.object(constants, "COMPLETION_MENTION_DECISION_TIMEOUT_SECONDS", .03))
+                        if order == "build failure":
+                            stack.enter_context(patch("netizen_cli.channel.presentation.mentioned_answer", side_effect=ValueError))
+                        await app.handle_message(FakeMessage("work", message_id="H"))
+                        cli = clients.calls[-1]
+                        cli.init()
+                        ex = ordinary._active[binding.id]
+                        decision = ex.human.reply.mention_decided
+                        wait_for_decision = decision.wait
+                        waiting = asyncio.Event()
+
+                        async def observe_wait():
+                            waiting.set()
+                            return await wait_for_decision()
+
+                        stack.enter_context(patch.object(decision, "wait", observe_wait))
+                        await self.until(lambda: bool(app._progress_cards._sessions))
+                        if order == "stop":
+                            await app.handle_message(FakeMessage("/stop", message_id="stop"))
+                        for block in (TextBlock("segment"), ToolUseBlock("tool", "Read", {})):
+                            cli.stream.put_nowait(AssistantMessage([block], "model", session_id=cli.session,
+                                uuid=type(block).__name__, message_id="model"))
+                        cli.result(result="final answer", idle=False)
+                        try:
+                            await asyncio.wait_for(segment.wait(), 3)
+                            if order in ("waiting", "late", "stop"):
+                                release_segment.set()
+                                await self.until(lambda: waiting.is_set() or body.is_set())
+                            if order == "late":
+                                await asyncio.wait_for(body.wait(), 3)
+                                self.assertTrue(waiting.is_set())
+                                self.assertFalse(decision.is_set())
+                            cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+                            await self.until(lambda: ex.human.terminal_sent)
+                        finally:
+                            release_segment.set()
+                            release_body.set()
+                        self.assertTrue(await ordinary.wait_idle(5))
+                    inline = order in ("early", "waiting")
+                    self.assertEqual([(t, ids) for t, ids in sent if ids], [("final answer", ["ou_user"])] if inline else [])
+                    self.assertEqual(sum(t == "final answer" for t, _ in sent), 1)
+                    self.assertEqual(sum(t == INCOMPLETE for t, _ in sent), int(receipt != "confirmed"))
+                    self.assertEqual([(post.text, [m.open_id for m in post.mentions], opts.reply_to)
+                                      for _, post, opts in fx.channel.send_calls],
+                                     [] if inline or order == "stop" else [
+                                         ("本轮任务已结束。", ["ou_user"], "final" if receipt == "confirmed" else "segment")])
 
     @requires_claude_sdk
     async def test_bodyless_human_tracks_background_and_best_effort_updates_do_not_gate_terminal(self):
@@ -1614,7 +1801,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cli.interrupts, 1)
             cli.init()
             fx.channel.reply_results.append(SendResult.ok(message_id="answer"))
-            cli.result()
+            await self.result_before_idle(cli, ordinary)
             self.assertTrue(await ordinary.wait_idle(10))
             self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
                              ["answer"])
@@ -1733,6 +1920,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                                     membership()
                                     cli.init(user_message_uuids=[])
                                     result(k)
+                                    if not cards and k == "C":
+                                        await self.until(lambda: "wake-C" in wire["H2"])
                                     system("session_state_changed", state="idle")
                                 await self.until(lambda: cli.closes == 1)
                             finally:
@@ -1742,9 +1931,13 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(any("child-secret" in s for s in last_version.values()))
                         self.assertTrue(any("wake-fragment" in s and confirmed[mid] == "H1" for mid, s in last_version.items()))
                         reminders = [opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())]
-                        self.assertCountEqual([confirmed[mid] for mid in reminders], ["H2"] if stop_wake else ["H1", "H2"])
+                        inline = [(anchor, post.markdown, [m.open_id for m in post.mentions])
+                                  for anchor, post in fx.channel.replies if getattr(post, "mentions", ())]
+                        self.assertEqual(inline, [("H1", "wake-A", ["ou_user"])] if not cards and not stop_wake else [])
+                        separate_h1 = cards and not stop_wake
+                        self.assertCountEqual([confirmed[mid] for mid in reminders], ["H1", "H2"] if separate_h1 else ["H2"])
                         self.assertCountEqual([next(b for b in bodies if b in last_version[mid]) for mid in reminders],
-                                              ["wake-C"] if stop_wake else ["wake-B", "wake-C"])
+                                              ["wake-B", "wake-C"] if separate_h1 else ["wake-C"])
                         if cards:
                             for mid, text in last_version.items():
                                 if any(body in text for body in ("launch-AB", "launch-C", "wake-A")):
@@ -1843,7 +2036,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             await self.until(lambda: ("H1", "wake") in fx.channel.replies)
             cli.init()
             fx.channel.reply_results.append(SendResult.ok(message_id="h2-answer"))
-            cli.result(result="second")
+            await self.result_before_idle(cli, ordinary, result="second")
             self.assertTrue(await ordinary.wait_idle(10))
             self.assertEqual([opts.reply_to for _, body, opts in fx.channel.send_calls if getattr(body, "mentions", ())],
                              ["h2-answer"])
@@ -1996,9 +2189,49 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             await app.handle_card_action(direct_card_event(fx.channel, missing_mention))
             self.assertIn("卡片已过期", fx.channel.replies[-1][1])
             self.assertFalse(fx.store.get(binding.id).task_feedback.completion_mention_enabled)
+            replies_before_save = len(fx.channel.replies)
             await app.handle_card_action(direct_card_event(fx.channel, form))
-            self.assertIn("设置已保存", fx.channel.replies[-1][1])
+            mid, saved = fx.channel.updates[-1]
+            self.assertEqual(mid, "om_card")
+            self.assertEqual(len(fx.channel.replies), replies_before_save)
+            self.assertIn("会话配置已保存", str(saved))
+            self.assertIn("模型来源：原生 Claude 设置。", str(saved))
+            self.assertNotIn("Codex", str(saved))
+            self.assertFalse(elements(saved, "form"))
+
+            await app.handle_message(FakeMessage("/config", message_id="config-again"))
+            fx.channel.card_update_success = False
+            await app.handle_card_action(direct_card_event(fx.channel, form_values(fx.channel.replies[-1][1])))
+            self.assertEqual(fx.channel.replies[-1], ("om_card", f"会话 {binding.short_id} 的设置已保存。"))
             self.assertEqual(len(clients.calls), 1)
+
+    async def test_group_created_and_configured_cards_name_the_context_recipient(self):
+        async with owner_channel() as (app, fx, _, clock, _):
+            clock[0] = 2.
+            app._message_history = AsyncMock()
+            app._message_history.resolve_anchor.return_value = MessageContextAnchor("new-card", 1000)
+            for command in ("new", "config"):
+                mid = f"{command}-card"
+                fx.channel.reply_results.append(SendResult.ok(message_id=mid))
+                await app.handle_message(FakeMessage(f"/{command}", message_id=command, chat_id="oc_group", chat_type="group"))
+                picker = fx.channel.replies[-1][1]
+                self.assertIn("作为背景交给 Claude Code。", str(picker.card))
+                self.assertNotIn("Codex", str(picker.card))
+                form = form_values(picker)
+                options = {item["name"]: item["options"] for item in elements(picker.card, "select_static")}
+                if command == "new":
+                    form["new_project"] = options["new_project"][0]["value"]
+                    form["new_context_mode"] = next(option["value"] for option in options["new_context_mode"]
+                                                    if option["value"].endswith(":catch-up"))
+                fx.channel.fetched_messages[mid] = {"data": {"items": [{"chat_id": "oc_group"}]}}
+                fx.channel.chat_types["oc_group"] = "group"
+                event = direct_button_event({}, message_id=mid, form_value=form)
+                event.chat_id = "oc_group"
+                await app.handle_card_action(event)
+                updated_id, card = fx.channel.updates[-1]
+                self.assertEqual(updated_id, mid)
+                self.assertIn("作为背景交给 Claude Code。", str(card))
+                self.assertNotIn("Codex", str(card))
 
     @requires_claude_sdk
     async def test_explore_card_reconciliation_orderings(self):
@@ -2570,6 +2803,239 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(sum(content == INCOMPLETE for _, content in fx.channel.replies), int(outcome != "confirmed"))
                 self.assertEqual(mentions.assert_reminder(self), "first")
 
+    async def test_deadline_during_text_fallback_preserves_the_incomplete_notice(self):
+        from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock, ToolUseBlock
+        from lark_channel import OutboundCard
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.physical_delivery import BODY
+        from netizen_cli.ordinary_sessions import PhysicalAnswer
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                project_alias="test", creator_id="ou_user",
+                task_feedback=BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=False))
+            running, terminal, release_running = (asyncio.Event() for _ in range(3))
+            calls = []
+            notice_receipts = []
+            updates_after_notice = []
+            present = app.handle_ordinary_completion
+            channel_reply, channel_update = fx.channel.reply, fx.channel.update_card
+
+            async def observe(event):
+                if isinstance(event, PhysicalAnswer):
+                    terminal.set()
+                await present(event)
+
+            async def update(mid, card):
+                if "final-answer" in str(card) and "notice" not in calls:
+                    calls.append("reject terminal")
+                    return SendResult(success=False, raw={"code": 99991400})
+                if not running.is_set() and "segment-one" in str(card):
+                    calls.append("running")
+                    running.set()
+                    await release_running.wait()
+                elif "body" in calls and "notice" not in calls:
+                    calls.append("freeze")
+                    await asyncio.Future()
+                await channel_update(mid, card)
+                if "notice" in calls:
+                    updates_after_notice.append(card)
+                return SendResult.ok(message_id=mid)
+
+            async def reply(origin, item, opts=None):
+                await channel_reply(origin, item, opts)
+                if isinstance(item, OutboundCard):
+                    return SendResult.ok(message_id="card")
+                if item == "final-answer":
+                    calls.append("body")
+                    await asyncio.Future()
+                if item == INCOMPLETE:
+                    calls.append("notice")
+                    notice_receipts.append((ledger.settled, ledger.items[BODY]))
+                return SendResult.ok(message_id="post")
+
+            with (patch.object(app, "handle_ordinary_completion", observe), patch.object(fx.channel, "update_card", update),
+                  patch.object(fx.channel, "reply", reply), patch("netizen_cli.runtime.claude_ordinary._CONTROL_SECONDS", .2),
+                  patch.object(ordinary, "_remaining", side_effect=lambda seconds: .5 if seconds == 30 else seconds)):
+                app._progress_cards._poll_seconds = .005
+                await app.handle_message(FakeMessage("work", message_id="H"))
+                cli = clients.calls[-1]
+                cli.init()
+                await self.until(lambda: bool(app._progress_cards._sessions))
+                ledger = next(iter(app._progress_cards._sessions.values())).delivery
+                for block in (TextBlock("segment-one"), ToolUseBlock("tool", "Read", {})):
+                    cli.stream.put_nowait(AssistantMessage([block], "m", session_id=cli.session,
+                        uuid=type(block).__name__, message_id="model"))
+                await asyncio.wait_for(running.wait(), 3)
+                cli.result(result="final-answer", idle=False)
+                try:
+                    await asyncio.wait_for(terminal.wait(), 3)
+                finally:
+                    release_running.set()
+                await self.until(lambda: not ordinary._active[binding.id].delivery.queues)
+                self.assertEqual(calls, ["running", "reject terminal", "body", "notice"])
+                cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
+                self.assertTrue(await ordinary.wait_idle(3))
+            self.assertEqual(notice_receipts, [(True, "unknown")])
+            self.assertEqual([post for _, post in fx.channel.replies if isinstance(post, str)], ["final-answer", INCOMPLETE])
+            self.assertTrue(updates_after_notice)
+            elements = {item.get("element_id"): item for item in updates_after_notice[-1]["body"]["elements"]}
+            self.assertIn("segment-one", str(elements["partialanswerv1"]))
+            self.assertNotIn("turnanswerv1", elements)
+            self.assertNotIn("final-answer", str(fx.channel.updates))
+            self.assertEqual(ledger.items[BODY], "unknown")
+
+    async def test_terminal_replacement_settles_after_its_bounded_attempts(self):
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.physical_delivery import BODY, PhysicalDelivery
+
+        for responses, expected, posts in (
+            (("slow",), "confirmed", []),
+            (("unknown", "confirmed"), "confirmed", []),
+            (("unknown", "unknown", "unknown"), "unknown", [INCOMPLETE]),
+            (("unknown", "rejected"), "unknown", [INCOMPLETE]),
+            (("rejected",), "confirmed", ["final answer"]),
+            (("deadline",), "unknown", [INCOMPLETE]),
+        ):
+            with self.subTest(responses=responses):
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    clock[0] = 2.
+                    binding = fx.store.create_channel_binding(
+                        scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                        project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=False))
+                    fx.channel.reply_results.append(SendResult.ok(message_id="running"))
+                    app._progress_cards._operation_timeout_seconds = .005
+                    calls = []
+                    settlements = []
+                    settle = PhysicalDelivery.settle
+
+                    def at_settlement(ledger):
+                        # Subsequent CLI state updates may write this card again.
+                        settlements.append((calls.copy(), ledger.items[BODY]))
+                        return settle(ledger)
+
+                    inflight = peak = 0
+                    entered, release = asyncio.Event(), asyncio.Event()
+
+                    async def update(mid, card):
+                        nonlocal inflight, peak
+                        self.assertEqual(mid, "running")
+                        inflight += 1
+                        peak = max(peak, inflight)
+                        try:
+                            if "final answer" in str(card):
+                                response = responses[len(calls)] if len(calls) < len(responses) else "extra"
+                                calls.append(response)
+                                if response in {"slow", "deadline"}:
+                                    entered.set()
+                                    await release.wait()
+                                if response == "unknown":
+                                    raise OSError("lost replacement receipt")
+                                if response == "rejected":
+                                    return SendResult(success=False, raw={"code": 99991400})
+                            return SendResult.ok(message_id=mid)
+                        finally:
+                            inflight -= 1
+
+                    with (patch.object(fx.channel, "update_card", side_effect=update),
+                          patch.object(PhysicalDelivery, "settle", at_settlement),
+                          patch("netizen_cli.channel.constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS", 1.0),
+                          patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", .001),
+                          patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_UPDATE_ATTEMPTS", 3)):
+                        await app.handle_message(FakeMessage("work", message_id="H"))
+                        cli = clients.calls[-1]
+                        cli.init()
+                        await self.until(lambda: bool(app._progress_cards._sessions))
+                        ledger = next(iter(app._progress_cards._sessions.values())).delivery
+                        budget = .05 if responses == ("deadline",) else 2.
+                        with patch.object(ordinary, "_remaining", side_effect=lambda seconds: budget if seconds == 30 else seconds):
+                            cli.result(result="final answer", idle=False)
+                            if responses == ("slow",):
+                                await asyncio.wait_for(entered.wait(), 2)
+                                # Release after the old request bound and before the item-receipt bound.
+                                asyncio.get_running_loop().call_later(.025, release.set)
+                            await self.until(lambda: ledger.settled and not ordinary._active[binding.id].delivery.queues)
+                    self.assertEqual(settlements, [(list(responses), expected)])
+                    self.assertEqual(peak, 1)
+                    self.assertEqual([item for _, item in fx.channel.replies if isinstance(item, str)], posts)
+
+    async def test_idle_during_a_confirmed_terminal_retry_updates_the_card_after_settlement(self):
+        from netizen_cli.bindings import BindingTaskFeedback
+        from netizen_cli.channel.physical_delivery import BODY
+
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2.
+            binding = fx.store.create_channel_binding(scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+                project_alias="test", creator_id="ou_user",
+                task_feedback=BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=False))
+            fx.channel.reply_results.append(SendResult.ok(message_id="card"))
+            await app.handle_message(FakeMessage("work", message_id="H"))
+            cli = clients.calls[-1]
+            cli.init()
+            await self.until(lambda: bool(app._progress_cards._sessions))
+            ledger = next(iter(app._progress_cards._sessions.values())).delivery
+            second, release = asyncio.Event(), asyncio.Event()
+            writes = []
+
+            async def update(mid, card):
+                if "final-answer" in str(card):
+                    writes.append((ledger.settled, "idle" if "全部完成" in str(card) else "running"))
+                    if len(writes) == 2:
+                        second.set()
+                        await release.wait()
+                    elif not ledger.settled:
+                        raise OSError("lost receipt")
+                return SendResult.ok(message_id=mid)
+
+            with (patch.object(fx.channel, "update_card", update),
+                  patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", .005)):
+                cli.result(result="final-answer", idle=False)
+                await asyncio.wait_for(second.wait(), 3)
+                try:
+                    _system_frame(cli, "session_state_changed", state="idle")
+                    await self.until(lambda: ordinary._active[binding.id].human.terminal_sent)
+                finally:
+                    release.set()
+                self.assertTrue(await ordinary.wait_idle(3))
+            self.assertEqual([state for settled, state in writes if not settled], ["running", "running"])
+            self.assertIn((True, "idle"), writes)
+            self.assertEqual(ledger.items[BODY], "confirmed")
+            self.assertNotIn(("H", INCOMPLETE), fx.channel.replies)
+
+    async def test_writer_recomputes_after_each_unknown_delay(self):
+        from netizen_cli.channel.replacement_writer import ReplacementWriter
+
+        for receipts, next_desired, expected_calls, expected_known in (
+            (["confirmed"], "B", ["A"], "A"),
+            (["rejected"], "B", ["A"], "previous"),
+            (["unknown", "confirmed"], "B", ["A", "B"], "B"),
+            (["unknown", "rejected"], "B", ["A", "B"], None),
+            (["unknown"] * 3, "B", ["A", "B", "B"], None),
+            (["unknown"], None, ["A"], None),
+        ):
+            with self.subTest(receipts=receipts, next_desired=next_desired):
+                writer = ReplacementWriter(str)
+                writer.known = "previous"
+                desired = "A"
+                write = AsyncMock(side_effect=receipts)
+                waits = []
+
+                async def delay(seconds):
+                    nonlocal desired
+                    self.assertTrue(writer.locked())
+                    waits.append(seconds)
+                    desired = next_desired
+
+                async with writer:
+                    with patch("netizen_cli.channel.replacement_writer.asyncio.sleep", delay):
+                        confirmed = await writer.reconcile_locked(lambda: desired, write, unknown_retry_delays=(1, 2))
+                self.assertEqual([call.args[0] for call in write.await_args_list], expected_calls)
+                self.assertEqual(waits, [1, 2][:min(receipts.count("unknown"), 2)])
+                self.assertEqual(writer.known, expected_known)
+                self.assertEqual(confirmed, receipts[-1] == "confirmed")
+
     def fail_preparation(self, stack, app, case):
         from dataclasses import replace
         from netizen_cli.ordinary_sessions import PhysicalAnswer
@@ -2623,7 +3089,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 cli = clients.calls[-1]
                 cli.init()
                 await self.until(lambda: bool(app._progress_cards._sessions))
-                cli.result(result=body, reason="completed" if body else None)
+                await self.result_before_idle(cli, ordinary, result=body, reason="completed" if body else None)
                 self.assertTrue(await ordinary.wait_idle(10))
                 if case.startswith("preparation"):
                     prepare.assert_called_once()
@@ -2861,6 +3327,8 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 assistant(TextBlock("physical two"), "final")
                 cli.result(user_message_uuid=None, result="physical two", origin={"kind": "task-notification",
                            "producer": "session-task", "runId": "r"})
+                if not cards:
+                    await self.until(lambda: ("H1", "physical two") in fx.channel.replies)
                 system("session_state_changed", state="idle")
                 self.assertTrue(await ordinary.wait_idle(5))
                 _, mention, opts = fx.channel.send_calls[-1]
@@ -2890,7 +3358,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             cli = clients.calls[-1]
             cli.init()
             await self.until(lambda: bool(app._progress_cards._sessions))
-            cli.result(result="body")
+            await self.result_before_idle(cli, ordinary, result="body")
             self.assertTrue(await ordinary.wait_idle(5))
             self.assertEqual(fx.channel.replies, [("H", "body"), ("H", INCOMPLETE)])
             self.assertFalse(fx.channel.send_calls)
@@ -2915,7 +3383,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     fx.channel.reply_results.append(SendResult.ok(message_id="om_result"))
                     fx.channel.send_results.append(SendResult.ok(message_id="reminder"))
-                    client.result(result="answer with ![file](unavailable.png)")
+                    await self.result_before_idle(client, ordinary, result="answer with ![file](unavailable.png)")
                 self.assertTrue(await ordinary.wait_idle(2))
                 reply = fx.channel.replies[-1][1]
                 if index:

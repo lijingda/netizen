@@ -9,7 +9,7 @@ import time
 from unittest.mock import AsyncMock, Mock, patch
 
 from claude_agent_sdk import ResultMessage, SystemMessage
-from lark_channel import OutboundCard, SendResult
+from lark_channel import OutboundCard, OutboundPost, SendResult
 import psutil
 
 from scripts.check_native_claude import checking, failure_details
@@ -231,6 +231,27 @@ class Driver:
     def replies(self, label):
         return [content for target, content in self.channel.replies if target == label]
 
+    def check_mention(self, label, *, eligible=True):
+        replies = [(i, post) for i, (target, post) in enumerate(self.channel.replies, 1) if target == label]
+        inline = [(i, post) for i, post in replies if getattr(post, "mentions", ())]
+        reminders = [(opts.reply_to, post) for _, post, opts in self.channel.send_calls
+                     if opts.reply_to == label or (opts.reply_to or "").startswith(f"reply-{label}-")]
+        if not eligible:
+            assert not inline and not reminders
+            route = "suppressed"
+        elif inline:
+            assert inline == [replies[-1]] and not reminders
+            post = inline[0][1]
+            assert isinstance(post, OutboundPost) and [m.open_id for m in post.mentions] == [OWNER]
+            route = "inline"
+        else:
+            (anchor, reminder), = reminders
+            assert anchor == f"reply-{label}-{replies[-1][0]}" and reminder.text == "本轮任务已结束。"
+            assert [m.open_id for m in reminder.mentions] == [OWNER]
+            route = "separate"
+        if self.provider:
+            print(json.dumps({"input": label, "completionMention": route}), flush=True)
+
     async def create(self):
         await self.send("new", "/new")
         card, = self.replies("new")
@@ -277,21 +298,21 @@ class Driver:
         typing = events.index(("add", label, "Typing"))
         finished = events.index(("add", label, terminal))
         assert typing < finished
-        reminders = [content for _, content, opts in self.channel.send_calls if opts.reply_to.startswith("reply-" + label + "-")]
+        self.check_mention(label, eligible=not interrupted)
         if interrupted:
-            assert [s.split("\n\n")[0] for s in replies] == ([STOPPED] if call.answer else []) and not reminders
+            assert [s.split("\n\n")[0] for s in replies] == ([STOPPED] if call.answer else [])
         else:
             post, = replies
-            assert isinstance(post, str) and typing < events.index(("reply", label, post)) < finished
-            assert [[m.open_id for m in r.mentions] for r in reminders] == [[OWNER]]
+            assert typing < events.index(("reply", label, post)) < finished
+            text = post.markdown if isinstance(post, OutboundPost) else post
             if self.provider and label == "ordinary":
                 assert call.answer == "fixture-reply-ordinary ![pixel](result.png)"
-                assert post.strip() == "fixture-reply-ordinary ![pixel](img_uploaded_1)"
+                assert text.strip() == "fixture-reply-ordinary ![pixel](img_uploaded_1)"
                 (source, kind), = self.channel.upload_calls
                 assert kind == "image" and source.buffer == PNG
             else:
-                assert call.answer and post == call.answer, "terminal did not deliver the attributed answer"
-                self.check_answer(label, post)
+                assert call.answer and text == call.answer, "terminal did not deliver the attributed answer"
+                self.check_answer(label, text)
         await self.reaped()
 
     async def reaped(self):
@@ -433,7 +454,8 @@ class Driver:
             # The native wrapper sees idle before the runtime applies it. A policy
             # notice or a busy refusal is also a reply, but neither is this answer.
             return (state and state.idle and state.tasks == 1 and len(cli.inputs) == submissions
-                    and cli.answer and any(isinstance(reply, str) and cli.answer in reply for reply in self.replies(label)))
+                    and cli.answer and any(cli.answer in text for reply in self.replies(label)
+                                           if isinstance(text := getattr(reply, "markdown", reply), str)))
         await wait_for(label + "_runtime_idle_reply", delivered_and_idle, 60 if self.live else 25)
 
     async def background(self):
@@ -451,9 +473,7 @@ class Driver:
         bodies = [r for r in self.replies("bg-a") if r != DEFAULT_MODE]
         assert len(bodies) == 2 and len([r for r in self.replies("bg-b") if r != DEFAULT_MODE]) == 1
         for label in ("bg-a", "bg-b"):
-            last_reply = max(i for i, (target, _) in enumerate(self.channel.replies, 1) if target == label)
-            reminders = [opts.reply_to for _, _, opts in self.channel.send_calls if opts.reply_to.startswith(f"reply-{label}-")]
-            assert reminders == [f"reply-{label}-{last_reply}"]
+            self.check_mention(label)
 
     async def release(self):
         gate = self.cwd / "background-release"
@@ -476,6 +496,8 @@ class Driver:
             await self.click(direct_button_event(_card_button_value(preview, "确认释放"), message_id="card-release-confirm"))
             assert self.replies("card-release-confirm") == ["已释放 Claude 会话连接。"]
             assert first.finished.is_set() and not running(shell)
+            self.check_mention("release-bg", eligible=False)
+            self.check_mention("idle-send")
         finally:
             gate.touch()
         await self.submit("after-release")
@@ -509,6 +531,8 @@ class Driver:
         assert reply and "1 个后台任务发送停止请求" in reply[0], reply
         assert await self.core._claude.wait_idle(45)
         assert not running(shell) and len(cli.inputs) == 2 and cli.finished.is_set()
+        self.check_mention("stop-list", eligible=False)
+        self.check_mention("second-foreground", eligible=False)
 
     async def stop_during_close(self):
         gate = self.clients.close_gate = asyncio.Event()

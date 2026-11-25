@@ -49,7 +49,7 @@ from .base import (
 from .completion_mentions import send_completion_mention
 from .messages import _confirmed_reply_id
 from .physical_delivery import BODY, FILES, INCOMPLETE, Item, PhysicalDelivery, record_sent_answer
-from .replies import ChannelReplies
+from .replies import ChannelReplies, mentioned_answer
 from .reply_events import ItemDelivery, RunEnded, RunState, TurnResult
 from .reply_presenter import (
     _CardUpdateAttempt,
@@ -158,14 +158,16 @@ class CompletionPresentationChannel(ChannelReplies):
             except Exception:
                 card = None
             if card and first_id and location.can_write(first_id):
-                if await self._progress_cards.publish_card(display, first_id, key, location, projection, delivery=ledger, items=items):
+                if await self._progress_cards.publish_card(display, first_id, key, location, projection,
+                                                          delivery=ledger, items=items, retry_unknown=True):
                     ledger.record(items, "confirmed")
                     return
                 if not any(ledger.items.get(item) == "rejected" and ledger.can_post(item) for item in items):
                     return
             if (card and not first_id and publishable()
                     and all(ledger.items[item] not in ("unknown", "rejected") for item in ledger.partial_text)):
-                state, sent = await ledger.send(items, reply, policy.send(card, None, location))
+                state, sent = await ledger.send(items, reply, policy.send(card, None, location),
+                                                timeout=constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS)
                 if state == "confirmed" and sent is not None:
                     record_sent_answer(reply, location, key.turn_id, items, sent)
                     if reply and (mid := _confirmed_reply_id(sent)):
@@ -173,11 +175,15 @@ class CompletionPresentationChannel(ChannelReplies):
                     return
                 if state == "unknown":
                     return
-        # Freeze any partials the running card may already show. The ledger
-        # independently decides which items can safely take a new text post.
-        if first_id and not location.can_write(first_id):
-            first_id = None
+        # Later reconciles must use the partial-only view even if a fallback post loses its receipt.
         last_snapshot = partials.freeze_snapshot
+        if first_id and last_snapshot and location.can_write(first_id):
+            frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
+                run_continues=outcome.run_continues, include_result=False, collapsed=True)
+            shown = tuple(("partial", part.item_id) for part in last_snapshot.partial_answers)
+            items = (*shown, *body_items) if any(item in matching_items for item in shown) else shown
+            self._progress_cards.register_card(display, first_id, key, location, frozen, tracks_run=False,
+                delivery=ledger, items=items)
         try:
             for index, fragment in enumerate(outcome.partial_answers):
                 item = ("partial", fragment.item_id)
@@ -207,30 +213,44 @@ class CompletionPresentationChannel(ChannelReplies):
                     offered = (*body_items, *matching_items, FILES) if post_body else (FILES,)
                     if publishable():
                         _, sent = await ledger.send(offered, reply, external_call(policy.send(file_card, "files", location)),
-                                                    timeout=self._progress_cards.operation_timeout)
+                                                    timeout=constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS)
                         if sent is not None:
                             record_sent_answer(reply, location, key.turn_id, offered, sent)
             if post_body and ledger.can_post(BODY):
-                content += policy.plain_suffix()
                 await self._send_receipted_items(outcome, policy, ledger, (*body_items, *matching_items), content, "final", location)
         finally:
-            if first_id and last_snapshot:
-                frozen = turn_progress_projection(snapshot=last_snapshot, terminal_status=status,
-                    run_continues=outcome.run_continues, include_result=False, collapsed=True)
-                shown = tuple(("partial", part.item_id) for part in last_snapshot.partial_answers)
-                items = (*shown, *body_items) if any(item in matching_items for item in shown) else shown
-                await self._progress_cards.publish_card(display, first_id, key, location, frozen, tracks_run=False,
-                    delivery=ledger, items=items)
-            else:
-                await self._progress_cards.reconcile(display)
+            # A fallback cancelled at the content deadline must leave the notice its own budget.
+            if policy.deadline is None or asyncio.get_running_loop().time() < policy.deadline:
+                async with asyncio.timeout_at(policy.deadline):
+                    await self._progress_cards.reconcile(display)
 
     async def _send_receipted_items(self, outcome: TurnResult, policy: ItemDelivery, ledger: PhysicalDelivery, items: tuple[Item, ...],
                                    content: str | OutboundPost, operation: str, location: CardReplyLocation) -> None:
+        reply = policy.display.reply
+        allow_inline_mention = operation == "final" and not outcome.task_feedback.progress_card_enabled
+        if (allow_inline_mention and outcome.target.run is not None and reply and outcome.task_feedback.completion_mention_enabled
+                and not outcome.run_continues and not reply.mention_decided.is_set() and policy.display.publishable()):
+            try:
+                async with asyncio.timeout(constants.COMPLETION_MENTION_DECISION_TIMEOUT_SECONDS):
+                    await reply.mention_decided.wait()
+            except TimeoutError:
+                allow_inline_mention = False
         if not policy.display.publishable() or (policy.deadline is not None and
                                          asyncio.get_running_loop().time() >= policy.deadline):
             return
-        _, result = await ledger.send(items, policy.display.reply, external_call(policy.send(content, operation, location)),
-                                      post=True, timeout=self._progress_cards.operation_timeout)
+        if operation == "final" and isinstance(content, str):
+            content += policy.plain_suffix()
+        if (allow_inline_mention and isinstance(content, str) and reply and reply.messages is not None
+                and reply.mention_user_id and not reply.mention_attempted):
+            try:
+                content = mentioned_answer(content, reply.mention_user_id)
+            except Exception:
+                logger.warning("could not prepare inline completion mention", exc_info=True)
+            else:
+                # The first SDK chunk may notify even if a later chunk is rejected.
+                reply.mention_attempted = True
+        _, result = await ledger.send(items, reply, external_call(policy.send(content, operation, location)),
+                                      post=True, timeout=constants.ITEM_RECEIPT_REQUEST_TIMEOUT_SECONDS)
         if result is not None:
             record_sent_answer(policy.display.reply, location, outcome.turn_id, items, result)
 
@@ -283,15 +303,17 @@ class CompletionPresentationChannel(ChannelReplies):
                 return
             await _best_effort_update(self._reactions.freeze(run.turn_id))
             await _best_effort_update(self._safe_add_reaction(event.target.origin, reaction))
-            if event.mention_user_id and display.publishable():
+            if event.mention_user_id and not reply.mention_attempted and display.publishable():
                 location = event.location
                 assert location is not None
                 source_id = _message_id(event.target.origin)
                 anchor = reply.mention_target(source_id if location.usable(source_id) else None)
-                await send_completion_mention(
-                    self._channel, scope=self._scope(event.target.origin), card_message_id=anchor,
-                    user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
-                )
+                if anchor:
+                    reply.mention_attempted = True
+                    await send_completion_mention(
+                        self._channel, scope=self._scope(event.target.origin), card_message_id=anchor,
+                        user_id=event.mention_user_id, operation_id=run.turn_id, isolate_child_cancellation=True, location=location,
+                    )
         finally:
             self._progress_cards.retire_run(display)
             reply.retire()

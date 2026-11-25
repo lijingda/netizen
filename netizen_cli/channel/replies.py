@@ -113,6 +113,10 @@ from .messages import _confirmed_reply_id
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
 
 
+def mentioned_answer(content: str, user_id: str) -> OutboundPost:
+    return OutboundPost(markdown=content, mentions=[Identity(open_id=user_id)])
+
+
 class ChannelReplies(ChannelState):
     """Replies, error reports and Goal management cards shared by every interaction."""
 
@@ -364,10 +368,7 @@ class ChannelReplies(ChannelState):
         on_sent: Callable[[str], None] | None = None,
     ) -> None:
         if isinstance(content, str) and completion_mention_user_id is not None:
-            content = OutboundPost(
-                markdown=content,
-                mentions=[Identity(open_id=completion_mention_user_id)],
-            )
+            content = mentioned_answer(content, completion_mention_user_id)
         result = await self._send_completion_reply(message, content)
         if on_sent is not None:
             target = _confirmed_reply_id(result, on_conflict=_message_id(message))

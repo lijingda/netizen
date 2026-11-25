@@ -110,14 +110,21 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
                 client.init()
                 if expected:
                     fx.channel.reply_results.append(SendResult.ok(message_id="answer-" + origin))
-                if mention:
+                if mention and not expected:
                     fx.channel.send_results.append(SendResult.ok(message_id="reminder"))
+                before = len(fx.channel.send_calls)
                 client.result(**native)
                 self.assertTrue(await ordinary.wait_idle(2))
-                self.assertEqual([r for target, r in fx.channel.replies if target == origin],
-                                 [expected] if expected else [])
-                reminders = [r for _, r, opts in fx.channel.send_calls if opts.reply_to in (origin, "answer-" + origin)]
-                self.assertEqual([[m.open_id for m in r.mentions] for r in reminders], [["ou_user"]] if mention else [])
+                replies = [r for target, r in fx.channel.replies if target == origin]
+                if expected and mention:
+                    answer, = replies
+                    self.assertEqual(answer.markdown, expected)
+                    self.assertEqual([m.open_id for m in answer.mentions], ["ou_user"])
+                    self.assertEqual(fx.channel.send_calls[before:], [])
+                else:
+                    self.assertEqual(replies, [expected] if expected else [])
+                    reminders = [r for _, r, opts in fx.channel.send_calls if opts.reply_to in (origin, "answer-" + origin)]
+                    self.assertEqual([[m.open_id for m in r.mentions] for r in reminders], [["ou_user"]] if mention else [])
                 self.assertEqual(client.consumers, 1)
 
     async def test_execution_change_never_exposes_previous_result_or_stops_successor(self):
@@ -222,7 +229,9 @@ class ObservationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(warnings.output), 3)
             self.assertNotIn("private", str(warnings.output))
             origin, answer = fx.channel.replies[-1]
-            self.assertEqual((origin, answer, client.interrupts), ("source", "native conclusion", 0))
+            self.assertEqual((origin, answer.markdown, client.interrupts), ("source", "native conclusion", 0))
+            self.assertEqual([m.open_id for m in answer.mentions], ["ou_user"])
+            self.assertEqual(fx.channel.send_calls, [])
 
     async def test_group_refusal_precedes_capabilities_and_question_precedes_schedule(self):
         async with owner_channel() as (app, fx, clients, clock, ordinary):

@@ -499,9 +499,6 @@ class CardControlChannel(TurnFileChannel):
             raise CardActionError(
                 "会话配置已变化，本卡片未执行；请重新发送 /config。"
             ) from error
-        if self._local_sessions is not None:
-            await self._safe_reply_to_card(intent, f"会话 {binding.short_id} 的设置已保存。")
-            return
         updated = await self._safe_update_card(
             intent.source_id,
             binding_configured_card(
@@ -510,9 +507,13 @@ class CardControlChannel(TurnFileChannel):
                 settings=settings,
                 task_feedback=binding.task_feedback,
                 message_context_mode=binding.message_context_mode,
+                form_view=self._session_form,
             ),
         )
         if not updated:
+            if self._local_sessions is not None:
+                await self._safe_reply_to_card(intent, f"会话 {binding.short_id} 的设置已保存。")
+                return
             await self._safe_reply_to_card(
                 intent,
                 f"✅ 会话 `{binding.short_id}` 配置已保存："

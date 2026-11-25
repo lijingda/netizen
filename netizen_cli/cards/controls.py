@@ -412,7 +412,7 @@ def _new_binding_form(
             inherit_initial_when_unset=False,
         )
     context = (
-        _context_mode_form_elements(prefix="new", initial_mode=message_context_mode)
+        _context_mode_form_elements(prefix="new", initial_mode=message_context_mode, backend_name=form_view.backend_name)
         if allow_context_mode else []
     )
     feedback = _task_feedback_form_elements(prefix="new", initial=task_feedback)
@@ -648,7 +648,7 @@ def _binding_config_form(
         form_view=form_view,
         model_fields=model_fields,
         context_fields=(
-            _context_mode_form_elements(prefix="config", initial_mode=message_context_mode)
+            _context_mode_form_elements(prefix="config", initial_mode=message_context_mode, backend_name=form_view.backend_name)
             if allow_context_mode else []
         ),
         feedback_fields=_task_feedback_form_elements(prefix="config", initial=task_feedback),
@@ -746,6 +746,7 @@ def _context_mode_form_elements(
     *,
     prefix: str,
     initial_mode: MentionContextMode,
+    backend_name: str = "Codex",
 ) -> list[dict[str, Any]]:
     return [
         _form_label("@ 时读取的消息范围"),
@@ -767,7 +768,7 @@ def _context_mode_form_elements(
         _form_hint(
             "机器人始终只响应 @ 它的消息。选择“自动带上”后，"
             "两次 @ 之间群里其他成员未 @ 机器人的消息，"
-            "也会在下一次 @ 时被读取，作为背景交给 Codex。"
+            f"也会在下一次 @ 时被读取，作为背景交给 {backend_name}。"
         ),
     ]
 
@@ -916,7 +917,7 @@ def session_settings_form_elements(
                             options=((value, value),) if value else (), initial_option=value or None),
                     ])
     context = (
-        _context_mode_form_elements(prefix=prefix, initial_mode=settings.message_context_mode)
+        _context_mode_form_elements(prefix=prefix, initial_mode=settings.message_context_mode, backend_name=form_view.backend_name)
         if allow_context_mode else []
     )
     feedback = _task_feedback_form_elements(prefix=prefix, initial=settings.task_feedback)
@@ -2012,8 +2013,8 @@ def binding_created_card(
         "如果刚才的任务因没有会话而未执行，请重新发送。\n"
         "在群聊和群话题中，每条消息都需要 @机器人。"
     )
-    builder.markdown(f"模型来源：{form_view.inherited_source}。" if not form_view.model_editable else _model_source_summary(settings))
-    builder.markdown(_context_mode_summary(message_context_mode))
+    builder.markdown(_model_source_summary(settings, form_view))
+    builder.markdown(_context_mode_summary(message_context_mode, form_view.backend_name))
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
     )
@@ -2027,21 +2028,24 @@ def binding_configured_card(
     settings: TurnModelSettings | None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
+    form_view: SessionFormView = SessionFormView(),
 ) -> OutboundCard:
     builder = _builder(
         "会话配置已保存",
         f"{project_alias} · Netizen 会话编号：{short_id}",
         template="green",
     )
-    builder.markdown(_model_source_summary(settings))
-    builder.markdown(_context_mode_summary(message_context_mode))
+    builder.markdown(_model_source_summary(settings, form_view))
+    builder.markdown(_context_mode_summary(message_context_mode, form_view.backend_name))
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
     )
     return OutboundCard(card=builder.to_dict())
 
 
-def _model_source_summary(settings: TurnModelSettings | None) -> str:
+def _model_source_summary(settings: TurnModelSettings | None, form_view: SessionFormView) -> str:
+    if not form_view.model_editable:
+        return f"模型来源：{form_view.inherited_source}。"
     if settings is None:
         return "Model 来源：继承 Codex，使用 Codex 自身的模型配置。"
     return (
@@ -2052,12 +2056,12 @@ def _model_source_summary(settings: TurnModelSettings | None) -> str:
     )
 
 
-def _context_mode_summary(mode: MentionContextMode) -> str:
+def _context_mode_summary(mode: MentionContextMode, backend_name: str = "Codex") -> str:
     if mode is MentionContextMode.CATCH_UP:
         return (
             "@ 时读取的消息范围：自动带上期间的群聊讨论。"
             "两次 @ 之间群里未 @ 机器人的成员消息，"
-            "也会在下一次 @ 时作为背景交给 Codex。"
+            f"也会在下一次 @ 时作为背景交给 {backend_name}。"
         )
     return "@ 时读取的消息范围：仅这条 @ 消息。"
 
