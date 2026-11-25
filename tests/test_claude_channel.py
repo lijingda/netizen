@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 from itertools import product
 import json
+import threading
 from unittest.mock import AsyncMock, PropertyMock, patch
 from uuid import UUID, uuid4
 
@@ -1818,6 +1819,52 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fx.store.active_binding(scope.key).native_thread_id, native)
             self.assertFalse(clients.calls)
             self.assertIn("会话分支已创建", str(fx.channel.updates[-1][1]))
+
+    async def test_controls_during_fork_are_refused_before_a_later_cron_turn(self):
+        async with owner_channel() as (app, fx, clients, clock, ordinary):
+            clock[0] = 2
+            scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+            source = (await fx.create_binding(scope)).binding
+            await app.handle_message(FakeMessage("human", message_id="H1"))
+            cli = clients.calls[-1]
+            cli.init()
+            await cli.live.stop_hook({"session_id": cli.session, "session_crons": [{"id": "job"}]}, None, None)
+            cli.result()
+            await self.until(lambda: cli.live.ordered_idle and ordinary._active[source.id].admissible)
+            app._management.validate_chat_target = AsyncMock(return_value=ValidatedChatTarget(scope.chat_id, "p2p"))
+            await app.handle_message(FakeMessage("/fork", message_id="open"))
+            card = fx.channel.replies[-1][1]
+            event = direct_card_event(fx.channel, form_values(card))
+            event.action.value = callback(card, "创建分支")
+
+            loop, fork = asyncio.get_running_loop(), clients.fork
+            entered, release = asyncio.Event(), threading.Event()
+            def copy(*args):
+                loop.call_soon_threadsafe(entered.set)
+                self.assertTrue(release.wait(10))
+                return fork(*args)
+
+            with patch.object(clients, "fork", side_effect=copy), patch.object(clients, "rename") as rename:
+                copying = asyncio.create_task(app.handle_card_action(event))
+                try:
+                    await asyncio.wait_for(entered.wait(), 3)
+                    self.assertIsNone(cli.live.physical)
+                    for index, command in enumerate(("/stop", "/rename concurrent", "/release",
+                                                     "/resume " + source.short_id, "next input")):
+                        mid = f"competing-{index}"
+                        await asyncio.wait_for(app.handle_message(FakeMessage(command, message_id=mid)), 3)
+                        self.assertIn((mid, "会话正在创建分支，请稍后再试。"), fx.channel.replies)
+                    cli.init(user_message_uuids=[])
+                    await self.until(lambda: cli.live.physical is not None)
+                finally:
+                    release.set()
+                    await copying
+                self.assertEqual(cli.interrupts, 0)
+                rename.assert_not_called()
+            (_, _, _, child_id), = clients.forks
+            self.assertIn(child_id, str(fx.channel.updates[-1][1]))
+            self.assertEqual(len(cli.inputs), 1)
+            cli.result(user_message_uuid=None, result="cron")
 
     async def test_failed_fork_preserves_known_child_in_source_receipt(self):
         for failure in ("verify", "publish", "bind"):

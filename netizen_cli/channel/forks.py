@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import hashlib
 import logging
 import re
@@ -277,8 +278,12 @@ class ForkChannel(SideChannel):
         async with provider.track_fork_creation(project.alias):
             try:
                 await self._safe_update_card(message_id, fork_status_card(status="creating", **common))
-                async with self._scope_coordinator.hold(scope.key):
+                async with AsyncExitStack() as source_scope:
+                    await source_scope.enter_async_context(self._scope_coordinator.hold(scope.key))
                     source = self._require_fork_source(scope, intent.source)
+                    if claude:
+                        # Competing inputs and controls must reach the Binding guard during the copy.
+                        await source_scope.aclose()
                     fork = await provider.copy_fork(source, expected_project_revision=project.revision,
                                                     title=intent.name or None)
                     child_id = fork.child_id
