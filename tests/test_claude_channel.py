@@ -1058,6 +1058,95 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                         last_initial = [card for mid, card in fx.channel.updates if mid == "initial"][-1]
                         self.assertNotIn("Claude：", str(last_initial))
 
+    async def test_only_allowlisted_activity_reaches_either_reply_transport(self):
+        from claude_agent_sdk import AssistantMessage, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock, UserMessage
+        from netizen_cli.bindings import BindingTaskFeedback
+        from tests.support.presenter_traces import delivery_recorder
+        from tests.support.process_transport import ProcessTransport, check_pairs
+
+        secret = "PRIVATE_PAYLOAD"
+        # Union of input property names from the pinned CLI's decoded tool catalogs.
+        fields = (
+            "-A -B -C -i -n -o action activeForm addBlockedBy addBlocks allow_large allowedPrompts "
+            "allowed_domains annotations answers args blocked_domains cell_id cell_type channel command "
+            "content context cron cursor dangerouslyDisableSandbox delaySeconds description "
+            "discard_changes durable edit_mode effort file_path findings glob head_limit id isolation "
+            "level limit max_results message metadata model multiline name new_source new_string noop "
+            "notebook_path notify_when_idle offset old_string output_mode owner pages path pattern prompt "
+            "q query questions reason recurring replace_all resumeFromRunId run_in_background script "
+            "scriptPath shell_id skill status stop subagent_type subject summary taskId task_id timeout "
+            "timeout_ms title to todos type url ws "
+        ).split()
+        names = (
+            "Agent AskUserQuestion Bash CronCreate CronDelete CronList DeferredToolPlaceholder Edit "
+            "EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree Glob Grep ListAgents Monitor "
+            "NotebookEdit Read ReportFindings ScheduleWakeup SendMessage Skill Task TaskCreate TaskGet "
+            "TaskList TaskStop TaskUpdate TodoWrite ToolSearch WebFetch WebSearch Workflow Write "
+        ).split() + ["mcp__" + secret, "custom_" + secret]
+        allowed = {"Bash": ("command",), "Read": ("file_path",), "Glob": ("pattern",), "Grep": ("pattern", "path"),
+                   "Write": ("file_path",), "Edit": ("file_path",), "NotebookEdit": ("notebook_path",),
+                   "WebFetch": ("url",), "WebSearch": ("query",)}
+        for cards in (True, False):
+            with self.subTest(cards=cards), ExitStack() as stack:
+                async with owner_channel() as (app, fx, clients, clock, ordinary):
+                    events = delivery_recorder(fx.channel, stack)
+                    process = ProcessTransport(events)
+                    app._progress_cards._process_port = process.port
+                    app._progress_cards._poll_seconds = .01
+                    clock[0] = 2.
+                    scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+                    fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=cards, completion_mention_enabled=False))
+                    fx.channel.reply_results.append(SendResult.ok(message_id="reply"))
+                    await app.handle_message(FakeMessage("work", message_id="H"))
+                    cli = clients.calls[-1]
+                    cli.init()
+                    def assistant(blocks, parent=None):
+                        cli.stream.put_nowait(AssistantMessage(blocks, "model", session_id=cli.session, uuid="fragment",
+                                                              message_id="assistant", parent_tool_use_id=parent))
+                    def result(key, payload, *, failed=False, parent=None):
+                        cli.stream.put_nowait(UserMessage([ToolResultBlock(key, content=secret, is_error=failed)],
+                                                          tool_use_result=payload, parent_tool_use_id=parent))
+                    try:
+                        assistant([ThinkingBlock(secret, secret)])
+                        assistant([TextBlock(secret), ToolUseBlock("child", "Bash", {"command": secret})], "parent")
+                        result("child", {"output": secret}, parent="parent")
+                        for offset in range(0, len(names), 5):
+                            for n, name in enumerate(names[offset:offset + 5], offset):
+                                key = f"tool-{n}"
+                                inputs = dict.fromkeys(fields, secret)
+                                inputs.update(dict.fromkeys(allowed.get(name, ()), "safe-detail"))
+                                assistant([ToolUseBlock(key, name, inputs)])
+                                result(key, {"raw": secret, "stderr": secret, "content": secret})
+                            # Sample every batch on the live wire before bounded windows can evict it.
+                            mark = f"batch-{offset}"
+                            assistant([ToolUseBlock(mark, "Read", {"file_path": mark, "description": secret})])
+                            await self.until(lambda: mark in str(events))
+                            result(mark, secret, failed=True)
+                        assistant([ToolUseBlock("steps", "TaskList", {})])
+                        result("steps", {"tasks": [{"id": "1", "subject": "safe-step", "status": "in_progress",
+                                                    "description": secret}], "raw": secret})
+                        await self.until(lambda: "safe-step" in str(events))
+                        self.assertEqual(len(process.created), int(not cards))
+                        self.assertNotIn(secret, str(events))
+                    finally:
+                        cli.result(result="final answer", permission_denials=[{"tool_name": secret, "tool_input": secret}])
+                        self.assertTrue(await ordinary.wait_idle(10))
+                    if not cards:
+                        await self.until(lambda: bool(process.completed))
+                        frames = [args[1] for name, args, _ in events if name == "process.update"]
+                        offered, finished = set(), set()
+                        for update in frames:
+                            starts, ends = check_pairs(update)
+                            offered.update(starts)
+                            finished.update(ends)
+                        self.assertGreater(len(offered), len(names) // 2)
+                        self.assertEqual(offered, finished)
+                        self.assertEqual([args[1] for name, args, _ in events if name == "process.complete"], ["done"])
+                    self.assertIn("safe-detail", str(events))
+                    self.assertNotIn(secret, str(events))
+
+    @requires_claude_sdk
     async def test_files_writer_settles_per_page_and_content_with_fresh_transport_nonces(self):
         from pathlib import Path
         from netizen_cli.cards import turn_files_card
@@ -1567,7 +1656,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             await self.until(lambda: activity() and (not cards or bool(confirmed)))
                             revision = activity().revision
                             assistant(TextBlock("initial-fragment"), "initial")
-                            assistant(ToolUseBlock("read", "Read", {}), "initial")
+                            assistant(ToolUseBlock("lookup", "TaskGet", {}), "initial")
                             await self.until(lambda: bool(activity().partial_answers))
                             self.assertGreater(activity().revision, revision)
                             launch("AB")

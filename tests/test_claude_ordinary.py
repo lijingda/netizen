@@ -176,6 +176,8 @@ class ClaudeOrdinaryTests(unittest.IsolatedAsyncioTestCase):
                                                    parent_tool_use_id=parent))
         start("create", "TaskCreate")
         cli.stream.put_nowait(UserMessage([ToolResultBlock("create")], tool_use_result={"task":{"id":"1","subject":"First"}}))
+        await self.wait_until(lambda: snapshot() and snapshot().plan_generated)
+        self.assertEqual([step.step for step in snapshot().steps], ["First"])
         start("update", "TaskUpdate")
         cli.stream.put_nowait(UserMessage([ToolResultBlock("update")], tool_use_result={
             "success":True, "taskId":"1", "updatedFields":["status"], "statusChange":{"to":"in_progress"}}))

@@ -61,6 +61,10 @@ class ClaudeToolsTest(unittest.TestCase):
         self.assertEqual([e.status for e in events], [Status.IN_PROGRESS, Status.COMPLETED] * 3)
         self.assertEqual(outputs, [["example.txt", "example.txt"]])
         self.assertEqual(replay("write-rewrite")[2], [["actual.txt"]])
+        turn = ClaudeTurnTools(ClaudeChecklist(), 120)
+        turn.assistant(AssistantMessage([ToolUseBlock("w", "Write", {"file_path": "requested.txt"})], "model"), 1)
+        turn.user(UserMessage([ToolResultBlock("w")], tool_use_result={}), 2)
+        self.assertEqual(turn.finish(Status.COMPLETED, 3)[1].outputs, ())
         self.assertEqual(replay("notebook")[2], [["fixture.ipynb"]])
         self.assertEqual(replay("notebook-error")[2], [[]])
         for status in (Status.FAILED, Status.INTERRUPTED):

@@ -321,6 +321,20 @@ async def main_cases(cwd, provider, evidence):
         evidence.check("missing exact resume opens no replacement", len(clients.calls) == count and not rows("missing"))
 
         native_settings()
+        target = new_binding()
+        write = await submit(target, "edit-file", "activity")
+        outcome = await done("activity")
+        path = cwd / "file-activity"
+        operations = outcome.activity.operations
+        evidence.check("completed native Write supplies its Activity and exact physical Files",
+                       outcome.status == "completed" and outcome.activity.turn_id == write.turn_id
+                       and outcome.activity.physical_turn_id and outcome.activity.physical_turn_id != write.turn_id
+                       and [(row.kind.value, row.status.value, row.text) for row in operations]
+                       == [("fileChange", "completed", "写入文件 · " + str(path))]
+                       and [item.path for item in outcome.file_evidence().outputs] == [str(path)]
+                       and path.read_text() == "fixture data\n"
+                       and any(row["tool_result"] and not row["tool_error"] for row in rows("activity")))
+
         for scenario, label, status in (("tool-error", "tool", "completed"), ("http-529", "api", "failed"),
                                         ("disconnect-mid-stream", "fallback", "completed")):
             target = new_binding()
