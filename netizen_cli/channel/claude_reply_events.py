@@ -105,7 +105,7 @@ class ClaudeReplyEvents:
         return TurnResult(
             target=target,
             status=status,
-            content=body,
+            content=body if event.has_content else "",
             final_response=event.final_response,
             task_feedback=event.task_feedback,
             cwd=event.cwd,

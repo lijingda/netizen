@@ -1085,8 +1085,7 @@ asyncio.run(probe())
                             cli.close_gate.set()
                         self.assertTrue(await self.runtime.wait_idle(5))
                         expected = [("H1", "first"), ("H2", "second"), ("H1", order[0])]
-                        if not grouped:
-                            expected.append(("H1", order[1]))
+                        expected.append(("H1", None if grouped else order[1]))
                         expected.append(("H1", order[2]))
                         for anchor in ("H1", "H2"):
                             self.assertEqual([e.final_response for e in events(PhysicalAnswer) if e.origin == anchor],
@@ -1155,7 +1154,9 @@ asyncio.run(probe())
             await state_idle()
             self.assertEqual(cli.closes, 0)
             await asyncio.wait_for(self.delivered.wait(), 2)
-            self.assertEqual([type(e) for e in self.all_events], [LogicalTerminal])
+            await self.wait_until(lambda: isinstance(self.all_events[-1], LogicalTerminal))
+            self.assertEqual([type(e) for e in self.all_events], [PhysicalAnswer, LogicalTerminal])
+            self.assertFalse(self.all_events[0].has_content)
             h2 = await self.submit(origin="second")
             h2.release_receipt_attempt()
             cli.init()
@@ -1175,9 +1176,9 @@ asyncio.run(probe())
             cli.stream.put_nowait(SystemMessage("session_state_changed", {"session_id": cli.session, "state": "idle"}))
             self.assertTrue(await self.runtime.wait_idle(3))
         bodies = [(e.origin, e.final_response) for e in self.events if isinstance(e, OrdinaryConclusion)]
-        self.assertEqual(bodies[0], ("second", "H2 only"))
-        self.assertIsInstance(bodies[1][0], ConversationTarget)
-        self.assertEqual([body for _, body in bodies], ["H2 only", "cron"])
+        self.assertEqual(bodies[:2], [("origin", None), ("second", "H2 only")])
+        self.assertIsInstance(bodies[2][0], ConversationTarget)
+        self.assertEqual([body for _, body in bodies], [None, "H2 only", "cron"])
         self.assertEqual((len(self.clients.calls), len(cli.inputs), cli.closes), (1, 2, 1))
 
     async def test_lost_h2_write_uses_same_reader_and_reserves_until_proven(self):

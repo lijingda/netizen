@@ -822,8 +822,8 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         # Even without a Result body, finish the proven human's running presenter
         # and transfer this physical turn's validated partials before clearing them.
         evidence = execution.physical_activity.finish(status) if execution.physical_activity else FileEvidence()
-        finish_presentation = direct and isinstance(source.origin, ClaudeInputAnchor)
-        if frame.result or detail or live.partials or evidence.outputs or (status == "completed" and finish_presentation):
+        has_content = bool(frame.result or detail or live.partials or evidence.outputs)
+        if human is not None or has_content:
             turn_id = source.input_id if direct else frame.uuid
             state = partial(execution.cli_state, human.input_id if human else "")
             execution.refresh_display(state())
@@ -838,7 +838,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
                                    ),
                                    state=state, session_has_work=lambda: bool(live.tasks or live.crons),
                                    activity=snapshot, partial_answers=snapshot.partial_answers, file_evidence=lambda: evidence,
-                                   wake=wake, reply=human.reply if human else None,
+                                   has_content=has_content, wake=wake, reply=human.reply if human else None,
                                    publishable=execution.publication.valid)
             self._queue(execution, source, event, conversation_id=None if human else frame.uuid)
         execution.physical_activity = None

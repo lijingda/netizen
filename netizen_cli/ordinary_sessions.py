@@ -159,6 +159,7 @@ class PhysicalAnswer(OrdinaryConclusion):
     reply: LogicalReply | None = None
     publishable: Callable[[], bool] = lambda: True
     delivery_deadline: float | None = None
+    has_content: bool = True
 
 
 @dataclass(frozen=True, slots=True)
