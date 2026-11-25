@@ -1867,7 +1867,7 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             cli.result(user_message_uuid=None, result="cron")
 
     async def test_failed_fork_preserves_known_child_in_source_receipt(self):
-        for failure in ("verify", "publish", "bind"):
+        for failure in ("verify", "publish", "bind", "cancel root", "cancel seed", "cancel caller"):
             with self.subTest(failure=failure):
                 async with owner_channel() as (app, fx, clients, clock, ordinary):
                     clock[0] = 2
@@ -1887,16 +1887,39 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
                             stack.enter_context(patch.object(clients, "session_cwd", side_effect=[fx.project, None]))
                         elif failure == "publish":
                             fx.channel.send_results.append(SendResult(success=False))
+                        elif failure in {"cancel root", "cancel seed"}:
+                            sends = [sent_result("om_root", chat_id=scope.chat_id)] if failure == "cancel seed" else []
+                            send = stack.enter_context(patch.object(fx.channel, "send",
+                                side_effect=[*sends, asyncio.CancelledError()]))
+                        elif failure == "cancel caller":
+                            publishing = asyncio.Event()
+                            async def wait_for_cancel(*args):
+                                publishing.set()
+                                await asyncio.Future()
+                            send = stack.enter_context(patch.object(fx.channel, "send", side_effect=wait_for_cancel))
                         else:
                             fx.channel.send_results.append(sent_result("om_child", chat_id=scope.chat_id, thread_id=target.topic_id))
                             stack.enter_context(patch.object(fx.store, "create_fork_binding", side_effect=RuntimeError("已变化")))
-                        await app.handle_card_action(event)
+                        job = asyncio.create_task(app.handle_card_action(event))
+                        if failure == "cancel caller":
+                            await asyncio.wait_for(publishing.wait(), 3)
+                            job.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await job
+                            send.assert_awaited_once()
+                        else:
+                            await job
+                            if failure in {"cancel root", "cancel seed"}:
+                                self.assertEqual(send.await_count, len(sends) + 1)
+                                self.assertEqual(job.cancelling(), 0)
                     (source_id, cwd, title, child_id), = clients.forks
                     self.assertEqual((source_id, cwd, title), (native, fx.project, "draft name"))
                     receipt = fx.channel.updates[-1][1]
-                    self.assertIn(child_id, str(receipt))
-                    self.assertIn("可在 Claude Code 中查看", str(receipt))
-                    self.assertFalse(elements(receipt, "button"))
+                    if failure != "cancel caller":
+                        self.assertEqual(fx.channel.updates[-1][0], event.message_id)
+                        self.assertIn(child_id, str(receipt))
+                        self.assertIn("可在 Claude Code 中查看", str(receipt))
+                        self.assertFalse(elements(receipt, "button"))
                     self.assertIsNone(fx.store.active_binding(target.key))
                     self.assertEqual(fx.store.active_binding(scope.key).native_thread_id, native)
                     self.assertFalse(clients.calls)

@@ -44,6 +44,7 @@ from ..domain import (
     ScopeKind,
 )
 from ..error_messages import describe_error
+from ..external_calls import external_call
 from ..management.chat_directory import AvailableChat
 from ..management.service import ExactBindingTarget
 from ..session_providers import PartialFork
@@ -288,11 +289,11 @@ class ForkChannel(SideChannel):
                                                     title=intent.name or None)
                     child_id = fork.child_id
                 provider.require_fork_creation_open(project.alias)
-                root = await send_topic_message(self._channel, target_chat_id,
+                root = await external_call(send_topic_message(self._channel, target_chat_id,
                     fork_status_card(status="creating", **common),
                     SendOpts(receive_id_type="chat_id", uuid=hashlib.sha256(
                         (("netizen-fork-main:v1\0" if intent.landing == "main" else "netizen-fork-root:v1\0")
-                         + child_id).encode()).hexdigest()[:32]))
+                         + child_id).encode()).hexdigest()[:32])), isolate=claude)
                 if intent.landing == "main":
                     if not root.is_main_line:
                         raise TopicPublishError("飞书未确认消息发布到聊天主线，本次未绑定分支。", unknown=True)
@@ -300,11 +301,11 @@ class ForkChannel(SideChannel):
                     origin = root
                     topic_url = chat_open_url(target_chat_id)
                 else:
-                    origin = await complete_fresh_topic(
+                    origin = await external_call(complete_fresh_topic(
                         self._channel, root,
                         seed_content="分支创建结果请查看话题顶部卡片。创建成功后，可在本话题发送消息继续。",
                         seed_uuid=hashlib.sha256(("netizen-fork-seed:v1\0" + child_id).encode()).hexdigest()[:32],
-                    )
+                    ), isolate=claude)
                     if origin.thread_id is None or (target_chat_id == scope.chat_id and origin.thread_id == scope.topic_id):
                         raise TopicPublishError("飞书未创建新的普通话题，本次未绑定分支。", unknown=True)
                     destination = FeishuScope(self._app_id, target_chat_id, ScopeKind.TOPIC, origin.thread_id)
