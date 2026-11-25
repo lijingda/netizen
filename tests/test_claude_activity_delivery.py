@@ -27,10 +27,10 @@ async def until(predicate):
 
 
 @asynccontextmanager
-async def running_channel(*, cards=False, mention=False):
+async def running_channel(*, cards=False, mention=False, topic=None):
     async with owner_channel() as (app, fixture, clients, clock, ordinary):
         clock[0] = 2.
-        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.TOPIC if topic else ScopeKind.DIRECT, topic)
         binding = fixture.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_user",
             task_feedback=BindingTaskFeedback(progress_card_enabled=cards, completion_mention_enabled=mention))
         process = ProcessTransport([])
@@ -38,7 +38,7 @@ async def running_channel(*, cards=False, mention=False):
         app._progress_cards._poll_seconds = .01
         if cards:
             fixture.channel.reply_results.append(SendResult.ok(message_id="first"))
-        await app.handle_message(FakeMessage("work", message_id="H"))
+        await app.handle_message(FakeMessage("work", message_id="H", thread_id=topic, raw={"root_id": "root"} if topic else {}))
         client = clients.calls[-1]
         client.init(uuid="physical-A")
         await until(lambda: bool(app._progress_cards._sessions))
@@ -375,3 +375,36 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 await app.handle_card_action(direct_button_event(page, message_id="first", form_value={"turn_file_page": "1"}))
             self.assertEqual(len(channel.updates), before + 1)
             self.assertIn("未确认本轮文件卡片翻页成功", channel.send_calls[-1][1])
+
+    async def test_retired_file_pages_validate_their_own_receipts(self):
+        for conflict in ("message", "chat", "thread", "topic root"):
+            with self.subTest(conflict=conflict):
+                topic = "topic" if conflict == "topic root" else None
+                async with running_channel(cards=True, topic=topic) as (app, channel, client, execution, _, ordinary):
+                    page = await open_file_pages(channel, client, execution)
+                    start_wake(client)
+                    finish_wake(client)
+                    self.assertTrue(await ordinary.wait_idle(5))
+                    updates = len(channel.updates)
+                    matching = sent_result("first", chat_id="oc_direct", thread_id=topic, root_id="root" if topic else "H", parent_id="H")
+                    channel.card_update_results.extend([matching] * 3)
+                    await asyncio.gather(*(app.handle_card_action(direct_button_event(
+                        page, message_id="first", form_value={"turn_file_page": str(index)})) for index in (1, 1, 0)))
+                    cards = [card for mid, card in channel.updates[updates:] if mid == "first"]
+                    self.assertEqual([len(buttons(card, "turn-file.send")) for card in cards], [1, 1, TURN_FILE_PAGE_SIZE])
+                    self.assertTrue(all("全部完成" in str(card) for card in cards))
+                    self.assertFalse(channel.send_calls)
+
+                    mid = "another-card" if conflict == "message" else "first"
+                    channel.card_update_results.append(sent_result(mid, chat_id="elsewhere" if conflict == "chat" else "oc_direct",
+                                                                  thread_id="elsewhere" if conflict == "thread" else topic,
+                                                                  root_id="elsewhere" if conflict == "topic root" else None))
+                    channel.send_results.extend([SendResult.ok(message_id="feedback")] * 2)
+                    click = direct_button_event(page, message_id="first", form_value={"turn_file_page": "1"})
+                    before = len(channel.updates)
+                    await app.handle_card_action(click)
+                    await app.handle_card_action(click)
+                    self.assertEqual(len(channel.updates), before + 1)
+                    self.assertEqual(app._progress_cards.binding_location(execution.binding.id).unusable, {"first", mid})
+                    self.assertEqual(len(channel.send_calls), 2)
+                    self.assertTrue(all("未确认本轮文件卡片翻页成功" in body for _, body, _ in channel.send_calls))

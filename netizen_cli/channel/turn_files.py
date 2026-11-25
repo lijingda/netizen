@@ -38,6 +38,7 @@ from .app_values import (
     _validate_turn_file_reply,
 )
 from .session_cards import SessionCardChannel
+from .topics import CardReplyLocation
 
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
@@ -108,7 +109,8 @@ class TurnFileChannel(SessionCardChannel):
         turn_file = require_turn_file_path(intent.path)
         await self._send_turn_file(intent, turn_file)
 
-    async def _update_manifest_page(self, intent: TurnFileActionIntent, can_write: Callable[[], bool] = lambda: True) -> bool:
+    async def _update_manifest_page(self, intent: TurnFileActionIntent,
+                                    destination: Callable[[], CardReplyLocation] | None = None) -> bool:
         assert intent.page is not None
         assert intent.answer is not None
         if intent.reply is not None:
@@ -145,7 +147,11 @@ class TurnFileChannel(SessionCardChannel):
                 additions=intent.additions,
                 deletions=intent.deletions,
             )
-        return await self._safe_update_card(intent.source_id, card, can_write=can_write)
+        mid = intent.source_id
+        if destination is None:
+            return await self._safe_update_card(mid, card)
+        return await self._safe_update_card(mid, card, can_write=lambda: destination().accepts_message_id(mid),
+                                            validate=lambda result: destination().validate_page_receipt(result, mid))
 
     async def _send_turn_file(
         self,

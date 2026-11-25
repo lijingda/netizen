@@ -50,7 +50,7 @@ MUTANTS = (
      '(BODY, *(item for item in ledger.items if item[0] == "image"))',
      CHANNEL + "test_physical_delivery_settles_each_item_once_at_its_target"),
     ("contradicted card is revoked for this input only", "channel/topics", "self.binding.unusable.update(ids)",
-     "from dataclasses import replace\n            self.binding = replace(self.binding, unusable=self.binding.unusable | ids)",
+     "from dataclasses import replace\n        self.binding = replace(self.binding, unusable=self.binding.unusable | ids)",
      CHANNEL + "test_later_humans_share_the_verified_root_and_revoke_a_foreign_card"),
     ("final snapshot loses earlier partials", "runtime/claude_ordinary",
      "snapshot = execution.activity(turn_id, source.feedback, state=state(), final=body)",

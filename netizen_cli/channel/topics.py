@@ -102,17 +102,12 @@ class CardReplyLocation:
         self.cards.clear()
 
     def usable(self, message_id: str) -> bool:
-        owner = self.binding.owners.get(message_id)
-        return (not self.retired and not self.binding.retired and message_id not in self.binding.unusable
-                and (owner is None or owner is self))
+        return not self.retired and not self.binding.retired and self.accepts_message_id(message_id)
 
     def can_write(self, message_id: str) -> bool:
         return self.usable(message_id) and self.binding.owners.get(message_id) is self
 
-    def validate(self, result: SendResult, *, card: bool = False, updated_id: str | None = None,
-                 reply_to: str | None = None) -> SendResult:
-        if self.retired or self.binding.retired:
-            return SendResult(success=False)
+    def _receipt_location(self, result: SendResult, updated_id: str | None) -> tuple[TopicMessage, set[str]]:
         data = _object_field(result.raw, "data")
         nested = _nonempty_field(data, "message_id")
         mid = updated_id or result.message_id or nested or ""
@@ -120,14 +115,42 @@ class CardReplyLocation:
                             _nonempty_field(data, "thread_id"), _nonempty_field(data, "root_id"),
                             _nonempty_field(data, "parent_id"))
         ids = {value for value in (updated_id, result.message_id, nested, *(result.chunk_ids or ())) if value}
+        return sent, ids
+
+    def _disqualify(self, ids: set[str]) -> SendResult:
+        self.binding.unusable.update(ids)
+        self.binding.release_cards({mid for mid in ids
+                                    if (owner := self.binding.owners.get(mid)) and owner.binding is self.binding})
+        return SendResult(success=False)
+
+    def accepts_message_id(self, mid: str) -> bool:
+        owner = self.binding.owners.get(mid)
+        return mid not in self.binding.unusable and (owner is None or owner is self)
+
+    def validate_page_receipt(self, result: SendResult, updated_id: str) -> SendResult:
+        """Verify an issued replacement using only the destination evidence we have."""
+        sent, ids = self._receipt_location(result, updated_id)
+        root = self.binding.root or self.root
+        if (len(ids) != 1 or sent.chat_id != self.scope.chat_id or sent.thread_id not in (None, self.scope.topic_id)
+                or (root is not None and sent.root_id not in (None, root))
+                or (self.parent is not None and sent.parent_id not in (None, self.parent))):
+            if self.binding.retired:
+                return SendResult(success=False)
+            return self._disqualify(ids)
+        if not self.accepts_message_id(updated_id) or (result.success and receipt(result) != "confirmed"):
+            return SendResult(success=False)
+        return result
+
+    def validate(self, result: SendResult, *, card: bool = False, updated_id: str | None = None,
+                 reply_to: str | None = None) -> SendResult:
+        if self.retired or self.binding.retired:
+            return SendResult(success=False)
+        sent, ids = self._receipt_location(result, updated_id)
         root = self.binding.root or self.root
         if (not sent.matches_location(self.scope, root, parent=reply_to or self.parent, partial=True)
                 or (card and self.scope.topic_id and sent.root_id and not root)
                 or (card and len(ids) > 1)):
-            self.binding.unusable.update(ids)
-            self.binding.release_cards({mid for mid in ids
-                                        if (owner := self.binding.owners.get(mid)) and owner.binding is self.binding})
-            return SendResult(success=False)
+            return self._disqualify(ids)
         if any(not self.usable(value) for value in ids):
             return SendResult(success=False)
         if card and self.parent and (confirmed := _confirmed_reply_id(result)):
