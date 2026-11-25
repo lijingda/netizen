@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import unittest
+from unittest.mock import patch
 
 from lark_channel import SendResult
 
@@ -94,3 +95,27 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await ordinary.wait_idle(5))
             await until(lambda: bool(process.completed))
             self.assertEqual([args[1] for name, args, _ in process.events if name == "process.complete"], ["done"])
+
+    async def test_completed_step_survives_child_invalidation_between_polls(self):
+        async with running_channel() as (app, _, client, execution, process, ordinary):
+            background(client)
+            tool(client, "TaskList", "list")
+            result(client, "list", {"tasks": [{"id": "1", "subject": "observed-step", "status": "in_progress"}]})
+            await until(lambda: "observed-step" in str(process.events))
+            session, = app._progress_cards._sessions.values()
+            with patch.object(session, "observe", return_value=session.observe()):
+                tool(client, "TaskUpdate", "change")
+                result(client, "change", {"success": True, "taskId": "1", "updatedFields": ["status"],
+                                          "statusChange": {"from": "in_progress", "to": "completed"}})
+                tool(client, "TaskList", "child", parent="bg")
+                await until(lambda: execution.checklist.rows is None)
+            def step_ended():
+                updates = [args[1] for name, args, _ in process.events if name == "process.update"]
+                return ("step", "observed-step") in check_pairs(updates[-1])[1]
+            await until(step_ended)
+            self.assertFalse(process.completed)
+            client.result(result="initial answer")
+            await until(lambda: execution.admissible and not execution.delivery.queues)
+            start_wake(client)
+            finish_wake(client)
+            self.assertTrue(await ordinary.wait_idle(5))
