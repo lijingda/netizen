@@ -32,7 +32,7 @@ from ..external_calls import ExternalCallCancelled, external_call
 from ..ordinary_sessions import (
     ClaudeCliState, CliStateChanged, ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted,
     LocalExecutionSnapshot, LocalStatusSnapshot, OrdinaryCompletionHandler, OrdinaryEvent, OrdinaryInputRejected, OrdinarySessionPort,
-    OrdinarySessionDiverged, PreparedPrompt, ReleaseConfirmation, SessionShutdownPort, StopPreview,
+    OrdinarySessionDiverged, PhysicalTerminalHandler, PreparedPrompt, ReleaseConfirmation, SessionShutdownPort, StopPreview, TerminalStatus,
 )
 from .claude_activity import ClaudeChecklist, ClaudeTurnTools
 from .claude_delivery import AnchorDelivery
@@ -315,7 +315,7 @@ def _denial_notice(denials: object) -> str | None:
     return f"本次有 {len(denials)} 个操作被 Claude Code 的权限设置拒绝{tools}。如需允许，请在 Claude Code 设置中调整权限规则。"
 
 
-def _terminal(message: ResultMessage) -> tuple[str, str | None, str | None]:
+def _terminal(message: ResultMessage) -> tuple[TerminalStatus, str | None, str | None]:
     if type(message.is_error) is not bool:
         raise TerminalStateUnknown(UNKNOWN)
     match (message.subtype, message.terminal_reason, message.is_error):
@@ -367,6 +367,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self.on_physical_terminal: PhysicalTerminalHandler | None = None
         self.on_binding_deleted: Callable[[str], Awaitable[None]] | None = None
         self._activity: dict[str, _BindingActivity] = {}
         self._active: dict[str, _Execution] = {}
@@ -807,6 +808,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             execution.stopping = False
         submitted = execution.submitted(input_id)
         bodyless = (frame.subtype, frame.terminal_reason, frame.is_error) == ("success", None, False) and not frame.result
+        status: TerminalStatus
         status, body, detail = ("completed", None, None) if bodyless else _terminal(frame)
         source = human or execution.human
         if submitted:
@@ -828,14 +830,21 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             state = partial(execution.cli_state, human.input_id if human else "")
             execution.refresh_display(state())
             snapshot = execution.activity(turn_id, source.feedback, state=state(), final=body)
+            run_continues = human is not None and (
+                live.has_work(human.input_id) or (execution.pending is human and submitted is not human)
+            )
+            if human is not None and self.on_physical_terminal is not None:
+                # Freeze the process writer before any revocable publication is queued.
+                try:
+                    self.on_physical_terminal(snapshot, status, run_continues)
+                except Exception:
+                    logger.exception("Claude physical terminal presentation failed")
             event = PhysicalAnswer(source.binding.id, execution.session,
                                    turn_id, self._owner,
                                    human.source if human else execution.scope, status, body, detail,
                                    task_feedback=source.feedback, feedback_revision=source.binding.feedback_revision,
                                    cwd=self._owned_cwds[source.binding.id], logical_id=human.input_id if human else None,
-                                   run_continues=human is not None and (
-                                       live.has_work(human.input_id) or (execution.pending is human and submitted is not human)
-                                   ),
+                                   run_continues=run_continues,
                                    state=state, session_has_work=lambda: bool(live.tasks or live.crons),
                                    activity=snapshot, partial_answers=snapshot.partial_answers, file_evidence=lambda: evidence,
                                    has_content=has_content, wake=wake, reply=human.reply if human else None,

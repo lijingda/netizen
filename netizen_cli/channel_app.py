@@ -170,6 +170,7 @@ class ChannelApplication(ChannelEntry):
         self._progress_cards = _ReplyCardPresenter(channel, process_messages=process_messages,
                                                   process_location=self._process_reply_location)
         if self._local_sessions is not None:
+            self._local_sessions.on_physical_terminal = self._progress_cards.observe_physical_terminal
             self._local_sessions.on_binding_deleted = self._progress_cards.retire_binding
         self.handle_completion = codex_completion_handler(
             self.handle_ordinary_completion, self.handle_codex_completion, self._projection_failed,

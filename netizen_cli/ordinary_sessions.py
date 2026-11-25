@@ -3,7 +3,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from .backends import BackendPolicy
 from .bindings import BindingTaskFeedback, BindingTurnSettings, ThreadBinding
@@ -17,6 +17,10 @@ from .runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, ReleaseDisposition, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TerminalStateUnknown, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
 )
+
+
+TerminalStatus = Literal["completed", "interrupted", "failed"]
+PhysicalTerminalHandler = Callable[[TurnActivitySnapshot, TerminalStatus, bool], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +307,7 @@ class LocalStatusSnapshot(BindingRuntimeSnapshot):
 
 
 class LocalSessionManagement(Protocol):
+    on_physical_terminal: PhysicalTerminalHandler | None
     on_binding_deleted: Callable[[str], Awaitable[None]] | None
 
     @property

@@ -17,6 +17,7 @@ from ..cards import reply_card, turn_progress_card
 from ..domain import ReplyCardManifest, ReplyCardProjection, TurnFileActionIntent
 from ..turn_files import TURN_FILE_PAGE_SIZE
 from ..ordinary_sessions import LogicalReply
+from ..runtime.contracts import TurnActivitySnapshot
 from ..cards.callbacks import without_callback_nonces
 from ..cards.reply import feishu_answer_text, refresh_file_page, turn_progress_projection
 from ..partial_answers import PartialAnswer
@@ -190,11 +191,15 @@ class _ReplyCardPresenter:
             if not state.terminal:
                 self._process_tombstones[state.key] = (state.run or state.key, state.binding_id)
 
+    def observe_physical_terminal(self, snapshot: TurnActivitySnapshot, status: TerminalStatus, run_continues: bool) -> None:
+        key = PresentationKey(snapshot.binding_id, snapshot.thread_id, snapshot.turn_id)
+        self.process_result(key, "error" if status == "failed" else "done", snapshot, run_continues)
+
     def process_result(self, key: PresentationKey, reason: Reason, activity: Activity | None, run_continues: bool) -> None:
         self._process_tombstones.pop(key, None)
         state = self._process.get(key)
-        if state is None:
-            return
+        if state is None or state.verdict in ("done", "error"):
+            return  # A queued publication may follow an already-proven physical terminal.
         state.verdict = reason
         try:
             state.sample(activity, terminal=True)

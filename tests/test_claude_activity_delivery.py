@@ -130,6 +130,36 @@ class ClaudeActivityDeliveryTest(unittest.IsolatedAsyncioTestCase):
             await until(lambda: bool(process.completed))
             self.assertEqual([args[1] for name, args, _ in process.events if name == "process.complete"], ["done"])
 
+    async def test_proven_interruption_reaches_process_before_held_stop_ack_and_eof(self):
+        async with running_channel() as (_, channel, client, execution, process, ordinary):
+            background(client)
+            tool(client, "Read", "open", {"file_path": "open-human"})
+            await until(lambda: "open-human" in str(process.events))
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def acknowledge():
+                entered.set()
+                await release.wait()
+
+            stop = asyncio.create_task(ordinary.stop_exact(execution.binding.id, acknowledge=acknowledge))
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                client.result("error_during_execution", "aborted_tools", True, result=None, idle=False)
+                await until(lambda: execution.live.physical is None and execution.human.status == "interrupted")
+                client.stream.put_nowait(None)
+                await until(lambda: execution.broken)
+            finally:
+                release.set()
+                await stop
+            self.assertTrue(await ordinary.wait_idle(5))
+            await until(lambda: bool(process.completed))
+            updates = [args[1] for name, args, _ in process.events if name == "process.update"]
+            starts, ends = check_pairs(updates[-1])
+            self.assertTrue(starts)
+            self.assertEqual(set(starts), ends)
+            self.assertEqual([args[1] for name, args, _ in process.events if name == "process.complete"], ["done"])
+            self.assertFalse(channel.replies)
+
     async def test_completed_step_survives_child_invalidation_between_polls(self):
         async with running_channel() as (app, _, client, execution, process, ordinary):
             background(client)
