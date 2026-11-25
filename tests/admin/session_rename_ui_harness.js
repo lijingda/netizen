@@ -83,6 +83,23 @@ function open() {
 function change(value) { field("name").value = value; field("name").dispatch("input"); }
 function submit() { assert(field("editor").dispatch("submit").prevented); }
 const cases = {
+  async unicode_title() {
+    open();
+    const title = "🦊".repeat(61);
+    const limit = field("name").getAttribute("maxlength");
+    assert(limit === null || Number(limit) >= title.length);
+    change("🦊".repeat(121));
+    assert(field("save").disabled);
+    submit();
+    assert.equal(posts.length, 0);
+    change("🦊".repeat(118) + " ".repeat(121) + "🦊");
+    assert(!field("save").disabled);
+    change("\u0085" + title + "\u001f");
+    assert(!field("save").disabled);
+    submit(); await flush();
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].body.name, title);
+  },
   async superseded_refresh() {
     for (const newerFails of [false, true]) {
       listGate = null; listFailure = false;
