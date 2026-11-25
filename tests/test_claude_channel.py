@@ -14,7 +14,7 @@ from netizen_cli.backends import BackendPolicy, BackendUnsupported
 from netizen_cli.cards.controls import error_card, release_confirmation_card
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.channel.physical_delivery import INCOMPLETE
-from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.domain import FeishuScope, MessageContextAnchor, ScopeKind
 from netizen_cli.ordinary_sessions import CLAUDE_RELEASE_HINT, ReleaseConfirmation
 from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
 from tests.support import has_claude_sdk, requires_claude_sdk
@@ -1996,9 +1996,47 @@ class OwnerChannelTests(unittest.IsolatedAsyncioTestCase):
             await app.handle_card_action(direct_card_event(fx.channel, missing_mention))
             self.assertIn("卡片已过期", fx.channel.replies[-1][1])
             self.assertFalse(fx.store.get(binding.id).task_feedback.completion_mention_enabled)
+            replies_before_save = len(fx.channel.replies)
             await app.handle_card_action(direct_card_event(fx.channel, form))
-            self.assertIn("设置已保存", fx.channel.replies[-1][1])
+            mid, saved = fx.channel.updates[-1]
+            self.assertEqual(mid, "om_card")
+            self.assertEqual(len(fx.channel.replies), replies_before_save)
+            self.assertIn("会话配置已保存", str(saved))
+            self.assertIn("模型来源：原生 Claude 设置。", str(saved))
+            self.assertNotIn("Codex", str(saved))
+            self.assertFalse(elements(saved, "form"))
+
+            await app.handle_message(FakeMessage("/config", message_id="config-again"))
+            fx.channel.card_update_success = False
+            await app.handle_card_action(direct_card_event(fx.channel, form_values(fx.channel.replies[-1][1])))
+            self.assertEqual(fx.channel.replies[-1], ("om_card", f"会话 {binding.short_id} 的设置已保存。"))
             self.assertEqual(len(clients.calls), 1)
+
+    async def test_group_created_and_configured_cards_name_the_context_recipient(self):
+        async with owner_channel() as (app, fx, _, clock, _):
+            clock[0] = 2.
+            app._message_history = AsyncMock()
+            app._message_history.resolve_anchor.return_value = MessageContextAnchor("new-card", 1000)
+            for command in ("new", "config"):
+                mid = f"{command}-card"
+                fx.channel.reply_results.append(SendResult.ok(message_id=mid))
+                await app.handle_message(FakeMessage(f"/{command}", message_id=command, chat_id="oc_group", chat_type="group"))
+                picker = fx.channel.replies[-1][1]
+                form = form_values(picker)
+                options = {item["name"]: item["options"] for item in elements(picker.card, "select_static")}
+                if command == "new":
+                    form["new_project"] = options["new_project"][0]["value"]
+                    form["new_context_mode"] = next(option["value"] for option in options["new_context_mode"]
+                                                    if option["value"].endswith(":catch-up"))
+                fx.channel.fetched_messages[mid] = {"data": {"items": [{"chat_id": "oc_group"}]}}
+                fx.channel.chat_types["oc_group"] = "group"
+                event = direct_button_event({}, message_id=mid, form_value=form)
+                event.chat_id = "oc_group"
+                await app.handle_card_action(event)
+                updated_id, card = fx.channel.updates[-1]
+                self.assertEqual(updated_id, mid)
+                self.assertIn("作为背景交给 Claude Code。", str(card))
+                self.assertNotIn("Codex", str(card))
 
     @requires_claude_sdk
     async def test_explore_card_reconciliation_orderings(self):
