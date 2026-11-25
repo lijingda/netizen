@@ -286,7 +286,7 @@ def _turn_progress_status_lines(
             if progress.plan_may_be_stale
             else ""
         )
-        lines.append(f"任务清单：Codex 尚未生成{suffix}")
+        lines.append(f"任务清单：尚未生成{suffix}")
         return tuple(lines)
 
     title = "任务清单"
