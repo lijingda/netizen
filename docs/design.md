@@ -1748,7 +1748,7 @@ Goal 换物理 Turn 继续重置 Activity。完整取舍见
 
 两个后端共用有界的活动窗口、排序、分段、子任务聚合与清单展示。Claude 每个 init UUID 对应独立的物理轮，只在这轮内配对顶层调用与结果。卡片操作时间取收到消息时的本地毫秒。展示版本随操作、清单、片段及状态行变化，准入复核和停止使用独立的控制版本。
 
-Claude 客户端新建会话时清单已知为空，续接时未知。顶层成功的 TodoWrite 或 TaskList 可整体替换；已知清单接受 TaskCreate、TaskUpdate 的已证实变更。子层清单工具或无法解释的清单结果使其未知。仅展示本轮已生成的已知步骤，外部共享或恢复的清单可能要到 TaskList 后才完整。可展示的工具与字段、匿名执行的归属及门禁见 [ADR 0108](adr/0108-project-claude-activity-and-files-from-pinned-native-tool-frames.md)。
+Claude 客户端无论新建还是续接，均从空集合开始展示本连接观察到的步骤。清单与 Files 只采用实际结果。TodoWrite 以 newTodos、TaskList 以返回列表整体替换。TaskCreate 追加已证实的 ID 和标签，TaskUpdate 只应用结果报告的状态变化。更新未观察过的 ID 时保留原清单。已显示的步骤若只确认修改了 subject 而没有新标签，清单转为未知。子层清单工具或无法解释的清单结果使其未知。仅展示本轮已生成的已知步骤，本连接未观察到的旧步骤要到 TaskList 后才显示。可展示的工具与字段、匿名执行的归属及门禁见 [ADR 0108](adr/0108-project-claude-activity-and-files-from-pinned-native-tool-frames.md)。
 
 Codex Runtime 为 exact Ordinary Active Turn、Goal 当前 exact 物理 Turn 与 exact active Side Turn
 维护带 revision 的有界投影；包含 accepted 后的 running/stopping/pausing、完整原生

@@ -629,7 +629,7 @@ def _status_event(
     )
 
 
-def _operation_summary(label: str, *details: str | None, limit: int) -> str:
+def operation_summary(label: str, *details: str | None, limit: int) -> str:
     # Sanitize each native field before combining it with display labels.
     parts = [label]
     for detail in details:
@@ -647,19 +647,19 @@ def _command_activity_summary(item: CommandExecutionThreadItem, *, limit: int) -
     if len(item.command_actions) == 1:
         action = item.command_actions[0].root
         if type(action) is ReadCommandAction and action.path.root.strip():
-            summary = _operation_summary("读取文件", action.path.root, limit=limit)
+            summary = operation_summary("读取文件", action.path.root, limit=limit)
         elif (
             type(action) is ListFilesCommandAction
             and action.path
             and action.path.strip()
         ):
-            summary = _operation_summary("列出文件", action.path, limit=limit)
+            summary = operation_summary("列出文件", action.path, limit=limit)
         elif type(action) is SearchCommandAction and (
             (action.query and action.query.strip()) or (action.path and action.path.strip())
         ):
-            summary = _operation_summary("搜索内容", action.query, action.path, limit=limit)
+            summary = operation_summary("搜索内容", action.query, action.path, limit=limit)
     if summary is None:
-        summary = _operation_summary("执行命令", item.command, limit=limit)
+        summary = operation_summary("执行命令", item.command, limit=limit)
     if item.exit_code is not None and item.exit_code != 0:
         suffix = f" · 退出码 {item.exit_code}"
         summary = (
@@ -683,15 +683,15 @@ def _file_change_activity_summary(item: FileChangeThreadItem, *, limit: int) -> 
         safe_path = sanitize_activity_operation_text(path, limit=limit)
         changes.append(f"{label} {safe_path}" if safe_path else label)
     detail = "、".join(changes) + ("、…" if len(item.changes) > 3 else "")
-    return _operation_summary("修改文件", detail, limit=limit)
+    return operation_summary("修改文件", detail, limit=limit)
 
 
 def _web_search_activity_summary(item: WebSearchThreadItem, *, limit: int) -> str:
     action = item.action.root if item.action is not None else None
     if type(action) is OpenPageWebSearchAction:
-        return _operation_summary("打开网页", action.url or item.query, limit=limit)
+        return operation_summary("打开网页", action.url or item.query, limit=limit)
     if type(action) is FindInPageWebSearchAction:
-        return _operation_summary(
+        return operation_summary(
             "查找网页内容", action.pattern, action.url or item.query, limit=limit,
         )
     if type(action) is SearchWebSearchAction:
@@ -701,9 +701,9 @@ def _web_search_activity_summary(item: WebSearchThreadItem, *, limit: int) -> st
                 sanitize_activity_operation_text(query, limit=limit) or ""
                 for query in queries[:3]
             ) + ("、…" if len(queries) > 3 else "")
-            return _operation_summary("搜索网页", detail, limit=limit)
-        return _operation_summary("搜索网页", action.query or item.query, limit=limit)
-    return _operation_summary("搜索网页", item.query, limit=limit)
+            return operation_summary("搜索网页", detail, limit=limit)
+        return operation_summary("搜索网页", action.query or item.query, limit=limit)
+    return operation_summary("搜索网页", item.query, limit=limit)
 
 
 def _tool_name(value: object) -> str:
