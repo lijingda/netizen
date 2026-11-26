@@ -192,11 +192,9 @@ class ProcessPresentation:
     def __init__(self, key: PresentationKey, port: ProcessMessages,
                  channel: ReplyChannel, location: Callable[[], ProcessLocation | None],
                  clock: Callable[[], float],
-                 timeout: float, on_closed: Callable[[ProcessPresentation], None] = lambda _: None,
-                 *, claimed_cot_ids: set[str]) -> None:
+                 timeout: float, on_closed: Callable[[ProcessPresentation], None] = lambda _: None) -> None:
         self.key = key
         self.port, self.channel, self.resolve = port, channel, location
-        self.claimed_cot_ids = claimed_cot_ids
         self.clock, self.timeout, self.on_closed = clock, timeout, on_closed
         self.terminal = False
         self.items = ProcessList(key)
@@ -263,10 +261,6 @@ class ProcessPresentation:
             if not isinstance(created, Rejected):
                 logger.warning("process message creation unconfirmed")
             return False
-        if created.cot_id in self.claimed_cot_ids:
-            logger.warning("process message identity collision")
-            return False
-        self.claimed_cot_ids.add(created.cot_id)
         async with asyncio.timeout(self.timeout):
             verified = await _verify(self.channel, location, created)
         if not verified or self.closed:

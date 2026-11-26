@@ -611,7 +611,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.channel.reply = sdk_reply
         return driver
 
-    async def test_scheduled_answer_receipt_confirms_delivery_even_if_its_id_matches_a_process_message(self):
+    async def test_confirmed_process_does_not_confirm_an_unverified_scheduled_answer(self):
         wire = ProcessTransport([])
         self.app._progress_cards._process_port = wire.port
         mid = "synthetic-process-1"
@@ -632,11 +632,11 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         claim, request = await self.completion_fixture()
         state, = self.app._progress_cards._process.values()
         await state.ready.wait()
-        self.channel.reply_results.append(sent_result(mid, chat_id="oc_group", thread_id="omt_fresh"))
+        self.channel.reply_results.append(sent_result("answer", chat_id="oc_group", thread_id="other-topic"))
         await self.finish_fixture(claim, request)
         await state.task
         self.assertEqual(wire.completed, {mid})
-        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
 
     async def finish_fixture(self, claim, request, content="验收成功", *, activity=None):
         await self.app.handle_completion(TurnOutcome(binding_id=request["binding"].id,

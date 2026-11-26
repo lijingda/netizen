@@ -144,7 +144,7 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("app", "chat", ScopeKind.DIRECT)
         message = ProcessPresentation(key, port, None,
             lambda: ProcessLocation(scope, "input", None),
-            lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+            lambda: 1_800_000_001, 1)
         try:
             async with asyncio.timeout(2):
                 message.sample(process_snapshot(1))
@@ -187,7 +187,7 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
                 channel = SimpleNamespace(fetch_message=AsyncMock(return_value={"code":0,"data":{"items":[row]}}))
                 port = process_port()
                 message = ProcessPresentation(key, port, channel,
-                    lambda: ProcessLocation(scope, "input", "root"), lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+                    lambda: ProcessLocation(scope, "input", "root"), lambda: 1_800_000_001, 1)
                 message.sample(process_snapshot(1))
                 await message.ready.wait()
                 message.finish("done")
@@ -284,7 +284,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
                     read = AsyncMock(return_value={"code": 0, "data": {"items": [row]}})
                     port = process_port()
                     state = ProcessPresentation(PresentationKey("binding", "native-one", "turn-one"), port, fx.channel,
-                        lambda: fx.app._process_reply_location(origin, None), lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+                        lambda: fx.app._process_reply_location(origin, None), lambda: 1_800_000_001, 1)
                     with patch.object(fx.channel, "fetch_message", read):
                         self.assertTrue(await state._create())
                     port.create.assert_awaited_once_with(chat, mid, True)
@@ -303,7 +303,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
         read, port = AsyncMock(side_effect=fetch), process_port()
         state = ProcessPresentation(PresentationKey("binding", "native-one", "turn-one"), port,
             SimpleNamespace(fetch_message=read), lambda: ProcessLocation(scope, "card", None),
-            lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+            lambda: 1_800_000_001, 1)
         async with asyncio.timeout(2):
             state.sample(process_snapshot(1))
             await entered.wait()

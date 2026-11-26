@@ -104,7 +104,6 @@ class _ReplyCardPresenter:
         self._channel = channel
         self._process_port, self._process_location, self._clock = process_messages, process_location, clock
         self._process: dict[PresentationKey, ProcessPresentation] = {}
-        self._claimed_cot_ids: set[str] = set()
         self._process_tombstones: set[PresentationKey] = set()
         self._poll_seconds = poll_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
@@ -120,7 +119,7 @@ class _ReplyCardPresenter:
         resolve = self._process_location
         state = ProcessPresentation(target.key, self._process_port, self._channel,
             lambda: resolve(target.origin, root_id), self._clock, PROCESS_OPERATION_TIMEOUT_SECONDS,
-            self._forget_process, claimed_cot_ids=self._claimed_cot_ids)
+            self._forget_process)
         self._process[target.key] = state
         return state
 
