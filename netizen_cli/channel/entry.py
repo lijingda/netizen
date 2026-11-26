@@ -118,7 +118,7 @@ class ChannelEntry(CommandChannel):
             direct = _message_chat_type(message) == "p2p"
             if not direct and not bool(getattr(message, "mentioned_bot", False)):
                 return
-            pending = None if not self._policy.allows(OperationId.SCHEDULE) else self._bindings.schedules.pending_route(
+            pending = self._bindings.schedules.pending_route(
                 app_id=self._app_id,
                 chat_id=scope.chat_id,
                 topic_id=scope.topic_id,
