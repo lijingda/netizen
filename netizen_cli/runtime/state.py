@@ -36,6 +36,7 @@ from ..partial_answers import PartialAnswer
 from ..activity_accumulator import ActivityAccumulator
 from ..progress_card_settings import ProgressCardSettings
 from .thread_naming import ThreadNamer
+from .turn_start import TurnStartAttempt
 from .codex_contracts import RuntimeOutcome, CompletionHandler
 from .contracts import (
     NativeTurnHandle,
@@ -121,6 +122,7 @@ class _ActiveTurn:
     cleanup_succeeded: bool = False
     terminal_observed: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    start_stop_receipts: set[asyncio.Event] = field(default_factory=set)
     in_progress_observed: bool = False
     observation_error: str | None = None
     recheck_ready: asyncio.Event | None = None
@@ -313,6 +315,7 @@ class RuntimeState:
     _on_input_received: InputReceivedHandler | None
     _poll_interval_seconds: float
     _active: dict[str, _ActiveTurn]
+    _turn_starts: dict[str, TurnStartAttempt]
     _retiring_turns: dict[tuple[str, str], _ActiveTurn]
     _compacting: dict[str, _ActiveCompaction]
     _goals: dict[str, _ActiveGoal]
@@ -326,6 +329,9 @@ class RuntimeState:
     _name_generation_requests: dict[str, asyncio.Event]
     _accepting: bool
     _thread_namer: ThreadNamer | None
+
+    def capture_turn_start(self, binding_id: str) -> TurnStartAttempt | None:
+        return self._turn_starts.get(binding_id)
 
     def _thread_handle(self, thread_id: str) -> AsyncThread:
         """Open the public SDK handle for one exact native Thread."""

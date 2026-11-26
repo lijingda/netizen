@@ -9,6 +9,7 @@ from .bindings import BindingTaskFeedback, ThreadBinding
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
+from .runtime.turn_start import StartedTurn, TurnStartAttempt
 from .runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TurnActivitySnapshot, TurnObservationUnavailableOutcome,
@@ -55,9 +56,10 @@ OrdinaryCompletionHandler = Callable[[OrdinaryEvent], Awaitable[None]]
 
 @dataclass(frozen=True, slots=True)
 class StopPreview:
-    """Receipt text captured before the stop operation selects its target."""
+    """A stop receipt and, during start, its exact in-process target."""
 
     acknowledgement: str
+    start: TurnStartAttempt | None = None
 
 
 class OrdinarySessionPort(Protocol):
@@ -77,11 +79,14 @@ class OrdinarySessionPort(Protocol):
 
     def reply_blocked_by_lifecycle(self, binding_id: str) -> bool: ...
 
+    def capture_turn_start(self, binding_id: str) -> TurnStartAttempt | None: ...
+
     async def preview_stop(self, binding: ThreadBinding) -> StopPreview | None: ...
 
     async def stop_exact(
         self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None, expected_turn_id: str | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition: ...
 
     async def recheck_turn_exact(
