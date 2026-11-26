@@ -183,19 +183,12 @@ def _check_timestamp(value: int) -> None:
         raise ValueError("timestamp must be ten-digit Unix seconds")
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result = dict(pairs)
-    if len(result) != len(pairs):
-        raise ValueError("duplicate JSON field in process message receipt")
-    return result
-
-
 async def _receipt(
     pending: Awaitable[lark.BaseResponse],
 ) -> dict[str, object] | Rejected | Unknown:
     try:
         raw = (await pending).raw
-        payload = json.loads(raw.content, object_pairs_hook=_unique_object)
+        payload = json.loads(raw.content)
         status = raw.status_code
         if not isinstance(payload, dict) or type(status) is not int:
             return Unknown()

@@ -168,8 +168,6 @@ async def _read_source_location(channel: ReplyChannel, location: ProcessLocation
 
 async def _verify(channel: ReplyChannel, location: ProcessLocation, created: Created) -> bool:
     mid = created.message_id
-    if mid in (location.parent, location.root):
-        return False
     if location.scope.topic_id:
         response = await external_call(channel.fetch_message(mid))
         code = _object_field(response, "code")

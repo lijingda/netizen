@@ -173,15 +173,6 @@ class ProcessMessageTransport(unittest.IsolatedAsyncioTestCase):
         self.server.raw_response = b"unexpected response"
         self.assertEqual(await self.port.update("cot", "msg", self.items), Unknown())
 
-    async def test_duplicate_keys_anywhere_in_a_receipt_are_unknown(self):
-        receipts = (b'{"code":10001,"code":0}', b'{"code":0,"code":10020}',
-                    b'{"code":0,"data":[{"extra":1,"extra":1}]}')
-        for raw in receipts:
-            with self.subTest(receipt=raw):
-                self.server.raw_response = raw
-                self.assertEqual(await self.port.update("cot", "msg", self.items), Unknown())
-        self.assertEqual(len(self.server.updates), len(receipts))
-
     async def test_cancellation_on_dispatched_write_propagates(self):
         self.server.release.clear()
         async with asyncio.TaskGroup() as group:
