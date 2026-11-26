@@ -71,12 +71,14 @@ The usage guides are not implementation guides.
 ## Architecture
 
 - Every backend meets the [backend contract](docs/design.md#后端契约) (ADR 0111): the
-  core native facts plus only the capability modules it declares. A capability either
-  maps to its module port or is closed at every entry. Shared layers never branch on
-  backend identity or grow parallel paths. The shared presentation event vocabulary and
-  its single delivery policy change only by ADR. Guarantees rest on native facts pinned
-  by gates, never on measured timing. New modules are defined in Netizen terms so any
-  backend, including Codex, can implement them.
+  core native facts plus only the capability modules it declares. Each capability item
+  is either implemented through its module port or closed at every entry. Shared
+  execution, eligibility and delivery logic never branches on backend identity or grows
+  parallel paths; existing direct Codex calls move behind ports as ADR 0111 §6 describes.
+  The shared presentation event vocabulary and its single delivery policy change only
+  by ADR. Guarantees rest on native facts pinned by gates, never on measured timing.
+  New modules are defined in Netizen terms so any backend, including Codex, can
+  implement them.
 - The in-process Admin Web is a management-only adapter over the shared
   application/runtime boundary (ADR 0031). It manages existing sessions but does
   not create ordinary Bindings; interactive session creation belongs to Feishu.
