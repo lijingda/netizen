@@ -112,7 +112,7 @@ class _ReplyCardPresenter:
         self._closed = False
 
     def _process_for(self, target: ReplyTarget, root_id: str | None = None) -> ProcessPresentation | None:
-        if (not target.key.side and not target.key.owner_id) or target.key in self._process_tombstones or self._closed or self._process_port is None or self._process_location is None:
+        if not target.key.owner_id or target.key in self._process_tombstones or self._closed or self._process_port is None or self._process_location is None:
             return None
         if state := self._process.get(target.key):
             return state
