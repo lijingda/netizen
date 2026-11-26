@@ -79,6 +79,12 @@ The usage guides are not implementation guides.
   by ADR. Guarantees rest on native facts pinned by gates, never on measured timing.
   New modules are defined in Netizen terms so any backend, including Codex, can
   implement them.
+- Delegate native-owned semantics (ADR 0112). First check host-owned state (owner
+  gate, capability items, Scope/Binding identity, captured version, cursor, stop,
+  lifecycle and unknown occupancy) and reject before writing if any fails. Then, for
+  native-owned behavior such as busy handling, configuration validity or permissions,
+  send the request and map the native response. Pre-reject only when a native response
+  could not prove what happened.
 - The in-process Admin Web is a management-only adapter over the shared
   application/runtime boundary (ADR 0031). It manages existing sessions but does
   not create ordinary Bindings; interactive session creation belongs to Feishu.
@@ -103,8 +109,11 @@ The usage guides are not implementation guides.
   or convert it into a later Turn. On Codex, running input steers the exact Turn.
   Stop the exact current Turn.
   Only the verified session-tool entry uses native ExternalMessage start/join
-  (ADR 0081); it does not change ordinary input admission. Human messages,
-  question-card answers and scheduled inputs retain their exact-Turn admission.
+  (ADR 0081); it does not change ordinary input admission. On Codex, human
+  messages, question-card answers and scheduled inputs retain exact-Turn admission.
+  A backend using the handoff model targets the captured session and admission
+  version; an entry requiring an exact physical Turn still requires that identity
+  (ADR 0112).
   Collaboration tools use native Thread IDs and respect this instance's configured
   access ranges.
   Goal rollover never redirects a prepared input to another physical Turn.
