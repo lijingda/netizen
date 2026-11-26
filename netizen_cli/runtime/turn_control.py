@@ -15,6 +15,7 @@ from ..domain import (
     ActiveState,
     GoalOperationState,
 )
+from ..external_calls import external_call
 from .contracts import (
     SteerRace,
     TurnObservationUnavailable,
@@ -88,7 +89,7 @@ class TurnControlRuntime(GoalRuntime):
             if acknowledge is not None:
                 try:
                     async with asyncio.timeout(limits.STOP_ACK_ATTEMPT_TIMEOUT_SECONDS):
-                        await acknowledge()
+                        await external_call(acknowledge())
                 except TimeoutError:
                     logger.warning(
                         "stop acknowledgement timed out; continuing native stop",

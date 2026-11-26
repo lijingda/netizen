@@ -168,6 +168,35 @@ class TurnStartStopTest(unittest.IsolatedAsyncioTestCase):
             self.assertLess(events.index(("cleanup", first.thread_id)), events.index(("first", INTERRUPTED)))
             self.assertEqual(case.replies("first").count(INTERRUPTED), 1)
 
+    async def test_cancelled_stop_acknowledgement(self):
+        for pending, cancel_caller in itertools.product((True, False), repeat=2):
+            with self.subTest(pending=pending, cancel_caller=cancel_caller):
+                async with stop_case() as (case, tasks):
+                    first = tasks.create_task(case.message("first", "first"))
+                    await case.held.entered.wait()
+                    if not pending:
+                        case.held.release.set()
+                        await first
+                    send = asyncio.get_running_loop().create_future()
+                    with patch.object(case.allow_ack, "wait", new=lambda: send):
+                        stop = tasks.create_task(case.message("/stop", "stop"))
+                        await case.first_stop_reply.wait()
+                        if cancel_caller:
+                            stop.cancel()
+                        else:
+                            send.cancel()
+                        case.held.release.set()
+                        await first
+                        if cancel_caller:
+                            with self.assertRaises(asyncio.CancelledError):
+                                await stop
+                        else:
+                            await stop
+                            self.assertTrue(await case.runtime.wait_idle(2))
+                    handle, = case.codex.handles
+                    expected = (0, []) if cancel_caller else (1, [handle.thread_id])
+                    self.assertEqual((handle.interrupt_count, case.cleanup.calls), expected)
+
     async def test_stop_orderings(self):
         # Stop is captured before the start response. The second input may arrive on
         # either side of the stop and the response. Holding Scope delays redemption
