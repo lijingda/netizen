@@ -66,15 +66,9 @@ class CodexOrdinarySessions:
         expected_activity_revision: int | None = None, expected_turn_id: str | None = None,
         start: StartedTurn | None = None,
     ) -> StopDisposition:
-        if expected_activity_revision is None:
-            if expected_turn_id is not None:
-                raise ValueError("expected_turn_id requires expected_activity_revision")
-            if start is not None:
-                return await self._runtime.stop_exact(binding_id, acknowledge=acknowledge, start=start)
-            return await self._runtime.stop_exact(binding_id, acknowledge=acknowledge)
         return await self._runtime.stop_exact(
             binding_id, acknowledge=acknowledge, expected_activity_revision=expected_activity_revision,
-            expected_turn_id=expected_turn_id,
+            expected_turn_id=expected_turn_id, start=start,
         )
 
     async def recheck_turn_exact(

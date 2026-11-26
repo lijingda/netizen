@@ -13,8 +13,10 @@ from netizen_cli.backends import BackendPolicy, BackendUnsupported, Provider
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.management import CurrentBindingTarget
 from netizen_cli.runtime.contracts import NativeThreadMetadata
+from netizen_cli.schedules.models import ScheduleRule
 from netizen_cli.session_providers import SessionNames
 from netizen_cli.session_settings import SessionFormView
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from tests.support.channel_cards import (
     _card_button_value,
     _elements,
@@ -255,7 +257,20 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fx.runtime.generate_name_calls, [])
         result = await self.request("/api/v1/sessions/rename-extra", {})
         self.assertEqual(result.status, 404)
+        store = self.fx.store.schedules
+        plan = store.create(
+            name="reserved topic", instructions="check", project_alias=self.binding.project_alias,
+            app_id=self.scope.app_id, chat_id=self.scope.chat_id, workspace=WorkspacePolicy(),
+            schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create", now=100,
+        )
+        claim = store.claim_due(plan.plan_id, app_id=self.scope.app_id, now=160)
+        store.set_run(claim.run.id, phase="publishing_topic", topic_id="reserved")
         with patch.object(self.fx.management, "schedules", None):
+            message = FakeMessage("/stop", message_id="om_stop", thread_id="reserved")
+            with patch.object(self.fx.app, "_control") as control:
+                await self.fx.app.handle_message(message)
+                self.assertEqual(self.fx.channel.replies[-1], (message.id, "定时任务正在启动，请稍后重发。"))
+                control.assert_not_awaited()
             with self.assertRaises(BackendUnsupported):
                 await self.fx.app.dispatch_scheduled_run(None)
             result = await self.request("/api/v1/schedules/run-now", {})

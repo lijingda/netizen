@@ -12,6 +12,7 @@ from netizen_cli.bindings import (
 )
 from netizen_cli.ordinary_sessions import PreparedPrompt
 from netizen_cli.runtime.native_inputs import to_codex_input
+from netizen_cli.runtime.turn_start import StartedTurn
 from netizen_cli.codex_runtime import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
@@ -665,6 +666,7 @@ class StubRuntime:
         acknowledge=None,
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition:
         if expected_activity_revision is not None:
             self._require_activity(

@@ -18,6 +18,7 @@ from netizen_cli.ordinary_sessions import (
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.codex_replies import codex_completion_handler
+from netizen_cli.runtime.turn_start import StartedTurn
 from netizen_cli.runtime.contracts import (
     ActiveTurnSnapshot, ContextBoundaryCommitFailed, ContextCursorCommit, RuntimeClosed, SteerRace, StopAcknowledger,
     StopDisposition, Submission, SubmitDisposition, ThreadActivityChanged,
@@ -54,7 +55,9 @@ class StartOnlySessions:
     async def stop_exact(
         self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None, expected_turn_id: str | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition:
+        assert start is None
         if expected_activity_revision is not None:
             self._require_current(binding_id, expected_activity_revision, expected_turn_id)
         current = self.activity
@@ -71,23 +74,6 @@ class StartOnlySessions:
     ) -> ActiveTurnSnapshot:
         current = self._require_current(binding_id, expected_activity_revision, expected_turn_id)
         return ActiveTurnSnapshot(binding_id, current.thread_id, current.turn_id, "ou_user", current.state)
-
-
-class CodexOrdinarySessionsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_stop_exact_preserves_preconditions(self):
-        runtime = AsyncMock()
-        sessions = CodexOrdinarySessions(runtime)
-        with self.assertRaisesRegex(ValueError, "expected_activity_revision"):
-            await sessions.stop_exact("binding", expected_turn_id="turn")
-        runtime.stop_exact.assert_not_awaited()
-
-        for turn_id in ("turn", None):
-            await sessions.stop_exact("binding", expected_activity_revision=3, expected_turn_id=turn_id)
-            runtime.stop_exact.assert_awaited_with(
-                "binding", acknowledge=None, expected_activity_revision=3, expected_turn_id=turn_id,
-            )
-        await sessions.stop_exact("binding")
-        runtime.stop_exact.assert_awaited_with("binding", acknowledge=None)
 
 
 class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
@@ -340,3 +326,16 @@ class OrdinaryPortContract:
 
 class CodexOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyncioTestCase):
     backend = "codex"
+
+    async def test_stop_exact_rejects_invalid_targets_before_interrupt(self):
+        receipt = await self.submit(self.binding)
+        binding_id = self.binding.id
+        revision = self.port.runtime_snapshot_exact(binding_id).activity_revision
+        start = StartedTurn(binding_id, receipt.thread_id, receipt.turn_id)
+        with self.assertRaisesRegex(ValueError, "expected_turn_id requires expected_activity_revision"):
+            await self.port.stop_exact(binding_id, expected_turn_id=receipt.turn_id)
+        with self.assertRaisesRegex(ValueError, "cannot be combined with a captured start"):
+            await self.port.stop_exact(binding_id, expected_activity_revision=revision,
+                                       expected_turn_id=receipt.turn_id, start=start)
+        self.assertEqual(self.codex.handles[0].interrupt_count, 0)
+        await self.finish(receipt)
