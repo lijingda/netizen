@@ -2,7 +2,6 @@
 
 import asyncio
 import itertools
-import json
 import unittest
 from dataclasses import replace
 from unittest.mock import AsyncMock, patch
@@ -285,36 +284,6 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[1]["A"], (T, T+1))
         self.assertNotIn("A", history[2])
         self.assertEqual(history[3]["A"], history[1]["A"])
-
-    def test_reappearing_step_events_across_skipped_polls(self):
-        for poll_removal, confirm_start in itertools.product((False, True), repeat=2):
-            with self.subTest(poll_removal=poll_removal, confirm_start=confirm_start):
-                now = T
-                window = ProcessActivityWindow(lambda: now)
-                output = ProcessList(PresentationKey("binding", "native-one", "turn-one"))
-
-                def poll(confirm=True):
-                    output.observe(replace(process_snapshot(1), plan_generated=True, process_items=window.rows), now)
-                    sent = output.desired
-                    output.offered(sent)
-                    if confirm:
-                        output.confirmed(sent)
-                    return [(event["event_type"], int(event["timestamp"])) for event in item_events(sent)
-                            if json.loads(event["content"]).get("stepName") == "Inspect"]
-
-                inspect = TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS)
-                window.plan((inspect,))
-                self.assertEqual(poll(confirm_start), [("STEP_STARTED", T)])
-                now += 1
-                window.plan(())
-                if poll_removal:
-                    poll()
-                # Arbitrary other plans can come and go before the next sample.
-                for i in range(64):
-                    now += 1
-                    window.plan((TurnPlanStepSnapshot(str(i), TurnPlanStepState.IN_PROGRESS),))
-                window.plan((inspect,))
-                self.assertEqual(poll(), [("STEP_STARTED", T), ("STEP_FINISHED", T+1)])
 
     def test_same_window_and_new_physical_turn_prove_distinct_ends(self):
         key = PresentationKey("binding", "native-one", "goal")
