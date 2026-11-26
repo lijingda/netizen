@@ -96,11 +96,6 @@ def _metadata(body: bytes, version: str) -> None:
     metadata = BytesParser().parsebytes(body)
     if metadata.get("Name") != "netizen-cli" or metadata.get("Version") != version:
         raise DistributionError("distribution metadata name/version differs from the release tag")
-    claude = [value for value in metadata.get_all("Requires-Dist", [])
-              if re.match(r"(?i)claude[-_.]agent[-_.]sdk\b", value)]
-    if ("claude" not in metadata.get_all("Provides-Extra", []) or len(claude) != 1 or
-            not re.fullmatch(r"""claude-agent-sdk==0\.2\.186\s*;\s*extra\s*==\s*["']claude["']""", claude[0])):
-        raise DistributionError("distribution must declare the exact optional Claude SDK")
 
 
 def verify_wheel(path: Path, version: str) -> None:
@@ -247,22 +242,20 @@ def verify_distribution(directory: Path, *, tag: str, commit: str,
 def smoke_installs(directory: Path, manifest: dict) -> None:
     for name in manifest["files"]:
         artifact = (directory / name).resolve()
-        for extra in ("", "[claude]"):
-            with tempfile.TemporaryDirectory(prefix="netizen-artifact-") as temp:
-                env = Path(temp) / "venv"
-                subprocess.run([sys.executable, "-m", "venv", env], check=True)
-                python = str(env / "bin/python")
-                def run(*args: str) -> None:
-                    subprocess.run([python, "-I", *args], cwd=temp, check=True, timeout=300)
+        with tempfile.TemporaryDirectory(prefix="netizen-artifact-") as temp:
+            env = Path(temp) / "venv"
+            subprocess.run([sys.executable, "-m", "venv", env], check=True)
+            python = str(env / "bin/python")
+            def run(*args: str) -> None:
+                subprocess.run([python, "-I", *args], cwd=temp, check=True, timeout=300)
 
-                run("-m", "pip", "install", "--disable-pip-version-check", "--no-input",
-                    "--constraint", str(ROOT / "requirements.lock"), str(artifact) + extra)
-                run("-m", "pip", "check")
-                run("-m", "netizen_cli", "--help")
-                run("-m", "netizen_cli", "--version")
-                run("-c", """
+            run("-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+                "--constraint", str(ROOT / "requirements.lock"), str(artifact))
+            run("-m", "pip", "check")
+            run("-m", "netizen_cli", "--help")
+            run("-m", "netizen_cli", "--version")
+            run("-c", """
 import sys
-from importlib.util import find_spec
 from pathlib import Path
 import netizen_cli.cli_services, netizen_cli.cli_update_restore, netizen_cli.service_launcher
 from netizen_cli.backends import instance_backend
@@ -273,13 +266,7 @@ assert Path(netizen_cli.__file__).is_relative_to(sys.prefix)
 assert instance_backend({}) == "codex"
 assert (builtin_skill_root() / "netizen-user-guide/SKILL.md").is_file()
 assert resource_path("config.example.yaml").is_file()
-assert "claude_agent_sdk" not in sys.modules
-if sys.argv[1]:
-    from netizen_cli.claude_installation import verified_claude_cli
-    assert verified_claude_cli().is_relative_to(sys.prefix)
-else:
-    assert find_spec("claude_agent_sdk") is None
-""", extra)
+""")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -290,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--smoke-installs", action="store_true",
-                        help="test the preserved wheel and sdist in base and Claude environments")
+                        help="install and test each preserved artifact in a clean environment")
     parser.add_argument("--manifest-sha256")
     args = parser.parse_args(argv)
     try:

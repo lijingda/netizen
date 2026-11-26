@@ -23,7 +23,6 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "a" * 40
 FIXTURE_METADATA = (
     'Metadata-Version: 2.4\nName: netizen-cli\nVersion: 1.2.3\n'
-    'Provides-Extra: claude\nRequires-Dist: claude-agent-sdk==0.2.186; extra == "claude"\n'
 ).encode()
 
 

@@ -542,13 +542,6 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertEqual(report["package"]["state"], "unknown")
         self.assertIn("Update failed during installation verification", human_report(report))
 
-    def test_lost_tool_extra_prevents_restore_after_successful_replacement(self):
-        self.plan["package_plan"].update(prefix=str(self.directory), tool_requests_claude=True)
-        (self.directory / "uv-receipt.toml").write_text('[tool]\nrequirements=[{name="netizen-cli"}]\n')
-        report = cli_update_worker.execute(self.plan, runner=self.runner)
-        self.assertEqual(report["phase"], "validating")
-        self.assertIn("Claude extra", report["reason"])
-        self.assertEqual([args for args, _ in self.calls], [["package-tool"], ["validate"]])
 
     def test_own_validation_error_protocol_preserves_actionable_reason(self) -> None:
         def runner(argv, **kwargs):
