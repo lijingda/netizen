@@ -7,6 +7,7 @@ import logging
 
 
 from .state import RUNTIME_LOGGER_NAME
+from .turn_start import TurnStartAttempt
 from ..bindings import (
     ThreadBinding,
 )
@@ -20,6 +21,7 @@ from .contracts import (
     ScheduledTurnReadError,
     ThreadActivityChanged,
     StopDisposition,
+    TurnStartFailed,
     ActiveTurnSnapshot,
     StopAcknowledger,
 )
@@ -45,7 +47,16 @@ class TurnControlRuntime(GoalRuntime):
         acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
+        start: TurnStartAttempt | None = None,
     ) -> StopDisposition:
+        if start is not None and (expected_activity_revision is not None or expected_turn_id is not None):
+            raise ValueError("a displayed stop target cannot be combined with a captured start")
+        if expected_activity_revision is None:
+            start = start or self.capture_turn_start(binding_id)
+            if start is not None:
+                if start.binding_id != binding_id:
+                    raise ValueError("captured start belongs to another Binding")
+                await start.resolved.wait()
         async with self._lock(binding_id):
             self._guard_no_lifecycle_locked(binding_id)
             if expected_activity_revision is not None:
@@ -54,6 +65,17 @@ class TurnControlRuntime(GoalRuntime):
                     expected_activity_revision=expected_activity_revision,
                     expected_turn_id=expected_turn_id,
                 )
+            if start is not None:
+                if start.unconfirmed:
+                    raise TurnStartFailed(
+                        "Codex Turn 启动结果未确认；本次未请求中断。"
+                        "服务已停止接收新任务，请重启服务。"
+                    )
+                active = self._active.get(binding_id)
+                if active is None or (active.handle.thread_id, active.handle.id) != (
+                    start.thread_id, start.turn_id,
+                ):
+                    return StopDisposition.NOT_RUNNING
             # A stop attempt also cancels the validity of prompts still doing
             # bounded preparation outside this lock. Otherwise an idle /stop
             # could report NOT_RUNNING and a delayed quoted prompt could start
@@ -109,6 +131,7 @@ class TurnControlRuntime(GoalRuntime):
         acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
+        start: TurnStartAttempt | None = None,
     ) -> StopDisposition:
         """Management-port name for the exact ordinary Binding stop primitive."""
 
@@ -117,6 +140,7 @@ class TurnControlRuntime(GoalRuntime):
             acknowledge=acknowledge,
             expected_activity_revision=expected_activity_revision,
             expected_turn_id=expected_turn_id,
+            start=start,
         )
 
     async def recheck_turn_exact(

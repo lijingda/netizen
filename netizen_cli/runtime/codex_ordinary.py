@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from ..bindings import ThreadBinding
 from ..ordinary_sessions import PreparedPrompt, StopPreview
+from .turn_start import TurnStartAttempt
 from .contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TurnActivitySnapshot,
@@ -43,7 +44,13 @@ class CodexOrdinarySessions:
     def reply_blocked_by_lifecycle(self, binding_id: str) -> bool:
         return self._runtime.lifecycle_state(binding_id) is not None
 
+    def capture_turn_start(self, binding_id: str) -> TurnStartAttempt | None:
+        return self._runtime.capture_turn_start(binding_id)
+
     async def preview_stop(self, binding: ThreadBinding) -> StopPreview | None:
+        start = self.capture_turn_start(binding.id)
+        if start is not None:
+            return StopPreview("本轮正在启动，Codex 确认启动后将立即中断。", start)
         active = self._runtime.active_turn(binding.id)
         goal = self._runtime.active_goal(binding.id)
         compacting = self._runtime.is_compacting(binding.id)
@@ -57,10 +64,13 @@ class CodexOrdinarySessions:
     async def stop_exact(
         self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None, expected_turn_id: str | None = None,
+        start: TurnStartAttempt | None = None,
     ) -> StopDisposition:
         if expected_activity_revision is None:
             if expected_turn_id is not None:
                 raise ValueError("expected_turn_id requires expected_activity_revision")
+            if start is not None:
+                return await self._runtime.stop_exact(binding_id, acknowledge=acknowledge, start=start)
             return await self._runtime.stop_exact(binding_id, acknowledge=acknowledge)
         return await self._runtime.stop_exact(
             binding_id, acknowledge=acknowledge, expected_activity_revision=expected_activity_revision,

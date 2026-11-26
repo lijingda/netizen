@@ -242,6 +242,9 @@ class StubRuntime:
         assert self.submission is not None
         return self.submission
 
+    def capture_turn_start(self, binding_id: str) -> None:
+        return None
+
     async def capture_submission_admission(
         self,
         binding_id: str,

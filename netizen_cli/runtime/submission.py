@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,7 @@ from .state import (
     _ThreadSubscription,
 )
 from .compaction import CompactionRuntime
+from .turn_start import TurnStartAttempt
 
 
 _REVISION_RACES = (
@@ -108,6 +111,26 @@ class SubmissionRuntime(CompactionRuntime):
 
     def _init_submission_state(self) -> None:
         self._shutdown_requested = False
+        self._turn_starts = {}
+
+    @contextmanager
+    def _starting_turn(self, binding_id: str, thread_id: str) -> Iterator[TurnStartAttempt]:
+        attempt = TurnStartAttempt(binding_id, thread_id)
+        self._turn_starts[binding_id] = attempt
+        try:
+            yield attempt
+        except (ModelProviderRejected, InvalidRequestError):
+            # Only explicit non-delivery escapes _start_native_turn_locked in these forms.
+            raise
+        except BaseException:
+            if attempt.turn_id is None:
+                attempt.unconfirmed = True
+                self.close_admission()
+            raise
+        finally:
+            if not attempt.unconfirmed:
+                del self._turn_starts[binding_id]
+            attempt.resolved.set()
 
     async def configure_context_exact(
         self,
@@ -571,68 +594,70 @@ class SubmissionRuntime(CompactionRuntime):
                 raise SteerRace("目标会话已切到后台，跨会话消息未发送。")
             assert execution_cwd is not None
             task_feedback = self._capture_task_feedback(binding.task_feedback)
-            try:
-                handle = await self._start_native_turn_locked(
+            with self._starting_turn(binding.id, thread.id) as attempt:
+                try:
+                    handle = await self._start_native_turn_locked(
+                        binding_id=binding.id,
+                        thread=thread,
+                        native_input=native_input,
+                        resolved_settings=resolved_settings,
+                        external_model=external_model,
+                        external=external,
+                    )
+                except ModelProviderRejected:
+                    self._schedule_subscription_release_locked(subscription)
+                    raise
+
+                if active is not None and handle.id == active.handle.id:
+                    # The returned handle has its own SDK notification cursor.
+                    # Dropping it releases that unused cursor through SDK-owned
+                    # finalization. Keep the original consumer, owner and origin.
+                    # Like a confirmed steer, the exact running Turn accepted
+                    # one more input.
+                    attempt.confirm(active.handle.id, active.start_stop_receipts)
+                    self._refresh_turn_activity(active)
+                    active.steer_count += 1
+                    active.activity.plan_may_be_stale = True
+                    active.plan_stale_after_cursor = active.plan_cursor
+                    active.activity_revision += 1
+                    return Submission(
+                        disposition=SubmitDisposition.JOINED,
+                        binding_id=binding.id, thread_id=thread.id, turn_id=handle.id,
+                        task_feedback=active.task_feedback,
+                        feedback_revision=active.feedback_revision,
+                    )
+                if active is not None:
+                    self._retiring_turns[(binding.id, active.handle.id)] = active
+
+                receipt_attempted = asyncio.Event()
+                active = _ActiveTurn(
                     binding_id=binding.id,
                     thread=thread,
-                    native_input=native_input,
-                    resolved_settings=resolved_settings,
-                    external_model=external_model,
-                    external=external,
+                    handle=handle,
+                    owner_id=owner_id,
+                    origin=origin,
+                    receipt_attempted=receipt_attempted,
+                    cwd=execution_cwd,
+                    task_feedback=task_feedback,
+                    feedback_revision=binding.feedback_revision,
+                    activity=ActivityAccumulator(plan_available=self._turn_plan_observer is not None),
                 )
-            except ModelProviderRejected:
-                self._schedule_subscription_release_locked(subscription)
-                raise
-
-            if active is not None and handle.id == active.handle.id:
-                # The returned handle has its own SDK notification cursor.
-                # Dropping it releases that unused cursor through SDK-owned
-                # finalization. Keep the original consumer, owner and origin.
-                # Like a confirmed steer, the exact running Turn accepted
-                # one more input.
-                self._refresh_turn_activity(active)
-                active.steer_count += 1
-                active.activity.plan_may_be_stale = True
-                active.plan_stale_after_cursor = active.plan_cursor
-                active.activity_revision += 1
-                return Submission(
-                    disposition=SubmitDisposition.JOINED,
-                    binding_id=binding.id, thread_id=thread.id, turn_id=handle.id,
-                    task_feedback=active.task_feedback,
-                    feedback_revision=active.feedback_revision,
-                )
-            if active is not None:
-                self._retiring_turns[(binding.id, active.handle.id)] = active
-
-            receipt_attempted = asyncio.Event()
-            active = _ActiveTurn(
-                binding_id=binding.id,
-                thread=thread,
-                handle=handle,
-                owner_id=owner_id,
-                origin=origin,
-                receipt_attempted=receipt_attempted,
-                cwd=execution_cwd,
-                task_feedback=task_feedback,
-                feedback_revision=binding.feedback_revision,
-                activity=ActivityAccumulator(plan_available=self._turn_plan_observer is not None),
-            )
-            if initial_run_id is not None:
-                try:
-                    self._bindings.mark_scheduled_turn_started(
-                        initial_run_id, binding.id, handle.id,
-                    )
-                except BaseException as error:
-                    # Native accepted the Turn. Keep its sole observer alive
-                    # even when its scheduling handoff cannot be committed.
-                    self._track(active)
-                    receipt_attempted.set()
-                    self.close_admission()
-                    raise TurnStartFailed(
-                        "Codex 已接受本次定时任务，但首次 Turn 引用未能持久化；"
-                        "服务已停止接收新任务，请重启后对账。"
-                    ) from error
-            self._track(active)
+                if initial_run_id is not None:
+                    try:
+                        self._bindings.mark_scheduled_turn_started(
+                            initial_run_id, binding.id, handle.id,
+                        )
+                    except BaseException as error:
+                        # Native accepted the Turn. Keep its sole observer alive
+                        # even when its scheduling handoff cannot be committed.
+                        self._track(active, attempt)
+                        receipt_attempted.set()
+                        self.close_admission()
+                        raise TurnStartFailed(
+                            "Codex 已接受本次定时任务，但首次 Turn 引用未能持久化；"
+                            "服务已停止接收新任务，请重启后对账。"
+                        ) from error
+                self._track(active, attempt)
             if external and self._shutdown_requested:
                 # turn/start was already in flight when shutdown took its
                 # snapshot. Its newly accepted handle still needs the same
@@ -904,7 +929,6 @@ class SubmissionRuntime(CompactionRuntime):
             handle = await thread.turn(native_input, **turn_kwargs)
         except asyncio.CancelledError:
             self._invalidate_context_window_usage(binding_id)
-            self.close_admission()
             raise
         except Exception as error:
             rejection = _model_provider_rejection(error)
@@ -918,13 +942,11 @@ class SubmissionRuntime(CompactionRuntime):
             # that App Server did not start the Turn. Never admit another
             # Turn on this or any other Binding until the service restarts.
             self._invalidate_context_window_usage(binding_id)
-            self.close_admission()
             raise TurnStartFailed(
                 "Codex Turn 启动结果未确认；服务已停止接收新任务，请重启服务。"
             ) from error
         if handle.thread_id != thread.id:
             self._invalidate_context_window_usage(binding_id)
-            self.close_admission()
             raise RuntimeError(
                 "native Turn handle returned a different Thread ID; "
                 "service admission is closed"

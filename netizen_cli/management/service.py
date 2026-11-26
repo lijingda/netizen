@@ -57,7 +57,8 @@ from ..bindings import (
 )
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
-from ..ordinary_sessions import OrdinarySessionPort
+from ..ordinary_sessions import OrdinarySessionPort, StopPreview
+from ..runtime.turn_start import TurnStartAttempt
 from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
@@ -577,6 +578,9 @@ class ManagementRuntimePort:
             expected_native_thread_id=expected_native_thread_id,
         )
 
+    def capture_turn_start(self, binding_id: str) -> TurnStartAttempt | None:
+        return self.__ordinary.capture_turn_start(binding_id)
+
     async def stop_exact(
         self,
         binding_id: str,
@@ -584,7 +588,10 @@ class ManagementRuntimePort:
         acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
+        start: TurnStartAttempt | None = None,
     ) -> StopDisposition:
+        if start is not None and expected_activity_revision is None and expected_turn_id is None:
+            return await self.__ordinary.stop_exact(binding_id, acknowledge=acknowledge, start=start)
         return await self.__ordinary.stop_exact(
             binding_id,
             acknowledge=acknowledge,
@@ -2014,10 +2021,15 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
         acknowledge: StopAcknowledger | None = None,
+        preview: StopPreview | None = None,
     ) -> StoppedBinding:
+        start = preview.start if preview is not None else self._runtime.capture_turn_start(target.binding_id)
+        if start is not None:
+            # A stalled native receipt must leave other Scope operations available.
+            await start.resolved.wait()
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            disposition = await self._runtime.stop_exact(binding.id, acknowledge=acknowledge)
+            disposition = await self._runtime.stop_exact(binding.id, acknowledge=acknowledge, start=start)
             return StoppedBinding(binding=binding, disposition=disposition)
 
     async def activate_exact_binding(
@@ -2222,9 +2234,14 @@ class InstanceManagementService:
         acknowledge: StopAcknowledger | None = None,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> StoppedBinding:
+        start = self._runtime.capture_turn_start(target.binding_id) if runtime_precondition is None else None
+        if start is not None:
+            await start.resolved.wait()
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             stop_kwargs: dict[str, object] = {"acknowledge": acknowledge}
+            if start is not None:
+                stop_kwargs["start"] = start
             if runtime_precondition is not None:
                 stop_kwargs.update(
                     expected_activity_revision=(

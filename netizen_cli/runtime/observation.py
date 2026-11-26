@@ -47,6 +47,7 @@ from .state import (
     _ContextWindowUsageSnapshot,
 )
 from .naming import ThreadNamingRuntime
+from .turn_start import TurnStartAttempt
 
 
 logger = logging.getLogger(RUNTIME_LOGGER_NAME)
@@ -388,6 +389,8 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                 ) is active
 
         await active.receipt_attempted.wait()
+        for receipt in tuple(active.start_stop_receipts):
+            await receipt.wait()
         if unavailable_error is not None:
             if not notify_unavailable:
                 return
@@ -821,8 +824,9 @@ class TurnObservationRuntime(ThreadNamingRuntime):
         # another client may already have changed cwd after its completion.
         return getattr(response, "thread", None)
 
-    def _track(self, active: _ActiveTurn) -> None:
+    def _track(self, active: _ActiveTurn, attempt: TurnStartAttempt) -> None:
         self._active[active.binding_id] = active
+        attempt.confirm(active.handle.id, active.start_stop_receipts)
         self._start_turn_consumer(active)
 
     def _track_late_shutdown_turn(self, active: _ActiveTurn) -> None:
