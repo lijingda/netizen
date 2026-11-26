@@ -63,6 +63,7 @@ from .native_values import (
     _thread_status_type,
 )
 from .state import (
+    _acknowledge_stop,
     RUNTIME_LOGGER_NAME,
     _ActiveSideTurn,
     _SideSession,
@@ -624,21 +625,7 @@ class SideRuntime(SubmissionRuntime):
                 active.state = ActiveState.STOPPING
                 active.activity_revision += 1
                 session.revision += 1
-            if acknowledge is not None:
-                try:
-                    async with asyncio.timeout(limits.STOP_ACK_ATTEMPT_TIMEOUT_SECONDS):
-                        await acknowledge()
-                except TimeoutError:
-                    logger.warning(
-                        "Side stop acknowledgement timed out",
-                        extra={"side_id": side_id, "turn_id": active.handle.id},
-                    )
-                except Exception:
-                    logger.warning(
-                        "Side stop acknowledgement failed",
-                        exc_info=True,
-                        extra={"side_id": side_id, "turn_id": active.handle.id},
-                    )
+            await _acknowledge_stop(acknowledge, side_id=side_id, turn_id=active.handle.id)
             return await self._interrupt_side_turn(session, active)
 
     async def close_side(

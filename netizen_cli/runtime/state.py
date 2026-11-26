@@ -31,6 +31,7 @@ from ..domain import (
     GoalOperationState,
     NativeCapability,
 )
+from ..external_calls import external_call
 from ..model_settings import TurnModelSettings
 from ..partial_answers import PartialAnswer
 from ..activity_accumulator import ActivityAccumulator
@@ -39,6 +40,7 @@ from .thread_naming import ThreadNamer
 from .turn_start import TurnStartAttempt
 from .codex_contracts import RuntimeOutcome, CompletionHandler
 from .contracts import (
+    StopAcknowledger,
     NativeTurnHandle,
     NativeThread,
     NativeCodex,
@@ -99,6 +101,18 @@ class _TurnViewUnverified(RuntimeError):
 
 class _TurnResumeRequired(_TurnViewUnverified):
     """One bounded recovery attempt must replace the native Thread handle."""
+
+
+async def _acknowledge_stop(acknowledge: StopAcknowledger | None, **identity: str) -> None:
+    if acknowledge is None:
+        return
+    try:
+        async with asyncio.timeout(limits.STOP_ACK_ATTEMPT_TIMEOUT_SECONDS):
+            await external_call(acknowledge())
+    except TimeoutError:
+        logger.warning("stop acknowledgement timed out; continuing native stop", extra=identity)
+    except Exception:
+        logger.warning("stop acknowledgement failed; continuing native stop", extra=identity, exc_info=True)
 
 
 async def _ignore_completion(_outcome: RuntimeOutcome) -> None:

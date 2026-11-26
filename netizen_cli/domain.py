@@ -94,7 +94,7 @@ class ScheduledOrigin:
 
 
 @dataclass(frozen=True, slots=True)
-class ScheduledBindingConversation:
+class ChatConversation:
     chat_id: str
     chat_type: str
     thread_id: str | None = None
@@ -107,7 +107,7 @@ class ScheduledBindingOrigin:
     app_id: str
     chat_id: str
     message_id: str
-    conversation: ScheduledBindingConversation
+    conversation: ChatConversation
     plan_id: str
     run_id: str
     binding_id: str
@@ -119,20 +119,13 @@ class ScheduledBindingOrigin:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionAgentConversation:
-    chat_id: str
-    chat_type: str
-    thread_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class SessionAgentOrigin:
     """Verified agent delivery and its real bot-authored feedback anchor."""
 
     app_id: str
     chat_id: str
     message_id: str
-    conversation: SessionAgentConversation
+    conversation: ChatConversation
     source_binding_id: str | None
     source_thread_id: str
     target_binding_id: str

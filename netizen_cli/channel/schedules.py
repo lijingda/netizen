@@ -57,7 +57,7 @@ from ..runtime.contracts import (
 from ..domain import (
     FeishuScope,
     MentionContextMode,
-    ScheduledBindingConversation,
+    ChatConversation,
     ScheduledBindingOrigin,
     ScheduledConversation,
     ScheduledOrigin,
@@ -219,7 +219,7 @@ class ScheduleChannel(SessionToolChannel):
                 owner_id="scheduled_plan:" + plan.id, origin=origin,
                 run_id=run.id, skill_names=skill_names,
             )
-            await self._present_ordinary_receipt(submission, origin)
+            await self._present_receipt(submission, origin)
         except BaseException as error:
             if publication_owned and not native_submission:
                 resource_reserved = store.get_run(run.id).worktree_id is not None
@@ -328,7 +328,7 @@ class ScheduleChannel(SessionToolChannel):
                 raise TopicPublishError("触发消息不属于原会话，本次未执行。", unknown=True)
             origin = ScheduledBindingOrigin(
                 self._app_id, scope.chat_id, sent.message_id,
-                ScheduledBindingConversation(scope.chat_id, chat_kind, scope.topic_id),
+                ChatConversation(scope.chat_id, chat_kind, scope.topic_id),
                 plan.id, run.id, binding.id, root_id=sent.root_id,
             )
             store.set_run(run.id, origin_message_id=sent.message_id,

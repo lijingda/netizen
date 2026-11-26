@@ -166,7 +166,6 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
         runner = AdminWebRunner(host="127.0.0.1", port=0, users=users, auth=auth, feishu_client=feishu,
                                 instance_root=root)
         management = fixture.management
-        policy = BackendPolicy("codex")
         from netizen_cli.domain import NativeCapability
         fixture.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
         fixture.runtime.project_side_snapshots = Mock(return_value=())
@@ -180,7 +179,7 @@ class BrowserSmokeTest(unittest.IsolatedAsyncioTestCase):
                 lambda policy, operation, surface="command": operation is not OperationId.DELETE and allows(policy, operation, surface)))
         if manual_only:
             management.names = SessionNames(writer=management.names.writer)
-        runner.attach_management(management, group_access=GroupAccessService(), backend_policy=policy,
+        runner.attach_management(management, group_access=GroupAccessService(),
                                  session_policy=SessionPolicyService())
         with patch("netizen_cli.admin.web.accepted_authorities",
                    side_effect=lambda host, port, addresses: (f"127.0.0.1:{addresses[0][1]}",)):

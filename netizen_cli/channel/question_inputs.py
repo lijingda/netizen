@@ -5,16 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..domain import ChatConversation
 from ..prompt_projection import PromptProjectionError, project_identity
 from ..user_questions import QuestionTarget
 from .ports import ReplyChannel
-
-
-@dataclass(frozen=True, slots=True)
-class CardAnswerConversation:
-    chat_id: str
-    chat_type: str
-    thread_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +16,7 @@ class CardAnswerOrigin:
     app_id: str
     chat_id: str
     message_id: str
-    conversation: CardAnswerConversation
+    conversation: ChatConversation
     source_card_id: str
     target: QuestionTarget
     root_id: str | None = None

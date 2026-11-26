@@ -89,7 +89,7 @@ from .queries import (
 )
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
-from ..backends import BackendPolicy, OperationId, OPERATIONS
+from ..backends import OperationId, OPERATIONS
 from ..backends import BackendUnsupported
 from ..instance import instance_digest
 from ..error_messages import describe_error
@@ -345,7 +345,6 @@ class AdminWebApplication:
         *,
         auth: AdminAuth,
         management: InstanceManagementService,
-        backend_policy: BackendPolicy | None = None,
         instance_root: Path | None = None,
         credentials: AdminCredentials | None = None,
         login: AdminLogin | None = None,
@@ -354,7 +353,7 @@ class AdminWebApplication:
     ) -> None:
         self._auth = auth
         self._management = management
-        self._backend_policy = management.operation_policy(backend_policy)
+        self._backend_policy = management.policy
         self._instance_root = instance_root
         self._users = auth.users
         self._credentials = credentials
@@ -3022,7 +3021,6 @@ class AdminWebRunner:
             raise
 
     def attach_management(self, management: InstanceManagementService, *,
-                          backend_policy: BackendPolicy | None = None,
                           session_policy: SessionPolicyService | None = None,
                           group_access: GroupAccessService | None = None) -> None:
         """Attach the sole application service after the closed listener binds."""
@@ -3030,7 +3028,6 @@ class AdminWebRunner:
         if self._application is not None:
             raise RuntimeError("Admin management application is already attached")
         application = AdminWebApplication(
-            backend_policy=backend_policy,
             auth=self._auth, management=management, instance_root=self._instance_root,
             credentials=self._credentials, login=self._login,
             session_policy=session_policy, group_access=group_access,

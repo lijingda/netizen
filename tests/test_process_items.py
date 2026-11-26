@@ -14,13 +14,12 @@ T = 1_800_000_000
 class ItemProjection(unittest.TestCase):
     def test_first_observation_and_first_finish_are_stable_including_clock_rollback(self):
         item = ToolItem("tool", "安全操作", T)
-        self.assertEqual(item.state, "running")
+        self.assertIsNone(item.finished_at)
         first = item_events((item,))
         self.assertEqual([e["event_type"] for e in first], ["TOOL_CALL_START"])
         for finish_at in (T - 1, T, T + 2):
             done = item.finish(finish_at)
             self.assertEqual(done.finished_at, max(T, finish_at))
-            self.assertEqual(done.state, "finished")
             self.assertIs(done.finish(T + 200), done)
             self.assertEqual(item_events((done,))[0], first[0])
             self.assertEqual(item_events((done,)), item_events((done.finish(T + 200),)))
@@ -46,7 +45,7 @@ class ItemProjection(unittest.TestCase):
         self.assertEqual(selected, build_items((*running, *reversed(finished))))
         final = finish_items((*running, *finished), T + 2)
         self.assertEqual({i.item_id for i in final}, {i.item_id for i in selected})
-        self.assertTrue(all(i.state == "finished" for i in final))
+        self.assertTrue(all(i.finished_at is not None for i in final))
         self.assertEqual(finish_items(final, T + 200), final)
         self.assertEqual(len(item_events(final)), 2 * ITEM_LIMIT)
 
@@ -122,9 +121,8 @@ class ItemProjection(unittest.TestCase):
                 StepItem("x", "步骤", bad)
             with self.assertRaises(ValueError):
                 StepItem("x", "步骤", T).finish(bad)
-        for start, content, end in ((T + 1, T, T + 2), (T, T + 2, T + 1), (T + 1, T, T)):
-            with self.assertRaises(ValueError):
-                TextItem("x", "文字", start, end, content_at=content)
+        with self.assertRaises(ValueError):
+            TextItem("x", "文字", T + 1, T)
         with self.assertRaises(ValueError):
             TextItem("x", "文字", T, None)
         with self.assertRaises(ValueError):

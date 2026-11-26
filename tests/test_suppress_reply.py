@@ -11,6 +11,7 @@ from lark_channel import Identity, OutboundCard, OutboundText
 
 from netizen_cli import turn_files
 from tests.support.reply_events import open_card
+from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel import reply_presenter
 from netizen_cli.domain import ActiveState, FeishuScope, GoalOperationState, GoalStatus, ScopeKind
@@ -185,7 +186,7 @@ class SuppressReplyTest(unittest.IsolatedAsyncioTestCase):
                     turn_id = outcome.turn_id
                     await self.app._reactions.start(turn_id, self.origin.id, pulse_enabled=True)
                     failed = replace(outcome, error=UnformattableError())
-                self.assertIn((self.binding.id, outcome.thread_id, turn_id), self.app._progress_cards._sessions)
+                self.assertIn(PresentationKey(self.binding.id, outcome.thread_id, turn_id), self.app._progress_cards._sessions)
                 pulse = self.app._reactions._pulses[turn_id]
                 running_ids = (pulse.typing_reaction_id, pulse.thinking_reaction_id)
                 self.channel.reactions.clear()

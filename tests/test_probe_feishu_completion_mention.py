@@ -193,6 +193,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
                 sent = self.sent("om_probe")
                 if mismatch == "chunks":
                     sent.chunk_ids = ["om_probe", "om_other"]
+                    sent.raw["data"]["message_id"] = "om_other"
                 else:
                     sent.raw["data"][mismatch] = "unexpected"
                 channel.send.side_effect = [sent]
@@ -220,6 +221,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
                     )
                     if mismatch == "chunks":
                         mentioned.chunk_ids = ["om_mention", "om_other"]
+                        mentioned.raw["data"]["message_id"] = "om_other"
                     else:
                         mentioned.raw["data"][mismatch] = (
                             None if (

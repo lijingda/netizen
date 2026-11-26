@@ -45,7 +45,7 @@ from ..domain import (
     FeishuScope,
     GoalOperationState,
     MentionContextMode,
-    SessionAgentConversation,
+    ChatConversation,
     SessionAgentOrigin,
     ScopeKind,
 )
@@ -239,7 +239,7 @@ class SessionToolChannel(ForkChannel):
         if submission.disposition is SubmitDisposition.STARTED:
             try:
                 async with asyncio.timeout(constants.SESSION_RECEIPT_TIMEOUT_SECONDS):
-                    await self._present_ordinary_receipt(submission, origin)
+                    await self._present_receipt(submission, origin)
             except asyncio.CancelledError:
                 # The native input is already accepted. A tool deadline during
                 # display must still return its known Thread/Turn receipt.
@@ -405,7 +405,7 @@ class SessionToolChannel(ForkChannel):
                         worktree_id=None if worktree is None else worktree.id,
                     )
                 origin = SessionAgentOrigin(self._app_id, destination.chat_id, published.message_id,
-                    SessionAgentConversation(destination.chat_id, target.chat_kind, destination.topic_id),
+                    ChatConversation(destination.chat_id, target.chat_kind, destination.topic_id),
                     source.id, source_thread_id, binding.id, call_id, root_id=root.message_id)
                 self._runtime.require_topic_creation_open(project.alias)
                 submission_attempted = True
@@ -474,7 +474,7 @@ class SessionToolChannel(ForkChannel):
             ):
                 raise TopicPublishError("来信消息不属于指定会话，本次未投递。", unknown=True)
             origin = SessionAgentOrigin(self._app_id, scope.chat_id, sent.message_id,
-                SessionAgentConversation(scope.chat_id, target.chat_kind, scope.topic_id),
+                ChatConversation(scope.chat_id, target.chat_kind, scope.topic_id),
                 source_binding_id, source_thread_id, binding.id, call_id, source_side_id, root_id=sent.root_id)
             binding, scope = self._require_session_target(target_thread_id)
             submission_attempted = True

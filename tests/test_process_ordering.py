@@ -32,8 +32,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         key = PresentationKey("binding", "native-one", "turn-one")
         scope = FeishuScope("app", "chat", ScopeKind.TOPIC if topic else ScopeKind.DIRECT, "topic" if topic else None)
         location = ProcessLocation(scope, "input", "root" if topic else None)
-        state = ProcessPresentation(key, port, channel, lambda: location, lambda: T+1, 1,
-                                    claimed_cot_ids=set())
+        state = ProcessPresentation(key, port, channel, lambda: location, lambda: T+1, 1)
         async def close():
             state.revoke()
             if state.task:
@@ -110,6 +109,27 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(channel.fetch_message.await_count, int(cut == "placement"))
                 port.update.assert_not_awaited()
                 port.complete.assert_not_awaited()
+
+    async def test_first_terminal_reason_and_late_authoritative_result(self):
+        for first, second in itertools.permutations(("done", "error", "timeout"), 2):
+            with self.subTest(first=first, second=second):
+                async with channel_fixture() as fx, asyncio.timeout(2):
+                    port = process_port()
+                    state = self.message(port)
+                    presenter = fx.app._progress_cards
+                    presenter._process[state.key] = state
+                    state.sample(process_snapshot(1))
+                    await state.ready.wait()
+                    if first == "timeout":
+                        presenter.tombstone_unknown_process(state.key)
+                    else:
+                        presenter.process_result(state.key, first, process_snapshot(2))
+                    presenter.process_result(state.key, second, process_snapshot(3))
+                    presenter.end_process_run(state.key, second)
+                    await state.task
+                    port.complete.assert_awaited_once_with("cot", "process-mid", first)
+                    self.assertTrue(state.terminal)
+                    self.assertNotIn(state.key, presenter._process_tombstones)
 
     async def test_final_write_failure_still_completes_once(self):
         for response in (Rejected(10020), Rejected(10001), Unknown(), OSError()):
@@ -380,7 +400,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         port.create.assert_not_awaited()
 
 
-    async def test_only_process_ids_are_exclusive_across_codex_turns_and_lifecycle(self):
+    async def test_each_turn_writes_with_its_own_create_receipt_through_retirement(self):
         from netizen_cli.process_messages import Created
         from netizen_cli.runtime.contracts import (
             Submission, SubmitDisposition, ThreadActivityDiscardedOutcome, TurnOutcome,
@@ -388,9 +408,9 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         from tests.support.channel_results import completed_turn_result
 
         first = Created("cot", "process-mid")
-        receipts = (first, Created("cot", "other-mid"), Created("other", "process-mid"))
-        for second, owner, phase in itertools.product(receipts, ("A", "B"), ("open", "ended", "discarded")):
-            with self.subTest(second=second, owner=owner, phase=phase):
+        second = Created("other", "other-mid")
+        for owner, phase in itertools.product(("A", "B"), ("open", "ended", "discarded")):
+            with self.subTest(owner=owner, phase=phase):
                 async with channel_fixture() as fx, asyncio.timeout(4):
                     presenter = fx.app._progress_cards
                     port = process_port()
@@ -414,7 +434,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                             return receipt
 
                         port.create.side_effect = create
-                        await fx.app._present_ordinary_receipt(submission, origin)
+                        await fx.app._present_receipt(submission, origin)
                         state = await created
                         await state.ready.wait()
                         outcome = TurnOutcome(binding_id=binding, thread_id=thread, turn_id=turn,
@@ -438,9 +458,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                             await finish(*first_turn)
                         await finish(*next_turn)
 
-                    expected = [(first.cot_id, first.message_id)]
-                    if second.cot_id != first.cot_id:
-                        expected.append((second.cot_id, second.message_id))
+                    expected = [(item.cot_id, item.message_id) for item in (first, second)]
                     self.assertEqual(port.create.await_count, 2)
                     self.assertEqual([call.args[:2] for call in port.complete.await_args_list], expected)
                     self.assertCountEqual([call.args[:2] for call in port.update.await_args_list], expected * 2)

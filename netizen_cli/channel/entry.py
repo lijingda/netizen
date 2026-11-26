@@ -201,10 +201,7 @@ class ChannelEntry(CommandChannel):
             handler, operation = self._handle_turn_file_card_action, OperationId.FILES
         try:
             if operation is not None:
-                if operation is OperationId.FORK:
-                    self._policy.require(operation, "card")
-                else:
-                    self._policy.require(operation)
+                self._policy.require(operation, "card")
         except (BackendUnsupported, CardActionError, InvalidInteraction) as error:
             message_id = getattr(event, "message_id", "")
             if message_id and chat_id:

@@ -99,12 +99,11 @@ class TurnOpened:
     feedback: BindingTaskFeedback
     observe: Callable[[], ActivityChanged | None]
     retain_after_send: Callable[[], bool]
-    reply: Callable[[OutboundCard], Awaitable[SendResult]]
+    reply: Callable[[OutboundCard], Awaitable[SendResult]] | None
     reply_partial: Callable[[OutboundPost], Awaitable[SendResult]]
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
     reuse_existing: bool = False
     process_root_id: str | None = None
-    process_binding_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 
-from .state import RUNTIME_LOGGER_NAME
+from .state import RUNTIME_LOGGER_NAME, _acknowledge_stop
 from .turn_start import StartedTurn
 from ..bindings import (
     ThreadBinding,
@@ -15,7 +15,6 @@ from ..domain import (
     ActiveState,
     GoalOperationState,
 )
-from ..external_calls import external_call
 from .contracts import (
     SteerRace,
     TurnObservationUnavailable,
@@ -88,21 +87,7 @@ class TurnControlRuntime(GoalRuntime):
                 return StopDisposition.NOT_RUNNING
             if active.state is ActiveState.RUNNING:
                 self._mark_stopping(active)
-            if acknowledge is not None:
-                try:
-                    async with asyncio.timeout(limits.STOP_ACK_ATTEMPT_TIMEOUT_SECONDS):
-                        await external_call(acknowledge())
-                except TimeoutError:
-                    logger.warning(
-                        "stop acknowledgement timed out; continuing native stop",
-                        extra={"turn_id": active.handle.id},
-                    )
-                except Exception:
-                    logger.warning(
-                        "stop acknowledgement failed; continuing native stop",
-                        exc_info=True,
-                        extra={"turn_id": active.handle.id},
-                    )
+            await _acknowledge_stop(acknowledge, turn_id=active.handle.id)
             if active.terminal_observed and not active.interrupt_attempted:
                 active.state = ActiveState.RUNNING
                 active.activity_revision += 1

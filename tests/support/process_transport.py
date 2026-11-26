@@ -109,7 +109,7 @@ async def check_displaced_step(case, key, observe_plan, rollover=None):
     wire = ProcessTransport([])
     scope = FeishuScope("app", "chat", ScopeKind.DIRECT)
     state = ProcessPresentation(key, wire.port, None, lambda: ProcessLocation(scope, "input", None),
-                                lambda: now, 1, claimed_cot_ids=set())
+                                lambda: now, 1)
     inspect = TurnPlanStepSnapshot("Inspect", TurnPlanStepState.IN_PROGRESS)
     other = TurnPlanStepSnapshot("Never offered", TurnPlanStepState.IN_PROGRESS)
     prefix = tuple(TurnPlanStepSnapshot(f"Pending {n}", TurnPlanStepState.PENDING) for n in range(12))

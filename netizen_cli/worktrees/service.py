@@ -453,8 +453,7 @@ class WorktreeService:
                 "bindings": [{"bindingId": binding.id, "shortId": binding.short_id,
                               "nativeThreadId": binding.native_thread_id,
                               "scopeKey": binding.scope_key} for binding in snapshot.bindings],
-                "sideCount": len(sides), "protectedSessionCount": len(
-                    {b.id for b in usage_bindings} | (frozenset())),
+                "sideCount": len(sides), "protectedSessionCount": len({binding.id for binding in usage_bindings}),
                 "safe": not reasons, "reasons": list(dict.fromkeys(reasons)),
                 "externalUseWarning": "仅检查本实例已知关联；请确认没有其他客户端正在使用目录。"}
 

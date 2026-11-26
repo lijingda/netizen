@@ -249,7 +249,7 @@ class OrdinaryPortContract:
         async with channel_fixture(ordinary=self.ordinary) as fixture:
             with (patch.object(fixture.app, "_policy", BackendPolicy(self.backend)),
                   patch.object(fixture.app._reactions, "start", side_effect=held_reaction)):
-                delivery = asyncio.create_task(fixture.app._present_ordinary_receipt(receipt, message))
+                delivery = asyncio.create_task(fixture.app._present_receipt(receipt, message))
                 try:
                     await asyncio.wait_for(started.wait(), 2)
                     self.complete(receipt.turn_id)

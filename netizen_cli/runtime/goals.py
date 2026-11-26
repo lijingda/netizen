@@ -58,6 +58,7 @@ from .native_values import (
     _final_agent_response,
 )
 from .state import (
+    _acknowledge_stop,
     RUNTIME_LOGGER_NAME,
     _ActiveGoal,
     _same_goal_generation,
@@ -743,21 +744,7 @@ class GoalRuntime(TurnObservationRuntime):
         if active.state is GoalOperationState.RUNNING:
             active.state = GoalOperationState.PAUSING
             self._advance_admission_revision(active.binding_id)
-        if acknowledge is not None:
-            try:
-                async with asyncio.timeout(limits.STOP_ACK_ATTEMPT_TIMEOUT_SECONDS):
-                    await acknowledge()
-            except TimeoutError:
-                logger.warning(
-                    "Goal stop acknowledgement timed out; continuing native pause",
-                    extra={"logical_turn_id": handle.id},
-                )
-            except Exception:
-                logger.warning(
-                    "Goal stop acknowledgement failed; continuing native pause",
-                    exc_info=True,
-                    extra={"logical_turn_id": handle.id},
-                )
+        await _acknowledge_stop(acknowledge, logical_turn_id=handle.id)
         if active.cleanup_succeeded:
             return StopDisposition.GOAL_STOPPING
         return await self._pause_and_clean_goal(active)

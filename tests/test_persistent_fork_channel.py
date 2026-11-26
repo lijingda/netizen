@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, call, patch
 
 from lark_channel import OutboundCard
 
+from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.bindings import BindingNotFound
 from netizen_cli.cards import CardActionError
 from netizen_cli.cards.fork import ForkSource, decode_fork_action, fork_form_card
@@ -290,7 +291,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         expect_presenter_trace(self, self.fixture, "adopted_fork_first_turn")
         await self.app.handle_message(message)
         self.assertEqual(self.runtime.submit_calls[-1]["binding"].id, fork.id)
-        self.assertIn((fork.id, self.native.id, activity.turn_id), self.app._progress_cards._sessions)
+        self.assertIn(PresentationKey(fork.id, self.native.id, activity.turn_id), self.app._progress_cards._sessions)
         self.assertEqual(self.channel.replies[-1][0], message.id)
         await self.app.handle_completion(TurnOutcome(fork.id, self.native.id, activity.turn_id, "ou_user", message,
             result=completed_turn_result(final_response="fork result"), task_feedback=fork.task_feedback, activity=activity, cwd=self.fixture.project))
@@ -737,7 +738,10 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assert_no_execution()
 
     async def test_invalid_root_and_seed_cannot_bind_or_delete_native_fork(self):
+        split = sent_result("last", chat_id=self.scope.chat_id, thread_id="omt_fork")
+        split.message_id, split.chunk_ids = "first", ["first", "last"]
         cases = [
+            [split],
             [sent_result("om_root", chat_id=self.scope.chat_id, thread_id="omt_fork", parent_id="om_existing")],
             [sent_result("om_root", chat_id=self.scope.chat_id),
              sent_result("om_seed", chat_id=self.scope.chat_id, thread_id="omt_fork",
@@ -748,8 +752,8 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
                 self.channel.send_results.extend(results)
                 await self.app.handle_card_action(self.confirm_event())
                 self.assertIsNone(self.store.active_binding(self.target_scope.key))
-        self.assertEqual(self.runtime.fork_exact.await_count, 2)
-        self.assertEqual(self.runtime.release_unbound_fork.await_count, 2)
+        self.assertEqual(self.runtime.fork_exact.await_count, len(cases))
+        self.assertEqual(self.runtime.release_unbound_fork.await_count, len(cases))
         self.runtime.adopt_fork.assert_not_awaited()
         self.assertEqual(self.runtime.delete_binding_calls, [])
         self.assertIn("绑定未完成", self.updates_text())

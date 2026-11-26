@@ -7,29 +7,35 @@ from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
+from lark_channel import OutboundPost
+
+from netizen_cli.backends import Provider
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.codex_reply_events import CodexReplyEvents
 from netizen_cli.channel.process_presentation import ProcessLocation, ProcessPresentation
-from netizen_cli.channel.question_inputs import CardAnswerConversation, CardAnswerOrigin
+from netizen_cli.channel.question_inputs import CardAnswerOrigin
 from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.domain import (
-    FeishuScope, GoalStatus, NativeCapability, ScheduledBindingConversation, ScheduledBindingOrigin,
-    ScheduledConversation, ScheduledOrigin, ScopeKind, SessionAgentConversation, SessionAgentOrigin,
+    FeishuScope, GoalStatus, NativeCapability, ChatConversation, ScheduledBindingOrigin,
+    ScheduledConversation, ScheduledOrigin, ScopeKind, SessionAgentOrigin,
 )
 from netizen_cli.process_messages import Created, Ok, Unknown
 from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.process_activity import ObservedProcessItem, ProcessActivityWindow
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.runtime.codex_contracts import GoalOutcome
-from netizen_cli.runtime.contracts import GoalSubmission, SideTurnOutcome, TurnOutcome
+from netizen_cli.runtime.contracts import GoalSubmission, SideTurnOutcome, Submission, SubmitDisposition, TurnOutcome
 from netizen_cli.turn_activity import TurnActivityEvent, TurnActivityKind, TurnActivityStatus, TurnPlanStepSnapshot, TurnPlanStepState
 from netizen_cli.user_questions import BindingQuestionTarget
 from tests.support.channel_cards import _card_button_value, direct_button_event
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
-from tests.support.channel_results import completed_turn_result, file_change_item, goal_activity_snapshot, native_goal, side_turn_activity_snapshot, turn_activity_snapshot
+from tests.support.channel_results import (
+    completed_turn_result, file_change_item, goal_activity_snapshot, native_goal, sent_result,
+    side_turn_activity_snapshot, turn_activity_snapshot,
+)
 from tests.support.presenter_traces import delivery_recorder
 from tests.support.process_transport import ProcessTransport
 
@@ -124,6 +130,40 @@ def process_port():
 
 
 class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_ordinary_receipt_publishes_partial_and_permitted_process_activity(self):
+        for available, card, process_writes in ((False, False, 0), (False, True, 0), (True, False, 1)):
+            with self.subTest(available=available, card=card):
+                async with channel_fixture() as fx:
+                    origin = await fx.new()
+                    binding = fx.store.active_binding(fx.app._scope(origin).key)
+                    activity = process_snapshot(1, binding=binding.id)
+                    partial = PartialAnswer(activity.thread_id, activity.turn_id, "partial-1", "阶段正文")
+                    fx.runtime.turn_activity_values[binding.id] = replace(activity, partial_answers=(partial,))
+                    released = Mock()
+                    fx.runtime.submission = Submission(
+                        SubmitDisposition.STARTED, binding.id, activity.thread_id, activity.turn_id, released,
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=card),
+                    )
+                    port = process_port()
+                    fx.app._progress_cards._process_port = port
+                    fx.app._progress_cards._poll_seconds = 0.001
+                    fx.channel.reply_results.append(sent_result("om_partial", chat_id="oc_direct"))
+                    management = fx.management
+                    policy = management.policy.bind(
+                        lambda provider: (available or provider != Provider.REPLY_PROGRESS)
+                        and management.has_provider(provider)
+                    )
+                    with patch.object(management, "policy", policy):
+                        fx.app._policy, fx.app._session_form = policy, management.session_form
+                        await fx.app.handle_message(FakeMessage("work", message_id="om_source"))
+                        async with asyncio.timeout(2):
+                            while not fx.channel.replies or (process_writes and not port.update.await_count):
+                                await asyncio.sleep(0.001)
+                    self.assertEqual(fx.channel.replies, [("om_source", OutboundPost(markdown="**阶段性答案**\n\n阶段正文"))])
+                    self.assertEqual(port.create.await_count, process_writes)
+                    self.assertEqual(port.update.await_count, process_writes)
+                    released.assert_called_once_with()
+
     async def test_each_changed_version_attempted_once_when_confirmed_write_rereads(self):
         port = process_port()
         first, second, third, release = (asyncio.Event() for _ in range(4))
@@ -144,7 +184,7 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("app", "chat", ScopeKind.DIRECT)
         message = ProcessPresentation(key, port, None,
             lambda: ProcessLocation(scope, "input", None),
-            lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+            lambda: 1_800_000_001, 1)
         try:
             async with asyncio.timeout(2):
                 message.sample(process_snapshot(1))
@@ -187,7 +227,7 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
                 channel = SimpleNamespace(fetch_message=AsyncMock(return_value={"code":0,"data":{"items":[row]}}))
                 port = process_port()
                 message = ProcessPresentation(key, port, channel,
-                    lambda: ProcessLocation(scope, "input", "root"), lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+                    lambda: ProcessLocation(scope, "input", "root"), lambda: 1_800_000_001, 1)
                 message.sample(process_snapshot(1))
                 await message.ready.wait()
                 message.finish("done")
@@ -273,9 +313,9 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
         app, chat, mid, topic, root = "cli_test", "oc_group", "om_source", "omt_topic", "om_root"
         origins = (
             ScheduledOrigin(app, chat, mid, ScheduledConversation(topic), "plan", "run", root_id=root),
-            ScheduledBindingOrigin(app, chat, mid, ScheduledBindingConversation(chat, "group", topic), "plan", "run", "binding", root),
-            CardAnswerOrigin(app, chat, mid, CardAnswerConversation(chat, "group", topic), "card", BindingQuestionTarget("binding"), root),
-            SessionAgentOrigin(app, chat, mid, SessionAgentConversation(chat, "group", topic), "binding", "thread", "target", "call", root_id=root),
+            ScheduledBindingOrigin(app, chat, mid, ChatConversation(chat, "group", topic), "plan", "run", "binding", root),
+            CardAnswerOrigin(app, chat, mid, ChatConversation(chat, "group", topic), "card", BindingQuestionTarget("binding"), root),
+            SessionAgentOrigin(app, chat, mid, ChatConversation(chat, "group", topic), "binding", "thread", "target", "call", root_id=root),
         )
         async with channel_fixture() as fx:
             for origin in origins:
@@ -284,7 +324,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
                     read = AsyncMock(return_value={"code": 0, "data": {"items": [row]}})
                     port = process_port()
                     state = ProcessPresentation(PresentationKey("binding", "native-one", "turn-one"), port, fx.channel,
-                        lambda: fx.app._process_reply_location(origin, None), lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+                        lambda: fx.app._process_reply_location(origin, None), lambda: 1_800_000_001, 1)
                     with patch.object(fx.channel, "fetch_message", read):
                         self.assertTrue(await state._create())
                     port.create.assert_awaited_once_with(chat, mid, True)
@@ -303,7 +343,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
         read, port = AsyncMock(side_effect=fetch), process_port()
         state = ProcessPresentation(PresentationKey("binding", "native-one", "turn-one"), port,
             SimpleNamespace(fetch_message=read), lambda: ProcessLocation(scope, "card", None),
-            lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+            lambda: 1_800_000_001, 1)
         async with asyncio.timeout(2):
             state.sample(process_snapshot(1))
             await entered.wait()
@@ -365,7 +405,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
                 key = PresentationKey("side", activity.thread_id, activity.turn_id, True)
                 event = CodexReplyEvents(fx.runtime, fx.app._ordinary).opened(
                     key, origin, BindingTaskFeedback(), reply=AsyncMock(), reply_partial=AsyncMock(),
-                    parent_binding_id="parent", root_message_id="root")
+                    root_message_id="root")
                 fx.runtime.side_turn_activity_values["side"] = activity
                 await presenter.open(event)
                 state = presenter._process[key]

@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from lark_channel import (
     SendOpts,
 )
 
-from .codex_reply_events import CodexReplyEvents
-from .reply_events import PresentationKey
 from ..admin.port_config import AdminPortConfigurationError
 from ..group_access import GroupAccessLimitExceeded
 from ..bindings import (
@@ -26,8 +24,7 @@ from ..cards import (
     side_topic_card,
 )
 from .messages import _nonempty_field, _object_field
-from .question_inputs import CardAnswerOrigin
-from .topics import TopicPublishError, send_topic_message
+from .topics import TopicMessage, TopicPublishError, send_topic_message
 from ..cards.status import (
     side_status_card,
 )
@@ -40,7 +37,6 @@ from ..runtime.contracts import (
     SideStartFailed,
     SideSubmissionAdmission,
     StopDisposition,
-    SubmitDisposition,
 )
 from ..domain import (
     ControlIntent,
@@ -75,7 +71,6 @@ from ..skill_references import InvalidSkillReference, parse_skill_references
 from . import constants
 from .app_values import (
     _CardReplyTarget,
-    _SentMessage,
     _side_send_uuid,
     _side_initial_question_echo,
     _side_reply_target,
@@ -246,56 +241,7 @@ class SideChannel(PromptChannel):
         finally:
             submit_kwargs.pop("input", None)
             prepared = None
-        if submission.disposition is SubmitDisposition.STEERED:
-            if not await self._safe_add_reaction(reply_origin, constants.STEER_REACTION):
-                try:
-                    await self._reply(reply_origin, "已接收 Side 调整。")
-                except Exception as error:
-                    logger.warning(
-                        "accepted Side steer presentation failed",
-                        extra={
-                            "side_id": submission.side_id,
-                            "thread_id": submission.thread_id,
-                            "turn_id": submission.turn_id,
-                            "error_type": type(error).__name__,
-                        },
-                    )
-            return
-        release = submission.release_receipt_attempt
-        assert release is not None
-        try:
-            presenters: list[Awaitable[bool]] = [
-                self._reactions.start(
-                    submission.turn_id,
-                    _message_id(reply_origin),
-                    pulse_enabled=(
-                        submission.task_feedback.reaction_pulse_enabled
-                    ),
-                )
-            ]
-            key = PresentationKey(submission.side_id, submission.thread_id, submission.turn_id, side=True)
-            event = CodexReplyEvents(self._runtime, self._ordinary).opened(
-                key, reply_origin, submission.task_feedback,
-                parent_binding_id=submission.parent_binding_id, root_message_id=submission.root_message_id,
-                reply=lambda card: (self._reply_to_origin(reply_origin, card) if isinstance(reply_origin, CardAnswerOrigin)
-                                    else self._channel.reply(reply_origin, card)),
-                reply_partial=lambda post: self._reply_to_origin(reply_origin, post),
-            )
-            presenters.append(self._progress_cards.open(event))
-            if presenters:
-                await asyncio.gather(*presenters)
-        except Exception as error:
-            logger.warning(
-                "accepted Side prompt presentation failed",
-                extra={
-                    "side_id": submission.side_id,
-                    "thread_id": submission.thread_id,
-                    "turn_id": submission.turn_id,
-                    "error_type": type(error).__name__,
-                },
-            )
-        finally:
-            release()
+        await self._present_receipt(submission, reply_origin)
 
     async def _command_enable(self, message: Any, intent: ControlIntent) -> None:
         if _message_chat_type(message) == "p2p":
@@ -596,7 +542,7 @@ class SideChannel(PromptChannel):
             await self._reply_no_current_binding(message, intent.scope)
             return
         record = existing
-        root: _SentMessage | None = None
+        root: TopicMessage | None = None
         topic_id: str | None = None
         origin: _CardReplyTarget | None = None
         try:
@@ -834,9 +780,8 @@ class SideChannel(PromptChannel):
         chat_id: str,
         content: Any,
         opts: SendOpts,
-    ) -> _SentMessage:
+    ) -> TopicMessage:
         try:
-            sent = await send_topic_message(self._channel, chat_id, content, opts)
+            return await send_topic_message(self._channel, chat_id, content, opts)
         except TopicPublishError as error:
             raise SideTopicCreateFailed("Side " + str(error)) from error
-        return _SentMessage(sent.message_id, sent.chat_id, sent.thread_id, sent.root_id, sent.parent_id)

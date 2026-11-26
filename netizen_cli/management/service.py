@@ -914,11 +914,6 @@ class InstanceManagementService:
             case Provider.NAME_GENERATOR:
                 return self.names.generate is not None
 
-    def operation_policy(self, identity: BackendPolicy | None = None) -> BackendPolicy:
-        if identity is not None and identity.backend != self.policy.backend:
-            raise ValueError("Backend policy identity conflicts with assembled management")
-        return self.policy
-
     @property
     def session_form(self) -> SessionFormView:
         return SessionFormView.from_operations(
@@ -1565,8 +1560,7 @@ class InstanceManagementService:
         deadline: float | None = None,
     ) -> BindingStatusProjection:
         binding = self._bindings.get(binding_id)
-        capture = self.status_source.capture(binding, snapshot)
-        before = capture.snapshot
+        before = self.status_source.capture(binding, snapshot)
         local = _project_binding_status(
             binding=binding,
             snapshot=before,
@@ -1673,11 +1667,10 @@ class InstanceManagementService:
         binding_snapshots = []
         for binding_id in binding_ids:
             binding = self._bindings.get(binding_id)
-            capture = self.status_source.capture(binding)
             binding_snapshots.append(
                 _project_binding_status(
                     binding=binding,
-                    snapshot=capture.snapshot,
+                    snapshot=self.status_source.capture(binding),
                 )
             )
         sides: list[SideSessionSnapshot] = []

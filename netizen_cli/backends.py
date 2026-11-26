@@ -290,7 +290,7 @@ OPERATIONS = {
         ),
     ),
     OperationId.SKILLS: Operation(
-        "显式 Skill 调用", Provider.CODEX_RUNTIME, command_probe=NativeCapability.SKILLS
+        "显式 Skill 调用", Provider.CODEX_RUNTIME
     ),
     OperationId.FILES: Operation("本轮文件", Provider.REPLY_PROGRESS),
 }

@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
+from functools import partial
 
 
+from ..backends import OperationId
 from ..bindings import (
     SideTopicNotFound,
     SideTopicState,
@@ -14,7 +16,9 @@ from ..bindings import (
 )
 from ..domain import (
     FeishuScope,
+    ScheduledBindingOrigin,
     ScheduledOrigin,
+    SessionAgentOrigin,
     ScopeKind,
 )
 from ..error_messages import describe_error
@@ -30,6 +34,9 @@ from ..runtime.codex_replies import CodexFeatureEvent
 from ..runtime.contracts import (
     CompactionOutcome,
     GoalSubmission,
+    SideSubmission,
+    Submission,
+    SubmitDisposition,
     SideLifecycleOutcome,
     SideTurnOutcome,
     ThreadActivityDiscardedOutcome,
@@ -49,6 +56,7 @@ from .base import (
 )
 from .codex_reply_events import CodexReplyEvents
 from .process_presentation import ProcessLocation
+from .question_inputs import CardAnswerOrigin
 from .presentation import CompletionPresentationChannel
 from .reply_events import DeliveryReceipt, PresentationKey, ReplyTarget, RunState, TurnResult
 
@@ -246,6 +254,49 @@ class NativeReplyChannel(CompletionPresentationChannel):
             raise
         await self._complete_task(event)
 
+    async def _present_receipt(self, submission: Submission | SideSubmission, origin: object) -> None:
+        side = isinstance(submission, SideSubmission)
+        owner = submission.side_id if isinstance(submission, SideSubmission) else submission.binding_id
+        key = PresentationKey(owner, submission.thread_id, submission.turn_id, side)
+        kind = "Side" if side else "ordinary"
+        if submission.disposition is SubmitDisposition.STEERED:
+            if not await self._safe_add_reaction(origin, constants.STEER_REACTION):
+                try:
+                    await self._reply(origin, "已接收 Side 调整。" if side else "已接收调整。")
+                except Exception as error:
+                    logger.warning("accepted %s steer presentation failed", kind,
+                                   extra={**key.log_context, "error_type": type(error).__name__})
+            return
+
+        release = submission.release_receipt_attempt
+        assert release is not None
+        try:
+            reaction = self._reactions.start(key.turn_id, _message_id(origin),
+                                             pulse_enabled=submission.task_feedback.reaction_pulse_enabled)
+            await asyncio.gather(reaction, self._open_running_card(key, submission, origin))
+        except Exception as error:
+            logger.warning("accepted %s prompt presentation failed", kind,
+                           extra={**key.log_context, "error_type": type(error).__name__})
+        finally:
+            release()
+
+    async def _open_running_card(
+        self, key: PresentationKey, submission: Submission | SideSubmission | GoalSubmission, origin: object,
+    ) -> bool:
+        ordinary = isinstance(submission, Submission)
+        routed = (isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin))
+                  if ordinary else isinstance(submission, SideSubmission) and isinstance(origin, CardAnswerOrigin))
+        reply = self._reply_to_origin if routed else self._channel.reply
+        event = CodexReplyEvents(self._runtime, self._ordinary).opened(
+            key, origin, submission.task_feedback, goal=isinstance(submission, GoalSubmission),
+            root_message_id=submission.root_message_id if isinstance(submission, SideSubmission) else None,
+            reply=partial(reply, origin) if not ordinary or self._policy.allows(OperationId.REPLY_CARD) else None,
+            reply_partial=lambda post: self._reply_to_origin(origin, post),
+            validate_reply=(lambda result: self._scheduled_reply_confirmed(origin, result))
+                           if isinstance(submission, Submission) and isinstance(origin, ScheduledOrigin) else None,
+        )
+        return await self._progress_cards.open(event, can_publish_process=self._policy.allows(OperationId.PROGRESS))
+
     async def _present_running_goal(
         self,
         *,
@@ -258,12 +309,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
 
         key = PresentationKey(binding.id, submission.thread_id, submission.logical_turn_id)
         await self._reactions.start(key.turn_id, _message_id(origin), pulse_enabled=submission.task_feedback.reaction_pulse_enabled)
-        event = CodexReplyEvents(self._runtime, self._ordinary).opened(
-            key, origin, submission.task_feedback, goal=True,
-            reply=lambda card: self._channel.reply(origin, card),
-            reply_partial=lambda post: self._reply_to_origin(origin, post),
-        )
-        return await self._progress_cards.open(event)
+        return await self._open_running_card(key, submission, origin)
 
     async def _goal_management_receipt(
         self, binding: ThreadBinding, scope: FeishuScope, origin: object, *,

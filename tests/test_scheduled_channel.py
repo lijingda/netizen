@@ -23,6 +23,7 @@ from lark_channel import (
 )
 
 from tests.support.reply_events import open_card
+from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings
 from netizen_cli.cards import decode_turn_file_action
@@ -31,7 +32,7 @@ from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import (
     FeishuScope,
     ScopeKind,
-    ScheduledBindingConversation,
+    ChatConversation,
     ScheduledBindingOrigin,
     ScheduledOrigin,
     MentionContextMode,
@@ -610,7 +611,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.channel.reply = sdk_reply
         return driver
 
-    async def test_scheduled_answer_receipt_confirms_delivery_even_if_its_id_matches_a_process_message(self):
+    async def test_confirmed_process_does_not_confirm_an_unverified_scheduled_answer(self):
         wire = ProcessTransport([])
         self.app._progress_cards._process_port = wire.port
         mid = "synthetic-process-1"
@@ -631,11 +632,11 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         claim, request = await self.completion_fixture()
         state, = self.app._progress_cards._process.values()
         await state.ready.wait()
-        self.channel.reply_results.append(sent_result(mid, chat_id="oc_group", thread_id="omt_fresh"))
+        self.channel.reply_results.append(sent_result("answer", chat_id="oc_group", thread_id="other-topic"))
         await self.finish_fixture(claim, request)
         await state.task
         self.assertEqual(wire.completed, {mid})
-        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
 
     async def finish_fixture(self, claim, request, content="验收成功", *, activity=None):
         await self.app.handle_completion(TurnOutcome(binding_id=request["binding"].id,
@@ -947,7 +948,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         run_before = self.store.schedules.get_run(claim.run.id)
         origin = ScheduledBindingOrigin(
             app_id="app", chat_id="oc_group", message_id="om_seed",
-            conversation=ScheduledBindingConversation("oc_group", "group", "omt_fresh"),
+            conversation=ChatConversation("oc_group", "group", "omt_fresh"),
             plan_id=claim.plan.id, run_id=claim.run.id, binding_id=request["binding"].id,
         )
         self.channel.card_update_results.extend(SendResult(success=False, raw={"code": 2200}) for _ in range(3))
@@ -1152,7 +1153,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.schedules.get_run(claim.run.id), run_before)
         self.assertEqual(self.store._connection.total_changes, changes_before)
         self.assertEqual(self.store.active_binding(group.key).id, source.id)
-        self.assertEqual(set(self.app._progress_cards._sessions), {(source.id, "native-source", "turn-followup")})
+        self.assertEqual(set(self.app._progress_cards._sessions), {PresentationKey(source.id, "native-source", "turn-followup")})
 
     async def card_action(self, *, value=None, form=None, topic_id=None):
         self.channel.fetched_messages["om_card"] = {"code": 0, "data": {"items": [{"message_id": "om_card", "chat_id": "oc_group", **({"thread_id": topic_id} if topic_id else {})}]}}

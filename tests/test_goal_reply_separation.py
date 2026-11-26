@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from lark_channel import OutboundCard
 
+from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.cards import decode_turn_file_action
 from netizen_cli.domain import (
@@ -131,7 +132,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
                     owner_id="ou_user", state=GoalOperationState.RUNNING, persisted=native_goal(),
                 )
                 await self.start(progress=True)
-                session = self.app._progress_cards._sessions[(self.binding.id, "native-one", "goal-one")]
+                session = self.app._progress_cards._sessions[PresentationKey(self.binding.id, "native-one", "goal-one")]
                 management = self.channel.replies[0][1]
                 await self.app.handle_card_action(direct_button_event(button(management, "goal." + action), message_id="om_management"))
                 self.assertEqual(self.runtime.stop_calls, [])
@@ -168,8 +169,8 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.goal_submission = self.submission("goal-two")
         self.channel.reply_results.append(sent_result("om_task_two", chat_id="oc_direct"))
         await self.app.handle_message(FakeMessage("/goal resume", message_id="om_resume"))
-        self.assertIn((self.binding.id, "native-one", "goal-two"), self.app._progress_cards._sessions)
-        self.assertNotIn((self.binding.id, "native-one", "goal-one"), self.app._progress_cards._sessions)
+        self.assertIn(PresentationKey(self.binding.id, "native-one", "goal-two"), self.app._progress_cards._sessions)
+        self.assertNotIn(PresentationKey(self.binding.id, "native-one", "goal-one"), self.app._progress_cards._sessions)
         self.assertEqual([item[0] for item in self.channel.updates], ["om_task"])
 
     async def test_controls_survive_restart_but_changed_goal_has_no_mutation(self):
@@ -331,7 +332,7 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.release_count, 1)
         self.assertIn("Goal 已启动", rendered(self.channel.replies[0][1]))
         self.assertNotIn("请求处理未完成", rendered(self.channel.replies))
-        self.assertIn((self.binding.id, "native-one", "goal-one"), self.app._progress_cards._sessions)
+        self.assertIn(PresentationKey(self.binding.id, "native-one", "goal-one"), self.app._progress_cards._sessions)
 
     async def test_accepted_clear_receipt_is_preserved_when_management_refresh_fails(self):
         await self.app.handle_message(FakeMessage("/goal", message_id="om_query"))

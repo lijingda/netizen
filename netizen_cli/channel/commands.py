@@ -63,7 +63,7 @@ from ..management import (
 from . import constants
 from .app_values import (
     _CardReplyConversation,
-    _CardCommandOrigin,
+    _CardReplyTarget,
     _message_chat_type,
 )
 from .base import (
@@ -93,7 +93,7 @@ class CommandChannel(CardControlChannel):
         if not message_id or not chat_id or not isinstance(sender_id, str) or not sender_id:
             logger.warning("status command callback missing message or operator identity")
             return
-        origin = _CardCommandOrigin(message_id, message_id, chat_id, _CardReplyConversation(None))
+        origin = _CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(None))
         renewed_card: OutboundCard | None = None
         try:
             if getattr(action, "tag", None) != "button" or getattr(action, "form_value", None):

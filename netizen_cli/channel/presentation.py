@@ -320,45 +320,22 @@ class CompletionPresentationChannel(ChannelReplies):
         prepared_response: str | None = None,
     ) -> None:
         final_response = prepared_response or outcome.content
-        if not has_file_evidence(task_files.evidence, task_files.summary):
-            await self._reply_task_result(
-                outcome, final_response,
-            )
-            return
-        try:
-            scope, files, file_provenance_id = self._task_completion_files(
-                outcome,
-                task_files,
-            )
-            card = turn_files_card(
-                scope=scope,
-                binding_id=file_provenance_id,
-                turn_id=outcome.physical_turn_id,
-                final_response=(
-                    prepared_response or outcome.final_response or constants.TURN_FILES_WITHOUT_FINAL_RESPONSE
-                ),
-                files=files,
-                additions=task_files.summary.additions,
-                deletions=task_files.summary.deletions,
-                completion_mention_user_id=outcome.mention_user_id,
-            ) if files else None
-        except asyncio.CancelledError:
-            raise
-        except TurnFileCardLimitError as error:
-            await self._reply_task_result(outcome, f"{final_response}\n\n{_file_limit_notice(outcome, error)}")
-            return
-        except Exception:
-            logger.exception(
-                "failed to prepare completed Turn file card",
-                extra={
-                    "owner_id": outcome.target.key.owner_id,
-                    "turn_id": outcome.turn_id,
-                },
-            )
-            await self._reply_task_result(
-                outcome, final_response,
-            )
-            return
+        card = None
+        if has_file_evidence(task_files.evidence, task_files.summary):
+            try:
+                scope, files, file_provenance_id = self._task_completion_files(outcome, task_files)
+                if files:
+                    card = turn_files_card(
+                        scope=scope, binding_id=file_provenance_id, turn_id=outcome.physical_turn_id,
+                        final_response=prepared_response or outcome.final_response or constants.TURN_FILES_WITHOUT_FINAL_RESPONSE,
+                        files=files, additions=task_files.summary.additions, deletions=task_files.summary.deletions,
+                        completion_mention_user_id=outcome.mention_user_id,
+                    )
+            except TurnFileCardLimitError as error:
+                final_response += f"\n\n{_file_limit_notice(outcome, error)}"
+            except Exception:
+                logger.exception("failed to prepare completed Turn file card",
+                                 extra={"owner_id": outcome.target.key.owner_id, "turn_id": outcome.turn_id})
 
         # Only preparation failures are known to precede any publication.
         # Do not catch a text fallback's own failure and send it a second time.
@@ -386,7 +363,6 @@ class CompletionPresentationChannel(ChannelReplies):
         outcome: TurnResult,
         card_message_id: str | None,
         *,
-        scope: FeishuScope | None = None,
         source_message_id: str | None = None,
     ) -> None:
         if source_message_id is None and (
@@ -405,7 +381,7 @@ class CompletionPresentationChannel(ChannelReplies):
                 or f"会话 {outcome.target.key.owner_id[:8]}"
             )
         await send_completion_mention(
-            self._channel, scope=scope or self._scope(outcome.origin),
+            self._channel, scope=self._scope(outcome.origin),
             card_message_id=card_message_id, user_id=user_id,
             operation_id=outcome.turn_id,
             source_message_id=source_message_id,
@@ -417,20 +393,18 @@ class CompletionPresentationChannel(ChannelReplies):
         outcome: TurnResult,
         content: str,
         *,
-        origin: object | None = None,
         allow_completion_mention: bool = True,
-        partial_delivery: _PartialAnswerDelivery | None = None,
+        partial_delivery: _PartialAnswerDelivery,
         timeout_seconds: float = constants.TERMINAL_ANSWER_DELIVERY_TIMEOUT_SECONDS,
         unconfirmed_content: str | None = None,
         final_reply: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         """Deliver ordered answers once, reserving time and completion effects for final."""
 
-        target = outcome.origin if origin is None else origin
         if final_reply is None:
             async def final_reply(text: str) -> None:
                 await self._reply_task_result(
-                    outcome, text, origin=target,
+                    outcome, text,
                     allow_completion_mention=allow_completion_mention,
                 )
         if not outcome.partial_answers:
@@ -440,15 +414,6 @@ class CompletionPresentationChannel(ChannelReplies):
         if timeout_seconds <= 0:
             logger.warning("terminal answer delivery budget exhausted before sending")
             return
-        if partial_delivery is None:
-            partial_delivery = _PartialAnswerDelivery(
-                target=outcome.target,
-                stopped=asyncio.Event(),
-                reply_partial=lambda post: self._reply_to_origin(target, post),
-                validate_reply=(
-                    outcome.receipt.validate if outcome.receipt else None
-                ),
-            )
         try:
             async with asyncio.timeout(timeout_seconds):
                 confirmed = await self._progress_cards.deliver_partial_answers(
@@ -475,12 +440,11 @@ class CompletionPresentationChannel(ChannelReplies):
         outcome: TurnResult,
         content: str,
         *,
-        origin: object | None = None,
         allow_completion_mention: bool = True,
     ) -> None:
         mention = outcome.mention_user_id
         await self._reply(
-            outcome.origin if origin is None else origin,
+            outcome.origin,
             content,
             completion_mention_user_id=mention if allow_completion_mention else None,
         )

@@ -45,11 +45,10 @@ class CodexReplyEvents:
         origin: object,
         feedback: BindingTaskFeedback,
         *,
-        reply: Callable[[OutboundCard], Awaitable[SendResult]],
+        reply: Callable[[OutboundCard], Awaitable[SendResult]] | None,
         reply_partial: Callable[[OutboundPost], Awaitable[SendResult]],
         validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None,
         goal: bool = False,
-        parent_binding_id: str | None = None,
         root_message_id: str | None = None,
     ) -> TurnOpened:
         target = ReplyTarget(key, origin)
@@ -83,7 +82,7 @@ class CodexReplyEvents:
         return TurnOpened(
             target, feedback, observe, retain,
             reply, reply_partial, validate_reply, reuse_existing=goal,
-            process_binding_id=parent_binding_id, process_root_id=root_message_id,
+            process_root_id=root_message_id,
         )
 
     @classmethod

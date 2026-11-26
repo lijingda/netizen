@@ -213,7 +213,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_feedback_failure_after_acceptance_does_not_claim_rejection(self):
         self.queue_anchor()
-        self.app._present_ordinary_receipt = AsyncMock(side_effect=OSError("feedback failed"))
+        self.app._present_receipt = AsyncMock(side_effect=OSError("feedback failed"))
         with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_card_action(self.event())
         self.assertEqual(len(self.runtime.submit_calls), 1)
