@@ -19,9 +19,7 @@ from ..process_messages import (
     StepItem, TextItem, ToolItem, build_items, finish_items,
 )
 from .messages import _nonempty_field, _object_field
-from .replacement_writer import Outcome
 from .ports import ReplyChannel
-from .replacement_writer import ReplacementWriter
 from .reply_events import Activity, PresentationKey
 
 
@@ -202,7 +200,7 @@ class ProcessPresentation:
         self.clock, self.timeout, self.on_closed = clock, timeout, on_closed
         self.terminal = False
         self.items = ProcessList(key)
-        self.writer = ReplacementWriter[Payload](lambda items: items)
+        self.confirmed: Payload | None = None
         self.created: Created | None = None
         self.ready = asyncio.Event()
         self.task: asyncio.Task[None] | None = None
@@ -211,7 +209,6 @@ class ProcessPresentation:
         self.sampled = -1
         self.wake = asyncio.Event()
         self.closing: Reason | None = None
-        self.verdict: Reason | None = None
         self.closed = False
 
     def sample(self, snapshot: Activity | None, *, terminal: bool = False) -> None:
@@ -281,7 +278,7 @@ class ProcessPresentation:
     def _can_write(self) -> bool:
         return self.created is not None and not self.closed
 
-    async def _write(self, payload: Payload) -> Outcome:
+    async def _write(self, payload: Payload) -> Literal["confirmed", "unknown", "rejected"]:
         if not self._can_write():
             return "unknown"
         assert self.created
@@ -301,36 +298,37 @@ class ProcessPresentation:
 
     async def _drive(self) -> None:
         try:
-            if not self.ready.is_set():
-                try:
-                    if self.terminal or self.closing or not self.items.desired or not await self._create():
-                        self.closed = True
-                        return
-                finally:
-                    self.ready.set()
-            def desired() -> Payload | None:
-                self.sampled = self.generation
-                return self.items.desired if self._can_write() and not self.closing else None
-
+            if self.closed or self.terminal or self.closing or not self.items.desired or not await self._create():
+                return
+            self.ready.set()
             while self._can_write():
                 await self.wake.wait()
                 self.wake.clear()
                 if self.closing is not None:
                     final = finish_items(self.items.desired, int(self.clock()))
-                    self.writer.known = None
-                    await self.writer.reconcile(lambda: final if self._can_write() else None, self._write)
+                    await self._write(final)
                     if self._can_write():
                         assert self.created
                         async with asyncio.timeout(self.timeout):
                             result = await external_call(self.port.complete(self.created.cot_id, self.created.message_id, self.closing))
                             if not isinstance(result, (Ok, Rejected)):
                                 logger.warning("process message completion unconfirmed")
-                    self.closed = True
                     return
-                if self.generation != self.sampled:
-                    await self.writer.reconcile(desired, self._write)
+                if self.generation == self.sampled:
+                    continue
+                while self._can_write() and not self.closing:
+                    self.sampled = self.generation
+                    payload = self.items.desired
+                    if payload == self.confirmed:
+                        break
+                    outcome = await self._write(payload)
+                    if outcome == "confirmed":
+                        self.confirmed = payload
+                    else:
+                        if outcome == "unknown":
+                            self.confirmed = None
+                        break
         except Exception:
-            self.closed = True
             logger.warning("process message operation unconfirmed")
         finally:
             self.closed = True

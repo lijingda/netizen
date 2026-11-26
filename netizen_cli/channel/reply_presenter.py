@@ -143,14 +143,13 @@ class _ReplyCardPresenter:
     def process_result(self, key: PresentationKey, reason: Reason, activity: Activity | None) -> None:
         self._process_tombstones.discard(key)
         state = self._process.get(key)
-        if state is None or state.verdict in ("done", "error"):
+        if state is None or state.closing in ("done", "error"):
             return  # A queued publication may follow an already-proven physical terminal.
-        state.verdict = reason
         try:
             state.sample(activity, terminal=True)
         except Exception:
             logger.warning("process message result observation unavailable")
-        state.finish(state.verdict)
+        state.finish(reason)
 
     def end_process_run(self, run: PresentationKey, reason: Reason) -> None:
         confirmed = reason != "timeout"
@@ -158,7 +157,7 @@ class _ReplyCardPresenter:
             self._process_tombstones.discard(run)
         if state := self._process.get(run):
             state.terminal |= confirmed
-            state.finish(state.verdict or reason)
+            state.finish(reason)
 
     def tombstone_unknown_process(self, key: PresentationKey) -> None:
         self._process_tombstones.add(key)
