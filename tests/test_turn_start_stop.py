@@ -381,6 +381,26 @@ class TurnStartStopTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(case.replies("stop"), ["正在中断当前 Codex Turn。"])
             self.assertEqual((first.interrupt_count, case.cleanup.calls), (1, [first.thread_id]))
 
+    async def test_stop_captured_during_start_interrupts_same_turn_after_normal_steer(self):
+        async with stop_case() as (case, tasks):
+            prompt = tasks.create_task(case.message("first", "first"))
+            await case.held.entered.wait()
+            first, = case.codex.handles
+            async with case.management.scope_coordinator.hold(case.scope.key):
+                stop = tasks.create_task(case.message("/stop", "stop"))
+                await case.first_stop_reply.wait()
+                self.assertEqual(case.replies("stop"), [START_ACK])
+                case.held.release.set()
+                await prompt
+                await case.message("follow-up", "follow-up")
+                self.assertEqual(len(first.steers), 1)
+                self.assertEqual((first.interrupt_count, case.cleanup.calls), (0, []))
+
+            await stop
+            self.assertTrue(await case.runtime.wait_idle(2))
+            self.assertEqual((first.interrupt_count, case.cleanup.calls), (1, [first.thread_id]))
+            self.assertEqual(case.replies("stop"), [START_ACK])
+
     async def test_status_shortcut_captures_pending_start(self):
         async with stop_case() as (case, tasks):
             await case.message("/status", "status")
