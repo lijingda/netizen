@@ -221,7 +221,7 @@ class ReleaseWorkflowContractTest(unittest.TestCase):
 const assert = require('assert/strict');
 const runGate = new (Object.getPrototypeOf(async function(){}).constructor)(
   'github', 'context', 'core', process.argv[1]);
-const good = {head_sha: process.env.RELEASE_COMMIT, head_branch: 'main', event: 'push',
+const good = {id: 42, head_sha: process.env.RELEASE_COMMIT, head_branch: 'main', event: 'push',
   status: 'completed', conclusion: 'success', html_url: 'https://example.test/main-gate'};
 async function check(runs, expected) {
   const outputs = {};
@@ -235,6 +235,7 @@ async function check(runs, expected) {
   if (expected) {
     await attempt;
     assert.equal(outputs.url, good.html_url);
+    assert.equal(outputs['run-id'], good.id);
   } else {
     await assert.rejects(attempt, /no successful main CI run/);
     assert.deepEqual(outputs, {});

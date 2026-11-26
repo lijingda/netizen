@@ -80,8 +80,16 @@ class ReleaseEscalation(ReleaseError):
 Projection = Callable[[str, str], object]
 CI_COVERAGE = (
     "make check (Linux CPython matrix and macOS arm64), make check-native "
-    "(Linux and macOS arm64), and make check-browser (Linux Admin smoke)"
+    "(Linux and macOS arm64), make check-browser (Linux Admin smoke), and clean "
+    "wheel/sdist installs (Linux 3.11/3.14 and macOS arm64 3.14)"
 )
+MACOS_CI_JOB = "macOS arm64 (Python 3.14)"
+MACOS_CI_STEPS = {
+    "Run the repository gate",
+    "Run the isolated group",
+    "Upload native regression evidence",
+    "Build and install the wheel and sdist in separate clean environments",
+}
 
 
 def sdk_pins(*names: str) -> Projection:
@@ -807,6 +815,19 @@ def merge_pull_request(number: int) -> str:
     return merge_oid
 
 
+def require_macos_ci(run_id: str) -> None:
+    """A green workflow can contain skipped jobs or steps."""
+    jobs = json.loads(gh("run", "view", run_id, "--json", "jobs"))["jobs"]
+    job = next((job for job in jobs if job["name"] == MACOS_CI_JOB), None)
+    if not job or job["status"] != "completed" or job["conclusion"] != "success":
+        raise ReleaseError(f"main CI run {run_id} requires successful job {MACOS_CI_JOB}")
+    passed = {step["name"] for step in job["steps"]
+              if step["status"] == "completed" and step["conclusion"] == "success"}
+    missing = MACOS_CI_STEPS - passed
+    if missing:
+        raise ReleaseError(f"{MACOS_CI_JOB} in run {run_id} lacks successful steps: {', '.join(sorted(missing))}")
+
+
 def wait_for_main_ci(commit: str) -> str:
     deadline = time.monotonic() + CI_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -823,7 +844,7 @@ def wait_for_main_ci(commit: str) -> str:
                 "--event",
                 "push",
                 "--json",
-                "status,conclusion,url",
+                "databaseId,status,conclusion,url",
             )
         )
         successful = next(
@@ -836,6 +857,7 @@ def wait_for_main_ci(commit: str) -> str:
             None,
         )
         if successful is not None:
+            require_macos_ci(str(successful["databaseId"]))
             return str(successful["url"])
         if runs and all(run["status"] == "completed" for run in runs):
             run = runs[0]

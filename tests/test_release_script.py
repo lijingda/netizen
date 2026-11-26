@@ -10,6 +10,8 @@ from pathlib import Path
 from unittest.mock import call, patch
 
 from scripts.release import (
+    MACOS_CI_JOB,
+    MACOS_CI_STEPS,
     VERSION_FILES,
     CommitEntry,
     ReleaseEscalation,
@@ -24,6 +26,7 @@ from scripts.release import (
     parse_log,
     range_areas,
     release,
+    require_macos_ci,
     render_notes,
     summarize_rollup,
     validate_explicit_version,
@@ -492,18 +495,22 @@ class ReleaseOrchestrationTest(unittest.TestCase):
                 "url": "https://example.invalid/failed",
             },
             {
+                "databaseId": 42,
                 "status": "completed",
                 "conclusion": "success",
                 "url": "https://example.invalid/passed",
             },
         ]
-        with patch("scripts.release.gh", return_value=json.dumps(runs)) as gh_mock:
+        jobs = [{"name": MACOS_CI_JOB, "status": "completed", "conclusion": "success",
+                 "steps": [{"name": name, "status": "completed", "conclusion": "success"}
+                           for name in MACOS_CI_STEPS]}]
+        with patch("scripts.release.gh", side_effect=[json.dumps(runs), json.dumps({"jobs": jobs})]) as gh_mock:
             url = wait_for_main_ci("merge-oid")
 
         self.assertEqual(url, "https://example.invalid/passed")
         self.assertEqual(
-            gh_mock.call_args,
-            call(
+            gh_mock.call_args_list,
+            [call(
                 "run",
                 "list",
                 "--workflow",
@@ -515,9 +522,23 @@ class ReleaseOrchestrationTest(unittest.TestCase):
                 "--event",
                 "push",
                 "--json",
-                "status,conclusion,url",
-            ),
+                "databaseId,status,conclusion,url",
+            ), call("run", "view", "42", "--json", "jobs")],
         )
+
+    def test_main_ci_rejects_missing_or_unsuccessful_macos_coverage(self) -> None:
+        passed = {"status": "completed", "conclusion": "success"}
+        steps = [{"name": name, **passed} for name in MACOS_CI_STEPS]
+        job = {"name": MACOS_CI_JOB, **passed, "steps": steps}
+        cases = [[], [dict(job, conclusion="skipped")], [dict(job, name="another job")]]
+        for step in steps:
+            remaining = [other for other in steps if other != step]
+            cases.append([dict(job, steps=remaining)])
+            cases.append([dict(job, steps=[*remaining, dict(step, conclusion="skipped")])])
+        for jobs in cases:
+            with self.subTest(jobs=jobs), patch("scripts.release.gh", return_value=json.dumps({"jobs": jobs})):
+                with self.assertRaises(ReleaseError):
+                    require_macos_ci("42")
 
 
 class ReleaseCandidateTest(unittest.TestCase):

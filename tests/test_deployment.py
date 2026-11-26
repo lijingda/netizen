@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+from scripts.release import MACOS_CI_JOB, MACOS_CI_STEPS
 from tests.documentation_links import local_link_errors
 
 
@@ -94,19 +95,29 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertEqual(version("openai-codex-cli-bin"), sdk)
         self.assertIn(f"openai-codex-cli-bin=={sdk}", constraints)
 
-    def test_macos_jobs_run_on_main_pushes_and_dispatch_only(self) -> None:
+    def test_one_macos_job_qualifies_main_pushes_and_dispatches(self) -> None:
         workflow = yaml.load(
             (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"),
             Loader=yaml.BaseLoader,
         )
         jobs = workflow["jobs"]
-        self.assertEqual(jobs["macos-arm64-check"]["if"], "github.event_name != 'pull_request'")
-        for job_name in ("artifact-installs", "native-isolated"):
-            with self.subTest(job=job_name):
-                os_matrix = jobs[job_name]["strategy"]["matrix"]["os"]
-                self.assertIn("github.event_name == 'pull_request'", os_matrix)
-                self.assertIn('\'["ubuntu-latest"]\'', os_matrix)
-                self.assertIn('\'["ubuntu-latest", "macos-15"]\'', os_matrix)
+        self.assertIn("workflow_dispatch", workflow["on"])
+        mac, = (job for job in jobs.values() if job["runs-on"] != "ubuntu-latest")
+        self.assertEqual(mac["name"], MACOS_CI_JOB)
+        self.assertEqual(mac["if"], "github.event_name != 'pull_request'")
+        self.assertNotIn("matrix", mac.get("strategy", {}))
+        qualified_steps = [step for step in mac["steps"] if step["name"] in MACOS_CI_STEPS]
+        gate, native, upload, installs = qualified_steps
+        self.assertEqual(gate["run"], "make check")
+        self.assertEqual(native["run"], "make check-native")
+        self.assertEqual(native["timeout-minutes"], "120")
+        self.assertTrue(upload["uses"].startswith("actions/upload-artifact@"))
+        self.assertEqual(upload["if"], "always()")
+        self.assertEqual(upload["with"]["path"], native["env"]["NATIVE_EVIDENCE_DIR"])
+        self.assertIn("--smoke-installs", installs["run"])
+        linux_installs = jobs["artifact-installs"]
+        self.assertEqual(linux_installs["strategy"]["matrix"]["python"], ["3.11", "3.14"])
+        self.assertIn(installs["run"], [s.get("run") for s in linux_installs["steps"]])
 
     def test_main_ci_runs_repository_gate_for_supported_python_versions(self) -> None:
         workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
@@ -117,14 +128,15 @@ class DeploymentAssetsTest(unittest.TestCase):
             self.assertEqual(workflow["on"][event]["branches"], ["main"])
         self.assertEqual(workflow["permissions"]["contents"], "read")
 
-        for job_name, runner, versions in (
-            ("check", "ubuntu-latest", ["3.11", "3.12", "3.13", "3.14"]),
-            ("macos-arm64-check", "macos-15", ["3.14"]),
+        self.assertEqual(workflow["jobs"]["check"]["strategy"]["matrix"]["python"],
+                         ["3.11", "3.12", "3.13", "3.14"])
+        for job_name, runner, python_version in (
+            ("check", "ubuntu-latest", "${{ matrix.python }}"),
+            ("macos-arm64-check", "macos-15", "3.14"),
         ):
             with self.subTest(job=job_name):
                 job = workflow["jobs"][job_name]
                 self.assertEqual(job["runs-on"], runner)
-                self.assertEqual(job["strategy"]["matrix"]["python"], versions)
                 actions = {
                     step["uses"].split("@")[0]: step.get("with", {})
                     for step in job["steps"] if "uses" in step
@@ -134,7 +146,7 @@ class DeploymentAssetsTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     actions["actions/setup-python"]["python-version"],
-                    "${{ matrix.python }}",
+                    python_version,
                 )
                 commands = [
                     step["run"] for step in job["steps"] if "run" in step
