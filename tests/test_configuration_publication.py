@@ -17,6 +17,10 @@ from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule, SessionPolicyService
 from netizen_cli.worktrees.settings import WorktreeSettings, WorktreeSettingsService
 
+# Condition waits return as soon as the event or result is ready; the bound only
+# stops a broken test, so it is generous for slow CI runners.
+WAIT_SECONDS = 30
+
 
 class ConfigurationPublicationTest(unittest.TestCase):
     def setUp(self):
@@ -61,7 +65,7 @@ class ConfigurationPublicationTest(unittest.TestCase):
 
                     def slow_write(snapshot, loaded):
                         writing.set()
-                        if not release.wait(timeout=10):
+                        if not release.wait(timeout=2 * WAIT_SECONDS):
                             raise AssertionError("test did not release the configuration writer")
                         if fail_write:
                             raise OSError("synthetic write failure")
@@ -71,16 +75,16 @@ class ConfigurationPublicationTest(unittest.TestCase):
                         with ThreadPoolExecutor(max_workers=2) as pool:
                             saving = pool.submit(service.update, settings, expected_revision=before[1]["revision"])
                             try:
-                                self.assertTrue(writing.wait(timeout=2), "save did not reach the writer")
-                                self.assertEqual(pool.submit(read).result(timeout=2), before)
+                                self.assertTrue(writing.wait(timeout=WAIT_SECONDS), "save did not reach the writer")
+                                self.assertEqual(pool.submit(read).result(timeout=WAIT_SECONDS), before)
                                 self.assertEqual(self.path.read_bytes(), content_before)
                             finally:
                                 release.set()
                             if fail_write:
                                 with self.assertRaisesRegex(OSError, "synthetic write failure"):
-                                    saving.result(timeout=2)
+                                    saving.result(timeout=WAIT_SECONDS)
                             else:
-                                saving.result(timeout=2)
+                                saving.result(timeout=WAIT_SECONDS)
 
                     if fail_write:
                         self.assertEqual(read(), before)
@@ -111,7 +115,7 @@ class ConfigurationPublicationTest(unittest.TestCase):
 
                 def slow_write(snapshot, loaded):
                     writing.set()
-                    if not release.wait(timeout=10):
+                    if not release.wait(timeout=2 * WAIT_SECONDS):
                         raise AssertionError("test did not release the configuration writer")
                     return write_configuration(snapshot, loaded)
 
@@ -123,14 +127,14 @@ class ConfigurationPublicationTest(unittest.TestCase):
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         first = pool.submit(service.update, settings, expected_revision=before[1]["revision"])
                         try:
-                            self.assertTrue(writing.wait(timeout=2), "first save did not reach the writer")
+                            self.assertTrue(writing.wait(timeout=WAIT_SECONDS), "first save did not reach the writer")
                             second = pool.submit(competing_save)
-                            self.assertTrue(competing.wait(timeout=2), "competing save did not start")
+                            self.assertTrue(competing.wait(timeout=WAIT_SECONDS), "competing save did not start")
                         finally:
                             release.set()
-                        first.result(timeout=2)
+                        first.result(timeout=WAIT_SECONDS)
                         with self.assertRaises(conflict):
-                            second.result(timeout=2)
+                            second.result(timeout=WAIT_SECONDS)
                     self.assertEqual(writer.call_count, 1)
                 self.assertEqual(read()[0], settings)
                 self.assertEqual(yaml.safe_load(self.path.read_text())[section], settings.to_dict())
