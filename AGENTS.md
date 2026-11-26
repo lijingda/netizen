@@ -27,6 +27,7 @@ The usage guides are not implementation guides.
 
 ### Runtime and sessions
 
+- [Backend contract](docs/design.md#后端契约): core native facts, capability modules and how a module is added (ADR 0111).
 - [Identity](docs/design.md#scopebinding-与会话配置): Scope, Binding and Thread relationships, plus session configuration.
 - [Admission](docs/design.md#锁与输入准入): locks and which Turn may accept an input.
 - [Observation](docs/design.md#普通-turn-终态与观测恢复): ordinary Turn terminals and bounded observation recovery.
@@ -69,6 +70,13 @@ The usage guides are not implementation guides.
 
 ## Architecture
 
+- Every backend meets the [backend contract](docs/design.md#后端契约) (ADR 0111): the
+  core native facts plus only the capability modules it declares. A capability either
+  maps to its module port or is closed at every entry. Shared layers never branch on
+  backend identity or grow parallel paths. The shared presentation event vocabulary and
+  its single delivery policy change only by ADR. Guarantees rest on native facts pinned
+  by gates, never on measured timing. New modules are defined in Netizen terms so any
+  backend, including Codex, can implement them.
 - The in-process Admin Web is a management-only adapter over the shared
   application/runtime boundary (ADR 0031). It manages existing sessions but does
   not create ordinary Bindings; interactive session creation belongs to Feishu.
