@@ -187,8 +187,9 @@ class StatusCommandsTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(self.runtime, "stop_exact", wraps=self.runtime.stop_exact) as stop:
                     await self.app.handle_card_action(self.event(card, "停止"))
                 self.assertEqual(stop.await_args.args[0], binding.id)
-                self.assertNotIn("expected_turn_id", stop.await_args.kwargs)
-                self.assertNotIn("expected_activity_revision", stop.await_args.kwargs)
+                self.assertIsNone(stop.await_args.kwargs["expected_turn_id"])
+                self.assertIsNone(stop.await_args.kwargs["expected_activity_revision"])
+                self.assertIsNone(stop.await_args.kwargs["start"])
                 self.assertIn("正在中断当前 Codex Turn", self.channel.replies[-1][1])
         self.assertEqual(self.runtime.stop_calls, [binding.id, binding.id])
 

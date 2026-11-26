@@ -51,6 +51,8 @@ class TurnControlRuntime(GoalRuntime):
     ) -> StopDisposition:
         if start is not None and (expected_activity_revision is not None or expected_turn_id is not None):
             raise ValueError("a displayed stop target cannot be combined with a captured start")
+        if expected_turn_id is not None and expected_activity_revision is None:
+            raise ValueError("expected_turn_id requires expected_activity_revision")
         if start is not None and start.binding_id != binding_id:
             raise ValueError("captured start belongs to another Binding")
         async with self._lock(binding_id):

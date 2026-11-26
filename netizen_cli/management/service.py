@@ -590,13 +590,12 @@ class ManagementRuntimePort:
         expected_turn_id: str | None = None,
         start: StartedTurn | None = None,
     ) -> StopDisposition:
-        if start is not None and expected_activity_revision is None and expected_turn_id is None:
-            return await self.__ordinary.stop_exact(binding_id, acknowledge=acknowledge, start=start)
         return await self.__ordinary.stop_exact(
             binding_id,
             acknowledge=acknowledge,
             expected_activity_revision=expected_activity_revision,
             expected_turn_id=expected_turn_id,
+            start=start,
         )
 
     async def recheck_turn_exact(

@@ -269,6 +269,11 @@ Boundaries and examples are in the [design principles](docs/CONTRIBUTING.md#шо╛ш
   Degrade the smallest scope that contains the problem (attempt, Turn, session,
   instance) and notify once. Never resend a non-idempotent action whose result is
   unknown.
+- Weigh cost against value. Add scenario-specific handling only for the normal path
+  or when the generic degraded path would break a documented guarantee. Reuse existing
+  concepts and paths across session kinds and entries; a new concept needs a real
+  native difference. When effort keeps growing for a rare case, simplify the rule or
+  drop the change and record why.
 - Keep the normal path complete and send every anomaly through one generic
   degraded path. When review keeps finding holes in edge cases, simplify the rule
   instead of patching cases.
