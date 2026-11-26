@@ -726,7 +726,10 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
             return sent_result("om_final", chat_id="oc_direct")
 
         with patch.object(self.channel, "reply", side_effect=reply):
-            await asyncio.wait_for(self.app._reply_task_answers(codex_result(outcome), "final original", timeout_seconds=0.1), 1)
+            result = codex_result(outcome)
+            delivery = await self.app._terminal_partials(result)
+            await asyncio.wait_for(self.app._reply_task_answers(
+                result, "final original", partial_delivery=delivery, timeout_seconds=0.1), 1)
         self.assertEqual(attempted, ["**阶段性答案**\n\nslow first", "final original"])
 
 

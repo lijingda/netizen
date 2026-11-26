@@ -67,7 +67,6 @@ class _PartialAnswerDelivery:
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
     attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
     confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
-    message_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -250,7 +249,6 @@ class _ReplyCardPresenter:
             ),
             attempted_partials=set() if session is None else session.attempted_partials,
             confirmed_partials=set() if session is None else session.confirmed_partials,
-            message_id=session.message_id if session else None,
         )
 
     async def deliver_partial_answers(
