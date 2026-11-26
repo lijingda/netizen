@@ -115,10 +115,6 @@ def validate_topic_message(result: SendResult, chat_id: str) -> TopicMessage:
         raise TopicPublishError(f"飞书未确认消息发送成功（code={code!r}）。")
     data = _object_field(raw, "data")
     message_id = result.message_id or None
-    # A split SDK send reports the first ID on the logical result and the last ID in raw.
-    chunks = result.chunk_ids
-    if chunks:
-        raise TopicPublishError("飞书消息分段标识不一致。", unknown=True)
     if (
         code != 0 or data is None or message_id is None
         or _nonempty_field(data, "message_id") != message_id

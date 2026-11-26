@@ -10861,6 +10861,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         nonzero_code = sent_result("om-code", chat_id="oc-chat", code=1)
         chunked = sent_result("om-chunked", chat_id="oc-chat")
         chunked.chunk_ids = ["om-chunked", "om-other"]
+        chunked.raw["data"]["message_id"] = "om-other"
         mismatch = sent_result("om-result", chat_id="oc-chat")
         mismatch.raw["data"]["message_id"] = "om-data"
         wrong_chat = sent_result("om-wrong-chat", chat_id="oc-other")
@@ -10882,13 +10883,16 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ("missing-data", missing_data),
             ("unsuccessful", unsuccessful),
         ):
+            sent_before = len(self.channel.send_calls)
             self.channel.send_results.append(result)
-            with self.subTest(label=label), self.assertRaises(
-                SideTopicCreateFailed
-            ):
+            with self.subTest(label=label), self.assertRaises(SideTopicCreateFailed) as caught:
                 await self.app._send_side_message(
                     "oc-chat", "Side root", SendOpts(uuid=f"side-validator-{label}"),
                 )
+            if label == "chunked":
+                self.assertTrue(caught.exception.__cause__.unknown)
+                self.assertIn("缺少一致", str(caught.exception))
+                self.assertEqual(len(self.channel.send_calls), sent_before + 1)
 
 
 def _project_mode_value(
