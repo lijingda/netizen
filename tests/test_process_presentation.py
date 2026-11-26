@@ -365,7 +365,7 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
                 key = PresentationKey("side", activity.thread_id, activity.turn_id, True)
                 event = CodexReplyEvents(fx.runtime, fx.app._ordinary).opened(
                     key, origin, BindingTaskFeedback(), reply=AsyncMock(), reply_partial=AsyncMock(),
-                    parent_binding_id="parent", root_message_id="root")
+                    root_message_id="root")
                 fx.runtime.side_turn_activity_values["side"] = activity
                 await presenter.open(event)
                 state = presenter._process[key]

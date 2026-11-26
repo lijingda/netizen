@@ -3090,7 +3090,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "root_id": record.root_message_id, "parent_id": "in", "deleted": False,
             }]}}
             opened = CodexReplyEvents(self.runtime, CodexOrdinarySessions(self.runtime)).opened(
-                key, origin, BindingTaskFeedback(), parent_binding_id=binding.id, root_message_id=record.root_message_id,
+                key, origin, BindingTaskFeedback(), root_message_id=record.root_message_id,
                 reply=AsyncMock(), reply_partial=AsyncMock())
             with patch.object(handle, "run", side_effect=held):
                 steer = None

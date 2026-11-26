@@ -288,7 +288,6 @@ class NativeReplyChannel(CompletionPresentationChannel):
             origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin))
         event = CodexReplyEvents(self._runtime, self._ordinary).opened(
             key, origin, submission.task_feedback, goal=isinstance(submission, GoalSubmission),
-            parent_binding_id=submission.parent_binding_id if isinstance(submission, SideSubmission) else None,
             root_message_id=submission.root_message_id if isinstance(submission, SideSubmission) else None,
             reply=lambda card: self._reply_to_origin(origin, card) if routed else self._channel.reply(origin, card),
             reply_partial=lambda post: self._reply_to_origin(origin, post),

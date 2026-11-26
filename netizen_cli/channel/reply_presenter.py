@@ -113,8 +113,8 @@ class _ReplyCardPresenter:
         self._writers: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._closed = False
 
-    def _process_for(self, target: ReplyTarget, binding_id: str | None, root_id: str | None = None) -> ProcessPresentation | None:
-        if not binding_id or target.key in self._process_tombstones or self._closed or self._process_port is None or self._process_location is None:
+    def _process_for(self, target: ReplyTarget, root_id: str | None = None) -> ProcessPresentation | None:
+        if (not target.key.side and not target.key.owner_id) or target.key in self._process_tombstones or self._closed or self._process_port is None or self._process_location is None:
             return None
         if state := self._process.get(target.key):
             return state
@@ -215,7 +215,7 @@ class _ReplyCardPresenter:
         self._sessions[key] = session
         if not event.feedback.progress_card_enabled:
             try:
-                state = self._process_for(target, event.process_binding_id if key.side else key.owner_id, event.process_root_id)
+                state = self._process_for(target, event.process_root_id)
                 if state:
                     state.sample(snapshot)
             except Exception:
