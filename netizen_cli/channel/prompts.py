@@ -27,7 +27,6 @@ from ..runtime.contracts import (
     SkillReferenceError,
     SteerRace,
     SubmissionAdmission,
-    SubmitDisposition,
     ThreadCompacting,
     ThreadArchived,
     ThreadStopping,
@@ -278,9 +277,8 @@ class PromptChannel(NativeReplyChannel):
             if prepared.context_stats is not None:
                 await self._send_context_receipt(message, prepared.context_stats)
             attempted = True
-            origin = message
             submission = await self._ordinary.submit(
-                binding=binding, cwd=cwd, input=prepared.prompt, owner_id=owner_id, origin=origin,
+                binding=binding, cwd=cwd, input=prepared.prompt, owner_id=owner_id, origin=message,
                 admission=admission, context_commit=context_commit, skill_names=skill_names,
             )
             accepted = True
@@ -306,7 +304,7 @@ class PromptChannel(NativeReplyChannel):
                 if submission.release_receipt_attempt is not None:
                     submission.release_receipt_attempt()
                 raise
-        await self._present_receipt(submission, message if submission.disposition is SubmitDisposition.STEERED else origin)
+        await self._present_receipt(submission, message)
 
     async def _discard_unsubmitted_attachments(self, prepared, error: BaseException,
                                                *, attempted: bool = True) -> None:
