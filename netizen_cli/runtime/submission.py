@@ -62,6 +62,7 @@ from .state import (
     _ThreadSubscription,
 )
 from .compaction import CompactionRuntime
+from .turn_start import StartedTurn, StartFailure, TurnStartAttempt
 
 
 _REVISION_RACES = (
@@ -108,6 +109,12 @@ class SubmissionRuntime(CompactionRuntime):
 
     def _init_submission_state(self) -> None:
         self._shutdown_requested = False
+        self._turn_starts = {}
+
+    def _resolve_turn_start(self, binding_id: str, outcome: StartedTurn | StartFailure) -> None:
+        self._turn_starts[binding_id].resolve(outcome)
+        if outcome is not StartFailure.UNKNOWN:
+            del self._turn_starts[binding_id]
 
     async def configure_context_exact(
         self,
@@ -572,7 +579,7 @@ class SubmissionRuntime(CompactionRuntime):
             assert execution_cwd is not None
             task_feedback = self._capture_task_feedback(binding.task_feedback)
             try:
-                handle = await self._start_native_turn_locked(
+                handle, attempt = await self._start_native_turn_locked(
                     binding_id=binding.id,
                     thread=thread,
                     native_input=native_input,
@@ -590,6 +597,7 @@ class SubmissionRuntime(CompactionRuntime):
                 # finalization. Keep the original consumer, owner and origin.
                 # Like a confirmed steer, the exact running Turn accepted
                 # one more input.
+                attempt.attach_acknowledgements(active.start_stop_receipts)
                 self._refresh_turn_activity(active)
                 active.steer_count += 1
                 active.activity.plan_may_be_stale = True
@@ -625,14 +633,14 @@ class SubmissionRuntime(CompactionRuntime):
                 except BaseException as error:
                     # Native accepted the Turn. Keep its sole observer alive
                     # even when its scheduling handoff cannot be committed.
-                    self._track(active)
+                    self._track(active, attempt)
                     receipt_attempted.set()
                     self.close_admission()
                     raise TurnStartFailed(
                         "Codex 已接受本次定时任务，但首次 Turn 引用未能持久化；"
                         "服务已停止接收新任务，请重启后对账。"
                     ) from error
-            self._track(active)
+            self._track(active, attempt)
             if external and self._shutdown_requested:
                 # turn/start was already in flight when shutdown took its
                 # snapshot. Its newly accepted handle still needs the same
@@ -889,47 +897,55 @@ class SubmissionRuntime(CompactionRuntime):
         resolved_settings: TurnModelSettings | None,
         external_model: str | None,
         external: bool,
-    ) -> NativeTurnHandle:
+    ) -> tuple[NativeTurnHandle, TurnStartAttempt]:
         """Send turn/start once; an unconfirmed result closes service admission."""
+        turn_kwargs: dict[str, object] = {}
+        if resolved_settings is not None:
+            turn_kwargs = {
+                "model": resolved_settings.model,
+                "effort": resolved_settings.effort,
+                "service_tier": resolved_settings.service_tier_id,
+            }
+        if external_model is not None:
+            turn_kwargs["model"] = external_model
+        attempt = TurnStartAttempt()
+        self._turn_starts[binding_id] = attempt
         try:
-            turn_kwargs: dict[str, object] = {}
-            if resolved_settings is not None:
-                turn_kwargs = {
-                    "model": resolved_settings.model,
-                    "effort": resolved_settings.effort,
-                    "service_tier": resolved_settings.service_tier_id,
-                }
-            if external_model is not None:
-                turn_kwargs["model"] = external_model
             handle = await thread.turn(native_input, **turn_kwargs)
         except asyncio.CancelledError:
+            self._resolve_turn_start(binding_id, StartFailure.UNKNOWN)
             self._invalidate_context_window_usage(binding_id)
             self.close_admission()
             raise
         except Exception as error:
             rejection = _model_provider_rejection(error)
             if rejection is not None:
+                self._resolve_turn_start(binding_id, StartFailure.REJECTED)
                 raise rejection from error
             if external and isinstance(error, InvalidRequestError):
                 # An explicit native rejection proves non-delivery. Never
                 # retry it as steer/user input or close unrelated Bindings.
+                self._resolve_turn_start(binding_id, StartFailure.REJECTED)
                 raise
             # turn/start is side-effectful: a lost response cannot prove
             # that App Server did not start the Turn. Never admit another
             # Turn on this or any other Binding until the service restarts.
+            self._resolve_turn_start(binding_id, StartFailure.UNKNOWN)
             self._invalidate_context_window_usage(binding_id)
             self.close_admission()
             raise TurnStartFailed(
                 "Codex Turn 启动结果未确认；服务已停止接收新任务，请重启服务。"
             ) from error
         if handle.thread_id != thread.id:
+            self._resolve_turn_start(binding_id, StartFailure.UNKNOWN)
             self._invalidate_context_window_usage(binding_id)
             self.close_admission()
             raise RuntimeError(
                 "native Turn handle returned a different Thread ID; "
                 "service admission is closed"
             )
-        return handle
+        self._resolve_turn_start(binding_id, StartedTurn(binding_id, handle.thread_id, handle.id))
+        return handle, attempt
 
     async def _prepare_skill_cwd(
         self, *, binding_id: str, creation_cwd: Path | None, admission: SubmissionAdmission,

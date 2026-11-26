@@ -267,8 +267,6 @@ release/venv 或增加常驻总控。模块地图、公共导入兼容与分层�
 
 这些直连调用是 ADR 0111 第 6 条的迁移点：第二个后端实现该模块之前，先把它们移到端口后面。
 
-Codex 有一个已知的核心差距：原生已开始执行、提交回执尚未返回的短窗口内，`/stop` 会报告没有执行。补齐方式和验收顺序见 ADR 0111 第 6 条。
-
 | 模块 | 能力项与语义 | 主要入口 | Codex 边界 |
 | --- | --- | --- | --- |
 | 核心普通会话 | 上节所述；另含本地 Scope/Binding 索引、当前指针和准确控制 | `NEW`、`ACTIVATE`、`STOP`、`RECHECK`、`STATUS` 的基本状态、`LIST` 的本地与 lazy 列表、`CONTEXT` 的宿主字段 | 部分（激活、会话配置写入） |
@@ -1208,12 +1206,32 @@ running 时普通消息调用同一 handle 的 `steer()`；stopping 明确拒绝
 追加未确认，保留原执行和观察，不自动重试，不登记成功回执、计数或 Context Boundary，
 不额外关闭其他会话准入。取消等待仍关闭全局准入，Side/Goal 保留各自 closing/unknown；
 Goal receipt 畸形或 physical Turn 不匹配也仍保留 unknown 并关闭准入。
+
+普通 Binding 在调用 `thread.turn` 前为这一次启动登记内存身份。`/stop` 或普通
+`/status` 卡片的“停止”在回执返回前捕获该身份，先有界尝试一次提示“本轮正在启动，Codex 确认启动后将立即中断。”
+随后在 Scope 和 Binding 锁外等待这一次启动的结果。SDK 等待启动回执没有客户端超时
+（ADR 0009），原生请求一直未返回时，这次停止也会继续等待。
+定时新话题仍在路由预留期间时，所有输入（含 `/stop`）均提示“定时任务正在启动，请稍后重发。”
+
+停止入口只捕获一次。入口没有待启动请求时，仍按 Scope → Binding 的锁顺序选择当前目标。
+已捕获的启动由这一次原生调用确定结果，后续的订阅归还、定时首轮引用或上下文边界保存失败均不改变该结果。
+
+- 启动已确认时，在 Scope 锁内复核当前指针，再在 Binding 锁内核对回执的 Thread 和 Turn。跨会话消息加入已有
+  Turn 或开启下一轮时，均以回执为准。目标仍在运行即复用下述中断与清理流程，省略第二次确认提示。
+  目标已结束或换轮则回复“当前任务恰好已经结束。”
+- 启动被明确拒绝时，直接回复“本次启动未获接受，未请求中断。”已有 Turn 继续运行，用户可再次发送 `/stop`。
+- 启动结果未知时，直接回复“Codex Turn 启动结果未确认；本次未请求中断。服务已停止接收新任务，请重启服务。”
+  该 Binding 在重启前再次收到停止请求时仍返回这条提示。
+
+明确拒绝和结果未知均在 Scope 和 Binding 锁外处理，不发起中断或清理。
+`/sessions` 卡片和 Admin 的停止操作继续按展示时的 activity revision 和 Turn ID 核验。
+
 `/stop` 在 Binding 锁内先 interrupt 当前 active handle，再
 通过 ADR 0009 的窄 adapter 请求清理 App Server 为同一 native Thread 登记的后台
 终端。只有两步 RPC 都成功才由原任务回复中断终态；cleanup 请求失败时保持 stopping，
 重复 `/stop` 只重试 cleanup。按 ADR 0010，成功空响应不证明前台工具进程退出，飞书
 终态必须明确提示前台进程可能仍在运行。
-Channel 在进入两个 native RPC 之前先有界尝试回复“正在中断当前 Codex Turn”，避免
+对已在运行的普通 Turn，Channel 在进入两个 native RPC 之前先有界尝试回复“正在中断当前 Codex Turn”，避免
 底层 waiter 挂起时用户无反馈；投递失败不会撤销 stop，成功确认始终早于原任务唯一
 的成功/失败终态，不增加 durable delivery queue。
 interrupt 报错只代表结果未知，不能恢复 running；重复 `/stop` 会先重试 interrupt。

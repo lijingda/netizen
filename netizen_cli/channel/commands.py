@@ -31,6 +31,7 @@ from .messages import public_chat_kind as _public_chat_kind
 from ..cards.status import (
     codex_context_line, codex_model_lines, decode_status_command, session_status_card,
 )
+from ..runtime import limits
 from ..runtime.contracts import (
     ReleaseDisposition,
     SteerRace,
@@ -664,20 +665,29 @@ class CommandChannel(CardControlChannel):
 
         async def acknowledge() -> None:
             nonlocal acknowledged
-            # Runtime holds the Binding lock while awaiting this receipt,
-            # so native terminal delivery cannot overtake it.
             await self._reply(message, preview.acknowledgement)
             acknowledged = True
 
+        start = preview.start
+        if start is not None and not start.resolved.is_set():
+            with start.acknowledging():
+                try:
+                    async with asyncio.timeout(limits.STOP_ACK_ATTEMPT_TIMEOUT_SECONDS):
+                        await acknowledge()
+                except Exception:
+                    logger.warning("pending stop acknowledgement failed; continuing stop", exc_info=True)
+
         try:
             target = CurrentBindingTarget(intent.scope.key, binding.id)
-            stopped = await self._management.stop_current_binding(target=target, acknowledge=acknowledge)
+            stopped = await self._management.stop_current_binding(
+                target=target, acknowledge=acknowledge if start is None else None, preview=preview,
+            )
         except (NoCurrentBinding, CurrentBindingChanged) as error:
             raise SteerRace(
                 "active 会话已切换，本次停止未执行；请重新发送 /stop。"
             ) from error
         result = stopped.disposition
-        if result is StopDisposition.NOT_RUNNING and not acknowledged:
+        if result is StopDisposition.NOT_RUNNING and (start is not None or not acknowledged):
             await self._reply(message, "当前任务恰好已经结束。")
         elif result is StopDisposition.COMPACTING:
             await self._reply(

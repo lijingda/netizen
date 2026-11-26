@@ -7,6 +7,7 @@ import logging
 
 
 from .state import RUNTIME_LOGGER_NAME
+from .turn_start import StartedTurn
 from ..bindings import (
     ThreadBinding,
 )
@@ -45,7 +46,12 @@ class TurnControlRuntime(GoalRuntime):
         acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition:
+        if start is not None and (expected_activity_revision is not None or expected_turn_id is not None):
+            raise ValueError("a displayed stop target cannot be combined with a captured start")
+        if start is not None and start.binding_id != binding_id:
+            raise ValueError("captured start belongs to another Binding")
         async with self._lock(binding_id):
             self._guard_no_lifecycle_locked(binding_id)
             if expected_activity_revision is not None:
@@ -54,6 +60,12 @@ class TurnControlRuntime(GoalRuntime):
                     expected_activity_revision=expected_activity_revision,
                     expected_turn_id=expected_turn_id,
                 )
+            if start is not None:
+                active = self._active.get(binding_id)
+                if active is None or (active.handle.thread_id, active.handle.id) != (
+                    start.thread_id, start.turn_id,
+                ):
+                    return StopDisposition.NOT_RUNNING
             # A stop attempt also cancels the validity of prompts still doing
             # bounded preparation outside this lock. Otherwise an idle /stop
             # could report NOT_RUNNING and a delayed quoted prompt could start
@@ -109,6 +121,7 @@ class TurnControlRuntime(GoalRuntime):
         acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition:
         """Management-port name for the exact ordinary Binding stop primitive."""
 
@@ -117,6 +130,7 @@ class TurnControlRuntime(GoalRuntime):
             acknowledge=acknowledge,
             expected_activity_revision=expected_activity_revision,
             expected_turn_id=expected_turn_id,
+            start=start,
         )
 
     async def recheck_turn_exact(
