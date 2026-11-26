@@ -436,7 +436,6 @@ class TurnActivitySnapshot:
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
-    state_line: str | None = None
     physical_turn_id: str | None = field(default=None, repr=False, compare=False, kw_only=True)
 
     # None means this physical Turn has no process window. An empty tuple is an observed empty window.

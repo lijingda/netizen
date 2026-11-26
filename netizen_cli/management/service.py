@@ -922,7 +922,7 @@ class InstanceManagementService:
             backend_name=self.policy.display_name,
         )
 
-    def title_writer_for(self, binding: ThreadBinding) -> ManualTitleWriter:
+    def title_writer_for(self) -> ManualTitleWriter:
         self.policy.require(OperationId.MANUAL_RENAME)
         writer = self.names.writer
         assert writer is not None
@@ -1949,7 +1949,7 @@ class InstanceManagementService:
         self.policy.require(OperationId.MANUAL_RENAME)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            writer = self.title_writer_for(binding)
+            writer = self.title_writer_for()
         # Capture the exact target under Scope coordination, but never hold
         # that lock while waiting for a previous name writer to finish.
         normalized = await writer.rename_exact(binding.id, name)
@@ -2015,22 +2015,10 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
         acknowledge: StopAcknowledger | None = None,
-        runtime_precondition: RuntimePrecondition | None = None,
     ) -> StoppedBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            stop_kwargs: dict[str, object] = {"acknowledge": acknowledge}
-            if runtime_precondition is not None:
-                stop_kwargs.update(
-                    expected_activity_revision=(
-                        runtime_precondition.activity_revision
-                    ),
-                    expected_turn_id=runtime_precondition.physical_turn_id,
-                )
-            disposition = await self._runtime.stop_exact(
-                binding.id,
-                **stop_kwargs,
-            )
+            disposition = await self._runtime.stop_exact(binding.id, acknowledge=acknowledge)
             return StoppedBinding(binding=binding, disposition=disposition)
 
     async def activate_exact_binding(
@@ -2115,7 +2103,7 @@ class InstanceManagementService:
         self.policy.require(OperationId.MANUAL_RENAME)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
-            writer = self.title_writer_for(binding)
+            writer = self.title_writer_for()
         normalized = await writer.rename_exact(binding.id, name)
         return RenamedBinding(binding=binding, name=normalized)
 

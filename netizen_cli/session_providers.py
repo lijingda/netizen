@@ -29,7 +29,6 @@ class PersistentFork:
 class PersistentForkProvider(Protocol):
     def track_fork_creation(self, project_alias: str) -> AbstractAsyncContextManager[None]: ...
     def require_fork_creation_open(self, project_alias: str) -> None: ...
-    def project_has_fork_creation(self, project_alias: str) -> bool: ...
     async def copy_fork(self, source: ThreadBinding, *, expected_project_revision: int,
                         title: str) -> PersistentFork: ...
 
@@ -44,9 +43,6 @@ class CodexPersistentForks:
 
     def require_fork_creation_open(self, project_alias: str) -> None:
         self.runtime.require_fork_creation_open(project_alias)
-
-    def project_has_fork_creation(self, project_alias: str) -> bool:
-        return self.runtime.project_has_fork_creation(project_alias)
 
     async def copy_fork(self, source: ThreadBinding, *, expected_project_revision: int,
                         title: str) -> PersistentFork:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from lark_channel import (
@@ -114,8 +114,7 @@ class CompletionPresentationChannel(ChannelReplies):
                       outcome.thread_id, outcome.turn_id, outcome.physical_turn_id,
                   ))
         partial_delivery = await self._terminal_partials(outcome)
-        if outcome.end:
-            await self._present_run_end(outcome.end)
+        await self._present_run_end(outcome.end)
         task_files = _TaskFiles()
         prepared_response = None
         if not silent and outcome.status == "completed":
@@ -258,8 +257,6 @@ class CompletionPresentationChannel(ChannelReplies):
         def render(
             snapshot: TurnActivitySnapshot | SideTurnActivitySnapshot,
         ) -> OutboundCard:
-            if isinstance(snapshot, TurnActivitySnapshot) and snapshot.state_line is not None:
-                snapshot = replace(snapshot, state_line=None)
             return turn_progress_card(
                 snapshot=snapshot, partial_answers=outcome.partial_answers, final_response=final_response,
                 terminal_status=outcome.status, collapsed=True,

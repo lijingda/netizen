@@ -146,7 +146,7 @@ class CardControlChannel(TurnFileChannel):
             async with generation.update_lock:
                 if generation.invalidated:
                     return True
-                self._management.title_writer_for(binding)
+                self._management.title_writer_for()
                 async with asyncio.timeout(5):
                     return await self._safe_update_card(
                         intent.source_id,

@@ -117,7 +117,6 @@ class SessionCardItem:
     activity_revision: int = 0
     turn_id: str | None = None
     catalog_unconfirmed: bool = False
-    registered_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

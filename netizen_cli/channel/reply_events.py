@@ -143,7 +143,7 @@ class TurnResult:
     file_binding_id: str
     physical_turn_id: str
     allow_suppression: bool
-    end: RunEnded | None
+    end: RunEnded
     receipt: DeliveryReceipt | None = None
     execution_unknown: bool = False
     partial_answers: tuple[NativePartial, ...] = field(init=False)
@@ -168,7 +168,7 @@ class TurnResult:
 
     @property
     def mention_user_id(self) -> str | None:
-        return self.end.mention_user_id if self.end else None
+        return self.end.mention_user_id
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "partial_answers", self.target.exact_answers(self.partials))

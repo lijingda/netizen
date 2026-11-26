@@ -22,7 +22,7 @@ from lark_channel import (
 
 from netizen_cli.external_calls import external_call
 from netizen_cli.bindings import BindingTaskFeedback
-from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget, TurnResult
+from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget, RunEnded, TurnResult
 from netizen_cli.file_evidence import FileEvidence
 from netizen_cli.cards import decode_turn_file_action, reply_card, reply_card_from_manifest
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
@@ -155,7 +155,7 @@ async def _text_samples(send_post) -> int:
                 task_feedback=BindingTaskFeedback(progress_card_enabled=False), cwd=None, activity=None,
                 partials=tuple(target.partial(item) for item in (first, first, second)),
                 file_evidence=FileEvidence, file_binding_id=target.key.owner_id, physical_turn_id=turn_id,
-                allow_suppression=False, end=None,
+                allow_suppression=False, end=RunEnded(target, "completed", None),
             )
             delivery = await presenter.prepare_partial_answers(
                 target=target, reply=lambda post: external_call(send_post(label, post)),

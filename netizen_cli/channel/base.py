@@ -188,17 +188,6 @@ def _session_title(
     )
 
 
-def _local_session_title(binding: ThreadBinding, metadata: NativeThreadMetadata | None) -> str:
-    if metadata is not None:
-        name = _normalized_thread_text(metadata.name, max_chars=constants.SESSION_TITLE_MAX_CHARS)
-        if name:
-            return name
-        preview = _normalized_thread_preview(metadata.preview, max_chars=constants.SESSION_TITLE_MAX_CHARS)
-        if preview:
-            return f"会话预览：{preview}"
-    return binding.short_id
-
-
 def _session_card_cursor(page: SessionCardPage, scope: FeishuScope) -> str:
     try:
         return page.encode(scope)

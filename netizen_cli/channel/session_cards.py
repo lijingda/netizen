@@ -174,7 +174,6 @@ class SessionCardChannel(QuestionChannel):
                 native_thread_id=binding.native_thread_id,
                 title=(_session_title(binding, metadata)),
                 state=projection.primary_status or "暂不可用",
-                registered_at=binding.created_at,
                 catalog_unconfirmed=item.inventory_state is SessionInventoryState.UNKNOWN,
                 active=binding.active,
                 activity_revision=snapshot.activity_revision,

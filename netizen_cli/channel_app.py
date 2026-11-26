@@ -111,9 +111,6 @@ __all__ = [
 class ChannelApplication(ChannelEntry):
     """Route Feishu messages and card actions to the runtime and present results."""
 
-    async def reply_ordinary_notice(self, origin: object, text: str) -> None:
-        await self._reply(origin, text)
-
     def __init__(
         self,
         *,

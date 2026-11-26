@@ -23,7 +23,6 @@ from .ports import ReplyChannel
 
 logger = logging.getLogger(__name__)
 
-_RETIRED_FILE_CARD_LIMIT = 256
 _PROGRESS_CARD_POLL_SECONDS = 1.0
 _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
 # Process I/O never blocks content, so its bound only detects a lost request. Creation has no

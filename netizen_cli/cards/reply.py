@@ -454,10 +454,6 @@ def _inspect_file_items(manifest: tuple[TurnFileManifestItem, ...]) -> tuple[Rep
     return tuple(_reply_file_item(_inspect_manifest_file(entry)) for entry in manifest)
 
 
-def refresh_file_page(files: ReplyCardFilesModule, page: int) -> ReplyCardFilesModule:
-    return replace(files, items=_inspect_file_items(_file_manifest(files.items)), page=page)
-
-
 def _inspect_manifest_file(entry: TurnFileManifestItem) -> TurnFile:
     if entry.deleted:
         return TurnFile(
@@ -640,7 +636,6 @@ def turn_progress_projection(
 
     activity = ReplyCardActivityModule(
         progress=_turn_progress_manifest(snapshot),
-        state_line=getattr(snapshot, "state_line", None),
         terminal_status=normalized_terminal_status,
         collapsed=collapsed,
         # v4 file callbacks freeze only the already-bounded progress manifest.

@@ -461,7 +461,7 @@ class CommandChannel(CardControlChannel):
                 "请先发送一条真实任务，再使用 /rename。"
             )
         if not intent.arguments:
-            self._management.title_writer_for(binding)
+            self._management.title_writer_for()
             metadata = (await self._read_thread_metadata((binding,))).get(binding.native_thread_id)
             title = _session_title(binding, metadata)
             await self._reply(
