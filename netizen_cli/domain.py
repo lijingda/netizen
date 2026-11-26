@@ -155,7 +155,6 @@ class NativeCapability(str, Enum):
 
 
 class ActiveState(str, Enum):
-    CLOSING = "closing"
     RUNNING = "running"
     STOPPING = "stopping"
     OBSERVATION_UNAVAILABLE = "turn-observation-unavailable"
@@ -264,7 +263,6 @@ class CardControlName(str, Enum):
     ACTIVATE_BINDING = "binding.activate"
     ARCHIVE_EXACT_BINDING = "binding.archive.exact"
     STOP_EXACT_BINDING = "binding.stop.exact"
-    CONFIRM_RELEASE = "binding.release.confirm"
     RECHECK_EXACT_TURN = "binding.turn.recheck"
     SESSIONS_PAGE = "sessions.page"
     REFRESH_ARCHIVED_SESSIONS = "sessions.archived.refresh"
@@ -312,8 +310,6 @@ class CardControlIntent:
     worktree_id: str | None = None
     worktree_create: dict[str, str | None] | None = None
     new_settings_draft: dict[str, str] | None = None
-    from_status: bool = False
-    all_tasks: bool = False
 
 
 class TurnFileActionName(str, Enum):

@@ -479,17 +479,6 @@ def _valid_callback_nonce(value: Any) -> bool:
     return isinstance(value, str) and _CALLBACK_NONCE.fullmatch(value) is not None
 
 
-def without_callback_nonces(node: Any) -> Any:
-    """Comparison view of a card. Preserve the actual nonces sent to Feishu."""
-    if isinstance(node, list):
-        return [without_callback_nonces(item) for item in node]
-    if not isinstance(node, dict):
-        return node
-    value = node.get("value")
-    if (node.get("type") == "callback" and isinstance(value, dict) and isinstance(value.get("intent"), str)
-            and value["intent"] in _REPEATABLE_CALLBACK_INTENTS and _valid_callback_nonce(value.get("nonce"))):
-        return {**node, "value": {key: item for key, item in value.items() if key != "nonce"}}
-    return {key: without_callback_nonces(item) for key, item in node.items()}
 
 
 def _repeatable_callback_button(

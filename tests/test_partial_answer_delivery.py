@@ -71,7 +71,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(channel.reactions, [])
                 self.assertEqual(posts, [OutboundPost(markdown="**阶段性答案**\n\nfirst stable answer")])
                 delivery = await presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey(owner, thread, turn, side=side), None, None),
+                    target=ReplyTarget(PresentationKey(owner, thread, turn, side=side), None),
                     reply=reply)
                 confirmed = await presenter.deliver_partial_answers(
                     delivery, terminal_answers(delivery.target, (first, first, answer(thread="wrong"), second)),
@@ -102,7 +102,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(attempted.wait(), 1)
         await presenter.park_unavailable(binding_id="binding-one", thread_id="native-one", turn_id="turn-one")
         delivery = await presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
+                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None),
                     reply=reply)
         confirmed = await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, (partial,)))
         self.assertFalse(confirmed)
@@ -130,7 +130,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
             origin=FakeMessage("work", message_id="om_origin"), progress_enabled=False, reply_partial=reply)
         await asyncio.wait_for(entered.wait(), 1)
         preparing = asyncio.create_task(presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
+                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None),
                     reply=reply))
         session = presenter._sessions[("binding-one", "native-one", "turn-one")]
         await asyncio.wait_for(session.stopped.wait(), 1)
@@ -157,7 +157,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
             await presenter._deliver_partial_answers(session, (partial,))
         reply.assert_not_awaited()
         delivery = await presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
+                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None),
                     reply=reply)
         confirmed = await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, (partial,)))
         self.assertTrue(confirmed)
@@ -184,7 +184,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                 session = presenter._sessions[("binding-one", "native-one", "turn-one")]
                 await asyncio.wait_for(presenter._deliver_partial_answers(session, (answer(),)), timeout=1)
                 delivery = await presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
+                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None),
                     reply=reply)
                 confirmed = await presenter.deliver_partial_answers(delivery, terminal_answers(delivery.target, (answer(),)))
                 self.assertFalse(confirmed)
@@ -253,7 +253,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         await open_card(presenter, runtime, **common, progress_enabled=True,
             reply=AsyncMock(return_value=sent_result("om_card", chat_id="oc_direct")))
         delivery = await presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
+                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None),
                     reply=reply)
         self.assertEqual(reply.await_count, 1)
 
@@ -280,7 +280,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         delivery = await presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None, None),
+                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'turn-one'), None),
                     reply=reply)
         partials = (answer(), answer("second", "two"), answer("third", "three"))
         result = await asyncio.wait_for(
@@ -304,7 +304,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(presenter.close)
         reply = AsyncMock(return_value=sent_result("om_partial", chat_id="oc_direct"))
         delivery = await presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'logical-one'), None, None),
+                    target=ReplyTarget(PresentationKey('binding-one', 'native-one', 'logical-one'), None),
                     reply=reply)
         first, second = answer(turn="physical-one"), answer("second", turn="physical-two")
         partials = (first, answer("wrong thread", thread="another-thread"), second, first)

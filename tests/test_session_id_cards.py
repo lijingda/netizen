@@ -162,36 +162,6 @@ class SessionIdentityCardTest(unittest.TestCase):
             self.assertIn("Admin 会话列表", visible)
             self.assertIn("`/admin`", visible)
 
-    def test_deep_local_page_keeps_two_positions_per_action_and_fits_the_card(self):
-        from netizen_cli.bindings import BindingCursor
-
-        navigation = SessionCardPage("lazy")
-        items = []
-        stamp = "2026-11-22T12:00:00.123456+00:00"
-        for index in range(11):
-            identity = f"{index:08d}-1111-4111-8111-111111111111"
-            navigation = navigation.next(BindingCursor(stamp, identity))
-            items.append(SessionCardItem(
-                identity, identity[:8], "project" * 8, self.native_id, "", "running", False,
-                turn_id=self.native_id, registered_at=stamp,
-            ))
-        token = navigation.encode(self.scope)
-        self.assertGreater(len(token), 650)
-        card = sessions_card(
-            policy=BackendPolicy("claude", "owner"), scope=self.scope, sessions=tuple(items[:-1]),
-            current=replace(items[-1], active=True), local_directory=True, lazy=True,
-            active_binding_id=items[-1].binding_id, native_delete_available=False, page=navigation.page,
-            session_cursor=token, previous_cursor=navigation.previous().encode(self.scope),
-            next_cursor=navigation.next(BindingCursor(stamp, self.binding_id)).encode(self.scope),
-        ).card
-        self.assertLess(len(json.dumps(card, ensure_ascii=False).encode()), 40_000)
-        actions = [button["behaviors"][0]["value"] for button in _elements(card, "button")
-                   if "binding_id" in button["behaviors"][0]["value"]]
-        self.assertEqual(len(actions), 21)
-        self.assertEqual(str(card).count("上次观测的模型：未观测"), 11)
-        for action in actions:
-            reference = SessionCardPage.decode(action["session_cursor"], self.scope)
-            self.assertEqual(reference.positions, navigation.positions[-2:])
 
     def test_deep_page_retains_exact_row_positions_without_repeating_back_history(self):
         # Match production's 48-character title projection, with every control

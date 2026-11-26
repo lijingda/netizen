@@ -427,8 +427,7 @@ def parse_message(
     elif name is ControlName.RENAME and len(tokens) > 1:
         arguments = (" ".join(tokens[1:]),)
     try:
-        if not (policy.can_stop_background_tasks and name is ControlName.STOP and arguments == ("all",)):
-            _validate_arguments(name, arguments)
+        _validate_arguments(name, arguments)
     except InvalidInteraction as error:
         if name is ControlName.NEW:
             raise
@@ -524,16 +523,6 @@ def command_help(
         if spec.intent is not None and policy.command_refusal(spec.name) is None
         and spec.has_capability(policy, capabilities)
     )
-    if policy.backend == "claude":
-        labels = {
-            OperationId.MANUAL_RENAME: "[名称] 客户端关闭后手工改名",
-            OperationId.FORK: "空闲且无后台任务时创建持久分支",
-        }
-        return "Claude 会话：" + " · ".join(
-            f"/{spec.name} {labels.get(operation, OPERATIONS[operation].label)}"
-            for spec in available
-            if (operation := command_operation(spec.name)) is not None and operation is not OperationId.HELP
-        ) + "。"
     lines = [
         "### 快速开始",
         "",

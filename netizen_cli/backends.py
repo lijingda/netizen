@@ -1,20 +1,17 @@
 """Native backend identifiers supported by this program version."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, cast
-
-if TYPE_CHECKING:
-    from .session_views import SessionObservations
+from typing import Literal
 
 from .domain import NativeCapability
 from .management_errors import ManagementError
 
-BackendId = Literal["codex", "claude"]
+BackendId = Literal["codex"]
 Surface = Literal["command", "card", "api"]
 DEFAULT_BACKEND: Literal["codex"] = "codex"
-KNOWN_BACKENDS = (DEFAULT_BACKEND, "claude")
+KNOWN_BACKENDS = (DEFAULT_BACKEND,)
 
 
 class BackendError(ValueError):
@@ -28,7 +25,7 @@ def instance_backend(instance: Mapping[str, object]) -> BackendId:
             f"invalid instance.backend ({type(value).__name__}). "
             f"This program version supports only: {', '.join(KNOWN_BACKENDS)}"
         )
-    return cast(BackendId, value)
+    return value
 
 
 class BackendUnsupported(ManagementError):
@@ -37,7 +34,7 @@ class BackendUnsupported(ManagementError):
     code = "backend_unsupported"
 
     def __init__(self, feature: str, *, detail: str | None = None) -> None:
-        super().__init__(detail or f"Claude 试点暂不支持【{feature}】。")
+        super().__init__(detail or f"当前实例不支持【{feature}】。")
 
 
 class Provider(Enum):
@@ -98,7 +95,7 @@ class Operation:
     command_probe: NativeCapability | None = None
     grant: str = ""
     action_key: str = ""
-    surface_providers: Mapping[tuple[str, Surface], Provider | None] = field(default_factory=dict)
+    excluded_surfaces: tuple[Surface, ...] = ()
 
 # Each route is an actual authenticated endpoint. The router retains ownership
 # of unknown paths, HTTP methods, request schemas and one-time grant redemption.
@@ -214,11 +211,9 @@ OPERATIONS = {
         "释放会话",
         Provider.CODEX_RUNTIME,
         ("release",),
-        cards=("binding.release.confirm",),
         routes=(("POST", "/sessions/release"),),
         command_probe=NativeCapability.RELEASE,
-        surface_providers={("claude", "command"): Provider.ORDINARY, ("claude", "card"): Provider.ORDINARY,
-                           ("codex", "card"): None, ("claude", "api"): None},
+        excluded_surfaces=("card",),
     ),
     OperationId.ARCHIVE: Operation(
         "会话归档",
@@ -324,48 +319,30 @@ def command_operation(command: str, *, archived: bool = False) -> OperationId | 
 @dataclass(frozen=True, slots=True)
 class BackendPolicy:
     backend: str
-    owner_id: str | None = None
     providers: Callable[[Provider], bool] | None = None
 
     def __post_init__(self) -> None:
         if self.backend not in KNOWN_BACKENDS:
             raise BackendError("unknown backend policy")
-        if self.backend == "claude" and not self.owner_id:
-            raise BackendError("Claude 实例需要一名所有者。")
-
-    @property
-    def owner_only(self) -> bool:
-        return self.backend == "claude"
-
-    @property
-    def can_stop_background_tasks(self) -> bool:
-        return self.owner_only and self.allows(OperationId.STOP)
 
     def bind(self, providers: Callable[[Provider], bool]) -> "BackendPolicy":
         return replace(self, providers=providers)
 
     @property
     def display_name(self) -> str:
-        return "Claude Code" if self.backend == "claude" else "Codex"
+        return "Codex"
 
-    @property
-    def observation_defaults(self) -> "SessionObservations":
-        if self.backend == "claude":
-            from .runtime.claude_status import DEFAULT_OBSERVATIONS
-            return DEFAULT_OBSERVATIONS
-        from .session_views import SessionObservations
-        return SessionObservations()
 
     @property
     def inherited_model_label(self) -> str:
-        return "原生 Claude 设置" if self.owner_only else "继承 Codex"
+        return "继承 Codex"
 
     def has_provider(self, provider: Provider) -> bool:
         if self.providers is not None:
             return self.providers(provider)
         # Standalone parser/identity compatibility. Application services bind the
         # concrete provider lookup before admission.
-        return self.backend == "codex" or provider in (Provider.HOST, Provider.ORDINARY, Provider.REPLY_PROGRESS)
+        return True
 
     def allows(self, operation: OperationId, surface: Surface = "command") -> bool:
         provider = self.provider_for(operation, surface)
@@ -373,41 +350,26 @@ class BackendPolicy:
 
     def provider_for(self, operation: OperationId, surface: Surface) -> Provider | None:
         definition = OPERATIONS[operation]
-        return definition.surface_providers.get((self.backend, surface), definition.provider)
+        return None if surface in definition.excluded_surfaces else definition.provider
 
     def require_provider(self, provider: Provider, label: str) -> None:
         if not self.has_provider(provider):
             raise BackendUnsupported(label, detail=self.refusal(label))
 
     def refusal(self, label: str) -> str:
-        return (
-            f"Claude 试点暂不支持【{label}】。"
-            if self.backend == "claude"
-            else f"当前实例不支持【{label}】。"
-        )
+        return f"当前实例不支持【{label}】。"
 
     def require(self, operation: OperationId, surface: Surface = "command") -> None:
         if not self.allows(operation, surface):
-            label = "确认释放 Claude 会话" if (operation, surface) == (OperationId.RELEASE, "card") else OPERATIONS[operation].label
+            label = OPERATIONS[operation].label
             raise BackendUnsupported(label, detail=self.refusal(label))
 
-    def operation_refusal(self, operation: str, label: str) -> str | None:
-        # Kept for standalone callers of the original diagnostic API.
-        try:
-            selected = OperationId(operation)
-        except ValueError:
-            return (
-                None
-                if self.providers is None and self.backend == "codex"
-                else self.refusal(label)
-            )
-        return None if self.allows(selected) else self.refusal(label)
 
     def command_refusal(self, command: str, *, archived: bool = False) -> str | None:
         selected = command_operation(command, archived=archived)
         if selected is None:
             # The command parser owns unsupported built-ins and unknown commands.
-            return self.refusal("/" + command) if self.backend == "claude" else None
+            return None
         return (
             None if self.allows(selected) else self.refusal(OPERATIONS[selected].label)
         )
@@ -426,12 +388,3 @@ class BackendPolicy:
             if path == family or path.startswith(family + "/"):
                 self.require(operation, "api")
                 return
-
-    def sender_refusal(
-        self, sender_id: str | None, *, bare_help: bool = False
-    ) -> str | None:
-        if self.owner_only and (
-            not sender_id or (sender_id != self.owner_id and not bare_help)
-        ):
-            return "这个 Claude 实例仅限所有者使用。"
-        return None

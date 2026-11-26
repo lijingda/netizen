@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import Any
 
 from lark_channel import SendOpts
 
-from ..image_inputs import normalized_message_type
-from ..quoted_context import quoted_message_id
-from ..ordinary_sessions import OrdinaryInputRejected
 from .base import CHANNEL_LOGGER_NAME
 from ..bindings import (
     BindingContextRevisionConflict,
@@ -27,7 +23,6 @@ from ..cards.questions import (
     is_question_card_action,
 )
 from ..backends import BackendUnsupported, OperationId
-from ..cards.controls import permitted_form_fields
 from ..cards.defaults import is_defaults_card_action
 from ..cards.status import (
     is_status_command,
@@ -53,14 +48,12 @@ from ..runtime.contracts import (
 )
 from ..domain import (
     CardControlIntent,
-    CardControlName,
     ControlIntent,
     ControlName,
     PromptInput,
 )
 from ..experience import (
     InvalidInteraction,
-    require_command,
 )
 from ..model_settings import ModelCatalogError
 from ..management import (
@@ -79,7 +72,6 @@ from .app_values import (
     _message_chat_type,
     _inbound_root_message_id,
     _body_text,
-    authenticated_sender,
     _channel_bot_open_id,
 )
 from .commands import CommandChannel
@@ -97,23 +89,7 @@ class ChannelEntry(CommandChannel):
         group_rule, _ = self._group_access.snapshot()
         scope = self._scope(message)
         try:
-            local = self._local_sessions
-            if self._policy.owner_only:
-                if _message_chat_type(message) != "p2p" and not getattr(message, "mentioned_bot", False):
-                    return
-                sender = authenticated_sender(message, self._app_id)
-                if sender != self._policy.owner_id:
-                    bare_help = (
-                        sender is not None and group_rule.allows(scope.chat_id, _message_chat_type(message))
-                        and normalized_message_type(message) in {"text", "post"}
-                        and _body_text(message, bot_open_id=_channel_bot_open_id(self._channel)).strip() == "/help"
-                        and not quoted_message_id(message)
-                        and not getattr(getattr(message, "reply", None), "message_id", None)
-                        and not getattr(message, "resources", None)
-                        and not self._has_current_files(message) and not self._current_image_references(message)
-                    )
-                    await self._reply(message, self._policy.sender_refusal(sender, bare_help=bare_help) or self._help())
-                    return
+
             if not group_rule.allows(scope.chat_id, _message_chat_type(message)):
                 if bool(getattr(message, "mentioned_bot", False)):
                     # Inspect only current message text. Parsing is local and
@@ -154,8 +130,6 @@ class ChannelEntry(CommandChannel):
             current_images = self._current_image_references(message)
             interaction = self._parse_current_interaction(message, scope)
             if isinstance(interaction, PromptInput):
-                if local is not None:
-                    local.require_admission()
                 await self._prompt(
                     message,
                     interaction,
@@ -168,38 +142,13 @@ class ChannelEntry(CommandChannel):
         except Exception as error:
             await self._report_input_error(message, error)
 
-    def _check_local_card(self, value: Any, form: Any) -> None:
-        if isinstance(value, Mapping):
-            if is_status_command(value):
-                if value.get("target_kind") == "side":
-                    raise CardActionError("Claude 试点暂不支持【Side】。")
-                require_command(self._policy, str(value.get("command", "")))
-            elif value.get("intent"):
-                try:
-                    name = CardControlName(value["intent"])
-                except (TypeError, ValueError):
-                    raise CardActionError("未知卡片动作。") from None
-                self._policy.require_card(name.value)
-        if isinstance(form, Mapping):
-            if any(isinstance(key, str) and key.startswith("rename_name_v1__") for key in form):
-                self._policy.require_card(CardControlName.RENAME_BINDING.value)
-            for prefix in ("new", "config", "defaults_session"):
-                if any(isinstance(key, str) and key.startswith(prefix + "_") for key in form):
-                    permitted_form_fields(form, prefix, self._session_form)
 
     async def handle_card_action(self, event: Any) -> None:
         group_rule, _ = self._group_access.snapshot()
         chat_id = str(getattr(event, "chat_id", "") or "")
-        local = self._local_sessions
-        refusal = self._policy.sender_refusal(authenticated_sender(event, self._app_id, card=True)) if self._policy.owner_only else None
         action = getattr(event, "action", None)
         value = getattr(action, "value", None)
         form = getattr(action, "form_value", None)
-        if refusal:
-            message_id = getattr(event, "message_id", "")
-            if message_id and chat_id:
-                await self._reply(_CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(None)), refusal)
-            return
         known_direct = False
         if not group_rule.allows(chat_id, None):
             try:
@@ -254,14 +203,9 @@ class ChannelEntry(CommandChannel):
             if operation is not None:
                 if operation is OperationId.FORK:
                     self._policy.require(operation, "card")
-                    if local is not None:
-                        local.require_admission()
                 else:
                     self._policy.require(operation)
-            elif local is not None:
-                self._check_local_card(value, form)
-                local.require_admission()
-        except (BackendUnsupported, CardActionError, InvalidInteraction, OrdinaryInputRejected) as error:
+        except (BackendUnsupported, CardActionError, InvalidInteraction) as error:
             message_id = getattr(event, "message_id", "")
             if message_id and chat_id:
                 await self._reply(_CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(None)), str(error))
@@ -276,10 +220,6 @@ class ChannelEntry(CommandChannel):
         try:
             intent = await self._decode_card_event(event, context)
             context.scope = intent.scope
-            if not self._policy.allows(OperationId.SIDE) and self._bindings.side_topic_for_message(
-                app_id=self._app_id, chat_id=intent.scope.chat_id, topic_id=intent.scope.topic_id, root_message_id=message_id,
-            ) is not None:
-                raise CardActionError("Claude 试点暂不支持【Side】。")
             await self._card_control(intent)
         except (
             BackendUnsupported,
@@ -294,7 +234,6 @@ class ChannelEntry(CommandChannel):
             ModelCatalogError,
             MessageHistoryError,
             NativeThreadMissing,
-            OrdinaryInputRejected,
             TerminalStateUnknown,
             ProjectError,
             RuntimeClosed,

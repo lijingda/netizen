@@ -19,7 +19,7 @@ from ..process_messages import (
     StepItem, TextItem, ToolItem, build_items, finish_items,
 )
 from .messages import _nonempty_field, _object_field
-from .physical_delivery import Outcome
+from .replacement_writer import Outcome
 from .ports import ReplyChannel
 from .replacement_writer import ReplacementWriter
 from .reply_events import Activity, PresentationKey
@@ -161,14 +161,14 @@ async def _verify(channel: ReplyChannel, location: ProcessLocation, created: Cre
 class ProcessPresentation:
     """The presenter's poll supplies revisions. Only this task touches the process transport."""
 
-    def __init__(self, key: PresentationKey, run: PresentationKey | None, port: ProcessMessages,
+    def __init__(self, key: PresentationKey, port: ProcessMessages,
                  channel: ReplyChannel, location: Callable[[], ProcessLocation | None],
-                 on_created: Callable[[ProcessPresentation], None], clock: Callable[[], float],
+                 clock: Callable[[], float],
                  timeout: float, on_closed: Callable[[ProcessPresentation], None] = lambda _: None,
-                 *, claimed_cot_ids: set[str], binding_id: str) -> None:
-        self.key, self.run = key, run
-        self.port, self.channel, self.resolve, self.on_created = port, channel, location, on_created
-        self.claimed_cot_ids, self.binding_id = claimed_cot_ids, binding_id
+                 *, claimed_cot_ids: set[str]) -> None:
+        self.key = key
+        self.port, self.channel, self.resolve = port, channel, location
+        self.claimed_cot_ids = claimed_cot_ids
         self.clock, self.timeout, self.on_closed = clock, timeout, on_closed
         self.terminal = False
         self.items = ProcessList(key)
@@ -243,7 +243,6 @@ class ProcessPresentation:
             logger.warning("process message location unconfirmed")
             return False
         self.created = created
-        self.on_created(self)
         return True
 
     def _can_write(self) -> bool:

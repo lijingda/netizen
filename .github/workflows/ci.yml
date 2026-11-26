@@ -174,21 +174,3 @@ jobs:
           path: ${{ runner.temp }}/native-evidence
           retention-days: 14
           if-no-files-found: error
-
-  native-claude:
-    name: Native Claude loopback regression (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.14"]
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-15"]') }}
-    steps:
-      - *checkout
-      - *setup-python
-      - *locked-install
-      - name: Install the loopback fixture
-        run: .venv/bin/python -m pip install --disable-pip-version-check --no-input -c requirements.lock -r requirements-native-claude.lock
-      - name: Exercise the pinned SDK and bundled CLI
-        run: make check-native-claude

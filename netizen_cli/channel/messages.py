@@ -59,9 +59,3 @@ def _receipt_message_id(result: SendResult, *, on_conflict: str | None = None) -
     if target and result.chunk_ids and target not in result.chunk_ids:
         return on_conflict
     return target
-
-
-def _confirmed_reply_id(result: SendResult, *, on_conflict: str | None = None) -> str | None:
-    if _send_result_error_code(result) not in (None, 0):
-        return None
-    return _receipt_message_id(result, on_conflict=on_conflict)

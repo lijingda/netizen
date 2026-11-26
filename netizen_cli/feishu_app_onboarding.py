@@ -49,7 +49,6 @@ QrRenderer = Callable[[str, IO[str]], None]
 
 _APP_DESCRIPTIONS = {
     "codex": "Use native Codex threads from Feishu or Lark.",
-    "claude": "Use Claude Code sessions from Feishu or Lark.",
 }
 
 

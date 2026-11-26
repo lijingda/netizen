@@ -12,7 +12,6 @@ from tests.support.process_transport import ProcessTransport
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "codex_presenter_a1b9eee.json"
-CLAUDE_FIXTURE = FIXTURE.with_name("claude_presenter_a1b9eee.json")
 
 
 def delivery_value(value):

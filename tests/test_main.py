@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, Mock, patch
 from lark_channel import DedupStore, FeishuChannelError, FeishuChannelErrorCode, SendResult
 from openai_codex import CodexConfig
 
-from tests.support import requires_claude_sdk
 
 from netizen_cli.admin.port_config import ConfigFileSnapshot
 from netizen_cli.admin.users import AdminUsers
@@ -433,6 +432,29 @@ class MainConfigurationTest(unittest.TestCase):
             prepare.assert_not_called()
             run.assert_not_called()
             self.assertFalse(ready.exists())
+
+    def test_unsupported_backend_rejects_before_database_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            ensure_instance_root(root)
+            config = root / "config.yaml"
+            config.write_text("instance:\n  backend: claude\n")
+            config.chmod(0o600)
+            database = root / "state" / "channel.sqlite3"
+            fixture = Path(__file__).parent / "fixtures" / "channel_v14.sql"
+            with sqlite3.connect(database) as connection:
+                connection.executescript(fixture.read_text())
+            before = config.read_bytes(), database.read_bytes()
+            files = set(root.rglob("*"))
+            with (
+                patch.dict(os.environ, {"NETIZEN_ROOT": str(root)}, clear=True),
+                patch("netizen_cli.main.prepare_instance") as prepare,
+                self.assertRaisesRegex(StartupRejected, "This program version supports only: codex"),
+            ):
+                main()
+            prepare.assert_not_called()
+            self.assertEqual((config.read_bytes(), database.read_bytes()), before)
+            self.assertEqual(set(root.rglob("*")), files)
 
     def test_actual_start_with_lost_database_fails_before_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -928,114 +950,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             await _start_channel_input(channel, object(), ready_file=Path("/unused/service.ready"))
         self.assertEqual(events, ["handlers", "transport"])
 
-    @requires_claude_sdk
-    async def test_claude_service_ready_message_stop_and_shutdown(self) -> None:
-        from netizen_cli.runtime.claude_ordinary import DEFAULT_MODE, GRACE
-        from tests.support.channel_messages import FakeChannel, FakeMessage
-        from tests.support.claude_client import FakeClaudeClients
-
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            core = self._make_core(root)
-            core._settings = replace(core._settings, backend="claude")
-            channel = FakeChannel()
-            channel.chat_types["oc_direct"] = "p2p"
-            channel.update_policy = Mock()
-            core._channel = channel
-            clients = FakeClaudeClients()
-            self.enterContext(patch("netizen_cli.runtime.claude_client.BundledClaudeClients", return_value=clients))
-            for name in ("AsyncCodex", "CodexRuntime", "AppServerSkillRoots", "SessionMcpRunner",
-                         "ScheduleMcpRunner", "OutcomeMcpRunner", "Scheduler", "SessionService", "SessionPolicyService"):
-                self.enterContext(patch("netizen_cli.main." + name, side_effect=AssertionError(name)))
-
-            await core.start()
-            async def send(text, message_id):
-                await core.application.handle_message(FakeMessage(text, message_id=message_id, sender_id="ou_admin"))
-
-            now = 100.
-            core._claude._clock = lambda: now
-            try:
-                await send("early", "om_early")
-                self.assertEqual(channel.replies[-1][1], GRACE)
-                ready = root / "ready"
-                await _open_core_admission(core, ready_file=ready)
-                self.assertEqual(ready.read_bytes(), b"netizen service ready\n")
-                await send("/new", "om_new")
-                self.assertEqual(channel.replies[-1][1], GRACE)
-                self.assertEqual(clients.calls, [])
-                now += 2
-                scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
-                self.assertFalse(core._store.has_bindings(scope.key))
-                await core._management.create_current_binding(scope=scope, project_alias="test", creator_id="ou_admin")
-                await send("hello", "om_first")
-                first, = clients.calls
-                from lark_channel import SendResult
-                channel.reply_results.extend([SendResult.ok(), SendResult.ok(message_id="om_answer")])
-                first.init("default")
-                first.result(result="native answer")
-                self.assertTrue(await core._claude.wait_idle(2))
-                self.assertIn(DEFAULT_MODE, [reply for _, reply in channel.replies])
-                origin, reply = channel.replies[-1]
-                self.assertEqual((origin, reply.markdown), ("om_first", "native answer"))
-                self.assertEqual([mention.open_id for mention in reply.mentions], ["ou_admin"])
-                self.assertEqual(channel.send_calls, [])
-                await send("second", "om_second")
-                second = clients.calls[-1]
-                second.init()
-                await send("/stop", "om_stop")
-                self.assertEqual(second.interrupts, 1)
-                second.result("error_during_execution", "aborted_tools", True)
-                self.assertTrue(await core._claude.wait_idle(2))
-                await send("third", "om_third")
-                last = clients.calls[-1]
-                last.init()
-                async def on_interrupt():
-                    last.interrupts += 1
-                    last.result("error_during_execution", "aborted_streaming", True)
-                last.interrupt = on_interrupt
-            finally:
-                await core.close()
-            self.assertEqual([client.closes for client in clients.calls], [1, 1, 1])
-            self.assertEqual(last.interrupts, 1)
-            self.assertEqual(len({item.session for item in clients.calls}), 1)
-            self.assertTrue(await core._claude.wait_idle(0))
-
-    @requires_claude_sdk
-    async def test_claude_requires_exactly_one_owner_and_verified_install_before_bind(self):
-        from netizen_cli.admin.users import AdminIdentity, AdminUsersError
-        from netizen_cli.claude_installation import REPAIR
-
-        for state in ("missing-owner", "multiple-owners", "invalid-installation"):
-            with self.subTest(state=state), tempfile.TemporaryDirectory() as raw:
-                root = Path(raw)
-                core = self._make_core(root)
-                core._settings = replace(core._settings, backend="claude")
-                users = AdminUsers(root, "cli_test")
-                if state == "missing-owner":
-                    users.path.unlink()
-                elif state == "multiple-owners":
-                    users.add(AdminIdentity("cli_test", "ou_second"), actor=users.list()[0].identity,
-                              expected_revision=users.revision)
-                with (patch("netizen_cli.main.AdminWebRunner") as listener,
-                      patch("netizen_cli.runtime.claude_client.verified_claude_cli", side_effect=RuntimeError(REPAIR)) as verify):
-                    with self.assertRaisesRegex((AdminUsersError, RuntimeError), "唯一管理员|netizen-cli"):
-                        await core.start()
-                    listener.assert_not_called()
-                    self.assertEqual(verify.call_count, int(state == "invalid-installation"))
-                self.assertIsNone(core.application)
-
-    @requires_claude_sdk
-    async def test_claude_partial_start_closes_admission_and_listener(self):
-        with tempfile.TemporaryDirectory() as raw:
-            core = self._make_core(Path(raw))
-            core._settings = replace(core._settings, backend="claude")
-            with patch("netizen_cli.main.ChannelApplication", side_effect=ValueError("fixture assembly failure")):
-                with self.assertRaisesRegex(ValueError, "fixture assembly failure"):
-                    await core.start()
-            core._admin.close_listener.assert_awaited_once_with()
-            self.assertTrue(await core._claude.wait_idle(0))
-            with self.assertRaisesRegex(RuntimeError, "关闭"):
-                core._claude.require_admission()
 
     async def test_schedule_mcp_bind_failure_stops_before_codex(self) -> None:
         self.mcp_bind_error = OSError("schedule listener failed")
@@ -1587,32 +1501,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(core._schedule_mcp.deadline, core._scheduler.deadline)
         self.assertEqual(core._scheduler.deadline, core._management.deadline)
 
-    async def test_hung_claude_shutdown_runs_after_drains_and_leaves_time_for_cleanup(self):
-        order = []
-        def step(name):
-            async def record(*args, **kwargs):
-                order.append(name)
-            return record
-
-        async def hung(*, deadline):
-            assert deadline > asyncio.get_running_loop().time()
-            order.append("claude:close")
-            await asyncio.Future()
-
-        core = ServiceCore(settings=SimpleNamespace(), projects=SimpleNamespace(), instance_root=Path("/unused"),
-            channel=SimpleNamespace(update_policy=lambda **kwargs: None,
-                                    safety=SimpleNamespace(dispose=step("feishu:drain"))),
-            store=SimpleNamespace(aclose=step("store:close")))
-        core._claude = SimpleNamespace(close_admission=lambda: order.append("claude:admission"), interrupt_all=hung)
-        core._admin = SimpleNamespace(close_admission=lambda: None, close_listener=step("admin:listener"),
-                                      drain=step("admin:drain"), close_auth=lambda: order.append("admin:auth"))
-        core._management = SimpleNamespace(set_service_ready=lambda ready: None, close=step("management:drain"))
-        core.application = SimpleNamespace(close=step("application:close"))
-        with patch("netizen_cli.main._CLAUDE_SHUTDOWN_CAP_SECONDS", .02), self.assertLogs("netizen_cli.main", "WARNING") as logs:
-            await asyncio.wait_for(core.close(), 1)
-        self.assertIn("Claude client shutdown timed out", " ".join(logs.output))
-        self.assertEqual(order, ["claude:admission", "admin:listener", "feishu:drain", "admin:drain",
-                                 "management:drain", "claude:close", "application:close", "admin:auth", "store:close"])
 
     async def test_shutdown_native_failure_still_closes_sdk_and_local_resources(self) -> None:
         for failure in ("cleanup_error", "turns_not_idle"):

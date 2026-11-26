@@ -229,20 +229,11 @@ async function run() {
         return evaluate(`[${input}.value, ${save}.disabled]`);
       };
       const title = "🦊".repeat(61);
-      if (config.ownerOnly) {
-        assert.deepEqual(await enter(" \u0085 "), [" \u0085 ", true]);
-        assert.deepEqual(await enter("x".repeat(121)), ["x".repeat(121), true]);
-        await evaluate('document.querySelector("#session-rename-editor").requestSubmit()');
-        const spaced = "🦊".repeat(118) + " ".repeat(121) + "🦊";
-        assert.deepEqual(await enter(spaced), [spaced, false]);
-        assert.deepEqual(await enter(title), [title, false]);
-      } else {
-        assert.equal(await evaluate(input + ".maxLength"), 120);
-        assert.deepEqual(await enter(title), ["🦊".repeat(60), false]);
-        assert.deepEqual(await enter("\ufeff"), ["\ufeff", true]);
-        await evaluate('document.querySelector("#session-rename-editor").requestSubmit()');
-        await enter("🦊".repeat(30));
-      }
+      assert.equal(await evaluate(input + ".maxLength"), 120);
+      assert.deepEqual(await enter(title), ["🦊".repeat(60), false]);
+      assert.deepEqual(await enter("\ufeff"), ["\ufeff", true]);
+      await evaluate('document.querySelector("#session-rename-editor").requestSubmit()');
+      await enter("🦊".repeat(30));
       await click("#session-rename-save");
       await until("confirmed rename", () => evaluate('!document.querySelector("#session-rename-dialog").open'));
       await settled(null);
@@ -267,16 +258,13 @@ async function run() {
         await settled(phoneWidth);
         result.visits.push(step);
         if (path === "/projects") {
-          const alias = config.ownerOnly ? "pending" : config.deleteLimited ? "empty" : "test";
+          const alias = config.deleteLimited ? "empty" : "test";
           await click(`[data-project-alias="${alias}"] .project-delete-trigger`);
           await until("verified deletion scope", () => evaluate(visible("#project-delete-confirm:enabled")));
           const summary = await evaluate(element("#project-delete-dialog") + ".innerText");
           if (config.deleteLimited) {
             assert.match(summary, /0 个未开始的 Codex 会话登记/);
             assert.doesNotMatch(summary, /undefined/);
-          } else if (config.ownerOnly) {
-            assert.match(summary, /1 个未开始的 Claude Code 会话登记/);
-            assert.doesNotMatch(summary, /Codex|Goal|Side|App\/CLI|归档|定时/);
           } else {
             assert.match(summary, /Codex 会话、派生子会话、Codex App\/CLI 历史和本地会话登记将永久删除，无法恢复。/);
             assert.match(summary, /未开始 0，已创建 1/);
@@ -290,16 +278,9 @@ async function run() {
           await click(".diagnostics-environment summary");
           const restart = await evaluate(element(".service-restart") + ".innerText");
           const directories = await evaluate(element(".diagnostics-environment") + ".innerText");
-          if (config.ownerOnly) {
-            assert.match(restart, /中断正在执行的 Claude Code 任务/);
-            assert.doesNotMatch(restart, /Codex|Goal|Side/);
-            assert.match(directories, /实例目录/);
-            assert.doesNotMatch(directories, /Codex 目录/);
-          } else {
-            assert.match(restart, /暂停 Goal，并结束临时 Side 会话/);
-            assert.match(restart, /重启本实例的 Netizen 与 Codex 运行环境/);
-            assert.match(directories, /Codex 目录/);
-          }
+          assert.match(restart, /暂停 Goal，并结束临时 Side 会话/);
+          assert.match(restart, /重启本实例的 Netizen 与 Codex 运行环境/);
+          assert.match(directories, /Codex 目录/);
           result.interactions.push(step + " · restart and directories");
         }
         if (path === "/sessions/ordinary") {
@@ -314,48 +295,25 @@ async function run() {
             return displays;
           })()`);
           assert.equal(visibility[0], "flex");
-          if (config.manualOnly || config.ownerOnly) assert.equal(visibility[1], "none");
+          if (config.manualOnly) assert.equal(visibility[1], "none");
           else assert.notEqual(visibility[1], "none");
-          if (config.ownerOnly) {
-            const details = await evaluate(`(() => {
-              const cell = document.querySelector("#sessions-body .runtime-state").cloneNode(false);
-              const runtime = {primaryStatus: "idle", primaryStatusResolution: "local"};
-              const text = observations => {
-                updateRuntimeCell(cell, {...runtime, observations});
-                return cell.querySelector(".runtime-observations")?.textContent || "";
-              };
-              return [text({}), text({model: {label: "模型", availability: "observed", value: "sample"}}), text({})];
-            })()`);
-            assert.deepEqual(details, ["", "模型：sample", ""]);
-          }
           result.interactions.push(step + " · provider fields and computed visibility");
           const identities = await evaluate('[...document.querySelectorAll("#sessions-body .session-identities")].map(el => el.textContent)');
           for (const identity of identities) {
-            if (config.ownerOnly) {
-              assert.match(identity, /Claude Code 会话 ID/);
-              assert.doesNotMatch(identity, /Codex|跨会话工具/);
-            } else {
-              assert.match(identity, /完整 Codex 会话 ID/);
-            }
+            assert.match(identity, /完整 Codex 会话 ID/);
           }
           await click("#sessions-body button", "配置");
           await until("session configuration loaded", () => evaluate(visible("#session-settings-save:enabled")));
           const settings = await evaluate(element("#session-settings-drawer") + ".innerText");
-          if (config.ownerOnly) {
-            assert.match(settings, /模型沿用 Claude Code 的原生配置/);
-            assert.ok(await evaluate(visible("#session-settings-progress")));
-            assert.doesNotMatch(settings, /Codex/);
-          } else {
-            assert.match(settings, /选择继承 Codex 时，沿用 Codex 的原生配置/);
-          }
+          assert.match(settings, /选择继承 Codex 时，沿用 Codex 的原生配置/);
           await click("#session-settings-cancel");
           result.interactions.push(step + " · session configuration");
-          if (!mobile && (config.ownerOnly || config.manualOnly)) await checkRename();
+          if (!mobile && config.manualOnly) await checkRename();
         }
         if (path === "/login") {
           const cookie = await page("Network.setCookie", { ...config.cookie, url: config.origin, httpOnly: true });
           if (!cookie.success) throw new Error("Could not install fixture session cookie");
-        } else if (path === "/projects" && !config.ownerOnly && !config.deleteLimited) {
+        } else if (path === "/projects" && !config.deleteLimited) {
           step += " · Project Markdown preview";
           await click("#projects-body button", "查看文件");
           await click('#file-browser-entries button[data-path="readme.md"]');
@@ -366,31 +324,6 @@ async function run() {
           await click("#file-browser-close");
           await until("closed file browser", () => evaluate('!document.querySelector("#file-browser-drawer").open'));
           await settled(phoneWidth);
-          result.interactions.push(step);
-        } else if (config.ownerOnly && path !== "/login") {
-          step += " · owner controls";
-          if (!mobile && !await evaluate(visible("#nav-progress-card"))) throw Error("Missing shared presentation settings");
-          const unsupported = ["#nav-temporary", "#nav-schedules", "#nav-question-notifications", "#nav-session-tools", "#admin-user-add"];
-          for (const selector of unsupported) {
-            if (await evaluate(visible(selector))) throw Error("Unsupported owner action is visible: " + selector);
-          }
-          if (path === "/sessions/ordinary") {
-            const created = '[data-session-sort="session"][data-sort-by="createdAt"]';
-            const updated = '[data-session-sort="session"][data-sort-by="updatedAt"]';
-            const verify = () => evaluate(`document.querySelector('${created} .sort-label').textContent === "登记时间"
-              && document.querySelector('${updated}').disabled
-              && [...document.querySelectorAll("#sessions-body [data-binding-id]")].some(row =>
-                row.textContent.includes("原生 Claude 设置") && row.textContent.includes("空闲")
-                && /[0-9]/.test(row.querySelector(".session-time")?.textContent))`);
-            await until("local registration time, settings and status", verify);
-            await clickInViewport('#sessions-body [aria-haspopup="menu"]');
-            await until("Claude row menu contains only available actions", () => evaluate(
-              '[...document.querySelectorAll(\'[role="menuitem"]\')].some(el => el.textContent === "设为当前") && ![...document.querySelectorAll(\'[role="menuitem"]\')].some(el => el.textContent.includes("创建定时任务"))'));
-            await evaluate('document.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape", bubbles:true}))');
-            await click(created);
-            await until("local sort after refresh", () => evaluate(`document.querySelector('${created}').parentElement.getAttribute("aria-sort") === "ascending"`));
-            await until("local columns after refresh", verify);
-          }
           result.interactions.push(step);
         } else if (path === "/sessions/ordinary") {
           step += " · conversation";

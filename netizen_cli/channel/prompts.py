@@ -20,7 +20,6 @@ from .reply_events import PresentationKey
 from .question_inputs import CardAnswerOrigin
 from ..cards.defaults import defaults_card
 from ..defaults import DefaultConfigurationError
-from ..ordinary_sessions import ClaudeInputAnchor, LiveSubmissionUnknown, OrdinaryInputRejected
 from ..runtime.contracts import (
     ModelProviderRejected,
     ContextCursorCommit,
@@ -72,9 +71,7 @@ from ..message_projection import (
 from ..sdk_gap_adapter import SkillCatalogError
 
 from . import constants
-from .topics import CardReplyLocation
 from .app_values import (
-    _CardReplyConversation, _ClaudeReplyTarget, _inbound_root_message_id,
     _message_chat_type,
     _message_id,
 )
@@ -232,8 +229,6 @@ class PromptChannel(NativeReplyChannel):
                 or binding.context_revision != admission.context_revision
                 or binding.feedback_revision != admission.feedback_revision):
             raise SteerRace("准备本条消息期间会话配置或上下文已变化，本条消息未执行。")
-        # Deletion can retire this address while Feishu prepares the input.
-        verified = self._progress_cards.binding_location(binding.id) if self._local_sessions is not None else None
         context_commit = None
         if binding.message_context_mode is MentionContextMode.CATCH_UP:
             self._require_catch_up_message_scope(message, scope)
@@ -291,41 +286,13 @@ class PromptChannel(NativeReplyChannel):
                 await self._send_context_receipt(message, prepared.context_stats)
             attempted = True
             origin = message
-            presentation_thread = None
-            if verified is not None:
-                # A retained Claude client needs only the verified Feishu address.
-                if verified.retired:
-                    raise OrdinaryInputRejected("准备本条消息期间会话已变化，本条输入未发送。")
-                location = self._scope(message)
-                if location != scope:
-                    raise OrdinaryInputRejected("本条消息的会话位置已变化，请重新发送。")
-                source_id = _message_id(message)
-                root = _inbound_root_message_id(message)
-                if location.topic_id:
-                    if verified.root and root and root != verified.root:
-                        raise OrdinaryInputRejected("本条消息的话题根与当前会话不一致，本条输入未发送。")
-                    verified.root = root or verified.root
-                    root = verified.root
-                address = CardReplyLocation(location, source_id, root or (None if location.topic_id else source_id), verified)
-                source = _ClaudeReplyTarget(source_id, source_id, location.chat_id,
-                                          _CardReplyConversation(location.topic_id, _message_chat_type(message)), root, location=address)
-                async def cleanup(turn_id: str) -> None:
-                    try:
-                        if presentation_thread:
-                            await self._progress_cards.abandon(key=PresentationKey(binding.id, presentation_thread, turn_id))
-                    finally:
-                        await self._reactions.stop(turn_id)
-                origin = ClaudeInputAnchor(location, source, root if location.topic_id else None, cleanup, release_cards=address.retire)
             submission = await self._ordinary.submit(
                 binding=binding, cwd=cwd, input=prepared.prompt, owner_id=owner_id, origin=origin,
                 admission=admission, context_commit=context_commit, skill_names=skill_names,
             )
-            presentation_thread = submission.thread_id
             accepted = True
             if on_accepted is not None:
                 on_accepted()
-        except LiveSubmissionUnknown:
-            return  # Possible intake keeps attachments; the reader owns the one notice.
         except BaseException as error:
             if not accepted:
                 await self._discard_unsubmitted_attachments(prepared, error, attempted=attempted)
@@ -370,7 +337,7 @@ class PromptChannel(NativeReplyChannel):
         # Generic RPC failures, cancellation during submit and post-acceptance
         # cursor errors retain originals; manual deletion remains available.
         if attempted and not isinstance(error, (
-            OrdinaryInputRejected, SteerRace, RuntimeClosed, ThreadStopping, ThreadCompacting,
+            SteerRace, RuntimeClosed, ThreadStopping, ThreadCompacting,
             ThreadArchived, ThreadResumeNotFound, ThreadOccupied, ModelProviderRejected,
             SkillReferenceError, ModelCatalogError, SkillCatalogError,
             SideSessionNotFound, SideSessionClosing, SideSessionConflict,
@@ -386,8 +353,6 @@ class PromptChannel(NativeReplyChannel):
         release = submission.release_receipt_attempt
         assert release is not None
         try:
-            if isinstance(origin, ClaudeInputAnchor):
-                return
             presenters: list[Awaitable[bool]] = [
                 self._reactions.start(
                     submission.turn_id,

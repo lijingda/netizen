@@ -90,9 +90,7 @@ from .queries import (
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import ConfigConflict, ConfigUnavailable, AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
 from ..backends import BackendPolicy, OperationId, OPERATIONS
-from ..ordinary_sessions import OrdinaryInputRejected
 from ..backends import BackendUnsupported
-from .users import OwnerOnly
 from ..instance import instance_digest
 from ..error_messages import describe_error
 from ..chat_avatars import CHAT_AVATAR_IMAGE_SOURCES, avatar_url
@@ -138,7 +136,6 @@ from ..runtime.contracts import (
     ThreadDeleteUnavailable,
     ThreadGoalActive,
     ThreadLifecycleError,
-    SessionRenameUnconfirmed,
     ThreadLifecycleStateUnknown,
     ThreadNotArchived,
     ThreadNotMaterialized,
@@ -629,19 +626,8 @@ class AdminWebApplication:
             return _json_response(200, {"state": "cancelled"})
         raise AdminWebError(404, "not_found", "接口不存在。")
 
-    def _check_owner_route(self, context: _RequestContext) -> None:
-        session = self._authenticate(context)
-        if self._backend_policy.sender_refusal(session.identity.open_id):
-            raise AdminWebError(403, "owner_only", "这个 Claude 实例仅限所有者使用。")
-        if not context.path.startswith("/api/v1/"):
-            return
-        path = context.path.removeprefix("/api/v1")
-        if path in {"/admin-users/add", "/admin-users/selector-config"}:
-            raise OwnerOnly()
 
     async def _dispatch_authenticated(self, context: _RequestContext) -> Response:
-        if self._backend_policy.owner_only:
-            self._check_owner_route(context)
         if context.path.startswith("/api/v1/"):
             self._backend_policy.require_api(context.method, context.path.removeprefix("/api/v1"))
             if context.method == "GET" and context.path == "/api/v1/runtime-snapshots" and context.query.get("sideIds"):
@@ -673,8 +659,6 @@ class AdminWebApplication:
         if context.method == "GET" and context.path in _ADMIN_PAGE_PATHS:
             page = self._assets["index.html"]
             attributes = [f'data-backend-name="{self._backend_policy.display_name}"']
-            if self._backend_policy.owner_only:
-                attributes.extend((f'data-backend="{self._backend_policy.backend}"', 'data-owner-only="true"'))
             disabled = [operation.value for operation in OperationId if not self._backend_policy.allows(operation)]
             if disabled:
                 attributes.append('data-unavailable="' + " ".join(disabled) + '"')
@@ -686,11 +670,9 @@ class AdminWebApplication:
                 rename_hint = "自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。"
             else:
                 rename_hint = self._management.names.sync_hint
-                if self._backend_policy.owner_only and self._backend_policy.allows(OperationId.MANUAL_RENAME):
-                    rename_hint = "Claude 客户端关闭后可以改名。后台任务或会话 cron 保留连接时，请等待工作结束。" + rename_hint
             page = page.replace(b"__NETIZEN_RENAME_HINT__", html.escape(rename_hint).encode()).replace(
                 b" data-netizen-rename-limit",
-                b' data-max-code-points="120"' if self._backend_policy.backend == "claude" else b' maxlength="120"',
+                b' maxlength="120"',
             ).replace(
                 b" data-netizen-generate-name-visibility",
                 b"" if can_generate else b" hidden data-provider-hidden",
@@ -727,7 +709,7 @@ class AdminWebApplication:
             session = self._authenticate(context)
             profile = await self._identity_call(context, self._identity_credentials().profile(session.identity, session.add_revision))
             return _json_response(200, {"openId": profile.open_id, "name": profile.name, "avatarUrl": _user_avatar(profile.avatar_url),
-                **({"backend": "claude", "ownerOnly": True} if self._backend_policy.owner_only else {})})
+                **({})})
         if route == ("GET", "/api/v1/admin-users"):
             return self._admin_users(context)
         if route == ("GET", "/api/v1/group-access"):
@@ -1749,12 +1731,6 @@ class AdminWebApplication:
         _require_query_keys(context.query, allowed)
         page_size = _session_page_size(context.query)
         sort_by, sort_direction = _session_order_query(context.query)
-        local_only = not self._backend_policy.allows(OperationId.HISTORY)
-        if local_only:
-            if "sortBy" not in context.query:
-                sort_by = "created_at"
-            if sort_by != "created_at" or any(key in context.query for key in ("updatedFrom", "updatedBefore", "searchTerm")):
-                raise BackendUnsupported("原生会话目录或历史")
         created_from, created_before = _created_range_query(context.query)
         updated_from, updated_before = _updated_range_query(context.query)
         local = BindingQuery(
@@ -1764,11 +1740,8 @@ class AdminWebApplication:
             topic_id=_optional_text_query(context.query, "topicId"),
             identity=_optional_text_query(context.query, "identity"),
             current=_current_query(context.query),
-            created_from=created_from if local_only else None, created_before=created_before if local_only else None,
         )
         inventory_state = _session_inventory_state(context.query)
-        if local_only and inventory_state is SessionInventoryState.ARCHIVED:
-            raise BackendUnsupported("原生会话目录或历史")
         search_term = _optional_text_query(context.query, "searchTerm")
         if search_term and inventory_state is SessionInventoryState.LAZY:
             raise AdminWebError(400, "invalid_query", "Lazy 会话不支持搜索。")
@@ -1787,7 +1760,7 @@ class AdminWebApplication:
         fingerprint = _fingerprint("sessions", filter_values)
         cursor = _decode_session_cursor(
             _optional_one(context.query, "cursor"), fingerprint,
-            inventory_state=SessionInventoryState.LAZY if local_only else inventory_state,
+            inventory_state=inventory_state,
         )
         deadline = (
             asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS
@@ -1987,7 +1960,7 @@ class AdminWebApplication:
         if len(binding_ids) + len(side_ids) > _RUNTIME_SNAPSHOT_BATCH_SIZE:
             raise ValueError("runtime snapshot request accepts at most 50 IDs")
         resolve_primary = (
-            _optional_bool_query(context.query, "resolvePrimary") or False
+            _optional_bool_query(context.query, "resolvePrimary")
         )
         if resolve_primary:
             bindings = await self._management.binding_statuses_exact(
@@ -2407,15 +2380,7 @@ class AdminWebApplication:
             expected_resource="binding",
             allowed_extra={"name"},
         )
-        if self._backend_policy.backend == "claude":
-            # The ordinary title writer validates 1–120 Unicode characters.
-            # The generic HTTP field bound is in UTF-8 bytes.
-            value = payload.get("name")
-            if isinstance(value, str):
-                value = " ".join(value.split())
-            name = _required_text({"name": value}, "name", maximum=4 * 120)
-        else:
-            name = _required_text(payload, "name", maximum=120)
+        name = _required_text(payload, "name", maximum=120)
         renamed = await self._mutation(
             context,
             OPERATIONS[OperationId.MANUAL_RENAME].grant,
@@ -2737,9 +2702,9 @@ class AdminWebApplication:
             } for member in members]
             result = {
                 "revision": revision, "currentOpenId": session.identity.open_id, "users": rows,
-                "addAction": None if self._backend_policy.owner_only else grants.add(
+                "addAction": grants.add(
                     "admin-users.add", AdminActionTarget("admin-users", self._users.app_id), preconditions),
-                "selectorAction": None if self._backend_policy.owner_only else grants.add(
+                "selectorAction": grants.add(
                     "admin-users.selector-config", AdminActionTarget("admin-users", self._users.app_id), preconditions),
             }
             grants.issue()
@@ -3694,14 +3659,10 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(409, "stale_action", "操作授权已过期或名单已变化，请刷新后重试。")
     if isinstance(error, FeishuError):
         return AdminWebError(502, "feishu_error", "飞书请求未完成，请稍后重试。")
-    if isinstance(error, OrdinaryInputRejected):
-        return AdminWebError(409, "ordinary_input_rejected", str(error))
     if isinstance(error, TerminalStateUnknown):
         return AdminWebError(409, "terminal_state_unknown", str(error))
     if isinstance(error, BackendUnsupported):
         return AdminWebError(409, "backend_unsupported", str(error))
-    if isinstance(error, OwnerOnly):
-        return AdminWebError(403, error.code, str(error))
     if isinstance(error, AdminUsersError):
         if isinstance(error, AdminPermissionDenied):
             return AdminWebError(401, "not_authenticated", "请重新登录。")
@@ -3788,8 +3749,6 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(503, "state_unknown", "结果未确认，请刷新对账。")
     if isinstance(error, MalformedActionGrant):
         return AdminWebError(400, "invalid_action", "操作凭据无效。")
-    if isinstance(error, SessionRenameUnconfirmed):
-        return AdminWebError(503, "state_unknown", str(error))
     if isinstance(error, ThreadLifecycleError):
         return AdminWebError(409, "operation_rejected", describe_error(error))
     if isinstance(

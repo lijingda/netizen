@@ -6,29 +6,25 @@ from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 from netizen_cli.backends import BackendPolicy
-from netizen_cli.bindings import BindingStore, BindingTaskFeedback, ThreadBinding
-from netizen_cli.channel import constants
+from netizen_cli.bindings import BindingStore, ThreadBinding
 from netizen_cli.codex_runtime import CodexRuntime
 from netizen_cli.domain import ActiveState, FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
-from netizen_cli.file_evidence import FileEvidence
 from netizen_cli.management import (
     ExactBindingTarget, InstanceManagementService, ManagementRuntimePort, RuntimePrecondition, ScopeCoordinator,
 )
 from netizen_cli.ordinary_sessions import (
-    LogicalTerminal, OrdinaryCompletionHandler, OrdinaryConclusion, OrdinaryInputRejected, PhysicalAnswer, PreparedPrompt, StopPreview,
+    OrdinaryCompletionHandler, OrdinaryConclusion, PreparedPrompt, StopPreview,
 )
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.codex_replies import codex_completion_handler
 from netizen_cli.runtime.contracts import (
     ActiveTurnSnapshot, ContextBoundaryCommitFailed, ContextCursorCommit, RuntimeClosed, SteerRace, StopAcknowledger,
-    StopDisposition, Submission, SubmissionAdmission, SubmitDisposition, TerminalStateUnknown, ThreadActivityChanged,
-    ThreadStopping, TurnActivitySnapshot, TurnObservationUnavailableOutcome,
+    StopDisposition, Submission, SubmitDisposition, ThreadActivityChanged,
+    ThreadStopping, TurnActivitySnapshot,
 )
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
-from tests.support.channel_results import sent_result
-from tests.support import requires_claude_sdk
 from tests.test_codex_runtime import FakeCodex, FakeTerminalCleanup
 
 
@@ -44,38 +40,6 @@ class StartOnlySessions:
         self.revision = 0
         self.previewed = asyncio.Event()
         self.interrupts: list[str] = []
-
-    async def capture_submission_admission(self, binding_id: str) -> SubmissionAdmission:
-        if self.activity is not None:
-            raise OrdinaryInputRejected("当前任务仍在运行，本条消息未执行。")
-        return SubmissionAdmission(binding_id, self.revision, None, None, 1)
-
-    async def submit(
-        self, *, binding: ThreadBinding, cwd: Path | None, input: PreparedPrompt, owner_id: str,
-        origin: object, admission: SubmissionAdmission, context_commit: ContextCursorCommit | None,
-        skill_names: tuple[str, ...],
-    ) -> Submission:
-        if self.activity is not None or admission.revision != self.revision or admission.binding_id != binding.id:
-            raise OrdinaryInputRejected("目标已经变化，本条消息未执行。")
-        self.inputs.append(input)
-        self.revision += 1
-        self.activity = TurnActivitySnapshot(
-            binding.id, "thread", "turn", 1, ActiveState.RUNNING, 0, False, False, False, (),
-        )
-        self.receipt = Submission(
-            SubmitDisposition.STARTED, binding.id, "thread", "turn",
-            self.receipt_released.set, binding.task_feedback, binding.feedback_revision,
-        )
-        return self.receipt
-
-    def turn_activity(self, binding_id: str, *, thread_id: str, turn_id: str) -> TurnActivitySnapshot | None:
-        activity = self.activity
-        if activity and (activity.binding_id, activity.thread_id, activity.turn_id) == (binding_id, thread_id, turn_id):
-            return activity
-        return None
-
-    def reply_blocked_by_lifecycle(self, binding_id: str) -> bool:
-        return False
 
     async def preview_stop(self, binding: ThreadBinding) -> StopPreview | None:
         self.previewed.set()
@@ -127,53 +91,6 @@ class CodexOrdinarySessionsTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
-    async def test_start_busy_rejection_parking_and_recovered_conclusion(self):
-        backend = StartOnlySessions()
-        async with channel_fixture(ordinary=backend) as fixture:
-            backend.sink = fixture.app.handle_ordinary_completion
-            message = FakeMessage("run first", message_id="om_first")
-            binding = fixture.store.create_channel_binding(
-                scope=fixture.app._scope(message), project_alias="test", creator_id="ou_user",
-                task_feedback=BindingTaskFeedback(progress_card_enabled=True),
-            )
-            fixture.channel.reply_results.append(sent_result("om_progress", chat_id="oc_direct"))
-            stale = await backend.capture_submission_admission(binding.id)
-            await fixture.app.handle_message(message)
-            self.assertTrue(backend.receipt_released.is_set())
-            self.assertEqual(backend.receipt.disposition, SubmitDisposition.STARTED)
-            self.assertEqual(len(backend.inputs), 1)
-            self.assertIn("run first", backend.inputs[0].text)
-            with self.assertRaises(OrdinaryInputRejected):
-                await backend.submit(
-                    binding=binding, cwd=fixture.project, input=PreparedPrompt("late"), owner_id="ou_user",
-                    origin=message, admission=stale, context_commit=None, skill_names=(),
-                )
-            await fixture.app.handle_message(FakeMessage("busy", message_id="om_busy"))
-            self.assertIn("本条消息未执行", str(fixture.channel.replies[-1][1]))
-            self.assertNotIn(("om_busy", constants.STEER_REACTION), fixture.channel.reactions)
-            self.assertEqual(len(backend.inputs), 1)
-
-            backend.activity = replace(backend.activity, state=ActiveState.OBSERVATION_UNAVAILABLE, revision=2)
-            await backend.sink(TurnObservationUnavailableOutcome(
-                binding.id, "thread", "turn", "ou_user", message, TerminalStateUnknown("stream lost"),
-            ))
-            self.assertEqual(fixture.channel.updates[-1][0], "om_progress")
-            self.assertIn("观测不可用", str(fixture.channel.updates[-1][1]))
-            self.assertIn("尚未确认本轮是否结束", str(fixture.channel.replies[-1][1]))
-            self.assertNotIn(("om_first", constants.DONE_REACTION), fixture.channel.reactions)
-            self.assertEqual(fixture.channel.reaction_removals[0][0], "om_first")
-
-            conclusion = OrdinaryConclusion(
-                binding.id, "thread", "turn", "ou_user", message, "completed", "recovered answer",
-                cwd=fixture.project, task_feedback=binding.task_feedback,
-            )
-            self.assertEqual(conclusion.file_evidence(), FileEvidence())
-            backend.activity = None
-            await backend.sink(conclusion)
-            self.assertIn(("om_first", constants.DONE_REACTION), fixture.channel.reactions)
-            self.assertTrue(any("recovered answer" in str(item) for _, item in fixture.channel.replies))
-            self.assertEqual(fixture.runtime.submit_calls, [])
-            self.assertEqual(fixture.runtime.capture_calls, [])
 
     async def test_bare_stop_selects_current_execution_and_card_controls_keep_exact_target(self):
         backend = StartOnlySessions()
@@ -207,29 +124,6 @@ class OrdinaryChannelTests(unittest.IsolatedAsyncioTestCase):
                              ("thread", "second", ActiveState.STOPPING))
             self.assertEqual(fixture.runtime.stop_calls, [])
 
-    async def test_exact_stop_preview_cannot_follow_a_replacement_execution(self):
-        class ExactPreviewSessions(StartOnlySessions):
-            async def preview_stop(self, binding):
-                self.previewed.set()
-                return StopPreview("正在停止任务。", self.activity.revision, self.activity.turn_id)
-
-        backend = ExactPreviewSessions()
-        async with channel_fixture(ordinary=backend) as fixture:
-            await fixture.new()
-            message = FakeMessage("/stop", message_id="om_stop")
-            scope = fixture.app._scope(message)
-            binding = fixture.store.active_binding(scope.key)
-            backend.activity = TurnActivitySnapshot(
-                binding.id, "thread", "first", 1, ActiveState.RUNNING, 0, False, False, False, (),
-            )
-            async with fixture.management.scope_coordinator.hold(scope.key):
-                task = asyncio.create_task(fixture.app.handle_message(message))
-                await asyncio.wait_for(backend.previewed.wait(), 2)
-                backend.activity = replace(backend.activity, turn_id="second", revision=2)
-            await asyncio.wait_for(task, 2)
-            self.assertEqual(backend.interrupts, [])
-            self.assertNotIn((message.id, "正在停止任务。"), fixture.channel.replies)
-
 
 class OrdinaryPortContract:
     """Run the same ordinary operations against each production runtime and its SDK double."""
@@ -243,31 +137,14 @@ class OrdinaryPortContract:
         self.outcomes = asyncio.Queue()
         self.notices = asyncio.Queue()
 
-        if self.backend == "codex":
-            self.codex = FakeCodex()
-            self.runtime = CodexRuntime(
-                codex=self.codex, bindings=self.store, terminal_cleanup=FakeTerminalCleanup(self.codex.events),
-                automatic_thread_naming=False, poll_interval_seconds=0,
-                on_completion=codex_completion_handler(self.outcomes.put, AsyncMock(), AsyncMock()),
-            )
-            self.ordinary = CodexOrdinarySessions(self.runtime)
-            self.port = ManagementRuntimePort(self.runtime, ordinary=self.ordinary)
-        else:
-            from netizen_cli.runtime.claude_ordinary import ClaudeOrdinarySessions
-            from tests.support.claude_client import FakeClaudeClients
-
-            async def notice(origin, text):
-                await self.notices.put((origin, text))
-
-            now = 0.
-            self.clients = FakeClaudeClients()
-            self.ordinary = self.runtime = ClaudeOrdinarySessions(
-                bindings=self.store, clients=self.clients, owner_id="owner", on_completion=self.outcomes.put,
-                notice=notice, clock=lambda: now,
-            )
-            self.port = ManagementRuntimePort(None, ordinary=self.ordinary, local=self.ordinary)
-            self.runtime.open_admission()
-            now = 2.
+        self.codex = FakeCodex()
+        self.runtime = CodexRuntime(
+            codex=self.codex, bindings=self.store, terminal_cleanup=FakeTerminalCleanup(self.codex.events),
+            automatic_thread_naming=False, poll_interval_seconds=0,
+            on_completion=codex_completion_handler(self.outcomes.put, AsyncMock(), AsyncMock()),
+        )
+        self.ordinary = CodexOrdinarySessions(self.runtime)
+        self.port = ManagementRuntimePort(self.runtime, ordinary=self.ordinary)
 
         self.addAsyncCleanup(self.runtime.cancel_tasks)
         self.addCleanup(self.runtime.close_admission)
@@ -287,19 +164,11 @@ class OrdinaryPortContract:
         )
 
     def complete(self, turn_id, answer="answer"):
-        if self.backend == "codex":
-            handle = next(handle for handle in self.codex.handles if handle.id == turn_id)
-            handle.complete(response=answer)
-        else:
-            client = next(client for client in self.clients.calls if client.inputs[0]["uuid"] == turn_id)
-            client.init()
-            client.result(result=answer)
+        handle = next(handle for handle in self.codex.handles if handle.id == turn_id)
+        handle.complete(response=answer)
 
     def assert_native_starts(self, count):
-        if self.backend == "codex":
-            self.assertEqual(len(self.codex.handles), count)
-        else:
-            self.assertEqual([len(client.inputs) for client in self.clients.calls], [1] * count)
+        self.assertEqual(len(self.codex.handles), count)
 
     async def conclusion(self):
         # Interrupted Codex Turns take a second native read after a two-second confirmation interval.
@@ -322,17 +191,13 @@ class OrdinaryPortContract:
         first = await self.submit(binding, admission=admission)
         self.assertEqual(first.disposition, SubmitDisposition.STARTED)
         self.assertEqual(self.store.get(binding.id).native_thread_id, first.thread_id)
-        if self.backend == "codex":
-            follow = await self.submit(binding)
-            self.assertEqual((follow.disposition, follow.turn_id), (SubmitDisposition.STEERED, first.turn_id))
-            self.assertEqual(len(self.codex.handles[0].steers), 1)
-        else:
-            with self.assertRaisesRegex(OrdinaryInputRejected, "正在执行"):
-                await self.submit(binding)
+        follow = await self.submit(binding)
+        self.assertEqual((follow.disposition, follow.turn_id), (SubmitDisposition.STEERED, first.turn_id))
+        self.assertEqual(len(self.codex.handles[0].steers), 1)
         event = await self.finish(first)
         self.assertEqual((event.binding_id, event.thread_id, event.owner_id, event.origin, event.final_response),
                          (binding.id, first.thread_id, "owner", "origin", "answer"))
-        with self.assertRaises(SteerRace if self.backend == "codex" else OrdinaryInputRejected):
+        with self.assertRaises(SteerRace):
             await self.submit(binding, admission=admission)
         self.assert_native_starts(1)
 
@@ -343,18 +208,9 @@ class OrdinaryPortContract:
         cursor = ContextCursorCommit(binding.context_revision, MessageContextAnchor("upper", 200))
         other = await self.ordinary.capture_submission_admission(self.binding.id)
         with patch.object(self.store, "commit_context_anchor", side_effect=OSError("CAS failed")) as save:
-            if self.backend == "codex":
-                with self.assertRaisesRegex(ContextBoundaryCommitFailed, "上下文边界未能持久化"):
-                    await self.submit(binding, context_commit=cursor)
-                rejected = RuntimeClosed
-            else:
-                accepted = await self.submit(binding, context_commit=cursor)
-                self.clients.calls[0].init()
-                origin, notice = await asyncio.wait_for(self.notices.get(), 2)
-                self.assertEqual(origin, "origin")
-                self.assertIn("上下文边界未能持久化", notice)
-                accepted.release_receipt_attempt()
-                rejected = OrdinaryInputRejected
+            with self.assertRaisesRegex(ContextBoundaryCommitFailed, "上下文边界未能持久化"):
+                await self.submit(binding, context_commit=cursor)
+            rejected = RuntimeClosed
             active = self.port.runtime_snapshot_exact(binding.id).turn
             self.assertIsNotNone(active)
             for target in (binding, self.binding):
@@ -362,10 +218,7 @@ class OrdinaryPortContract:
                     await self.ordinary.capture_submission_admission(target.id)
             with self.assertRaises(rejected):
                 await self.submit(self.binding, admission=other)
-            if self.backend == "claude":
-                self.clients.calls[0].result()
-            else:
-                self.complete(active.turn_id)
+            self.complete(active.turn_id)
             self.assertTrue(await self.runtime.wait_idle(2))
             save.assert_called_once_with(binding_id=binding.id, expected_context_revision=binding.context_revision,
                                          anchor=cursor.anchor)
@@ -392,7 +245,7 @@ class OrdinaryPortContract:
         await activate(second, self.binding)
         await activate(self.binding, second)
         self.assertEqual(self.store.active_binding(self.binding.scope_key).id, self.binding.id)
-        with self.assertRaises(SteerRace if self.backend == "codex" else OrdinaryInputRejected):
+        with self.assertRaises(SteerRace):
             await self.submit(self.binding, admission=captured)
         self.assert_native_starts(0)
         self.assertIsNone(self.store.get(self.binding.id).native_thread_id)
@@ -414,12 +267,9 @@ class OrdinaryPortContract:
                 try:
                     await asyncio.wait_for(started.wait(), 2)
                     self.complete(receipt.turn_id)
-                    if self.backend == "codex":
-                        async with asyncio.timeout(2):
-                            while self.runtime.active_turn(self.binding.id) is not None:
-                                await asyncio.sleep(0)
-                    else:
-                        await asyncio.wait_for(self.clients.calls[0].closing.wait(), 2)
+                    async with asyncio.timeout(2):
+                        while self.runtime.active_turn(self.binding.id) is not None:
+                            await asyncio.sleep(0)
                     self.assertTrue(self.outcomes.empty())
                 finally:
                     delivery.cancel()
@@ -444,43 +294,24 @@ class OrdinaryPortContract:
             await self.ordinary.stop_exact(self.binding.id, acknowledge=ack,
                 expected_activity_revision=old.activity_revision, expected_turn_id=old.turn.turn_id)
         ack.assert_not_awaited()
-        if self.backend == "codex":
-            self.assertEqual(self.codex.handles[-1].interrupt_count, 0)
-        else:
-            self.assertEqual(self.clients.calls[-1].interrupts, 0)
+        self.assertEqual(self.codex.handles[-1].interrupt_count, 0)
         await self.finish(successor)
 
     async def test_late_native_confirmation_allows_an_explicit_successor(self):
         first = await self.submit(self.binding)
         first.release_receipt_attempt()
-        if self.backend == "claude":
-            client = self.clients.calls[0]
-            client.close_gate.clear()
-            try:
-                with patch("netizen_cli.runtime.claude_ordinary._CLOSE_SECONDS", 0):
-                    self.complete(first.turn_id)
-                    event = await self.conclusion()
-                    self.assertEqual((event.turn_id, event.status), (first.turn_id, "completed"))
-                    _, notice = await asyncio.wait_for(self.notices.get(), 2)
-                    self.assertIn("无法确认 Claude 客户端已关闭", notice)
-                    with self.assertRaisesRegex(OrdinaryInputRejected, "无法确认 Claude 客户端已关闭"):
-                        await self.submit(self.binding)
-            finally:
-                client.close_gate.set()
-        else:
-            # Codex retains the shared client. Its stop receipt needs a later native Turn terminal.
-            handle = self.codex.handles[0]
-            handle.complete_on_interrupt = False
-            snapshot = self.port.runtime_snapshot_exact(self.binding.id)
-            disposition = await self.ordinary.stop_exact(self.binding.id, expected_activity_revision=snapshot.activity_revision,
-                                                         expected_turn_id=first.turn_id)
-            self.assertEqual(disposition, StopDisposition.REQUESTED)
-            with self.assertRaises(ThreadStopping):
-                await self.submit(self.binding)
-            self.assertTrue(self.outcomes.empty())
-            handle.complete(status="interrupted")
-            event = await self.conclusion()
-            self.assertEqual((event.turn_id, event.status), (first.turn_id, "interrupted"))
+        handle = self.codex.handles[0]
+        handle.complete_on_interrupt = False
+        snapshot = self.port.runtime_snapshot_exact(self.binding.id)
+        disposition = await self.ordinary.stop_exact(self.binding.id, expected_activity_revision=snapshot.activity_revision,
+                                                     expected_turn_id=first.turn_id)
+        self.assertEqual(disposition, StopDisposition.REQUESTED)
+        with self.assertRaises(ThreadStopping):
+            await self.submit(self.binding)
+        self.assertTrue(self.outcomes.empty())
+        handle.complete(status="interrupted")
+        event = await self.conclusion()
+        self.assertEqual((event.turn_id, event.status), (first.turn_id, "interrupted"))
         self.assertTrue(await self.runtime.wait_idle(2))
         self.assert_native_starts(1)
         self.assertTrue(self.outcomes.empty())
@@ -509,17 +340,3 @@ class OrdinaryPortContract:
 
 class CodexOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyncioTestCase):
     backend = "codex"
-
-
-@requires_claude_sdk
-class ClaudeOrdinaryPortContractTests(OrdinaryPortContract, unittest.IsolatedAsyncioTestCase):
-    backend = "claude"
-
-    async def conclusion(self):
-        answer = await super().conclusion()
-        self.assertIsInstance(answer, PhysicalAnswer)
-        terminal = await asyncio.wait_for(self.outcomes.get(), 10)
-        self.assertIsInstance(terminal, LogicalTerminal)
-        self.assertEqual((terminal.binding_id, terminal.thread_id, terminal.turn_id, terminal.origin, terminal.status),
-                         (answer.binding_id, answer.thread_id, answer.logical_id, answer.origin, answer.status))
-        return answer

@@ -132,7 +132,7 @@ def _query(value: Any) -> str:
     return query
 
 
-def _name(value: Any, *, create: bool, optional: bool = False) -> str:
+def _name(value: Any, *, create: bool) -> str:
     if not isinstance(value, str) or "\x00" in value:
         raise CardActionError("会话名称无效。")
     if len(value) > MAX_THREAD_NAME_CHARS:
@@ -140,12 +140,12 @@ def _name(value: Any, *, create: bool, optional: bool = False) -> str:
     if not create:
         return value
     name = " ".join(value.split())
-    if not name and not optional:
+    if not name:
         raise CardActionError("会话名称不能为空。")
     return name
 
 
-def _validate_state(scope: FeishuScope, state: Any, *, claude: bool = False) -> tuple[ForkSource, ChatSearchSnapshot | None]:
+def _validate_state(scope: FeishuScope, state: Any) -> tuple[ForkSource, ChatSearchSnapshot | None]:
     if not isinstance(state, Mapping):
         raise CardActionError("分支卡片动作无效，请重新发送 /fork。")
     if state.get("kind") != "netizen_fork" or type(state.get("v")) is not int or state["v"] != _VERSION:
@@ -161,8 +161,7 @@ def _validate_state(scope: FeishuScope, state: Any, *, claude: bool = False) -> 
         raise CardActionError("分支卡片动作无效，请重新发送 /fork。")
     if action in {"confirm", "back"} and (
         not isinstance(state["draft"], Mapping)
-        or (set(state["draft"]) != _DRAFT_FIELDS
-            and not (claude and set(state["draft"]) == _DRAFT_FIELDS - {_SOURCE_ACTION_FIELD}))
+        or set(state["draft"]) != _DRAFT_FIELDS
     ):
         raise CardActionError("分支确认草稿无效，请重新发送 /fork。")
     snapshot = decode_chat_snapshot(state["snapshot"]) if action == "page" else None
@@ -178,9 +177,9 @@ def is_fork_card_action(value: Any, form: Any = None) -> bool:
     )
 
 
-def decode_fork_action(scope: FeishuScope, value: Any, form: Any = None, *, claude: bool = False) -> ForkCardAction:
+def decode_fork_action(scope: FeishuScope, value: Any, form: Any = None) -> ForkCardAction:
     """Read public callback value and form_value; callers verify card Scope."""
-    source, snapshot = _validate_state(scope, value, claude=claude)
+    source, snapshot = _validate_state(scope, value)
     action = value["action"]
     if action in {"confirm", "back"}:
         if form is not None and form != {}:
@@ -192,14 +191,11 @@ def decode_fork_action(scope: FeishuScope, value: Any, form: Any = None, *, clau
         raise CardActionError("分支表单缺少字段或混入其他操作。")
     target_draft = read_chat_target(form, mode_field=_MODE_FIELD,
                                    choice_field=_TARGET_FIELD, id_field=_ID_FIELD)
-    landing = form.get(_LANDING_FIELD)
-    source_action = form.get(_SOURCE_ACTION_FIELD, "keep" if claude else None)
+    landing, source_action = form.get(_LANDING_FIELD), form.get(_SOURCE_ACTION_FIELD)
     if not isinstance(landing, str) or landing not in {"topic", "main"}:
         raise CardActionError("请选择有效的分支落点。")
     if not isinstance(source_action, str) or source_action not in {"keep", "archive"}:
         raise CardActionError("请选择有效的来源会话处理方式。")
-    if claude and source_action != "keep":
-        raise CardActionError("Claude 会话分支只支持保留来源会话。")
     name_input = form.get(_NAME_FIELD, "")
     name = _name("" if name_input is None else name_input, create=False)
     query_input = form.get(_QUERY_FIELD, "")
@@ -222,7 +218,7 @@ def decode_fork_action(scope: FeishuScope, value: Any, form: Any = None, *, clau
         try:
             target = resolve_chat_target(target_draft, current_chat_id=scope.chat_id,
                                          choice_error="请选择创建位置。")
-            normalized_name = _name(name, create=True, optional=claude)
+            normalized_name = _name(name, create=True)
         except CardActionError as error:
             raise ForkFormValidationError(str(error), draft) from None
         return ForkCardAction(
@@ -317,7 +313,7 @@ def fork_form_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
                    query: str = "",
                    query_input: str | None = None,
                    chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
-                   notice: str | None = None, claude: bool = False) -> OutboundCard:
+                   notice: str | None = None) -> OutboundCard:
     """One form carries the name and target through search and final creation."""
     query = _query(chat_snapshot.query if chat_snapshot else query)
     if chat_snapshot is not None:
@@ -329,7 +325,7 @@ def fork_form_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
         options = chat_options(chats, avatar_keys=avatar_keys)
     target = (initial_chat_target(current_chat_id=scope.chat_id, target_chat_id=target_chat_id, options=options)
               if target_mode is None else ChatTargetDraft(target_mode, target_choice or "", target_id))
-    default_name = "" if claude else " ".join(source_title.split())[:MAX_THREAD_NAME_CHARS - len(" · 分支")] + " · 分支"
+    default_name = " ".join(source_title.split())[:MAX_THREAD_NAME_CHARS - len(" · 分支")] + " · 分支"
     draft_name = _name(default_name if name is None else name, create=False)
     target_notice = (
         "指定其他聊天时，目标聊天的参与者可通过新会话继续使用继承的上下文；后续回答可能引用来源会话的内容。\n"
@@ -358,11 +354,8 @@ def fork_form_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
             page=page, total_pages=chat_snapshot.total_pages if chat_snapshot is not None else 1,
         )
         builder = _builder("创建会话分支", _label(project_alias, 120))
-        backend = "Claude" if claude else "Codex"
         builder.raw(_plain(f"来源：{_label(source_title, 120)}\n"
-                           f"新会话继承当前 {backend} 上下文。两个会话共享项目文件，修改会相互可见。"))
-        if claude:
-            builder.raw(_plain("来源会话设置的会话 cron 会随对话记录复制，新会话恢复时也会恢复。"))
+                           "新会话继承当前 Codex 上下文。两个会话共享项目文件，修改会相互可见。"))
         builder.raw(_notice(target_notice))
         fields = [
             {"tag": "input", "name": _NAME_FIELD, "width": "fill",
@@ -379,16 +372,13 @@ def fork_form_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
              "required": True, "initial_option": landing,
              "options": [{"text": _plain_text(label), "value": value}
                          for label, value in (("新话题", "topic"), ("主线", "main"))]},
+            _plain("创建后"),
+            {"tag": "select_static", "name": _SOURCE_ACTION_FIELD, "width": "fill",
+             "required": True, "initial_option": source_action,
+             "options": [{"text": _plain_text(label), "value": value}
+                         for label, value in (("保留当前会话", "keep"), ("归档当前会话", "archive"))]},
+            _button(scope, source, "创建分支", "create"),
         ]
-        if not claude:
-            fields.extend([
-                _plain("创建后"),
-                {"tag": "select_static", "name": _SOURCE_ACTION_FIELD, "width": "fill",
-                 "required": True, "initial_option": source_action,
-                 "options": [{"text": _plain_text(label), "value": value}
-                             for label, value in (("保留当前会话", "keep"), ("归档当前会话", "archive"))]},
-            ])
-        fields.append(_button(scope, source, "创建分支", "create"))
         builder.raw({"tag": "form", "name": "fork_form_v6", "elements": fields})
         card = builder.to_dict()
         # Check the actual SDK serialization, including the single snapshot
@@ -412,12 +402,10 @@ def fork_status_card(*, name: str, source_title: str, project_alias: str,
                      native_thread_id: str | None = None,
                      binding_saved: bool = False, landing: str = "topic",
                      replaced_session: str | None = None, source_action: str = "keep",
-                     archive_result: str | None = None, claude: bool = False) -> OutboundCard:
+                     archive_result: str | None = None) -> OutboundCard:
     """Status pages cannot resubmit; only the source receipt gets a topic URL."""
     titles = {"creating": "会话分支创建中", "success": "会话分支已创建", "failed": "会话分支创建未完成"}
-    title, subtitle = titles[status], name
-    if status == "success" and (name or not claude):
-        title, subtitle = name, title
+    title, subtitle = (name, titles[status]) if status == "success" else (titles[status], name)
     builder = _builder(title, subtitle, template="red" if status == "failed" else "blue")
     builder.raw(_plain(f"来源：{source_title}\nProject：{project_alias}"))
     if status == "creating":
@@ -433,13 +421,12 @@ def fork_status_card(*, name: str, source_title: str, project_alias: str,
             builder.raw({"tag": "button", "text": _plain_text("进入聊天主线" if landing == "main" else "进入新话题"), "type": "primary_filled",
                 "behaviors": [{"type": "open_url", "default_url": topic_url}]})
     elif native_thread_id is not None:
-        backend = "Claude" if claude else "Codex"
         builder.raw(_notice(
-            f"{backend} 分支和本地会话已保存，但创建交接未完成。请先核查，不要重新创建。"
-            if binding_saved else f"{backend} 分支已创建，但{'主线' if landing == 'main' else '新话题'}会话绑定未完成或结果未确认。请先人工核查，不要直接重试。",
+            "Codex 分支和本地会话已保存，但创建交接未完成。请先核查，不要重新创建。"
+            if binding_saved else f"Codex 分支已创建，但{'主线' if landing == 'main' else '新话题'}会话绑定未完成或结果未确认。请先人工核查，不要直接重试。",
             error=True,
         ))
-        builder.raw(_plain(f"可在 Claude Code 中查看会话：{native_thread_id}" if claude else f"Codex 会话：{native_thread_id}"))
+        builder.raw(_plain(f"Codex 会话：{native_thread_id}"))
     if landing == "main" and replaced_session and (status == "success" or binding_saved):
         builder.raw(_plain(f"已替换当前会话：{replaced_session}。\n原会话保留，可通过 /sessions 切回。"))
     if detail:

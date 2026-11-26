@@ -82,11 +82,6 @@ class SessionFormView:
             raise BackendUnsupported("过程卡")
 
 
-def require_local_settings(has_model: bool, feedback: BindingTaskFeedback) -> None:
-    # The native Claude write boundary also rejects unsupported intent.
-    SessionFormView(False, True, "原生 Claude 设置").validate(has_model, feedback)
-
-
 _FIELDS = frozenset({"turn_settings", "reaction_pulse_enabled", "progress_card_enabled", "completion_mention_enabled", "message_context_mode", "progress_card_settings"})
 _TURN_FIELDS = frozenset({"model_id", "effort_id", "service_tier_id"})
 

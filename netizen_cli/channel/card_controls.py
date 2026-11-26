@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 import asyncio
 import logging
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any
 
 
 from ..bindings import (
@@ -36,7 +36,6 @@ from .messages import public_chat_kind as _public_chat_kind
 from ..cards.defaults import decode_defaults_action
 from ..defaults import DefaultConfigurationError
 from ..runtime.contracts import (
-    ThreadActivityChanged,
     StopDisposition,
     ThreadDeleteUnavailable,
     ThreadDeleteTargetChanged,
@@ -243,7 +242,6 @@ class CardControlChannel(TurnFileChannel):
             CardControlName.PREPARE_EXACT_DELETE_BINDING: self._card_prepare_exact_delete_binding,
             CardControlName.DELETE_EXACT_BINDING: self._card_delete_exact_binding,
             CardControlName.STOP_EXACT_BINDING: self._card_stop_exact_binding,
-            CardControlName.CONFIRM_RELEASE: self._card_confirm_release,
             CardControlName.RECHECK_EXACT_TURN: self._card_recheck_exact_turn,
             CardControlName.PREPARE_ARCHIVED_DELETE_BINDING: self._card_prepare_archived_delete_binding,
             CardControlName.DELETE_ARCHIVED_BINDING: self._card_delete_archived_binding,
@@ -344,9 +342,6 @@ class CardControlChannel(TurnFileChannel):
         )
 
     async def _card_prepare_new_workspace(self, intent: CardControlIntent) -> None:
-        if self._local_sessions is not None and self._open_new_cards.get(intent.source_id) != intent.scope.key:
-            await self._safe_reply_to_card(intent, "这张新建会话卡片已失效，请重新发送 /new。")
-            return
         assert intent.project_alias is not None
         assert intent.expected_revision is not None
         chat_kind = _public_chat_kind(await self._channel.get_chat_info(intent.scope.chat_id))
@@ -356,8 +351,6 @@ class CardControlChannel(TurnFileChannel):
             allow_context_mode=chat_kind == "group",
             settings_draft=intent.new_settings_draft,
         )
-        if self._local_sessions is not None and self._open_new_cards.get(intent.source_id) != intent.scope.key:
-            return
         if not await self._safe_update_card(intent.source_id, card):
             await self._safe_reply_to_card(
                 intent, "worktree 选项已查询，但卡片更新失败；未创建会话。请重新发送 /new。",
@@ -369,13 +362,6 @@ class CardControlChannel(TurnFileChannel):
         assert intent.reaction_pulse_enabled is not None
         assert intent.progress_card_enabled is not None
         assert intent.completion_mention_enabled is not None
-        if self._local_sessions is not None:
-            if self._open_new_cards.get(intent.source_id) != intent.scope.key:
-                await self._safe_reply_to_card(intent, "这张新建会话卡片已失效，请重新发送 /new。")
-                return
-            # Claim before any await or worktree creation. An uncertain outcome
-            # requires a new owner action, even if Feishu cannot replace the form.
-            del self._open_new_cards[intent.source_id]
         message_context_mode = (
             intent.message_context_mode or MentionContextMode.CURRENT_ONLY
         )
@@ -421,9 +407,6 @@ class CardControlChannel(TurnFileChannel):
                 form_view=self._session_form,
             ),
         )
-        if not updated and self._local_sessions is not None:
-            await self._safe_reply_to_card(intent, f"已创建并切换到会话 {binding.short_id}（{binding.project_alias}）。")
-            return
         if not updated:
             await self._safe_reply_to_card(
                 intent,
@@ -510,9 +493,6 @@ class CardControlChannel(TurnFileChannel):
             ),
         )
         if not updated:
-            if self._local_sessions is not None:
-                await self._safe_reply_to_card(intent, f"会话 {binding.short_id} 的设置已保存。")
-                return
             await self._safe_reply_to_card(
                 intent,
                 f"✅ 会话 `{binding.short_id}` 配置已保存："
@@ -701,7 +681,7 @@ class CardControlChannel(TurnFileChannel):
             context_anchor=context_anchor,
         )
         success_notice = (
-            f"✅ {'已恢复并切换' if activated.native_thread_id and self._management.session_reads.native_catalog else '已切换'}到会话 {activated.short_id}"
+            f"✅ {'已恢复并切换' if activated.native_thread_id else '已切换'}到会话 {activated.short_id}"
             f"（{activated.project_alias}）。"
         )
         try:
@@ -852,19 +832,6 @@ class CardControlChannel(TurnFileChannel):
         if not refreshed:
             await self._safe_reply_to_card(intent, success_notice)
 
-    async def _card_confirm_release(self, intent: CardControlIntent) -> None:
-        chat = intent.scope.chat_id
-        fetched = await self._channel.fetch_message(intent.source_id)
-        actual = scope_from_fetched_card(app_id=self._app_id, callback_chat_id=chat, fetched_message=fetched,
-                                        chat_type=_public_chat_kind(await self._channel.get_chat_info(chat)))
-        if actual != intent.scope:
-            raise CardActionError("卡片已离开原会话，请重新发送 /release。")
-        try:
-            await self._management.release_current_binding(target=CurrentBindingTarget(actual.key, cast(str, intent.binding_id)),
-                sender_id=intent.sender_id, revision=intent.expected_activity_revision, turn_id=intent.expected_turn_id)
-        except (NoCurrentBinding, CurrentBindingChanged, ThreadActivityChanged) as exc:
-            raise CardActionError("会话状态已变化，请重新发送 /release。") from exc
-        await self._safe_reply_to_card(intent, "已释放 Claude 会话连接。")
 
     async def _card_stop_exact_binding(self, intent: CardControlIntent) -> None:
         assert intent.binding_id is not None
@@ -876,17 +843,7 @@ class CardControlChannel(TurnFileChannel):
                                     expected_active_binding_id=intent.expected_active_binding_id)
         precondition = self._runtime_precondition(intent)
         try:
-            if self._local_sessions is not None:
-                if precondition is None or precondition.physical_turn_id is None:
-                    raise CardActionError("请刷新会话状态后再停止。")
-                disposition = await self._management.stop_claude_control(
-                    target, sender_id=intent.sender_id, revision=precondition.activity_revision,
-                    turn_id=precondition.physical_turn_id, all_tasks=intent.all_tasks,
-                    acknowledge=lambda text: self._safe_reply_to_card(intent, text))
-            else:
-                if intent.all_tasks:
-                    raise CardActionError("当前实例不支持全部停止。")
-                disposition = (await self._management.stop_exact_binding(target=target, runtime_precondition=precondition)).disposition
+            disposition = (await self._management.stop_exact_binding(target=target, runtime_precondition=precondition)).disposition
         except ActivePointerChanged as error:
             raise CardActionError(
                 "会话列表已变化，本次停止未执行；请刷新 /sessions。"
@@ -911,14 +868,9 @@ class CardControlChannel(TurnFileChannel):
             ),
         }
         notice = notices[disposition]
-        if self._local_sessions is not None:
-            notice = "已请求停止本次 Claude 执行。" if disposition is StopDisposition.REQUESTED else "该执行已结束或正在停止。"
         try:
-            if self._local_sessions is not None and intent.from_status:
-                card = await self._local_status_card(intent.scope, binding)
-            else:
-                card = await self._sessions_card(scope=intent.scope, page=intent.page,
-                                                 session_cursor=intent.session_cursor, notice=notice)
+            card = await self._sessions_card(scope=intent.scope, page=intent.page,
+                                             session_cursor=intent.session_cursor, notice=notice)
             refreshed = await self._safe_update_card(intent.source_id, card)
         except Exception:
             logger.exception("failed to rebuild sessions card after exact stop")
@@ -952,8 +904,6 @@ class CardControlChannel(TurnFileChannel):
             "若任务仍在执行，仅恢复状态检查，旧进度卡不再更新；"
             "停止尚未完成时仍需等待或重试 /stop。仍无法确认时会返回具体原因。"
         )
-        if self._local_sessions is not None:
-            notice = "已检查本次 Claude 执行的本地状态。"
         try:
             refreshed = await self._safe_update_card(
                 intent.source_id,

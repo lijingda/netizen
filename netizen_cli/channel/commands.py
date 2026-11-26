@@ -28,8 +28,6 @@ from ..cards import (
     rename_binding_card,
 )
 from .messages import public_chat_kind as _public_chat_kind
-from ..cards.controls import release_confirmation_card
-from ..ordinary_sessions import ReleaseConfirmation
 from ..cards.status import (
     codex_context_line, codex_model_lines, decode_status_command, session_status_card,
 )
@@ -55,10 +53,9 @@ from ..experience import (
     InvalidInteraction,
 )
 from ..management import (
-    ExactBindingTarget, CurrentBindingChanged,
+    CurrentBindingChanged,
     CurrentBindingTarget,
     NoCurrentBinding,
-    RuntimePrecondition,
 )
 
 from . import constants
@@ -70,7 +67,6 @@ from .app_values import (
 from .base import (
     CHANNEL_LOGGER_NAME,
     _markdown_code,
-    _normalized_thread_text,
     _session_title,
     _thread_metadata_status_lines,
     _git_branch_status_lines,
@@ -135,10 +131,7 @@ class CommandChannel(CardControlChannel):
             else:
                 if side is not None:
                     raise CardActionError("状态卡与当前 Side 话题不一致，本次未执行。")
-                if self._local_sessions is None:
-                    renewed_card = decoded.card()
-                elif decoded.command.name is ControlName.STOP:
-                    raise CardActionError("停止操作需要原执行标识，请重新发送 /status。")
+                renewed_card = decoded.card()
                 await self._control(origin, decoded.command, expected_binding_id=decoded.target_id)
         except CardActionError as error:
             await self._report_input_error(origin, InvalidInteraction(str(error)))
@@ -156,10 +149,6 @@ class CommandChannel(CardControlChannel):
     async def _control(
         self, message: Any, intent: ControlIntent, *, expected_binding_id: str | None = None,
     ) -> None:
-        if self._local_sessions is not None:
-            if intent.name in {ControlName.CONFIG, ControlName.NEW, ControlName.RESUME, ControlName.RENAME,
-                               ControlName.DEFAULTS, ControlName.FORK}:
-                self._local_sessions.require_admission()
         refusal = self._policy.command_refusal(intent.name.value, archived=bool(intent.arguments))
         if refusal:
             raise InvalidInteraction(refusal)
@@ -285,57 +274,50 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if self._local_sessions is not None:
-            snapshot = self._local_sessions.local_snapshot(binding.id)
-            if snapshot.turn is not None or snapshot.unavailable:
-                await self._reply(message, "当前会话不允许修改配置。")
-                return
-            catalog = catalog_error = None
-        else:
-            goal = await self._runtime.goal_snapshot(binding)
-            active_goal = self._runtime.active_goal(binding.id)
-            if active_goal is not None or (
-                goal is not None and goal.status is GoalStatus.ACTIVE
-            ):
-                await self._reply(
-                    message,
-                    "当前 Goal 正在执行或状态未完成，不能修改会话配置；"
-                    "请先使用 /stop 停止当前任务，或等待执行结束。",
+        goal = await self._runtime.goal_snapshot(binding)
+        active_goal = self._runtime.active_goal(binding.id)
+        if active_goal is not None or (
+            goal is not None and goal.status is GoalStatus.ACTIVE
+        ):
+            await self._reply(
+                message,
+                "当前 Goal 正在执行或状态未完成，不能修改会话配置；"
+                "请先使用 /stop 停止当前任务，或等待执行结束。",
+            )
+            return
+        active = self._runtime.active_turn(binding.id)
+        if self._runtime.is_compacting(binding.id):
+            await self._reply(
+                message,
+                "当前会话正在压缩上下文，完成前不能修改会话配置。",
+            )
+            return
+        if active is not None:
+            if active.state is ActiveState.STOPPING:
+                notice = (
+                    "当前 Turn 正在停止，不能修改会话配置；"
+                    "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
                 )
-                return
-            active = self._runtime.active_turn(binding.id)
-            if self._runtime.is_compacting(binding.id):
-                await self._reply(
-                    message,
-                    "当前会话正在压缩上下文，完成前不能修改会话配置。",
+            else:
+                notice = (
+                    "当前 Turn 正在执行，不能修改会话配置；"
+                    "请等待完成或先发送 /stop。"
                 )
-                return
-            if active is not None:
-                if active.state is ActiveState.STOPPING:
-                    notice = (
-                        "当前 Turn 正在停止，不能修改会话配置；"
-                        "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
-                    )
-                else:
-                    notice = (
-                        "当前 Turn 正在执行，不能修改会话配置；"
-                        "请等待完成或先发送 /stop。"
-                    )
-                await self._reply(
-                    message,
-                    notice,
-                )
-                return
-            catalog = None
-            catalog_error = None
-            try:
-                catalog = await self._runtime.model_catalog()
-            except Exception as error:
-                logger.warning(
-                    "native model catalog unavailable for /config settings",
-                    extra={"error_type": type(error).__name__},
-                )
-                catalog_error = "Model / Effort / Speed 暂不可用。"
+            await self._reply(
+                message,
+                notice,
+            )
+            return
+        catalog = None
+        catalog_error = None
+        try:
+            catalog = await self._runtime.model_catalog()
+        except Exception as error:
+            logger.warning(
+                "native model catalog unavailable for /config settings",
+                extra={"error_type": type(error).__name__},
+            )
+            catalog_error = "Model / Effort / Speed 暂不可用。"
         await self._reply(
             message,
             config_card(
@@ -393,16 +375,11 @@ class CommandChannel(CardControlChannel):
             initial_project_alias=initial_project_alias,
             allow_context_mode=(_message_chat_type(message) == "group"),
         )
-        def remember_card(message_id: str) -> None:
-            if len(self._open_new_cards) >= 1024:
-                self._open_new_cards.pop(next(iter(self._open_new_cards)))
-            self._open_new_cards[message_id] = intent.scope.key
 
         try:
             await self._reply(
                 message,
                 card,
-                **({"on_sent": remember_card} if self._local_sessions is not None else {}),
             )
         except asyncio.CancelledError:
             raise
@@ -448,7 +425,7 @@ class CommandChannel(CardControlChannel):
         )
         await self._reply(
             message,
-            f"{'已恢复并切换' if binding.native_thread_id and self._management.session_reads.native_catalog else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
+            f"{'已恢复并切换' if binding.native_thread_id else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
         )
 
     async def _command_unarchive(self, message: Any, intent: ControlIntent) -> None:
@@ -478,7 +455,7 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if binding.native_thread_id is None and self._local_sessions is None:
+        if binding.native_thread_id is None:
             raise ThreadNotMaterialized(
                 "当前会话尚未在 Codex 中创建；"
                 "请先发送一条真实任务，再使用 /rename。"
@@ -486,10 +463,7 @@ class CommandChannel(CardControlChannel):
         if not intent.arguments:
             self._management.title_writer_for(binding)
             metadata = (await self._read_thread_metadata((binding,))).get(binding.native_thread_id)
-            if self._local_sessions is not None:
-                title = _normalized_thread_text(metadata.name if metadata else None, max_chars=120)
-            else:
-                title = _session_title(binding, metadata)
+            title = _session_title(binding, metadata)
             await self._reply(
                 message,
                 rename_binding_card(
@@ -579,28 +553,17 @@ class CommandChannel(CardControlChannel):
     async def _command_release(self, message: Any, intent: ControlIntent) -> None:
         binding = self._bindings.active_binding(intent.scope.key)
         if binding is None:
-            if self._local_sessions is not None:
-                await self._reply(message, "当前没有可释放的 Claude 会话连接。")
-            else:
-                await self._reply_no_current_binding(message, intent.scope)
+            await self._reply_no_current_binding(message, intent.scope)
             return
         try:
             released = await self._management.release_current_binding(
                 target=CurrentBindingTarget(intent.scope.key, binding.id),
-                sender_id=intent.sender_id,
             )
         except (NoCurrentBinding, CurrentBindingChanged) as error:
             raise ThreadReleaseError(
                 "当前会话已切换，本次订阅释放未执行。"
             ) from error
-        if isinstance(released, ReleaseConfirmation):
-            await self._reply(message, release_confirmation_card(intent.scope, binding.id, released))
-            return
         disposition = released.disposition
-        if self._local_sessions is not None:
-            await self._reply(message, "已释放 Claude 会话连接。" if disposition is ReleaseDisposition.RELEASED
-                              else "当前没有可释放的 Claude 会话连接。")
-            return
         if disposition is ReleaseDisposition.NOT_MATERIALIZED:
             notice = "当前会话尚未开始，没有 Codex 会话订阅可释放。"
         elif disposition is ReleaseDisposition.NOT_SUBSCRIBED:
@@ -619,9 +582,6 @@ class CommandChannel(CardControlChannel):
         binding = self._bindings.active_binding(intent.scope.key)
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
-            return
-        if self._local_sessions is not None:
-            await self._reply(message, await self._local_status_card(intent.scope, binding))
             return
         status = await self._management.binding_status_exact(binding.id)
         state = status.primary_status
@@ -696,16 +656,6 @@ class CommandChannel(CardControlChannel):
         if binding is None:
             await self._reply_no_current_binding(message, intent.scope)
             return
-        if self._local_sessions is not None:
-            disposition = await self._management.stop_claude_control(
-                ExactBindingTarget(intent.scope.key, binding.id, binding.id), sender_id=intent.sender_id,
-                revision=None, turn_id=None, all_tasks=intent.arguments == ("all",),
-                acknowledge=lambda text: self._reply(message, text))
-            if disposition is StopDisposition.STOPPING:
-                await self._reply(message, "已在等待上一次停止请求的结果。")
-            elif disposition is StopDisposition.NOT_RUNNING:
-                await self._reply(message, "当前任务恰好已经结束。")
-            return
         preview = await self._ordinary.preview_stop(binding)
         if preview is None:
             await self._reply(message, "当前没有正在执行的任务。")
@@ -721,13 +671,7 @@ class CommandChannel(CardControlChannel):
 
         try:
             target = CurrentBindingTarget(intent.scope.key, binding.id)
-            if preview.activity_revision is None:
-                stopped = await self._management.stop_current_binding(target=target, acknowledge=acknowledge)
-            else:
-                stopped = await self._management.stop_current_binding(
-                    target=target, acknowledge=acknowledge,
-                    runtime_precondition=RuntimePrecondition(preview.activity_revision, preview.turn_id),
-                )
+            stopped = await self._management.stop_current_binding(target=target, acknowledge=acknowledge)
         except (NoCurrentBinding, CurrentBindingChanged) as error:
             raise SteerRace(
                 "active 会话已切换，本次停止未执行；请重新发送 /stop。"
@@ -735,8 +679,6 @@ class CommandChannel(CardControlChannel):
         result = stopped.disposition
         if result is StopDisposition.NOT_RUNNING and not acknowledged:
             await self._reply(message, "当前任务恰好已经结束。")
-        elif result is StopDisposition.STOPPING and self._local_sessions is not None:
-            await self._reply(message, "已在等待上一次停止请求的结果。")
         elif result is StopDisposition.COMPACTING:
             await self._reply(
                 message,

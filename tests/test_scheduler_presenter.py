@@ -132,7 +132,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(session.message_id)
                     self.assertIsNotNone(session.task)
                     delivery = await self.presenter.prepare_partial_answers(
-                    target=ReplyTarget(PresentationKey(self.identity['binding_id'], self.identity['thread_id'], self.identity['turn_id']), self.origin, None),
+                    target=ReplyTarget(PresentationKey(self.identity['binding_id'], self.identity['thread_id'], self.identity['turn_id']), self.origin),
                     reply=reply_partial)
                 self.assertEqual([call.args[0] for call in validate.await_args_list],
                     [self.result, partial_result])

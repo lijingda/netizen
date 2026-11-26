@@ -158,11 +158,6 @@ class ThreadLifecycleError(RuntimeError):
     pass
 
 
-class SessionRenameUnconfirmed(ThreadLifecycleError):
-    def __init__(self) -> None:
-        super().__init__("改名结果未确认，请在 Claude Code 中核查。")
-
-
 class TurnObservationUnavailable(ThreadLifecycleError):
     pass
 
