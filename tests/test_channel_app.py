@@ -8876,7 +8876,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     trace.append("reaction finished")
                     return True
 
-                async def card(event):
+                async def card(event, *, can_publish_process):
                     trace.append("card")
                     opened.set()
                     return True

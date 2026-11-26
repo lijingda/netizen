@@ -295,7 +295,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
             validate_reply=(lambda result: self._scheduled_reply_confirmed(origin, result))
                            if isinstance(submission, Submission) and isinstance(origin, ScheduledOrigin) else None,
         )
-        return await self._progress_cards.open(event)
+        return await self._progress_cards.open(event, can_publish_process=self._policy.allows(OperationId.PROGRESS))
 
     async def _present_running_goal(
         self,

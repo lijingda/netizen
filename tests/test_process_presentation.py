@@ -7,8 +7,11 @@ from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
+from lark_channel import OutboundPost
+
+from netizen_cli.backends import Provider
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.codex_reply_events import CodexReplyEvents
 from netizen_cli.channel.process_presentation import ProcessLocation, ProcessPresentation
@@ -23,13 +26,16 @@ from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.process_activity import ObservedProcessItem, ProcessActivityWindow
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.runtime.codex_contracts import GoalOutcome
-from netizen_cli.runtime.contracts import GoalSubmission, SideTurnOutcome, TurnOutcome
+from netizen_cli.runtime.contracts import GoalSubmission, SideTurnOutcome, Submission, SubmitDisposition, TurnOutcome
 from netizen_cli.turn_activity import TurnActivityEvent, TurnActivityKind, TurnActivityStatus, TurnPlanStepSnapshot, TurnPlanStepState
 from netizen_cli.user_questions import BindingQuestionTarget
 from tests.support.channel_cards import _card_button_value, direct_button_event
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
-from tests.support.channel_results import completed_turn_result, file_change_item, goal_activity_snapshot, native_goal, side_turn_activity_snapshot, turn_activity_snapshot
+from tests.support.channel_results import (
+    completed_turn_result, file_change_item, goal_activity_snapshot, native_goal, sent_result,
+    side_turn_activity_snapshot, turn_activity_snapshot,
+)
 from tests.support.presenter_traces import delivery_recorder
 from tests.support.process_transport import ProcessTransport
 
@@ -124,6 +130,40 @@ def process_port():
 
 
 class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_ordinary_receipt_publishes_partial_and_permitted_process_activity(self):
+        for available, card, process_writes in ((False, False, 0), (False, True, 0), (True, False, 1)):
+            with self.subTest(available=available, card=card):
+                async with channel_fixture() as fx:
+                    origin = await fx.new()
+                    binding = fx.store.active_binding(fx.app._scope(origin).key)
+                    activity = process_snapshot(1, binding=binding.id)
+                    partial = PartialAnswer(activity.thread_id, activity.turn_id, "partial-1", "阶段正文")
+                    fx.runtime.turn_activity_values[binding.id] = replace(activity, partial_answers=(partial,))
+                    released = Mock()
+                    fx.runtime.submission = Submission(
+                        SubmitDisposition.STARTED, binding.id, activity.thread_id, activity.turn_id, released,
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=card),
+                    )
+                    port = process_port()
+                    fx.app._progress_cards._process_port = port
+                    fx.app._progress_cards._poll_seconds = 0.001
+                    fx.channel.reply_results.append(sent_result("om_partial", chat_id="oc_direct"))
+                    management = fx.management
+                    policy = management.policy.bind(
+                        lambda provider: (available or provider != Provider.REPLY_PROGRESS)
+                        and management.has_provider(provider)
+                    )
+                    with patch.object(management, "policy", policy):
+                        fx.app._policy, fx.app._session_form = policy, management.session_form
+                        await fx.app.handle_message(FakeMessage("work", message_id="om_source"))
+                        async with asyncio.timeout(2):
+                            while not fx.channel.replies or (process_writes and not port.update.await_count):
+                                await asyncio.sleep(0.001)
+                    self.assertEqual(fx.channel.replies, [("om_source", OutboundPost(markdown="**阶段性答案**\n\n阶段正文"))])
+                    self.assertEqual(port.create.await_count, process_writes)
+                    self.assertEqual(port.update.await_count, process_writes)
+                    released.assert_called_once_with()
+
     async def test_each_changed_version_attempted_once_when_confirmed_write_rereads(self):
         port = process_port()
         first, second, third, release = (asyncio.Event() for _ in range(4))

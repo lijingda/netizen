@@ -161,7 +161,7 @@ class _ReplyCardPresenter:
         return self._operation_timeout_seconds
 
 
-    async def open(self, event: TurnOpened) -> bool:
+    async def open(self, event: TurnOpened, *, can_publish_process: bool = True) -> bool:
         target = event.target
         key = target.key
         if self._closed:
@@ -206,7 +206,7 @@ class _ReplyCardPresenter:
             confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
         self._sessions[key] = session
-        if not event.feedback.progress_card_enabled:
+        if can_publish_process and not event.feedback.progress_card_enabled:
             try:
                 state = self._process_for(target, event.process_root_id)
                 if state:
