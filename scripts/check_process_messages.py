@@ -71,7 +71,7 @@ async def probe(root: Path, chat: str, report: dict[str, object]) -> None:
     creds = load_lark_app(root / LARK_APP_RELATIVE_PATH)
     client = (lark.Client.builder().app_id(creds.app_id).app_secret(creds.app_secret)
               .timeout(10).log_level(lark.LogLevel.ERROR).build())
-    port = ProcessMessages(client)
+    port = ProcessMessages.for_app(creds.app_id, creds.app_secret, log_level=lark.LogLevel.ERROR)
     channel = FeishuChannel(app_id=creds.app_id, app_secret=creds.app_secret,
                             log_level=LogLevel.CRITICAL,
                             outbound=OutboundConfig(retry=RetryConfig(max_attempts=1)))

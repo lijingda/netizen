@@ -24,7 +24,7 @@ class LiveProbeContract(unittest.IsolatedAsyncioTestCase):
             patch.object(check_process_messages, "load_lark_app",
                          return_value=SimpleNamespace(app_id="fixture", app_secret="fixture")),
             patch.object(check_process_messages, "FeishuChannel"),
-            patch.object(check_process_messages, "ProcessMessages", return_value=port),
+            patch.object(ProcessMessages, "for_app", return_value=port),
             patch.object(check_process_messages, "create_in_topic",
                          side_effect=[Created(f"c{c}", f"m{c}") for c in "ABC"]) as create,
             redirect_stderr(stderr),
