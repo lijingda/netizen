@@ -56,9 +56,8 @@ class CommandSpec:
         operation = command_operation(self.name)
         if operation is None:
             return True
-        provider = policy.provider_for(operation, "command")
-        probe = self.requires if provider is OPERATIONS[operation].provider else None
-        return provider is not None and (probe is None or probe in capabilities)
+        probe = self.requires
+        return policy.provider_for(operation, "command") is not None and (probe is None or probe in capabilities)
 
 
 COMMAND_SPECS = (
