@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from openai_codex import ExternalMessage, InvalidRequestError
 from mcp.types import CallToolRequestParams
 
+from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.admin.port_config import ConfigFileSnapshot
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule, SessionPolicyService
 from netizen_cli.runtime.codex_session_reads import CodexSessionReads
@@ -534,7 +535,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         options = next(args[2] for op, args, _ in trace if op == "reply")
         self.assertEqual((options["reply_to"], options["reply_in_thread"], options["reply_target_gone"]),
                          ("om_delivery", True, "fail"))
-        self.assertIn((target.id, activity.thread_id, activity.turn_id), self.app._progress_cards._sessions)
+        self.assertIn(PresentationKey(target.id, activity.thread_id, activity.turn_id), self.app._progress_cards._sessions)
         submitted = self.submissions[-1]
         await self.app.handle_completion(TurnOutcome(target.id, activity.thread_id, activity.turn_id,
             submitted["owner_id"], submitted["origin"], result=completed_turn_result(final_response="agent result"),

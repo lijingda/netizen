@@ -128,7 +128,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
                     self.assertTrue(await self.start(validate_reply=validate, reply_partial=reply_partial))
                     await asyncio.wait_for(partial_checked.wait(), 1)
-                    session = self.presenter._sessions[tuple(self.identity.values())]
+                    session = self.presenter._sessions[PresentationKey(*self.identity.values())]
                     self.assertIsNone(session.message_id)
                     self.assertIsNotNone(session.task)
                     delivery = await self.presenter.prepare_partial_answers(
@@ -161,7 +161,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
                 ), 1))
             poll.assert_called_once()
         self.assertTrue(entered.is_set())
-        session = presenter._sessions[tuple(self.identity.values())]
+        session = presenter._sessions[PresentationKey(*self.identity.values())]
         self.assertIsNone(session.message_id)
         render = Mock()
         self.assertIsNone(await presenter.finish(key=PresentationKey(*self.identity.values()), activity=self.activity, render=render))

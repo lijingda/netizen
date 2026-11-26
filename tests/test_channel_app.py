@@ -243,15 +243,15 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                     turn_id="turn-one", origin=prompt,
                 )
                 self.session = self.presenter._sessions[
-                    ("binding-one", "native-one", "turn-one")
+                    PresentationKey("binding-one", "native-one", "turn-one")
                 ]
             elif kind == "side":
                 started = await open_card(self.presenter, self.runtime,
                     side_id="side-one", thread_id="native-side-1",
                     turn_id="side-turn-1", origin=prompt,
                 )
-                self.session = self.presenter._side_sessions[
-                    ("side-one", "native-side-1", "side-turn-1")
+                self.session = self.presenter._sessions[
+                    PresentationKey("side-one", "native-side-1", "side-turn-1", side=True)
                 ]
             else:
                 started = await open_card(self.presenter, self.runtime,
@@ -260,7 +260,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                     logical_turn=True,
                 )
                 self.session = self.presenter._sessions[
-                    ("binding-one", "native-one", "goal-one")
+                    PresentationKey("binding-one", "native-one", "goal-one")
                 ]
         self.assertTrue(started)
 
@@ -1032,7 +1032,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.updates[-1][0], "om_progress_one")
         self.assertEqual(len(controller._sessions), 1)
         self.assertIn(
-            (second.binding_id, second.thread_id, second.turn_id),
+            PresentationKey(second.binding_id, second.thread_id, second.turn_id),
             controller._sessions,
         )
         await controller.abandon(key=PresentationKey(second.binding_id, second.thread_id, second.turn_id))
@@ -1225,7 +1225,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.runtime.turn_activity_values[binding.id] = updated
-        key = (binding.id, "native-one", "turn-one")
+        key = PresentationKey(binding.id, "native-one", "turn-one")
         session = self.app._progress_cards._sessions[key]
 
         with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
@@ -9518,8 +9518,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         updated = side_turn_activity_snapshot(side_id=record.id, revision=2)
         self.runtime.side_turn_activity_values[record.id] = updated
-        key = (record.id, "native-side-1", "side-turn-1")
-        session = self.app._progress_cards._side_sessions[key]
+        key = PresentationKey(record.id, "native-side-1", "side-turn-1", side=True)
+        session = self.app._progress_cards._sessions[key]
 
         with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await asyncio.wait_for(session.task, timeout=1)
@@ -9546,7 +9546,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.channel.updates), initial_updates + (4 if terminal_succeeds else 6))
         self.assertEqual(self.channel.updates[-1][0], "om-side-progress")
         self.assertIn("side answer survives", str(self.channel.updates[-1][1]))
-        self.assertNotIn(key, self.app._progress_cards._side_sessions)
+        self.assertNotIn(key, self.app._progress_cards._sessions)
         self.assertEqual(len(self.channel.replies), 1 if terminal_succeeds else 2)
         if not terminal_succeeds:
             self.assertEqual(self.channel.replies[-1], (prompt.id, completion_post("side answer survives")))

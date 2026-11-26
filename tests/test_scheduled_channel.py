@@ -23,6 +23,7 @@ from lark_channel import (
 )
 
 from tests.support.reply_events import open_card
+from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings
 from netizen_cli.cards import decode_turn_file_action
@@ -1152,7 +1153,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.schedules.get_run(claim.run.id), run_before)
         self.assertEqual(self.store._connection.total_changes, changes_before)
         self.assertEqual(self.store.active_binding(group.key).id, source.id)
-        self.assertEqual(set(self.app._progress_cards._sessions), {(source.id, "native-source", "turn-followup")})
+        self.assertEqual(set(self.app._progress_cards._sessions), {PresentationKey(source.id, "native-source", "turn-followup")})
 
     async def card_action(self, *, value=None, form=None, topic_id=None):
         self.channel.fetched_messages["om_card"] = {"code": 0, "data": {"items": [{"message_id": "om_card", "chat_id": "oc_group", **({"thread_id": topic_id} if topic_id else {})}]}}
