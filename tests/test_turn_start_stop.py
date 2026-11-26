@@ -134,8 +134,9 @@ async def stop_case(outcome="success", call=1):
         resources.enter_context(patch("netizen_cli.runtime.limits.INTERRUPTION_CONFIRMATION_SECONDS", 0))
         case = StopCase(store, cwd, held)
         resources.push_async_callback(case.management.close)
-        resources.push_async_callback(case.app.close)
+        # Close presentation before cancelling Turn consumers that may still be awaiting a card poller.
         resources.push_async_callback(case.runtime.cancel_tasks)
+        resources.push_async_callback(case.app.close)
         async with asyncio.TaskGroup() as tasks:
             try:
                 yield case, tasks
