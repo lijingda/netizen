@@ -12,6 +12,7 @@ from netizen_cli.bindings import (
 )
 from netizen_cli.ordinary_sessions import PreparedPrompt
 from netizen_cli.runtime.native_inputs import to_codex_input
+from netizen_cli.runtime.turn_start import StartedTurn
 from netizen_cli.codex_runtime import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
@@ -136,6 +137,7 @@ class StubRuntime:
             tuple[str, str | None, str | None, bool]
         ] = []
         self.stop_calls: list[str] = []
+        self.stop_starts: list[StartedTurn | None] = []
         self.recheck_calls: list[tuple[str, int, str]] = []
         self.lifecycle_states: dict[str, object] = {}
         self.rename_binding_calls: list[tuple[str, str]] = []
@@ -665,7 +667,9 @@ class StubRuntime:
         acknowledge=None,
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition:
+        self.stop_starts.append(start)
         if expected_activity_revision is not None:
             self._require_activity(
                 binding_id,
