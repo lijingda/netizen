@@ -295,9 +295,9 @@ class CompletionPresentationChannel(ChannelReplies):
         return _TaskFiles(evidence, summary)
 
     def _task_completion_files(
-        self, outcome: TurnResult, task_files: _TaskFiles, *, scope: FeishuScope | None = None,
+        self, outcome: TurnResult, task_files: _TaskFiles,
     ) -> tuple[FeishuScope, tuple[TurnFile, ...], str]:
-        scope = scope or self._scope(outcome.origin)
+        scope = self._scope(outcome.origin)
         key = outcome.target.key
         if key.side:
             record = self._bindings.get_side_topic(key.owner_id)

@@ -1947,7 +1947,6 @@ class AdminWebApplication:
             "sessionSettings": SessionSettings.from_binding(binding).to_dict(),
             "runtime": _runtime_binding_json(status),
             "actions": actions,
-            **({} if self._backend_policy.allows(OperationId.HISTORY) else {"nativeDetailsAvailable": False}),
         }
 
     async def _runtime_snapshots(self, context: _RequestContext) -> Response:

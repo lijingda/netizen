@@ -83,7 +83,7 @@ from .channel.app_values import (
     _goal_reply_activity,
     _outcome_completion_mention_user_id,
 )
-from .backends import BackendPolicy, Provider
+from .backends import Provider
 from .channel.entry import ChannelEntry
 
 
@@ -117,7 +117,6 @@ class ChannelApplication(ChannelEntry):
         app_id: str,
         channel: ReplyChannel,
         runtime: CodexRuntime,
-        policy: BackendPolicy | None = None,
         ordinary: OrdinarySessionPort | None = None,
         bindings: BindingStore,
         projects: ProjectRegistry,
@@ -136,7 +135,7 @@ class ChannelApplication(ChannelEntry):
         self._app_id = app_id
         self._channel = channel
         self._chat_avatars = ChatAvatarImages(channel)
-        self._policy = management.operation_policy(policy)
+        self._policy = management.policy
         self._session_form = management.session_form
         self._runtime = runtime
         self._ordinary = ordinary if ordinary is not None else CodexOrdinarySessions(runtime)

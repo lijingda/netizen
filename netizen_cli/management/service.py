@@ -462,9 +462,8 @@ class ManagementRuntimePort:
 
     __slots__ = ("__runtime", "__ordinary", "names")
 
-    def __init__(self, runtime: CodexRuntime, *, ordinary: OrdinarySessionPort,
-                 names: SessionNames | None = None) -> None:
-        self.names = names if names is not None else SessionNames.from_runtime(runtime)
+    def __init__(self, runtime: CodexRuntime, *, ordinary: OrdinarySessionPort) -> None:
+        self.names = SessionNames.from_runtime(runtime)
         self.__runtime = runtime
         self.__ordinary = ordinary
 
