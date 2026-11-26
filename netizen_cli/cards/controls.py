@@ -7,13 +7,11 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from lark_channel import OutboundCard
 
 from ..backends import BackendPolicy, OperationId
-if TYPE_CHECKING:
-    pass
 from ..bindings import (
     BindingTaskFeedback,
     BindingTurnSettings,
