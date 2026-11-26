@@ -1,12 +1,13 @@
 import asyncio
 import itertools
+import sqlite3
 import tempfile
 import unittest
 from contextlib import AsyncExitStack, asynccontextmanager, closing
 from pathlib import Path
 from unittest.mock import patch
 
-from openai_codex import ExternalMessage
+from openai_codex import ExternalMessage, InvalidRequestError
 
 from netizen_cli.bindings import BindingStore, BindingTaskFeedback
 from netizen_cli.channel_app import ChannelApplication
@@ -19,12 +20,15 @@ from netizen_cli.schedules.models import ScheduleRule
 from netizen_cli.worktrees.policy import WorkspacePolicy
 from tests.support.channel_cards import _card_button_value, direct_card_event
 from tests.support.channel_messages import FakeChannel, FakeMessage
-from tests.test_codex_runtime import FakeTerminalCleanup, provider_error
+from tests.test_codex_runtime import (
+    FakeBackgroundTerminalInspector, FakeTerminalCleanup, FakeThreadSubscriptionControl, provider_error,
+)
 from tests.test_session_external_runtime import ExternalCodex, ExternalThread
 
 
 START_ACK = "本轮正在启动，Codex 确认启动后将立即中断。"
 ENDED = "当前任务恰好已经结束。"
+REJECTED = "本次启动未获接受，未请求中断。"
 INTERRUPTED = (
     "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。"
     "前台工具进程不受此接口保证，可能仍在运行。"
@@ -48,12 +52,14 @@ class HeldReceipt:
             self.calls += 1
             if self.calls != self.call:
                 return await native_turn(thread, input, **kwargs)
-            if self.outcome != "rejected":
+            if self.outcome not in {"rejected", "external_rejected"}:
                 handle = await native_turn(thread, input, **kwargs)
             self.entered.set()
             await self.release.wait()
             if self.outcome == "rejected":
                 raise provider_error()
+            if self.outcome == "external_rejected":
+                raise InvalidRequestError(-32600, "input rejected")
             if self.outcome == "unknown":
                 raise ConnectionError("native start receipt lost")
             return handle
@@ -214,9 +220,11 @@ class TurnStartStopTest(unittest.IsolatedAsyncioTestCase):
             if outcome in {"unknown", "cancelled"}:
                 self.assertIsNone(receipt)
                 self.assertFalse(case.runtime._accepting)
-                await case.message("/stop", "again")
+                async with case.management.scope_coordinator.hold(case.scope.key), case.runtime._lock(case.binding.id):
+                    await case.message("/stop", "again")
                 self.assertEqual(len(replies), 2)
                 self.assertIn("启动结果未确认", replies[1])
+                self.assertEqual(replies[1], "Codex Turn 启动结果未确认；本次未请求中断。服务已停止接收新任务，请重启服务。")
                 self.assertEqual(case.replies("again"), [replies[1]])
             elif outcome == "success" and finish == "running":
                 self.assertEqual(receipt.disposition, SubmitDisposition.JOINED)
@@ -224,6 +232,9 @@ class TurnStartStopTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(case.codex.handles[0].interrupt_count, 1)
                 self.assertEqual(case.cleanup.calls, [receipt.thread_id])
                 return
+            elif outcome == "rejected":
+                self.assertEqual(receipt.disposition, SubmitDisposition.STARTED)
+                self.assertEqual(replies, [START_ACK, REJECTED])
             else:
                 self.assertEqual(receipt.disposition, SubmitDisposition.STARTED)
                 self.assertEqual(replies, [START_ACK, ENDED])
@@ -252,6 +263,123 @@ class TurnStartStopTest(unittest.IsolatedAsyncioTestCase):
             await stop
             self.assertIn("active 会话已切换", case.replies("stop")[-1])
             self.assertEqual(case.codex.handles[0].interrupt_count, 0)
+
+    async def rejected_external(self, case):
+        with self.assertRaises(InvalidRequestError):
+            await case.external()
+
+    async def test_bare_stop_keeps_its_preview_across_scope_wait(self):
+        async with stop_case("external_rejected", call=2) as (case, tasks):
+            await case.message("first", "first")
+            first, = case.codex.handles
+            previewed, selecting = asyncio.Event(), asyncio.Event()
+            stop_current = case.management.stop_current_binding
+            stop_exact = case.runtime.stop_exact
+
+            async def after_preview(**kwargs):
+                self.assertIsNone(kwargs["preview"].start)
+                previewed.set()
+                return await stop_current(**kwargs)
+
+            async def under_scope(*args, **kwargs):
+                selecting.set()
+                return await stop_exact(*args, **kwargs)
+
+            with patch.object(case.management, "stop_current_binding", after_preview), patch.object(
+                case.runtime, "stop_exact", under_scope,
+            ):
+                async with case.management.scope_coordinator.hold(case.scope.key):
+                    stop = tasks.create_task(case.message("/stop", "stop"))
+                    await previewed.wait()
+                    tasks.create_task(self.rejected_external(case))
+                    await case.held.entered.wait()
+                await selecting.wait()
+                case.held.release.set()
+                await stop
+            self.assertEqual(case.replies("stop"), ["正在中断当前 Codex Turn。"])
+            self.assertEqual((first.interrupt_count, case.cleanup.calls), (1, [first.thread_id]))
+
+    async def test_provider_rejection_survives_local_subscription_error(self):
+        async with stop_case("rejected") as (case, tasks):
+            async def first_start():
+                with self.assertRaisesRegex(sqlite3.OperationalError, "release read failed"):
+                    await case.external()
+
+            first = tasks.create_task(first_start())
+            await case.held.entered.wait()
+            stop = tasks.create_task(case.message("/stop", "stop"))
+            await case.first_stop_reply.wait()
+            with (
+                patch.object(case.runtime, "_thread_subscription_control", FakeThreadSubscriptionControl()),
+                patch.object(case.runtime, "_background_terminal_inspector", FakeBackgroundTerminalInspector()),
+                patch.object(case.store, "get", side_effect=sqlite3.OperationalError("release read failed")) as read,
+            ):
+                case.held.release.set()
+                await first
+                read.assert_called_once_with(case.binding.id)
+            await stop
+            self.assertEqual(case.replies("stop"), [START_ACK, REJECTED])
+            self.assertEqual((case.codex.handles, case.cleanup.calls), ([], []))
+            self.assertEqual((await case.external()).disposition, SubmitDisposition.STARTED)
+
+    async def test_rejected_stop_returns_while_second_receipt_is_withheld(self):
+        async with stop_case("rejected") as (case, tasks):
+            second_receipt = HeldReceipt("success", call=2)
+            with second_receipt.install():
+                tasks.create_task(case.message("first", "first"))
+                await case.held.entered.wait()
+                stop = tasks.create_task(case.message("/stop", "stop"))
+                await case.first_stop_reply.wait()
+                queued = asyncio.Event()
+
+                async def second_input():
+                    queued.set()
+                    return await case.external()
+
+                second = tasks.create_task(second_input())
+                await queued.wait()
+                case.held.release.set()
+                try:
+                    await second_receipt.entered.wait()
+                    kept = await case.management.create_current_binding(
+                        scope=case.scope, project_alias="test", creator_id="ou_other", only_if_empty=True,
+                    )
+                    await stop
+                    self.assertEqual(kept.binding.id, case.binding.id)
+                    self.assertEqual(case.replies("stop"), [START_ACK, REJECTED])
+                    self.assertFalse(second.done())
+                finally:
+                    second_receipt.release.set()
+                self.assertEqual((await second).disposition, SubmitDisposition.STARTED)
+                self.assertEqual(case.codex.handles[0].interrupt_count, 0)
+
+    async def test_captured_external_rejection_leaves_running_turn_alone(self):
+        async with stop_case("external_rejected", call=2) as (case, tasks):
+            await case.message("first", "first")
+            first, = case.codex.handles
+            tasks.create_task(self.rejected_external(case))
+            await case.held.entered.wait()
+            async with case.management.scope_coordinator.hold(case.scope.key):
+                stop = tasks.create_task(case.message("/stop", "stop"))
+                await case.first_stop_reply.wait()
+                case.held.release.set()
+                await stop
+            self.assertEqual(case.replies("stop"), [START_ACK, REJECTED])
+            self.assertEqual(first.record.status.value, "inProgress")
+            self.assertEqual((first.interrupt_count, case.cleanup.calls), (0, []))
+            await case.message("/stop", "again")
+            self.assertEqual((first.interrupt_count, case.cleanup.calls), (1, [first.thread_id]))
+
+    async def test_normal_steer_then_stop_targets_same_running_turn(self):
+        async with stop_case() as (case, _):
+            case.held.release.set()
+            await case.message("first", "first")
+            await case.message("follow-up", "follow-up")
+            first, = case.codex.handles
+            self.assertEqual(len(first.steers), 1)
+            await case.message("/stop", "stop")
+            self.assertEqual(case.replies("stop"), ["正在中断当前 Codex Turn。"])
+            self.assertEqual((first.interrupt_count, case.cleanup.calls), (1, [first.thread_id]))
 
     async def test_status_shortcut_captures_pending_start(self):
         async with stop_case() as (case, tasks):

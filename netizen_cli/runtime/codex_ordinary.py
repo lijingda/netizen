@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from ..bindings import ThreadBinding
 from ..ordinary_sessions import PreparedPrompt, StopPreview
-from .turn_start import TurnStartAttempt
+from .turn_start import StartedTurn, TurnStartAttempt
 from .contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TurnActivitySnapshot,
@@ -64,7 +64,7 @@ class CodexOrdinarySessions:
     async def stop_exact(
         self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None, expected_turn_id: str | None = None,
-        start: TurnStartAttempt | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition:
         if expected_activity_revision is None:
             if expected_turn_id is not None:

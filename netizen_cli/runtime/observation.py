@@ -826,7 +826,7 @@ class TurnObservationRuntime(ThreadNamingRuntime):
 
     def _track(self, active: _ActiveTurn, attempt: TurnStartAttempt) -> None:
         self._active[active.binding_id] = active
-        attempt.confirm(active.handle.id, active.start_stop_receipts)
+        attempt.attach_acknowledgements(active.start_stop_receipts)
         self._start_turn_consumer(active)
 
     def _track_late_shutdown_turn(self, active: _ActiveTurn) -> None:

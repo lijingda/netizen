@@ -9,7 +9,7 @@ from .bindings import BindingTaskFeedback, ThreadBinding
 from .file_evidence import FileEvidence
 from .partial_answers import PartialAnswer
 from .prompt_inputs import PreparedPrompt as PreparedPrompt, PromptImage as PromptImage
-from .runtime.turn_start import TurnStartAttempt
+from .runtime.turn_start import StartedTurn, TurnStartAttempt
 from .runtime.contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
     TurnActivitySnapshot, TurnObservationUnavailableOutcome,
@@ -86,7 +86,7 @@ class OrdinarySessionPort(Protocol):
     async def stop_exact(
         self, binding_id: str, *, acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None, expected_turn_id: str | None = None,
-        start: TurnStartAttempt | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition: ...
 
     async def recheck_turn_exact(

@@ -58,7 +58,7 @@ from ..bindings import (
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
 from ..ordinary_sessions import OrdinarySessionPort, StopPreview
-from ..runtime.turn_start import TurnStartAttempt
+from ..runtime.turn_start import StartedTurn, TurnStartAttempt
 from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
@@ -588,7 +588,7 @@ class ManagementRuntimePort:
         acknowledge: StopAcknowledger | None = None,
         expected_activity_revision: int | None = None,
         expected_turn_id: str | None = None,
-        start: TurnStartAttempt | None = None,
+        start: StartedTurn | None = None,
     ) -> StopDisposition:
         if start is not None and expected_activity_revision is None and expected_turn_id is None:
             return await self.__ordinary.stop_exact(binding_id, acknowledge=acknowledge, start=start)
@@ -2023,10 +2023,8 @@ class InstanceManagementService:
         acknowledge: StopAcknowledger | None = None,
         preview: StopPreview | None = None,
     ) -> StoppedBinding:
-        start = preview.start if preview is not None else self._runtime.capture_turn_start(target.binding_id)
-        if start is not None:
-            # A stalled native receipt must leave other Scope operations available.
-            await start.resolved.wait()
+        attempt = preview.start if preview is not None else self._runtime.capture_turn_start(target.binding_id)
+        start = await attempt.confirmed_target() if attempt is not None else None
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             disposition = await self._runtime.stop_exact(binding.id, acknowledge=acknowledge, start=start)
@@ -2234,9 +2232,8 @@ class InstanceManagementService:
         acknowledge: StopAcknowledger | None = None,
         runtime_precondition: RuntimePrecondition | None = None,
     ) -> StoppedBinding:
-        start = self._runtime.capture_turn_start(target.binding_id) if runtime_precondition is None else None
-        if start is not None:
-            await start.resolved.wait()
+        attempt = self._runtime.capture_turn_start(target.binding_id) if runtime_precondition is None else None
+        start = await attempt.confirmed_target() if attempt is not None else None
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
             stop_kwargs: dict[str, object] = {"acknowledge": acknowledge}
