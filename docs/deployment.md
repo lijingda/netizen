@@ -350,7 +350,7 @@ timeout 300 .venv/bin/python scripts/check_process_messages.py \
 退出码 0 表示 API 检查通过。探针精确读取根、直接父消息与过程消息，核对聊天和话题位置。
 A 写入工具、清单和已完成进展文字的条目列表，并在收尾时补齐 END。B 用 300 个需 JSON 转义的可见字符作为工具名称，发送适配层能生成的最大单事件，在 `max_event_characters` 中记录完整内层 JSON 的实测字符数，并在完成后检查更新返回 10001。
 C 的有界并发样本允许各次返回 0 或 10020，是否出现 10020 仅供记录。回环测试固定覆盖这一拒绝。
-维护者在桌面端展开 A，单独记录条目及完成对勾的显示。客户端显示差异不作为 API 断言。API 门禁未通过时依 ADR 0107 降级为普通答案投递。
+维护者在桌面端展开 A，记录消息完成时条目的运行动效是否停止，以及客户端实际显示的条目状态。客户端显示差异不作为 API 断言。API 门禁未通过时依 ADR 0107 降级为普通答案投递。
 
 Worktree 目录选择、定时工作区交接或原生 cwd 采用边界变化时，从源码 checkout 运行：
 
@@ -1746,7 +1746,7 @@ Admin 矩阵须从另一台受信内网主机，经 `/admin` 给出的实际端�
    | --- | --- | --- | --- |
    | F01 保持 Pulse 关闭、选择过程消息后发送首条 prompt 并 steer；覆盖三种终态 | accepted 后原消息常驻 `Typing`，有可见活动时发送独立过程消息，零 `THINKING`、进度卡、心跳；steer 成功消息有 `OnIt` 且锚点不迁移。终态先加 completed/failed/interrupted 对应 `DONE`/`ERROR`/`CrossMark` 再移除 `Typing`；无文件用富文本/静态文本，有文件仅现有“最终回复＋本轮文件”卡。手机少量独立生命周期表情消息是接受的取舍。 | 原生结果＋桌面/手机飞书 | [表情][验收13] |
    | F02 使 `OnIt` 失败；`/config` 只开 Pulse 后启动长 Turn | 仅 native steer 成功后有文字 fallback；Lifecycle Reaction 同关闭组，`THINKING` 低频显隐，终态与 `Typing` 一起清理。 | 投递故障注入＋真实长 Turn | [表情][验收13] |
-   | F03 只开 Progress，产生 checklist、无 plan、observer unavailable | accepted 后除表情外仅一张运行卡、顶部过程展开；status/checklist `✓/→/○` 更新同一 message ID；无 plan 为“Codex 尚未生成”，不可观察为“暂不可用”。无耗时/百分比/ETA、reasoning、raw command/tool output、arguments、MCP server。 | 原生 Activity＋真实卡；故障注入 | [投影][验收14]、[呈现][验收15] |
+   | F03 只开 Progress，产生 checklist、无 plan、observer unavailable | accepted 后除表情外仅一张运行卡、顶部过程展开；status/checklist `✓/→/○` 更新同一 message ID；无 plan 为“尚未生成”，不可观察为“暂不可用”。无耗时/百分比/ETA、reasoning、raw command/tool output、arguments、MCP server。 | 原生 Activity＋真实卡；故障注入 | [投影][验收14]、[呈现][验收15] |
    | F04 至少一条最近进展和操作；操作 started→completed | Card 2.0 本地化日期/分钟正确，完成后切 exact completion 时间，checklist 无时间；进展最多四条，正文直接跟 `·`、无额外 `•`。 | 原生时间证据＋客户端渲染 | [投影][验收14] |
    | F05 命令分类已知/未知/复合/空对象、非零退出码、文件/网页、多查询、MCP/dynamic tool 与特殊 Markdown | 显示原生路径/查询，分类不可用时原命令预览、不猜意图、保留非零码；文件/网页显示原生对象，进展保留普通路径/链接/代码而隐藏凭据。操作单行≤120 字符、文件/查询最多前三项、分页详情保留；工具名 exact，动态 Markdown 不注入标签。 | 原生字段＋客户端/分页，合成异常输入 | [投影][验收14] |
    | F06 成功 steer 后等新 plan；完成有/无文件及有/无 partial | 旧 checklist 标过期，新 plan 整体替换；同卡终态折叠过程并显示结果，文件分页/callback 保留：无 partial 用 v4、有 partial 用 v5。 | 原生 steer/plan＋真实卡回调 | [状态 Activity](design.md#状态查询中的-activity)、[呈现][验收15] |
