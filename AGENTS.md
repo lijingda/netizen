@@ -79,6 +79,11 @@ The usage guides are not implementation guides.
   by ADR. Guarantees rest on native facts pinned by gates, never on measured timing.
   New modules are defined in Netizen terms so any backend, including Codex, can
   implement them.
+- Delegate native-owned semantics (ADR 0112). The host checks only host-owned state:
+  Scope/Binding identity, admission version, cursor, owner gate, Project/Worktree
+  state and capability items. For native-owned behavior such as busy handling,
+  configuration validity or permissions, send the request and map the native response.
+  Pre-reject only when a native response could not prove what happened.
 - The in-process Admin Web is a management-only adapter over the shared
   application/runtime boundary (ADR 0031). It manages existing sessions but does
   not create ordinary Bindings; interactive session creation belongs to Feishu.
