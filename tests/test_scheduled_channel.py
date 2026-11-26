@@ -31,7 +31,7 @@ from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import (
     FeishuScope,
     ScopeKind,
-    ScheduledBindingConversation,
+    ChatConversation,
     ScheduledBindingOrigin,
     ScheduledOrigin,
     MentionContextMode,
@@ -947,7 +947,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         run_before = self.store.schedules.get_run(claim.run.id)
         origin = ScheduledBindingOrigin(
             app_id="app", chat_id="oc_group", message_id="om_seed",
-            conversation=ScheduledBindingConversation("oc_group", "group", "omt_fresh"),
+            conversation=ChatConversation("oc_group", "group", "omt_fresh"),
             plan_id=claim.plan.id, run_id=claim.run.id, binding_id=request["binding"].id,
         )
         self.channel.card_update_results.extend(SendResult(success=False, raw={"code": 2200}) for _ in range(3))

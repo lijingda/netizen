@@ -57,7 +57,7 @@ from ..runtime.contracts import (
 from ..domain import (
     FeishuScope,
     MentionContextMode,
-    ScheduledBindingConversation,
+    ChatConversation,
     ScheduledBindingOrigin,
     ScheduledConversation,
     ScheduledOrigin,
@@ -328,7 +328,7 @@ class ScheduleChannel(SessionToolChannel):
                 raise TopicPublishError("触发消息不属于原会话，本次未执行。", unknown=True)
             origin = ScheduledBindingOrigin(
                 self._app_id, scope.chat_id, sent.message_id,
-                ScheduledBindingConversation(scope.chat_id, chat_kind, scope.topic_id),
+                ChatConversation(scope.chat_id, chat_kind, scope.topic_id),
                 plan.id, run.id, binding.id, root_id=sent.root_id,
             )
             store.set_run(run.id, origin_message_id=sent.message_id,

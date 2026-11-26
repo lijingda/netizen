@@ -26,7 +26,8 @@ from ..cards import (
     scope_from_fetched_card,
 )
 from .messages import _nonempty_field, _object_field, public_chat_kind as _public_chat_kind
-from .question_inputs import CardAnswerConversation, CardAnswerOrigin, card_answer_sender
+from ..domain import ChatConversation
+from .question_inputs import CardAnswerOrigin, card_answer_sender
 from .topics import TopicPublishError, send_topic_message
 from ..cards.questions import (
     QuestionAnswer,
@@ -209,7 +210,7 @@ class QuestionChannel(ScheduleChannel):
                     raise TopicPublishError("回答消息不属于原会话，本条回答未执行。", unknown=True)
                 origin = CardAnswerOrigin(
                     self._app_id, chat_id, sent.message_id,
-                    CardAnswerConversation(chat_id, chat_kind, scope.topic_id),
+                    ChatConversation(chat_id, chat_kind, scope.topic_id),
                     message_id, context.target, root_id=sent.root_id,
                 )
             projection = CardAnswerProjection(

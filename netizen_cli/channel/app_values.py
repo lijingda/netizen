@@ -43,6 +43,7 @@ from ..turn_files import (
     TurnFileError,
 )
 
+from .topics import TopicMessage
 from . import constants
 
 
@@ -61,25 +62,11 @@ class _CardReplyTarget:
     root_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _CardCommandOrigin(_CardReplyTarget):
-    """A real card callback reply anchor, never a fabricated prompt message."""
-
-
 @dataclass(slots=True)
 class _CardCallbackContext:
     """Keep the verified location even when later form decoding fails."""
 
     scope: FeishuScope | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _SentMessage:
-    message_id: str
-    chat_id: str
-    thread_id: str | None
-    root_id: str | None
-    parent_id: str | None
 
 
 @dataclass(slots=True)
@@ -137,7 +124,7 @@ def _validate_turn_file_reply(
     result: SendResult,
     *,
     intent: TurnFileActionIntent,
-) -> _SentMessage:
+) -> TopicMessage:
     raw = result.raw
     code = _object_field(raw, "code")
     if code == 230071:
@@ -161,7 +148,7 @@ def _validate_turn_file_reply(
     chat_id = _nonempty_field(data, "chat_id")
     if chat_id != intent.scope.chat_id:
         raise TurnFileError("飞书把本轮文件发送到了其他聊天。")
-    sent = _SentMessage(
+    sent = TopicMessage(
         message_id=message_id,
         chat_id=chat_id,
         thread_id=_nonempty_field(data, "thread_id"),
@@ -198,7 +185,7 @@ def _side_initial_question_echo(text: str) -> str:
 
 
 def _side_reply_target(
-    message: _SentMessage,
+    message: TopicMessage,
     topic_id: str,
 ) -> _CardReplyTarget:
     return _CardReplyTarget(

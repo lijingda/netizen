@@ -12,11 +12,11 @@ from unittest.mock import AsyncMock, call, patch
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.codex_reply_events import CodexReplyEvents
 from netizen_cli.channel.process_presentation import ProcessLocation, ProcessPresentation
-from netizen_cli.channel.question_inputs import CardAnswerConversation, CardAnswerOrigin
+from netizen_cli.channel.question_inputs import CardAnswerOrigin
 from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.domain import (
-    FeishuScope, GoalStatus, NativeCapability, ScheduledBindingConversation, ScheduledBindingOrigin,
-    ScheduledConversation, ScheduledOrigin, ScopeKind, SessionAgentConversation, SessionAgentOrigin,
+    FeishuScope, GoalStatus, NativeCapability, ChatConversation, ScheduledBindingOrigin,
+    ScheduledConversation, ScheduledOrigin, ScopeKind, SessionAgentOrigin,
 )
 from netizen_cli.process_messages import Created, Ok, Unknown
 from netizen_cli.partial_answers import PartialAnswer
@@ -273,9 +273,9 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
         app, chat, mid, topic, root = "cli_test", "oc_group", "om_source", "omt_topic", "om_root"
         origins = (
             ScheduledOrigin(app, chat, mid, ScheduledConversation(topic), "plan", "run", root_id=root),
-            ScheduledBindingOrigin(app, chat, mid, ScheduledBindingConversation(chat, "group", topic), "plan", "run", "binding", root),
-            CardAnswerOrigin(app, chat, mid, CardAnswerConversation(chat, "group", topic), "card", BindingQuestionTarget("binding"), root),
-            SessionAgentOrigin(app, chat, mid, SessionAgentConversation(chat, "group", topic), "binding", "thread", "target", "call", root_id=root),
+            ScheduledBindingOrigin(app, chat, mid, ChatConversation(chat, "group", topic), "plan", "run", "binding", root),
+            CardAnswerOrigin(app, chat, mid, ChatConversation(chat, "group", topic), "card", BindingQuestionTarget("binding"), root),
+            SessionAgentOrigin(app, chat, mid, ChatConversation(chat, "group", topic), "binding", "thread", "target", "call", root_id=root),
         )
         async with channel_fixture() as fx:
             for origin in origins:

@@ -27,7 +27,7 @@ from ..cards import (
 )
 from .messages import _nonempty_field, _object_field
 from .question_inputs import CardAnswerOrigin
-from .topics import TopicPublishError, send_topic_message
+from .topics import TopicMessage, TopicPublishError, send_topic_message
 from ..cards.status import (
     side_status_card,
 )
@@ -75,7 +75,6 @@ from ..skill_references import InvalidSkillReference, parse_skill_references
 from . import constants
 from .app_values import (
     _CardReplyTarget,
-    _SentMessage,
     _side_send_uuid,
     _side_initial_question_echo,
     _side_reply_target,
@@ -596,7 +595,7 @@ class SideChannel(PromptChannel):
             await self._reply_no_current_binding(message, intent.scope)
             return
         record = existing
-        root: _SentMessage | None = None
+        root: TopicMessage | None = None
         topic_id: str | None = None
         origin: _CardReplyTarget | None = None
         try:
@@ -834,9 +833,8 @@ class SideChannel(PromptChannel):
         chat_id: str,
         content: Any,
         opts: SendOpts,
-    ) -> _SentMessage:
+    ) -> TopicMessage:
         try:
-            sent = await send_topic_message(self._channel, chat_id, content, opts)
+            return await send_topic_message(self._channel, chat_id, content, opts)
         except TopicPublishError as error:
             raise SideTopicCreateFailed("Side " + str(error)) from error
-        return _SentMessage(sent.message_id, sent.chat_id, sent.thread_id, sent.root_id, sent.parent_id)
