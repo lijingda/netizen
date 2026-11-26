@@ -38,6 +38,32 @@ def answer(text="first stable answer", item="partial-one", *, thread="native-one
 
 
 class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_same_ids_keep_distinct_card_owners_through_retirement(self):
+        channel, runtime = FakeChannel(), StubRuntime()
+        presenter = presenter_for(channel, runtime, poll_seconds=3600)
+        self.addAsyncCleanup(presenter.close)
+        ordinary = PresentationKey("owner", "thread", "first")
+        side = replace(ordinary, side=True)
+        other_turn = replace(ordinary, turn_id="second")
+        other_thread = replace(ordinary, thread_id="other")
+        other_owner = replace(ordinary, owner_id="other")
+        keys = (ordinary, side, other_turn, other_thread, other_owner)
+        for number, key in enumerate(keys):
+            channel.reply_results.append(sent_result(f"card-{number}", chat_id="oc_direct"))
+            ids = dict(thread_id=key.thread_id, turn_id=key.turn_id)
+            if key.side:
+                ids["side_id"] = key.owner_id
+                runtime.side_turn_activity_values[key.owner_id] = side_turn_activity_snapshot(**ids)
+            else:
+                ids["binding_id"] = key.owner_id
+                runtime.turn_activity_values[key.owner_id] = turn_activity_snapshot(**ids)
+            self.assertTrue(await open_card(presenter, runtime, origin=FakeMessage("work", message_id="source"), **ids))
+        self.assertEqual([presenter.has_card(k) for k in keys], [True] * 5)
+        await presenter.abandon_thread(binding_id=ordinary.owner_id, thread_id=ordinary.thread_id)
+        self.assertEqual([presenter.has_card(k) for k in keys], [False, True, False, True, True])
+        await presenter.abandon(key=side)
+        self.assertEqual([presenter.has_card(k) for k in keys], [False, False, False, True, True])
+
     async def test_no_card_delivers_once_and_terminal_fills_only_missing_exact_items(self):
         for side in (False, True):
             with self.subTest(side=side):

@@ -8856,6 +8856,47 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(root["header"]["subtitle"]["content"], "已结束")
         self.assertNotIn("side.close", str(root))
 
+    async def test_opening_barriers_across_session_kinds(self) -> None:
+        for kind in ("ordinary", "side", "goal"):
+            with self.subTest(kind=kind):
+                source = FakeMessage("/side first" if kind == "side" else "first", message_id=f"source-{kind}", chat_id=f"chat-{kind}")
+                binding = self.fixture.binding_for(source)
+                self.runtime.submission = Submission(SubmitDisposition.STARTED, binding.id, "thread",
+                                                     "turn", lambda: None)
+                opened = asyncio.Event()
+                trace = []
+
+                async def reaction(*args, **kwargs):
+                    trace.append("reaction started")
+                    if kind == "goal":
+                        # Yield to any concurrently scheduled card attempt.
+                        await asyncio.sleep(0)
+                    else:
+                        await opened.wait()
+                    trace.append("reaction finished")
+                    return True
+
+                async def card(event):
+                    trace.append("card")
+                    opened.set()
+                    return True
+
+                with (patch.object(self.app._reactions, "start", side_effect=reaction),
+                      patch.object(self.app._progress_cards, "open", side_effect=card)):
+                    async with asyncio.timeout(2):
+                        if kind == "side":
+                            self.fixture.queue_promoted_topic(chat_id=source.conversation.chat_id, root_id="root",
+                                                             seed_id="seed", topic_id="topic")
+                        if kind == "goal":
+                            goal = GoalSubmission(binding.id, "thread", "turn", lambda: None)
+                            await self.app._present_running_goal(binding=binding, submission=goal, origin=source)
+                        else:
+                            await self.app.handle_message(source)
+                expected = ["reaction started", "card", "reaction finished"]
+                if kind == "goal":
+                    expected = ["reaction started", "reaction finished", "card"]
+                self.assertEqual(trace, expected)
+
     async def test_initial_side_accepted_prompt_survives_presenter_failure(self) -> None:
         source = FakeMessage(
             "/side accepted work", message_id="om-side-presenter-failure",

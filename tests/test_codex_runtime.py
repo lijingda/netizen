@@ -1625,10 +1625,21 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(handle.run_calls, 0)
 
+        cancelled_ack = asyncio.get_running_loop().create_future()
+        cancelled_ack.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await self.runtime.stop_side(record.id, acknowledge=lambda: cancelled_ack)
+
+        before_stop = []
+
+        async def acknowledge():
+            before_stop.append((handle.interrupt_count, tuple(self.cleanup.calls)))
+
         self.assertEqual(
-            await self.runtime.stop_side(record.id),
+            await self.runtime.stop_side(record.id, acknowledge=acknowledge),
             StopDisposition.REQUESTED,
         )
+        self.assertEqual(before_stop, [(0, ())])
         self.assertEqual(handle.run_calls, 0)
         observer.complete(
             thread_id=snapshot.thread_id,
@@ -8278,8 +8289,19 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
-        result = await self.runtime.stop(binding.id)
+        cancelled_ack = asyncio.get_running_loop().create_future()
+        cancelled_ack.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await self.runtime.stop(binding.id, acknowledge=lambda: cancelled_ack)
 
+        before_stop = []
+
+        async def acknowledge():
+            before_stop.append((control.handles[0].pause_calls, tuple(self.cleanup.calls)))
+
+        result = await self.runtime.stop(binding.id, acknowledge=acknowledge)
+
+        self.assertEqual(before_stop, [(0, ())])
         self.assertEqual(result, StopDisposition.GOAL_REQUESTED)
         self.assertEqual(control.persisted.status, GoalStatus.PAUSED)
         self.assertEqual(control.handles[0].pause_calls, 1)

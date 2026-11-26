@@ -111,6 +111,27 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                 port.update.assert_not_awaited()
                 port.complete.assert_not_awaited()
 
+    async def test_first_terminal_reason_and_late_authoritative_result(self):
+        for first, second in itertools.permutations(("done", "error", "timeout"), 2):
+            with self.subTest(first=first, second=second):
+                async with channel_fixture() as fx, asyncio.timeout(2):
+                    port = process_port()
+                    state = self.message(port)
+                    presenter = fx.app._progress_cards
+                    presenter._process[state.key] = state
+                    state.sample(process_snapshot(1))
+                    await state.ready.wait()
+                    if first == "timeout":
+                        presenter.tombstone_unknown_process(state.key)
+                    else:
+                        presenter.process_result(state.key, first, process_snapshot(2))
+                    presenter.process_result(state.key, second, process_snapshot(3))
+                    presenter.end_process_run(state.key, second)
+                    await state.task
+                    port.complete.assert_awaited_once_with("cot", "process-mid", first)
+                    self.assertTrue(state.terminal)
+                    self.assertNotIn(state.key, presenter._process_tombstones)
+
     async def test_final_write_failure_still_completes_once(self):
         for response in (Rejected(10020), Rejected(10001), Unknown(), OSError()):
             with self.subTest(response=response):
