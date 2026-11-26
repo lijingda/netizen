@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from lark_channel import (
@@ -15,9 +15,6 @@ from .base import CHANNEL_LOGGER_NAME
 from ..bindings import (
     ThreadBinding,
 )
-from .codex_reply_events import CodexReplyEvents
-from .reply_events import PresentationKey
-from .question_inputs import CardAnswerOrigin
 from ..cards.defaults import defaults_card
 from ..defaults import DefaultConfigurationError
 from ..runtime.contracts import (
@@ -29,7 +26,6 @@ from ..runtime.contracts import (
     SideSessionNotFound,
     SkillReferenceError,
     SteerRace,
-    Submission,
     SubmissionAdmission,
     SubmitDisposition,
     ThreadCompacting,
@@ -43,9 +39,6 @@ from ..domain import (
     MessageContextAnchor,
     MentionContextMode,
     PromptInput,
-    ScheduledBindingOrigin,
-    ScheduledOrigin,
-    SessionAgentOrigin,
 )
 from ..worktrees.errors import WorktreeError
 from ..model_settings import ModelCatalogError
@@ -313,23 +306,7 @@ class PromptChannel(NativeReplyChannel):
                 if submission.release_receipt_attempt is not None:
                     submission.release_receipt_attempt()
                 raise
-        if submission.disposition is SubmitDisposition.STEERED:
-            if not await self._safe_add_reaction(message, constants.STEER_REACTION):
-                try:
-                    await self._reply(message, "已接收调整。")
-                except Exception as error:
-                    logger.warning(
-                        "accepted ordinary steer presentation failed",
-                        extra={
-                            "binding_id": submission.binding_id,
-                            "thread_id": submission.thread_id,
-                            "turn_id": submission.turn_id,
-                            "error_type": type(error).__name__,
-                        },
-                    )
-            return
-
-        await self._present_ordinary_receipt(submission, origin)
+        await self._present_receipt(submission, message if submission.disposition is SubmitDisposition.STEERED else origin)
 
     async def _discard_unsubmitted_attachments(self, prepared, error: BaseException,
                                                *, attempted: bool = True) -> None:
@@ -347,48 +324,6 @@ class PromptChannel(NativeReplyChannel):
             await self._input_preparer.discard_attachments(prepared)
         except Exception:
             logger.warning("unsubmitted attachment cleanup failed", exc_info=True)
-
-    async def _present_ordinary_receipt(self, submission: Submission, origin: Any) -> None:
-        """Ordinary input and scheduled initial Turns share feedback and receipt ordering."""
-        release = submission.release_receipt_attempt
-        assert release is not None
-        try:
-            presenters: list[Awaitable[bool]] = [
-                self._reactions.start(
-                    submission.turn_id,
-                    _message_id(origin),
-                    pulse_enabled=(
-                        submission.task_feedback.reaction_pulse_enabled
-                    ),
-                )
-            ]
-            if not self._session_form.progress_editable:
-                await asyncio.gather(*presenters)
-                return
-            key = PresentationKey(submission.binding_id, submission.thread_id, submission.turn_id)
-            routed = isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin))
-            event = CodexReplyEvents(self._runtime, self._ordinary).opened(
-                key, origin, submission.task_feedback,
-                reply=lambda card: self._reply_to_origin(origin, card) if routed else self._channel.reply(origin, card),
-                reply_partial=lambda post: self._reply_to_origin(origin, post),
-                validate_reply=(lambda result: self._scheduled_reply_confirmed(origin, result))
-                               if isinstance(origin, ScheduledOrigin) else None,
-            )
-            presenters.append(self._progress_cards.open(event))
-            if presenters:
-                await asyncio.gather(*presenters)
-        except Exception as error:
-            logger.warning(
-                "accepted ordinary prompt presentation failed",
-                extra={
-                    "binding_id": submission.binding_id,
-                    "thread_id": submission.thread_id,
-                    "turn_id": submission.turn_id,
-                    "error_type": type(error).__name__,
-                },
-            )
-        finally:
-            release()
 
     async def _send_context_receipt(
         self,

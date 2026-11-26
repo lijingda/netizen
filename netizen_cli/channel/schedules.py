@@ -219,7 +219,7 @@ class ScheduleChannel(SessionToolChannel):
                 owner_id="scheduled_plan:" + plan.id, origin=origin,
                 run_id=run.id, skill_names=skill_names,
             )
-            await self._present_ordinary_receipt(submission, origin)
+            await self._present_receipt(submission, origin)
         except BaseException as error:
             if publication_owned and not native_submission:
                 resource_reserved = store.get_run(run.id).worktree_id is not None

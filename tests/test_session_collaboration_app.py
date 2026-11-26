@@ -94,7 +94,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         async def receipt(submission, origin):
             submission.release_receipt_attempt()
 
-        self.app._present_ordinary_receipt = AsyncMock(side_effect=receipt)
+        self.app._present_receipt = AsyncMock(side_effect=receipt)
         policy_path = fixture.project_root / "session-policy.yaml"
         policy_path.write_text("{}\n")
         self.policy = SessionPolicyService(config_snapshot=ConfigFileSnapshot.read(policy_path))
@@ -274,7 +274,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("native-source", visible["content"])
         self.assertEqual(len(self.submissions), 2)
         self.assertEqual(self.receipts, [target.id])
-        self.app._present_ordinary_receipt.assert_awaited_once()
+        self.app._present_receipt.assert_awaited_once()
 
     async def test_side_can_report_to_parent_but_parent_cannot_reply(self):
         side = await self.side_source()
@@ -451,7 +451,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     submission.release_receipt_attempt()
 
-            self.app._present_ordinary_receipt.side_effect = blocked_display
+            self.app._present_receipt.side_effect = blocked_display
             runner = SessionMcpRunner()
             runner._admission = True
             runner._callback = self.service.call
@@ -480,7 +480,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 submission.release_receipt_attempt()
 
-        self.app._present_ordinary_receipt.side_effect = blocked_display
+        self.app._present_receipt.side_effect = blocked_display
         with patch("netizen_cli.channel.constants.SESSION_RECEIPT_TIMEOUT_SECONDS", 0.01):
             async with asyncio.timeout(2):
                 result = await self.service.call(
@@ -521,7 +521,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         from tests.support.presenter_traces import expect_presenter_trace
 
         self.enterContext(patch("netizen_cli.channel.session_tools.uuid.uuid4", return_value=uuid.UUID(int=1)))
-        del self.app._present_ordinary_receipt
+        del self.app._present_receipt
         target, scope = self.target(topic=True, feedback=BindingTaskFeedback(progress_card_enabled=True))
         self.queue_target_message(topic=True)
         self.channel.reply_results.append(sent_result("om_progress", chat_id=scope.chat_id,
@@ -561,7 +561,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.disposition = SubmitDisposition.JOINED
         result = await self.app.send_session_message("native-source", "native-target", "补充")
         self.assertEqual(result["netizen"]["disposition"], "joined")
-        self.app._present_ordinary_receipt.assert_not_awaited()
+        self.app._present_receipt.assert_not_awaited()
         self.assertEqual(self.receipts, [])
 
     async def test_send_background_target_reports_exact_status_without_activating(self):
@@ -752,7 +752,7 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
             submission.release_receipt_attempt()
             self.store.delete_binding(target.id)
 
-        self.app._present_ordinary_receipt.side_effect = delete_during_display
+        self.app._present_receipt.side_effect = delete_during_display
         result = await self.app.send_session_message("native-source", "native-target", "任务")
         self.assertTrue(result["netizen"]["accepted"])
         self.assertEqual(result["threadId"], "native-target")

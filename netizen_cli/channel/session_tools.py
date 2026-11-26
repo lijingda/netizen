@@ -239,7 +239,7 @@ class SessionToolChannel(ForkChannel):
         if submission.disposition is SubmitDisposition.STARTED:
             try:
                 async with asyncio.timeout(constants.SESSION_RECEIPT_TIMEOUT_SECONDS):
-                    await self._present_ordinary_receipt(submission, origin)
+                    await self._present_receipt(submission, origin)
             except asyncio.CancelledError:
                 # The native input is already accepted. A tool deadline during
                 # display must still return its known Thread/Turn receipt.

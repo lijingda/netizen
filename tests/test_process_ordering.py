@@ -435,7 +435,7 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
                             return receipt
 
                         port.create.side_effect = create
-                        await fx.app._present_ordinary_receipt(submission, origin)
+                        await fx.app._present_receipt(submission, origin)
                         state = await created
                         await state.ready.wait()
                         outcome = TurnOutcome(binding_id=binding, thread_id=thread, turn_id=turn,
