@@ -257,9 +257,9 @@ chmod 600 LOCAL_ENVIRONMENT.md
 
 ### 原生已实现的交给原生
 
-- 宿主只核验自己的状态，例如 Scope 与 Binding 身份、准入版本、群聊游标和所有者门禁。
+- 宿主先核验自己的状态，例如所有者门禁、能力项、Scope 与 Binding 身份、捕获版本和群聊游标，任何一项不满足就在写入前拒绝。
 - 原生已实现的语义（忙时处理、配置是否合法、权限、会话状态）不重复判断：发出请求，按原生应答映射结果。
-- 判断能否委托，看原生应答能不能证明发生了什么。委托会产生无法归属或无法撤销的效果时，才由宿主前置拒绝。见 [ADR 0112](adr/0112-integrate-antigravity-through-acp-and-delegate-native-semantics.md)。
+- 判断能否委托，看原生应答能不能证明发生了什么。委托会产生无法归属或无法撤销的效果时，才由宿主前置拒绝。见 [ADR 0112](adr/0112-delegate-native-semantics-and-defer-antigravity.md)。
 
 ### 测试不变量
 
