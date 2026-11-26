@@ -19,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from openai_codex import AsyncCodex, AsyncThread, InvalidRequestError
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.probe_sdk_partial_answers import isolated_config, message_events, response_events
@@ -203,9 +205,27 @@ async def unload(codex, thread):
             await asyncio.sleep(0.1)
 
 
+async def archive_after_turn(codex: AsyncCodex, thread: AsyncThread) -> None:
+    max_attempts = 20
+    async with asyncio.timeout(20):
+        while await load_state(thread) not in {"idle", "notLoaded"}:
+            await asyncio.sleep(0.1)
+        # Public status reports Turn activity. The rollout writer can still be
+        # releasing after the Turn is idle, with no public writer-release event.
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await codex.thread_archive(thread.id)
+                return
+            except InvalidRequestError as error:
+                if (error.code != -32600 or error.message != f"thread {thread.id} already has an active writer"
+                        or attempt == max_attempts):
+                    raise
+                await asyncio.sleep(0.25)
+
+
 async def probe(case: str) -> dict:
     from codex_cli_bin import bundled_codex_path
-    from openai_codex import AsyncCodex, CodexConfig
+    from openai_codex import CodexConfig
 
     selected = CASES if case == "all" else (case,)
     router = Router()
@@ -294,7 +314,7 @@ async def probe(case: str) -> dict:
                         await check(mounted, f"after-{kind}", outcome)
                 if "restore" in selected:
                     for label, kwargs in (("restore-mounted", {"config": outcome.thread_config()}), ("restore-none", {})):
-                        await codex.thread_archive(mounted.id)
+                        await archive_after_turn(codex, mounted)
                         restored = await codex.thread_unarchive(mounted.id)
                         assert restored.id == mounted.id
                         restored = await codex.thread_resume(mounted.id, include_turns=False, **kwargs)
