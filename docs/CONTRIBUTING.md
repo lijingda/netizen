@@ -55,7 +55,10 @@ start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收
 也可用 `make check-native NATIVE_EVIDENCE_DIR=/path/to/new-directory` 指定新目录或空目录。
 Code mode 的 V8 运行时会预留大量虚拟地址空间，请勿用 `ulimit -v` 或 `prlimit --as` 限制它，
 如需限制内存，可在 Linux 上使用 cgroup，例如 `systemd-run --user --scope -p MemoryMax=4G make check-native`。
-面向 main 的 PR 和每次 main push 的 CI 都在 Linux 与 macOS arm64 执行这组回归。
+面向 main 的 PR、main push 和手动触发均在 Linux 运行这组回归。Linux 的 `make check`
+覆盖 CPython 3.11–3.14，wheel 和 sdist 的隔离安装覆盖 3.11 和 3.14。main push 和手动触发
+另使用一台 macOS arm64 运行机，在 CPython 3.14 上依次执行 `make check`、原生隔离回归和
+wheel／sdist 隔离安装。
 
 ### 实现导航
 

@@ -294,8 +294,9 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 
 所有面向 `main` 的代码先通过 `make check`。PR 和 main push 的 GitHub CI 都在 Linux x64
 标准 CPython 3.11-3.14 执行这一个统一本地门禁，这 4 个 job 是 `Protect main` ruleset 的
-required status checks。main push 和手动触发的 workflow 另在 macOS arm64 标准 CPython 3.14
-执行同一门禁。
+required status checks。Linux 另在 3.11 和 3.14 上分别隔离安装 wheel 和 sdist。
+main push 和手动触发的 `macOS arm64 (Python 3.14)` job 在同一台运行机上依次执行
+`make check`、原生隔离回归及 wheel／sdist 隔离安装。macOS 只验收 3.14，3.11 的隔离安装由 Linux 覆盖。
 
 macOS 任务只在 main push 和手动触发时运行，PR 只运行 Linux 任务。macOS 托管运行机供给有限，
 排队取消和慢机超时会阻塞与平台无关的改动。发布只认 exact main push 的成功 CI，因此每次发布
@@ -303,8 +304,8 @@ macOS 任务只在 main push 和手动触发时运行，PR 只运行 Linux 任�
 生命周期、部署与 LaunchAgent、打包或原生适配层时，合并前在该分支手动触发一次完整 workflow，
 结果会附在同一提交上。
 
-面向 main 的 PR 和每次 main push 还会运行 `Native isolated regression (Linux)`；main push 和
-手动触发另运行 `Native isolated regression (macOS arm64)`。两者在 CPython 3.14 上执行 `make check-native`，
+面向 main 的 PR、main push 和手动触发均运行 `Native isolated regression (Linux)`。
+该 job 和上述 macOS job 使用 CPython 3.14 执行 `make check-native`，
 按注册表串行运行 isolated 组，用随包 App Server 和本机回环 mock provider 验证原生行为，
 无需 Codex 账号或飞书。无论回归成功或失败，CI 都上传各平台的证据目录，保留 14 天；
 可从 artifact 的 `SUMMARY.md` 定位到每步结果和探针输出。任一平台回归失败都会使 workflow 失败。
@@ -1288,8 +1289,9 @@ Publisher。流程使用 OIDC，不新增长期 PyPI token secret。GitHub 的 I
    会公开写入 Release notes，可引用已有验收报告。`codex-sdk` 的依据是[升级审查](#codex-sdk-升级审查)的逐项处置。
    “发布前补验”须完成，仍未完成的项必须由维护者明确改记“接受的残留风险（附重新评估条件）”。
    有残留风险时用 `--accept-risk` 记录。缺项或参数无效时脚本在版本 PR、tag 和 dispatch 前停止。
-   automated 区域复用 exact main push CI 的五个代码门禁、两平台原生隔离回归和 Linux Admin 浏览器冒烟，
-   继续执行下列包验证。仅修改 wheel／sdist 必备文件条目、setuptools 的 `package-data` 或包发现清单、
+   automated 区域复用 exact main push CI 的五个代码门禁、两平台原生隔离回归、隔离安装和 Linux Admin 浏览器冒烟。
+   发布脚本和发布 workflow 均核对同次 CI 的 macOS job 及其代码门禁、原生回归、证据上传和隔离安装步骤全部成功，
+   再执行下列包验证。仅修改 wheel／sdist 必备文件条目、setuptools 的 `package-data` 或包发现清单、
    随包示例 `config.example.yaml` 时，由 CI 资源测试及隔离安装验证覆盖。区域依据见 [ADR 0103](adr/0103-classify-release-verification-by-changed-area.md)。
 
    以下检查由触及相应边界的 PR 记录证据或具体缺口。发布时复用这些记录，维护者也可选择在发布前复验。

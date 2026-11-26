@@ -44,6 +44,7 @@ jobs:
             requirements-dev.lock
 
       - &locked-install
+        id: locked-install
         name: Install the locked dependency set
         run: |
           python -m venv .venv
@@ -62,23 +63,30 @@ jobs:
       - name: Run the repository gate
         run: make check
 
-  # macOS jobs run on main pushes and manual dispatch only. Release qualification
+  # macOS runs on main pushes and manual dispatch only. Release qualification
   # uses the exact main push run; dispatch the workflow on a branch whose change is
   # platform-sensitive (process lifecycle, deployment, packaging, native adapters).
   macos-arm64-check:
-    name: macOS arm64 Python ${{ matrix.python }}
+    name: macOS arm64 (Python 3.14)
     if: github.event_name != 'pull_request'
     runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.14"]
+    env:
+      NATIVE_EVIDENCE_ARTIFACT: native-isolated-macos-15
     steps:
       - *checkout
 
       - *setup-node
 
-      - *setup-python
+      - &setup-python314
+        id: setup-python
+        name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.lock
 
       - name: Confirm the standard arm64 runtime
         run: |
@@ -101,23 +109,44 @@ jobs:
       - name: Run the repository gate
         run: make check
 
+      # Keep independent checks running if an earlier check fails.
+      - name: Run the isolated group
+        if: ${{ !cancelled() && steps.locked-install.outcome == 'success' }}
+        timeout-minutes: 120
+        env: &native-evidence
+          NATIVE_EVIDENCE_DIR: ${{ runner.temp }}/native-evidence
+        run: make check-native
+
+      - &upload-native
+        name: Upload native regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.NATIVE_EVIDENCE_ARTIFACT }}
+          path: ${{ runner.temp }}/native-evidence
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Build and install the wheel and sdist in separate clean environments
+        if: ${{ !cancelled() && steps.setup-python.outcome == 'success' }}
+        run: &clean-artifact-installs |
+          python -m pip install setuptools==80.9.0
+          version=$(python -c 'from netizen_cli import __version__; print(__version__)')
+          python scripts/build_cli_distribution.py --tag "v$version" --commit "$GITHUB_SHA" \
+            --output-dir "$RUNNER_TEMP/netizen-dist" --smoke-installs
+
   artifact-installs:
-    name: Clean artifact installs (${{ matrix.os }}, Python ${{ matrix.python }})
-    runs-on: ${{ matrix.os }}
+    name: Clean artifact installs (ubuntu-latest, Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-15"]') }}
         python: ["3.11", "3.14"]
     steps:
       - *checkout
       - *setup-python
       - name: Build and install the wheel and sdist in separate clean environments
-        run: |
-          python -m pip install setuptools==80.9.0
-          version=$(python -c 'from netizen_cli import __version__; print(__version__)')
-          python scripts/build_cli_distribution.py --tag "v$version" --commit "$GITHUB_SHA" \
-            --output-dir "$RUNNER_TEMP/netizen-dist" --smoke-installs
+        run: *clean-artifact-installs
 
   admin-browser-smoke:
     name: Admin browser smoke (Linux)
@@ -147,30 +176,19 @@ jobs:
           retention-days: 3
 
   native-isolated:
-    name: Native isolated regression (${{ matrix.os == 'macos-15' && 'macOS arm64' || 'Linux' }})
-    runs-on: ${{ matrix.os }}
+    name: Native isolated regression (Linux)
+    runs-on: ubuntu-latest
     # The serial isolated deadlines total about 100 minutes, before cleanup and setup.
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.14"]
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-15"]') }}
+    env:
+      NATIVE_EVIDENCE_ARTIFACT: native-isolated-ubuntu-latest
     steps:
       - *checkout
-      - *setup-python
+      - *setup-python314
       - *locked-install
 
       - name: Run the isolated group
-        env:
-          NATIVE_EVIDENCE_DIR: ${{ runner.temp }}/native-evidence
+        env: *native-evidence
         run: make check-native
 
-      - name: Upload native regression evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: native-isolated-${{ matrix.os }}
-          path: ${{ runner.temp }}/native-evidence
-          retention-days: 14
-          if-no-files-found: error
+      - *upload-native
