@@ -35,7 +35,7 @@ CHAT_AVATAR_IMAGE_SOURCES = " ".join(f"https://{host}" for host in CHAT_AVATAR_H
 _IMAGE_KEY = re.compile(r"img_[A-Za-z0-9_-]{1,256}\Z")
 _MAX_KEYS = 128
 _KEY_SECONDS = 600.0
-_PREPARE_SECONDS = 4.0
+_PREPARE_SECONDS = 8.0
 
 
 def avatar_url(value: object) -> str | None:

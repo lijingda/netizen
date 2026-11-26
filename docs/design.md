@@ -608,7 +608,7 @@ Fork 的落点由独立原生单选决定，Cron 仍只在字段说明中写“�
 `p3-lark-file.byteimg.com`、`s1-imfile.feishucdn.com`、`s3-imfile.feishucdn.com`，未知来源降级。
 Channel 使用公开 `upload_media(MediaSource(kind="url"), kind="image")` 取得卡片图片 key；
 首次查找为本次最多 200 群准备头像，初始表单只准备当前/保留目标；实例最多 4 路并发，整批
-预算 4 秒。已完成的 key 随快照携带，不因进程内 URL/key 缓存淘汰而丢失。成功 key 按 URL
+预算 8 秒。已完成的 key 随快照携带，不因进程内 URL/key 缓存淘汰而丢失。成功 key 按 URL
 在进程内最多缓存 128 项、10 分钟，不缓存目录或成员关系，不写 SQLite。
 初始或错误表单的当前群/保留目标展示查询各限 2 秒，
 失败不新增创建门禁；头像缺失、下载或上传失败时群选项降级为通用图标，聊天类型未确认
