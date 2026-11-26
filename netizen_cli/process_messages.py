@@ -16,6 +16,9 @@ from .turn_activity import normalize_activity_text_layout
 
 
 _RESOURCE = "/open-apis/im/v1/message_cot"
+# Create has no deduplication key. Give slow acknowledgements the full writer
+# budget so the returned IDs can still be used to update and complete the message.
+PROCESS_OPERATION_TIMEOUT_SECONDS = 30.0
 CONTENT_LIMIT = 1_800
 ITEM_TEXT_LIMIT = 300
 ITEM_LIMIT = 60
@@ -220,10 +223,16 @@ async def _receipt(
 
 
 class ProcessMessages:
-    """Borrow the same instance-owned lark-oapi client as the history reader."""
+    """Write process messages using the instance's app credentials."""
 
     def __init__(self, client: lark.Client) -> None:
         self._client = client
+
+    @classmethod
+    def for_app(cls, app_id: str, app_secret: str, *, log_level: lark.LogLevel = lark.LogLevel.WARNING) -> Self:
+        client = (lark.Client.builder().app_id(app_id).app_secret(app_secret)
+                  .timeout(PROCESS_OPERATION_TIMEOUT_SECONDS).log_level(log_level).build())
+        return cls(client)
 
     async def create(
         self, receive_chat_id: str, origin_message_id: str | None, reply_in_thread: bool,

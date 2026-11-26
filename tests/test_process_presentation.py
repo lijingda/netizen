@@ -7,13 +7,17 @@ from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.codex_reply_events import CodexReplyEvents
 from netizen_cli.channel.process_presentation import ProcessLocation, ProcessPresentation
+from netizen_cli.channel.question_inputs import CardAnswerConversation, CardAnswerOrigin
 from netizen_cli.channel.reply_events import PresentationKey
-from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.domain import (
+    FeishuScope, GoalStatus, NativeCapability, ScheduledBindingConversation, ScheduledBindingOrigin,
+    ScheduledConversation, ScheduledOrigin, ScopeKind, SessionAgentConversation, SessionAgentOrigin,
+)
 from netizen_cli.process_messages import Created, Ok, Unknown
 from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.process_activity import ObservedProcessItem, ProcessActivityWindow
@@ -21,9 +25,11 @@ from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.runtime.codex_contracts import GoalOutcome
 from netizen_cli.runtime.contracts import GoalSubmission, SideTurnOutcome, TurnOutcome
 from netizen_cli.turn_activity import TurnActivityEvent, TurnActivityKind, TurnActivityStatus, TurnPlanStepSnapshot, TurnPlanStepState
+from netizen_cli.user_questions import BindingQuestionTarget
+from tests.support.channel_cards import _card_button_value, direct_button_event
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
-from tests.support.channel_results import completed_turn_result, file_change_item, goal_activity_snapshot, side_turn_activity_snapshot, turn_activity_snapshot
+from tests.support.channel_results import completed_turn_result, file_change_item, goal_activity_snapshot, native_goal, side_turn_activity_snapshot, turn_activity_snapshot
 from tests.support.presenter_traces import delivery_recorder
 from tests.support.process_transport import ProcessTransport
 
@@ -194,6 +200,120 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
 
 
 class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_topic_goal_resume_process_placement_and_answer(self):
+        chat, topic, source = "oc_group", "omt_topic", "om_origin"
+        ids = dict(message_id=source, chat_id=chat, thread_id=topic)
+        cases = (
+            ("button", dict(root_id="om_root", parent_id="older"), "om_root"),
+            ("button", {}, source),
+            ("button", dict(thread_id="other", root_id="om_root"), None),
+            ("button", dict(message_id="other", root_id="om_root"), None),
+            ("button", dict(chat_id="other", root_id="om_root"), None),
+            ("button", dict(deleted=True, root_id="om_root"), None),
+            ("button", dict(parent_id="older"), None),
+            ("button", dict(root_id=source, parent_id="older"), None),
+            ("button", None, None),  # fetch failure
+            ("slash", dict(root_id="om_root", parent_id="older"), "om_root"),
+            ("slash", {}, source),
+            ("slash", dict(parent_id="older"), None),
+            ("slash", dict(thread_id="other"), None),
+            ("slash", dict(message_id="other", root_id="om_root"), None),
+        )
+        for route, fields, root in cases:
+            with self.subTest(route=route, fields=fields):
+                async with channel_fixture() as fx, asyncio.timeout(2):
+                    scope = FeishuScope("cli_test", chat, ScopeKind.TOPIC, topic)
+                    binding = (await fx.create_binding(scope)).binding
+                    fx.runtime.materialize(binding.id, "native-one", cwd=fx.project)
+                    binding = fx.store.get(binding.id)
+                    fx.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+                    fx.runtime.goal_snapshot_value = native_goal(GoalStatus.PAUSED)
+                    activity = replace(goal_activity_snapshot(binding_id=binding.id), process_items=process_snapshot(1).process_items)
+                    fx.runtime.goal_activity_values[binding.id] = activity
+                    feedback = BindingTaskFeedback(progress_card_enabled=False)
+                    fx.runtime.goal_submission = GoalSubmission(binding.id, "native-one", "goal-one", lambda: None, task_feedback=feedback)
+                    port = process_port()
+                    fx.app._progress_cards._process_port = port
+                    if fields is not None:
+                        fx.channel.fetched_messages[source] = {"code": 0, "data": {"items": [dict(ids, deleted=False) | fields]}}
+                    fx.channel.fetched_messages["process-mid"] = {"code": 0, "data": {"items": [
+                        dict(ids, message_id="process-mid", deleted=False, root_id=root, parent_id=source),
+                    ]}}
+                    with patch.object(fx.channel, "fetch_message", wraps=fx.channel.fetch_message) as read:
+                        if route == "button":
+                            card = await fx.register_goal_card(scope=scope, binding=binding, goal=fx.runtime.goal_snapshot_value,
+                                                               message_id=source, runtime_state="idle")
+                            event = direct_button_event(_card_button_value(card, "恢复 Goal"), message_id=source)
+                            event.chat_id = chat
+                            await fx.app.handle_card_action(event)
+                        else:
+                            await fx.app.handle_message(FakeMessage("/goal resume", message_id=source, chat_id=chat,
+                                chat_type="group", thread_id=topic, raw=ids | fields))
+                        resumed, = fx.runtime.resume_goal_calls
+                        key = PresentationKey(binding.id, "native-one", "goal-one")
+                        if state := fx.app._progress_cards._process.get(key):
+                            await state.ready.wait()
+                        await fx.app.handle_completion(GoalOutcome(binding.id, "native-one", "goal-one", "owner",
+                            resumed["origin"], final_physical_turn_id="physical-final", final_turn_status="completed",
+                            final_response="goal result", activity=activity, task_feedback=feedback))
+                        if state and state.task:
+                            await state.task
+                    expected_reads = [call(source)] if route == "button" else []
+                    if root:
+                        expected_reads.append(call("process-mid"))
+                        port.create.assert_awaited_once_with(chat, source, True)
+                        self.assertGreaterEqual(port.update.await_count, 1)
+                    else:
+                        port.create.assert_not_awaited()
+                        port.update.assert_not_awaited()
+                    self.assertEqual(read.await_args_list, expected_reads)
+                    self.assertIn((source, "goal result"), [(mid, getattr(content, "markdown", content)) for mid, content in fx.channel.replies])
+
+    async def test_known_roots_need_only_post_create_read(self):
+        app, chat, mid, topic, root = "cli_test", "oc_group", "om_source", "omt_topic", "om_root"
+        origins = (
+            ScheduledOrigin(app, chat, mid, ScheduledConversation(topic), "plan", "run", root_id=root),
+            ScheduledBindingOrigin(app, chat, mid, ScheduledBindingConversation(chat, "group", topic), "plan", "run", "binding", root),
+            CardAnswerOrigin(app, chat, mid, CardAnswerConversation(chat, "group", topic), "card", BindingQuestionTarget("binding"), root),
+            SessionAgentOrigin(app, chat, mid, SessionAgentConversation(chat, "group", topic), "binding", "thread", "target", "call", root_id=root),
+        )
+        async with channel_fixture() as fx:
+            for origin in origins:
+                with self.subTest(origin=type(origin).__name__):
+                    row = dict(message_id="process-mid", chat_id=chat, thread_id=topic, root_id=root, parent_id=mid, deleted=False)
+                    read = AsyncMock(return_value={"code": 0, "data": {"items": [row]}})
+                    port = process_port()
+                    state = ProcessPresentation(PresentationKey("binding", "native-one", "turn-one"), port, fx.channel,
+                        lambda: fx.app._process_reply_location(origin, None), lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+                    with patch.object(fx.channel, "fetch_message", read):
+                        self.assertTrue(await state._create())
+                    port.create.assert_awaited_once_with(chat, mid, True)
+                    read.assert_awaited_once_with("process-mid")
+
+    async def test_source_read_in_flight_at_terminal_never_dispatches_create(self):
+        scope = FeishuScope("app", "chat", ScopeKind.TOPIC, "topic")
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def fetch(message_id):
+            entered.set()
+            await release.wait()
+            return {"code": 0, "data": {"items": [dict(message_id=message_id, chat_id="chat", thread_id="topic",
+                                                       deleted=False, root_id="root", parent_id="older")]}}
+
+        read, port = AsyncMock(side_effect=fetch), process_port()
+        state = ProcessPresentation(PresentationKey("binding", "native-one", "turn-one"), port,
+            SimpleNamespace(fetch_message=read), lambda: ProcessLocation(scope, "card", None),
+            lambda: 1_800_000_001, 1, claimed_cot_ids=set())
+        async with asyncio.timeout(2):
+            state.sample(process_snapshot(1))
+            await entered.wait()
+            state.sample(process_snapshot(2))
+            state.sample(process_snapshot(3), terminal=True)
+            release.set()
+            await state.task
+        read.assert_awaited_once_with("card")
+        port.create.assert_not_awaited()
+
     async def test_rollover_reuses_one_process_and_finishes_the_previous_physical_item(self):
         async with channel_fixture() as fx:
             origin = await fx.new()

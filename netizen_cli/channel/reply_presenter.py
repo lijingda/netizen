@@ -11,7 +11,7 @@ from weakref import WeakValueDictionary
 
 from lark_channel import OutboundCard, OutboundPost, SendResult
 
-from ..process_messages import ProcessMessages
+from ..process_messages import PROCESS_OPERATION_TIMEOUT_SECONDS, ProcessMessages
 from ..cards import turn_progress_card
 from ..cards.reply import feishu_answer_text
 from ..partial_answers import PartialAnswer
@@ -25,10 +25,6 @@ logger = logging.getLogger(__name__)
 
 _PROGRESS_CARD_POLL_SECONDS = 1.0
 _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
-# Process I/O never blocks content, so its bound only detects a lost request. Creation has no
-# deduplication key: a bound shorter than Feishu's slow tail leaves a created message that
-# can never be updated or completed.
-_PROCESS_OPERATION_TIMEOUT_SECONDS = 30.0
 _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES = 3
 _TERMINAL_CARD_UPDATE_ATTEMPTS = 3
 _TERMINAL_CARD_RETRY_SECONDS = 0.5
@@ -131,7 +127,7 @@ class _ReplyCardPresenter:
             return state
         resolve = self._process_location
         state = ProcessPresentation(target.key, self._process_port, self._channel,
-            lambda: resolve(target.origin, root_id), self._clock, _PROCESS_OPERATION_TIMEOUT_SECONDS,
+            lambda: resolve(target.origin, root_id), self._clock, PROCESS_OPERATION_TIMEOUT_SECONDS,
             self._forget_process, claimed_cot_ids=self._claimed_cot_ids)
         self._process[target.key] = state
         return state

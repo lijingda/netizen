@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import Literal
 
@@ -137,6 +137,36 @@ class ProcessLocation:
     parent: str | None
     root: str | None
 
+    def with_source_root(self, source: object, *, explicit_inbound_root: bool = False) -> ProcessLocation | None:
+        """Resolve the root from the exact triggering message or card."""
+        expected = {"message_id": self.parent, "chat_id": self.scope.chat_id, "thread_id": self.scope.topic_id}
+        for key, required in expected.items():
+            actual = _object_field(source, key)
+            if explicit_inbound_root and actual is None:
+                continue  # The normalized inbound message already identifies this reply.
+            if not required or actual != required:
+                return None
+        root = _object_field(source, "root_id")
+        parent = _object_field(source, "parent_id")
+        if root in (None, "", self.parent):
+            return replace(self, root=self.parent) if parent in (None, "") else None
+        if not isinstance(root, str) or not root.strip():
+            return None
+        if parent is not None and (not isinstance(parent, str) or parent == self.parent):
+            return None
+        return replace(self, root=root)
+
+
+async def _read_source_location(channel: ReplyChannel, location: ProcessLocation) -> ProcessLocation | None:
+    assert location.parent is not None
+    response = await external_call(channel.fetch_message(location.parent))
+    code = _object_field(response, "code")
+    items = _object_field(_object_field(response, "data"), "items")
+    if type(code) is not int or code != 0 or not isinstance(items, list) or len(items) != 1:
+        return None
+    source, = items
+    return location.with_source_root(source) if _object_field(source, "deleted") is False else None
+
 
 async def _verify(channel: ReplyChannel, location: ProcessLocation, created: Created) -> bool:
     mid = created.message_id
@@ -222,6 +252,9 @@ class ProcessPresentation:
 
     async def _create(self) -> bool:
         location = self.resolve()
+        if location is not None and location.scope.topic_id and location.parent and location.root is None:
+            async with asyncio.timeout(self.timeout):
+                location = await _read_source_location(self.channel, location)
         if location is None or (location.scope.topic_id and not (location.root and location.parent)):
             logger.warning("process message target unavailable")
             return False

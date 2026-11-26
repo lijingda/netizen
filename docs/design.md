@@ -1337,7 +1337,8 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | `AppServerThreadHistory`（[0083](adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)、[0101](adr/0101-show-session-agent-inputs-that-start-admin-conversation-turns.md)） | 只读固定 `thread/turns/list`、`thread/items/list`，供协作 read/wait 与 Admin 对话记录分页。Admin 按页内顺序在期限内读取每轮首项（升序、`limit=1`、最多十轮），首项为 `functionCallOutput` 时替换 Summary 输入 | shape/synthetic 与原生 paginated/legacy 探针。首项读取失败按 [Admin 对话记录规则](#管理查询与操作) 降级，legacy `-32601` 不告警。运行终态与 Files 仍有各自的证据读取。 | 公开等价历史分页 facade。 |
 | `PinnedTurnActivityObserver`（[0020](adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)/[0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)） | exact ordinary Turn 问题、ordinary/Side partial、`/status`、steer freshness 的 retained event-store 快照；在 router RLock 下复制绝对 cursor 后的通知引用 | **精确 SDK 版本、整包源码指纹、generated payload、内部持有类型与 event-store shape**；校验 exact Turn 保留区间/序号连续性。不调用 RPC、不注册/关闭订阅、不消费/裁剪事件或改订阅者游标、不新建 worker。失败仅降级展示，不能绕过独立 cleanup 启动门禁。 | 公开可多路复用、无每 Turn 常驻 worker 且不改变消费时机的 Activity/plan snapshot、callback 或异步通知面通过相同 synthetic/live 门禁后，删除 event-store reach-through、指纹及运行时例外。 |
 
-固定版 `lark-oapi` 在租户令牌过期或缓存为空时会同步刷新令牌，可能延迟服务事件循环中的其他操作。上游提供异步令牌路径后移除这项 SDK 限制。
+固定版 `lark-oapi` 在租户令牌过期或缓存为空时会同步刷新令牌，可能延迟服务事件循环中的其他操作。
+过程消息客户端的同步刷新也使用 30 秒的请求超时，令牌接口响应缓慢时可能阻塞事件循环长达 30 秒。上游提供异步令牌路径后移除这项 SDK 限制。
 
 Channel SDK 的卡片原始结构适配见 [ADR 0099](adr/0099-project-original-card-content-with-bounded-component-adapter.md)
 及[引用读取与 SDK 内容适配](#引用读取与-sdk-内容适配)：仅用公开 SDK 取得原始卡片，
@@ -1558,8 +1559,10 @@ Binding 的“回复消息类型”可选卡片或过程消息。卡片沿用原
 每条过程消息串行替换完整列表，保存上次确认的列表。未知回执、超时或并发码 10020 后，
 下次活动变化或生命周期事件重新写入，其他明确拒绝保留上次确认值。每个 END 与其 START
 同列。已提供的运行项在首次写入时固定文字与起始秒，结束后优先占用可用名额直至确认；
-每次最多 60 项，保留已提供 START 的运行项及其待确认 END。空位先给最早开始的新运行项，再给最近完成的条目。展示 Turn 内同名步骤重现时沿用原 START 和已确认的结束状态。
-运行结束或执行结果明确未知时，写入者关闭运行项并执行一次有界最终写入，再尝试完成一次。
+每次最多 60 项，保留已提供 START 的运行项及其待确认 END。空位先给最早开始的新运行项，再给最近完成的条目。
+展示器根据首次看到的结束证据固定清单步骤的 END，Activity 明确记录步骤结束时取其记录的结束时间，从可用清单中发现步骤已移除时取本次观察时间。
+即使 END 尚未写入，同一展示 Turn 内再次运行的同名步骤也沿用原 START 和 END。若步骤在两次观察之间被移除又重新运行，展示器未看到结束证据，就沿用原来的运行行。[同名步骤重现测试](../tests/test_process_ordering.py#L270)
+运行结束或执行结果明确未知时，写入者在一次有界最终写入中为所有仍在运行的条目补齐 END，再尝试完成一次过程消息。[最终写入顺序测试](../tests/test_process_ordering.py#L44)
 已完成和中断用 `done`，失败用 `error`，执行结果明确未知用 `timeout`。单纯失去 Activity
 观察时保留写入者。确认为执行未知后恢复的结果只交付普通内容。Goal 整个逻辑运行使用同一条
 过程消息，物理换轮重新区分条目。服务关闭、Binding 退役或移除 Thread 时会取消写入者，已创建的消息可能仍显示进行中。详见 [ADR 0107](adr/0107-present-process-in-feishu-process-messages.md)。

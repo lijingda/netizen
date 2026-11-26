@@ -4,10 +4,12 @@ import asyncio
 import json
 import socket
 import threading
+import time
 import unittest
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
 from uuid import uuid4
 
 import lark_oapi as lark
@@ -30,6 +32,7 @@ class LocalFeishu(ThreadingHTTPServer):
         self.release.set()
         self.writer = threading.Lock()
         self.completed = False
+        self.create_response_delay = 0
         self.disconnect = False
         self.raw_response = None
         self.updates = []
@@ -62,6 +65,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif self.headers.get("Authorization") != "Bearer loopback-only":
             self.send_error(403)
         elif url.path == RESOURCE and query == {"receive_id_type": ["chat_id"]}:
+            if self.server.create_response_delay:
+                time.sleep(self.server.create_response_delay)
             self.reply({"code": 0, "data": {"cot_id": "cot", "message_id": "msg"}})
         elif (url.path == RESOURCE + "/complete/cot"
               and query == {"message_id": ["msg"], "reason": ["done"]}):
@@ -139,6 +144,19 @@ class ProcessMessageTransport(unittest.IsolatedAsyncioTestCase):
         label = json.loads(start["content"])["toolCallName"]
         self.assertEqual(label, self.items[0].text[:299] + "…")
         self.assertEqual(json.loads(end["content"])["toolCallId"], sha256(b"tool").hexdigest()[:32])
+
+    async def test_slow_create_receipt_within_process_budget(self):
+        # Scale SDK timeouts and the 11-second response delay by the same factor.
+        scale = 0.05
+        self.server.create_response_delay = 11 * scale
+        builder = lark.Client.builder().domain("http://127.0.0.1:%d" % self.server.server_port)
+        set_timeout = builder.timeout
+        with patch.object(lark.Client, "builder", return_value=builder), patch.object(
+            builder, "timeout", side_effect=lambda seconds: set_timeout(seconds * scale),
+        ):
+            port = ProcessMessages.for_app(self.app_id, "fixture")
+        async with asyncio.timeout(30 * scale):
+            self.assertEqual(await port.create("chat", "parent", True), Created("cot", "msg"))
 
     async def test_timeout_on_dispatched_write_is_unknown(self):
         self.server.release.clear()

@@ -39,6 +39,7 @@ from ..runtime.contracts import (
 from ..schedules.models import ScheduleNotFound
 from . import constants
 from .app_values import (
+    _CardReplyTarget,
     _inbound_root_message_id,
     _message_id,
     _ScheduledCompletion,
@@ -85,7 +86,14 @@ class NativeReplyChannel(CompletionPresentationChannel):
             return None
         if scope.app_id != self._app_id or (root_id is not None and (not scope.topic_id or root not in (None, root_id))):
             return None
-        return ProcessLocation(scope, parent, root or root_id)
+        location = ProcessLocation(scope, parent, root or root_id)
+        if not scope.topic_id or root_id or getattr(origin, "root_id", None) or isinstance(origin, _CardReplyTarget):
+            # Only a rootless topic callback delegates one source read to the process writer.
+            return location
+        explicit_reply_root = root is not None and root != parent
+        if not explicit_reply_root and getattr(origin, "reply", None) is not None:
+            return None
+        return location.with_source_root(getattr(origin, "raw", None), explicit_inbound_root=explicit_reply_root)
 
 
     def _codex_result(self, outcome: OrdinaryConclusion | SideTurnOutcome | GoalOutcome) -> TurnResult:

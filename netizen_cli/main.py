@@ -427,7 +427,7 @@ class ServiceCore:
                 runtime=self._runtime, ordinary=backend.ordinary,
                 bindings=self._store,
                 projects=self._projects,
-                process_messages=ProcessMessages(self._feishu_read_client),
+                process_messages=ProcessMessages.for_app(self._settings.app_id, self._settings.app_secret),
                 message_history=FeishuMessageHistoryReader(
                     self._feishu_read_client
                 ),

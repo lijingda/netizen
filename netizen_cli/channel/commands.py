@@ -53,6 +53,7 @@ from ..domain import (
 from ..experience import (
     InvalidInteraction,
 )
+from ..external_calls import external_call
 from ..management import (
     CurrentBindingChanged,
     CurrentBindingTarget,
@@ -673,7 +674,7 @@ class CommandChannel(CardControlChannel):
             with start.acknowledging():
                 try:
                     async with asyncio.timeout(limits.STOP_ACK_ATTEMPT_TIMEOUT_SECONDS):
-                        await acknowledge()
+                        await external_call(acknowledge())
                 except Exception:
                     logger.warning("pending stop acknowledgement failed; continuing stop", exc_info=True)
 
