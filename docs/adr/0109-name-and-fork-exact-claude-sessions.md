@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded_by: 0110
 date: 2026-11-25
 amends: 0105
 related: 0067, 0078, 0097, 0104
@@ -38,6 +39,6 @@ SDK 或随附 CLI 升级时复核上述证据。若公开接口提供能协调�
 
 ## 实施与验收
 
-固定版本的 Claude 回环通过飞书命令和卡片保存名称，并按精确原生 ID 读回。关闭来源的持久分支可在同一 cwd 冷续接，读到继承的对话后，来源转录的字节摘要仍相同。保留客户端时改名被拒，原生后台任务运行时分支也被拒，两次拒绝均发生在 SDK 写入前。[原生回环](../../scripts/check_native_claude.py) [飞书入口场景](../../tests/support/claude_channel_e2e.py)
+固定版本的 Claude 回环通过飞书命令和卡片保存名称，并按精确原生 ID 读回。关闭来源的持久分支可在同一 cwd 冷续接，读到继承的对话后，来源转录的字节摘要仍相同。保留客户端时改名被拒，原生后台任务运行时分支也被拒，两次拒绝均发生在 SDK 写入前。[原生回环](https://github.com/lijingda/netizen/blob/8eee3114e5f6455692610e3a980ea5cb7ce0d8f6/scripts/check_native_claude.py) [飞书入口场景](https://github.com/lijingda/netizen/blob/8eee3114e5f6455692610e3a980ea5cb7ce0d8f6/tests/support/claude_channel_e2e.py)
 
-仅登记一个会话 cron 的来源到达有序空闲后，所有者可从飞书创建分支。子会话首次续接时，原生 Stop hook 报告与来源相同的 cron ID，来源客户端仍然保留。该场景验证 cron 的登记恢复。变异门禁覆盖连接中改名、带后台任务复制、跳过子 cwd 校验和复制未确认后重试。[变异门禁](../../scripts/check_claude_session_mutations.py)
+仅登记一个会话 cron 的来源到达有序空闲后，所有者可从飞书创建分支。子会话首次续接时，原生 Stop hook 报告与来源相同的 cron ID，来源客户端仍然保留。该场景验证 cron 的登记恢复。变异门禁覆盖连接中改名、带后台任务复制、跳过子 cwd 校验和复制未确认后重试。[变异门禁](https://github.com/lijingda/netizen/blob/8eee3114e5f6455692610e3a980ea5cb7ce0d8f6/scripts/check_claude_session_mutations.py)

@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded_by: 0110
 date: 2026-11-25
 amends: 0105
 related: 0025, 0027, 0052, 0086, 0107

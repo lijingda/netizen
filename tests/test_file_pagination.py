@@ -252,8 +252,7 @@ class FilePaginationTest(unittest.TestCase):
                             goal_generation="z" * 43, status="paused", runtime_state="goal-paused",
                             objective="生成报告", token_budget=None, tokens_used=50,
                         ) if version == 5 else None,
-                        activity=ReplyCardActivityModule(progress=progress, terminal_status="completed", collapsed=True,
-                                                     state_line="全部完成" if version == 5 else None),
+                        activity=ReplyCardActivityModule(progress=progress, terminal_status="completed", collapsed=True),
                         files=replace(projection.files, items=tuple(
                             replace(item, path=str(path))
                             for item, path in zip(projection.files.items, paths)
@@ -273,10 +272,6 @@ class FilePaginationTest(unittest.TestCase):
                         rebuilt = turn_progress_card_from_manifest(
                             final_response=intent.answer, progress=intent.progress, **kwargs,
                         )
-                    if version == 5:
-                        self.assertEqual(intent.reply.activity.state_line, "全部完成")
-                        panel, = elements(rebuilt.card, "collapsible_panel")
-                        self.assertIn("全部完成", panel["header"]["title"]["content"])
                     next_value = page_buttons(rebuilt.card)[0][1]
                     self.assertEqual(next_value["pagination"], "select")
                     self.assertEqual(next_value["page"], 2)

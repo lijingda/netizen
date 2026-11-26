@@ -43,25 +43,16 @@ def _send_result_error_code(result: SendResult | None) -> int | None:
     return None
 
 
-def _receipt_message_id(result: SendResult, *, on_conflict: str | None = None) -> str | None:
-    """Resolve a card ID, or a mention anchor when the verified source is supplied."""
+def _receipt_message_id(result: SendResult) -> str | None:
+    """Resolve the single writable message ID from a confirmed card receipt."""
 
     if not result.success:
         return None
-    if result.chunk_ids and on_conflict is None:
+    if result.chunk_ids:
         return None  # A split post has no single writable card.
     direct = result.message_id or None
     data = result.raw.get("data") if result.raw is not None else None
     nested = _nonempty_field(data, "message_id")
     if direct is not None and nested is not None and direct != nested:
-        return on_conflict
-    target = direct or nested
-    if target and result.chunk_ids and target not in result.chunk_ids:
-        return on_conflict
-    return target
-
-
-def _confirmed_reply_id(result: SendResult, *, on_conflict: str | None = None) -> str | None:
-    if _send_result_error_code(result) not in (None, 0):
         return None
-    return _receipt_message_id(result, on_conflict=on_conflict)
+    return direct or nested

@@ -14,7 +14,6 @@ from netizen_cli.channel.codex_reply_events import CodexReplyEvents
 from netizen_cli.channel.process_presentation import ProcessLocation, ProcessPresentation
 from netizen_cli.channel.reply_events import PresentationKey
 from netizen_cli.domain import FeishuScope, ScopeKind
-from netizen_cli.ordinary_sessions import LogicalReply, PhysicalAnswer, PhysicalStarted
 from netizen_cli.process_messages import Created, Ok, Unknown
 from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.process_activity import ObservedProcessItem, ProcessActivityWindow
@@ -137,9 +136,9 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
         port.update.side_effect = update
         key = PresentationKey("binding", "native-one", "turn-one")
         scope = FeishuScope("app", "chat", ScopeKind.DIRECT)
-        message = ProcessPresentation(key, key, port, None,
+        message = ProcessPresentation(key, port, None,
             lambda: ProcessLocation(scope, "input", None),
-            lambda _: None, lambda: 1_800_000_001, 1, claimed_cot_ids=set(), binding_id=key.owner_id)
+            lambda: 1_800_000_001, 1, claimed_cot_ids=set())
         try:
             async with asyncio.timeout(2):
                 message.sample(process_snapshot(1))
@@ -165,55 +164,6 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actual, json.loads(REFERENCE.read_text())["False/False"])
         port.create.assert_not_awaited()
 
-    async def test_claude_safe_items_flow_through_start_and_result_without_becoming_receipts(self):
-        async with channel_fixture() as fx:
-            origin = await fx.new()
-            port = process_port()
-            reply = LogicalReply()
-            fx.app._progress_cards._process_port = port
-            snapshot = process_snapshot(1)
-            key = PresentationKey(snapshot.binding_id, snapshot.thread_id, snapshot.turn_id)
-            with patch.object(fx.app._ordinary, "turn_activity", return_value=snapshot):
-                await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
-                    BindingTaskFeedback(), lambda: True, lambda: True, reply))
-            state = fx.app._progress_cards._process[key]
-            async with asyncio.timeout(1):
-                await state.ready.wait()
-            await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "user", origin, "completed",
-                "final", logical_id=key.turn_id, activity=snapshot, reply=reply))
-            await state.task
-            port.create.assert_awaited_once_with("oc_direct", "om_new", False)
-            port.complete.assert_awaited_once_with("cot", "process-mid", "done")
-            self.assertNotIn("process-mid", reply.messages)
-
-    async def test_creation_slower_than_the_card_bound_stays_owned_and_completes(self):
-        async with channel_fixture() as fx:
-            origin = await fx.new()
-            port = process_port()
-            created = port.create.return_value
-            async def slow_create(*_):
-                await asyncio.sleep(0.05)
-                return created
-            port.create.side_effect = slow_create
-            reply = LogicalReply()
-            presenter = fx.app._progress_cards
-            presenter._process_port = port
-            presenter._operation_timeout_seconds = 0.01
-            snapshot = process_snapshot(1)
-            key = PresentationKey(snapshot.binding_id, snapshot.thread_id, snapshot.turn_id)
-            feedback = BindingTaskFeedback(completion_mention_enabled=False)
-            with patch.object(fx.app._ordinary, "turn_activity", return_value=snapshot):
-                await fx.app.handle_ordinary_completion(PhysicalStarted(*key.index, origin,
-                    feedback, lambda: True, lambda: True, reply))
-            state = presenter._process[key]
-            async with asyncio.timeout(1):
-                await state.ready.wait()
-                await fx.app.handle_ordinary_completion(PhysicalAnswer(*key.index, "user", origin, "completed",
-                    "final", logical_id=key.turn_id, activity=snapshot, reply=reply, task_feedback=feedback))
-                await state.task
-            self.assertIs(state.created, created)
-            self.assertGreaterEqual(port.update.await_count, 1)
-            port.complete.assert_awaited_once_with("cot", "process-mid", "done")
 
     async def test_topic_requires_one_exact_placement_read_before_writes(self):
         key = PresentationKey("binding", "native-one", "turn-one")
@@ -230,8 +180,8 @@ class OrdinaryProcessTest(unittest.IsolatedAsyncioTestCase):
                     row["deleted"] = True
                 channel = SimpleNamespace(fetch_message=AsyncMock(return_value={"code":0,"data":{"items":[row]}}))
                 port = process_port()
-                message = ProcessPresentation(key, key, port, channel,
-                    lambda: ProcessLocation(scope, "input", "root"), lambda _: None, lambda: 1_800_000_001, 1, claimed_cot_ids=set(), binding_id=key.owner_id)
+                message = ProcessPresentation(key, port, channel,
+                    lambda: ProcessLocation(scope, "input", "root"), lambda: 1_800_000_001, 1, claimed_cot_ids=set())
                 message.sample(process_snapshot(1))
                 await message.ready.wait()
                 message.finish("done")
@@ -305,8 +255,16 @@ class GoalSideProcessTest(unittest.IsolatedAsyncioTestCase):
                     activity=activity, root_message_id="root"))
             port.create.assert_awaited_once_with("chat", "input", True)
             read.assert_awaited_once_with("process-mid")
-            self.assertFalse(presenter.binding_location("parent").unusable)
-            self.assertNotIn("side", presenter._binding_locations)
+            parent = FakeMessage("parent input", message_id="parent-input")
+            await fx.app.handle_completion(TurnOutcome(
+                binding_id="parent", thread_id="parent-thread", turn_id="parent-turn",
+                owner_id="owner", origin=parent, cwd=fx.project,
+                result=completed_turn_result(final_response="parent result"),
+            ))
+            self.assertEqual(
+                [mid for mid, content in fx.channel.replies if "parent result" in str(content)],
+                ["parent-input"],
+            )
             port.update.assert_not_awaited()
             port.complete.assert_not_awaited()
             self.assertIn("side result", str(fx.channel.replies))

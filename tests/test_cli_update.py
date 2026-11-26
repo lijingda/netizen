@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import fcntl
 import hashlib
 import io
@@ -478,6 +479,39 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertIn("netizen-cli 1.0 -> 2.0; installation verified", output)
         self.assertIn("2/2 restored and ready", output)
 
+    def test_uv_tool_replacement_receipt_is_checked_before_any_restore(self) -> None:
+        valid = '[tool]\nrequirements = [{name = "netizen-cli"}]\n'
+        for change in ("missing", "symlink", "malformed", "wrong primary"):
+            with self.subTest(change=change):
+                prefix = self.directory / change
+                prefix.mkdir()
+                receipt = prefix / "uv-receipt.toml"
+                receipt.write_text(valid)
+                plan = copy.deepcopy(self.plan)
+                plan["package_plan"].update(backend="uv-tool", prefix=str(prefix))
+                self.calls.clear()
+
+                def replace(argv, **kwargs):
+                    if argv == ["package-tool"]:
+                        self.assertEqual(cli_update_worker.read_uv_tool_receipt(receipt)["requirements"],
+                                         [{"name": "netizen-cli"}])
+                        receipt.unlink()
+                        if change == "symlink":
+                            target = prefix / "other.toml"
+                            target.write_text(valid)
+                            receipt.symlink_to(target)
+                        elif change == "malformed":
+                            receipt.write_text("[tool")
+                        elif change == "wrong primary":
+                            receipt.write_text(valid.replace("netizen-cli", "unrelated"))
+                    return self.runner(argv, **kwargs)
+
+                report = cli_update_worker.execute(plan, runner=replace)
+                self.assertEqual([argv for argv, _ in self.calls], [["package-tool"], ["validate"]])
+                self.assertEqual(report["status"], "failed")
+                self.assertEqual(report["package"]["state"], "unknown")
+                self.assertEqual(report["progress"]["ready"], 0)
+
     def test_progress_wraps_raw_package_output_and_precedes_validation_and_restore(self) -> None:
         output = io.StringIO()
         def runner(argv, **kwargs):
@@ -542,13 +576,6 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertEqual(report["package"]["state"], "unknown")
         self.assertIn("Update failed during installation verification", human_report(report))
 
-    def test_lost_tool_extra_prevents_restore_after_successful_replacement(self):
-        self.plan["package_plan"].update(prefix=str(self.directory), tool_requests_claude=True)
-        (self.directory / "uv-receipt.toml").write_text('[tool]\nrequirements=[{name="netizen-cli"}]\n')
-        report = cli_update_worker.execute(self.plan, runner=self.runner)
-        self.assertEqual(report["phase"], "validating")
-        self.assertIn("Claude extra", report["reason"])
-        self.assertEqual([args for args, _ in self.calls], [["package-tool"], ["validate"]])
 
     def test_own_validation_error_protocol_preserves_actionable_reason(self) -> None:
         def runner(argv, **kwargs):
@@ -611,7 +638,8 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertEqual([item["state"] for item in report["instances"]], ["unknown", "ready", "stopped"])
 
     def test_tool_no_version_change_still_restores_recorded_set(self) -> None:
-        self.plan["package_plan"]["backend"] = "uv-tool"
+        self.plan["package_plan"].update(backend="uv-tool", prefix=str(self.directory))
+        (self.directory / "uv-receipt.toml").write_text('[tool]\nrequirements = [{name = "netizen-cli"}]\n')
         def runner(argv, **kwargs):
             result = self.runner(argv, **kwargs)
             result.stdout = '{"version":"1.0"}'

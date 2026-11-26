@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack
 import hashlib
 import logging
 import re
@@ -44,10 +43,8 @@ from ..domain import (
     ScopeKind,
 )
 from ..error_messages import describe_error
-from ..external_calls import external_call
 from ..management.chat_directory import AvailableChat
 from ..management.service import ExactBindingTarget
-from ..session_providers import PartialFork
 
 from .app_values import (
     _CardReplyConversation,
@@ -65,10 +62,6 @@ class ForkChannel(SideChannel):
     async def _fork_source_title(self, binding: ThreadBinding) -> str:
         try:
             async with asyncio.timeout(3):
-                if self._local_sessions is not None:
-                    metadata = await self._management.binding_metadata_exact(
-                        binding.id, deadline=asyncio.get_running_loop().time() + 3)
-                    return metadata.name if metadata and metadata.name else binding.short_id
                 metadata = await self._runtime.thread_summary(binding.native_thread_id)
                 return metadata.name or binding.short_id
         except Exception:
@@ -119,7 +112,6 @@ class ForkChannel(SideChannel):
             selected = await self._card_display_group(selected_id)
             chats[selected_id] = selected or AvailableChat(selected_id, selected_id, None, None)
         display = dict(
-            claude=self._local_sessions is not None,
             source_title=title, project_alias=binding.project_alias,
             avatar_keys=(await self._chat_avatars.prepare(tuple(chats.values()))
                          if chat_snapshot is None else chat_snapshot.avatar_keys),
@@ -178,8 +170,7 @@ class ForkChannel(SideChannel):
                 raise CardActionError("Side 话题不支持创建持久分支，请返回普通会话使用 /fork。")
             notice = None
             try:
-                request = decode_fork_action(scope, getattr(action, "value", None), getattr(action, "form_value", None),
-                                             claude=self._local_sessions is not None)
+                request = decode_fork_action(scope, getattr(action, "value", None), getattr(action, "form_value", None))
             except ForkFormValidationError as error:
                 request, notice = error.draft, str(error)
             source = self._require_fork_source(scope, request.source)
@@ -216,9 +207,6 @@ class ForkChannel(SideChannel):
         source_title: str, message_id: str, sender_id: str,
     ) -> None:
         assert intent.target_chat_id is not None and intent.name is not None
-        claude = self._local_sessions is not None
-        if claude and intent.source_action != "keep":
-            raise CardActionError("Claude 会话分支只支持保留来源会话。")
         target_chat_id = intent.target_chat_id
         destination = None
         try:
@@ -266,7 +254,7 @@ class ForkChannel(SideChannel):
         if project.revision != intent.source.project_revision:
             raise CardActionError("来源 Project 已变化，请重新发送 /fork。")
         common = {"name": intent.name, "source_title": source_title, "project_alias": project.alias,
-                  "landing": intent.landing, "source_action": intent.source_action, "claude": claude}
+                  "landing": intent.landing, "source_action": intent.source_action}
         fork = root = binding = None
         child_id = None
         topic_url = None
@@ -279,21 +267,17 @@ class ForkChannel(SideChannel):
         async with provider.track_fork_creation(project.alias):
             try:
                 await self._safe_update_card(message_id, fork_status_card(status="creating", **common))
-                async with AsyncExitStack() as source_scope:
-                    await source_scope.enter_async_context(self._scope_coordinator.hold(scope.key))
+                async with self._scope_coordinator.hold(scope.key):
                     source = self._require_fork_source(scope, intent.source)
-                    if claude:
-                        # Competing inputs and controls must reach the Binding guard during the copy.
-                        await source_scope.aclose()
                     fork = await provider.copy_fork(source, expected_project_revision=project.revision,
-                                                    title=intent.name or None)
+                                                    title=intent.name)
                     child_id = fork.child_id
                 provider.require_fork_creation_open(project.alias)
-                root = await external_call(send_topic_message(self._channel, target_chat_id,
+                root = await send_topic_message(self._channel, target_chat_id,
                     fork_status_card(status="creating", **common),
                     SendOpts(receive_id_type="chat_id", uuid=hashlib.sha256(
                         (("netizen-fork-main:v1\0" if intent.landing == "main" else "netizen-fork-root:v1\0")
-                         + child_id).encode()).hexdigest()[:32])), isolate=claude)
+                         + child_id).encode()).hexdigest()[:32]))
                 if intent.landing == "main":
                     if not root.is_main_line:
                         raise TopicPublishError("飞书未确认消息发布到聊天主线，本次未绑定分支。", unknown=True)
@@ -301,11 +285,11 @@ class ForkChannel(SideChannel):
                     origin = root
                     topic_url = chat_open_url(target_chat_id)
                 else:
-                    origin = await external_call(complete_fresh_topic(
+                    origin = await complete_fresh_topic(
                         self._channel, root,
                         seed_content="分支创建结果请查看话题顶部卡片。创建成功后，可在本话题发送消息继续。",
                         seed_uuid=hashlib.sha256(("netizen-fork-seed:v1\0" + child_id).encode()).hexdigest()[:32],
-                    ), isolate=claude)
+                    )
                     if origin.thread_id is None or (target_chat_id == scope.chat_id and origin.thread_id == scope.topic_id):
                         raise TopicPublishError("飞书未创建新的普通话题，本次未绑定分支。", unknown=True)
                     destination = FeishuScope(self._app_id, target_chat_id, ScopeKind.TOPIC, origin.thread_id)
@@ -320,30 +304,27 @@ class ForkChannel(SideChannel):
                         root_message_id=root.message_id, creator_id=sender_id,
                         expected_project_revision=project.revision, context_anchor=anchor,
                         target_chat_kind=target.chat_kind,
-                        **({"verified_cwd": str(fork.verified_cwd)} if fork.verified_cwd is not None else {}),
                     )
                     binding, previous_id = created.binding, created.previous_active_binding_id
                     try:
-                        named = await fork.adopt(binding) if fork.adopt else True
+                        named = await fork.adopt(binding)
                     finally:
                         if intent.landing == "main":
                             # The persisted pointer already changed, as with /new;
                             # reconcile subscriptions even if adoption failed.
-                            await (self._local_sessions or self._runtime).binding_pointer_changed(previous_id, binding.id)
+                            await self._runtime.binding_pointer_changed(previous_id, binding.id)
                 status = "success"
                 if not named:
                     detail = "会话已创建；Codex 名称更新未确认，可稍后使用 /rename 修改。"
             except asyncio.CancelledError:
                 raise
-            except PartialFork as error:
-                child_id, detail = error.child_id, str(error)
             except Exception as error:
                 logger.warning("persistent fork creation incomplete", extra={"error_type": type(error).__name__})
                 detail = describe_error(error)
-                if binding is not None and not claude:
+                if binding is not None:
                     detail = "本地会话已保存，但订阅交接未确认；请先核查会话，不要重新创建。" + detail
             finally:
-                if fork is not None and binding is None and fork.release_unbound:
+                if fork is not None and binding is None:
                     await fork.release_unbound()
             if previous_id is not None:
                 replaced_session = previous_id[:8]

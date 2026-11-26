@@ -381,14 +381,9 @@ class WorktreeService:
     async def _usage_reasons(self, snapshot, sides, *, delete_sessions: bool,
                              project_deletion_bindings: frozenset[str] = frozenset(), usage_bindings=()) -> list[str]:
         record, reasons = snapshot.record, []
-        local = self._management.local
-        if local is not None and sides:
-            reasons.append("Claude 试点暂不支持【Side】。")
         associated = {binding.id for binding in snapshot.bindings}
         for binding in snapshot.bindings:
             usage = await self._runtime.worktree_usage(binding.id)
-            if local is not None and usage.get("status") != "idle":
-                reasons.append(usage.get("reason") or "关联 Claude 会话的工作目录仍在使用或无法确认已空闲。")
             current = self._bindings.get(binding.id)
             if current.native_thread_id != binding.native_thread_id:
                 reasons.append("关联会话已物化或身份发生改变，请重新预览。")
@@ -419,9 +414,7 @@ class WorktreeService:
         if any(side.parent_binding_id not in associated | project_deletion_bindings for side in sides):
             reasons.append("仍有非级联会话的 Side 使用此目录，请先结束该 Side。")
         if delete_sessions and any(binding.native_thread_id for binding in snapshot.bindings) and not self._management.native_delete_available:
-            reasons.append("Claude 试点暂不支持【会话删除】。" if local is not None else "Codex 会话删除能力不可用。")
-        if local is not None and local.occupying_bindings(Path(record.root)):
-            reasons.append("Claude 客户端仍占用此目录。")
+            reasons.append("Codex 会话删除能力不可用。")
         return reasons
 
     async def _delete_check(self, record: WorktreeRecord) -> tuple[WorktreeState, list[str]]:
@@ -461,8 +454,7 @@ class WorktreeService:
                               "nativeThreadId": binding.native_thread_id,
                               "scopeKey": binding.scope_key} for binding in snapshot.bindings],
                 "sideCount": len(sides), "protectedSessionCount": len(
-                    {b.id for b in usage_bindings} | (self._management.local.occupying_bindings(Path(snapshot.record.root))
-                                                      if self._management.local else frozenset())),
+                    {b.id for b in usage_bindings} | (frozenset())),
                 "safe": not reasons, "reasons": list(dict.fromkeys(reasons)),
                 "externalUseWarning": "仅检查本实例已知关联；请确认没有其他客户端正在使用目录。"}
 
@@ -511,12 +503,9 @@ class WorktreeService:
                             raise WorktreeError("in_use", "Side 尚未确认结束，目录保留。")
                     for binding in snapshot.bindings:
                         try:
-                            if self._management.local is not None:
-                                await self._management.local.delete_lazy_resource(binding.id)
-                            else:
-                                await self._management.delete_exact_binding(
-                                    target=ExactBindingTarget(binding.scope_key, binding.id, None),
-                                    expected_native_thread_id=binding.native_thread_id)
+                            await self._management.delete_exact_binding(
+                                target=ExactBindingTarget(binding.scope_key, binding.id, None),
+                                expected_native_thread_id=binding.native_thread_id)
                         except BindingNotFound:
                             try:
                                 self._bindings.get(binding.id)

@@ -1,11 +1,9 @@
 "use strict";
 
 const unavailableOperations = new Set((document.body.dataset.unavailable || "").split(" "));
-const localDirectory = unavailableOperations.has("history");
 const inheritedModel = unavailableOperations.has("model");
 const replyCardUnavailable = unavailableOperations.has("reply_card");
 const progressUnavailable = unavailableOperations.has("progress");
-const ownerOnly = document.body.dataset.ownerOnly === "true";
 function hideProviderElement(node) {
   node.dataset.providerHidden = "";
   node.hidden = true;
@@ -16,20 +14,6 @@ for (const [operation, id] of [
 ]) {
   if (unavailableOperations.has(operation)) hideProviderElement(document.getElementById(id));
 }
-if (ownerOnly) {
-  hideProviderElement(document.getElementById("admin-user-add"));
-  for (const node of document.querySelectorAll("[data-codex-only]")) hideProviderElement(node);
-  for (const node of document.querySelectorAll("[data-claude-text]")) node.textContent = node.dataset.claudeText;
-}
-if (localDirectory) {
-  hideProviderElement(document.getElementById("session-search-help"));
-  hideProviderElement(document.querySelector("#session-search").closest("label"));
-  document.querySelector("#session-inventory-state option[value=archived]").remove();
-  document.querySelector("#session-inventory-state option[value=active]").textContent = "全部本地会话";
-  hideProviderElement(document.querySelector("[data-time-range-id=session-updated]"));
-  for (const header of document.querySelectorAll("[data-session-sort=session][data-sort-by=updatedAt]")) header.disabled = true;
-}
-
 const state = {
   tab: "projects",
   sessionTab: "ordinary",
@@ -1460,7 +1444,6 @@ function subscriptionStateLabel(value) {
 }
 
 function runtimeLabel(runtime) {
-  if (runtime.localLabel) return runtime.localLabel;
   if (runtime.primaryStatusResolution === "archived") return "—";
   if (runtime.primaryStatus != null) {
     const label = localizedLabel(runtimeLabels, runtime.primaryStatus);
@@ -1477,21 +1460,12 @@ function runtimeLabel(runtime) {
 function updateRuntimeCell(target, runtime) {
   const archived = runtime.primaryStatusResolution === "archived";
   const label = runtimeLabel(runtime);
-  const samples = runtime.observations;
-  const details = Object.entries(samples || {}).filter(([, field]) => field && field.label !== null)
-    .map(([key, field]) => {
-      const label = field.label ?? key;
-      if (field.availability !== "observed") return `${label}：${field.availability}`;
-      const stamp = field.sampledAt == null ? "" : `（${field.source} · ${sessionDateLabel(new Date(field.sampledAt * 1000).toISOString())}）`;
-      return `${label}：${field.value}${stamp}`;
-    }).join(" · ");
   const title = archived ? "已归档，不查询运行态" : label;
   const subscriptionLabel = !archived && runtime.subscriptionState
     ? `订阅：${subscriptionStateLabel(runtime.subscriptionState)}` : "";
   const previous = target.querySelector(".runtime-primary");
   if (
     previous?.textContent === label
-    && (target.querySelector(".runtime-observations")?.textContent || "") === details
     && previous.title === title
     && (target.querySelector(".runtime-subscription")?.textContent || "") === subscriptionLabel
   ) return;
@@ -1500,12 +1474,6 @@ function updateRuntimeCell(target, runtime) {
   primary.textContent = label;
   primary.title = title;
   target.replaceChildren(primary);
-  if (details) {
-    const observed = document.createElement("small");
-    observed.className = "runtime-observations";
-    observed.textContent = details;
-    target.append(document.createElement("br"), observed);
-  }
   if (subscriptionLabel) {
     const subscription = document.createElement("small");
     subscription.className = "runtime-subscription";
@@ -1653,9 +1621,6 @@ function observeSessionPreviews(body) {
 }
 
 function sessionName(session) {
-  if (document.body.dataset.backend === "claude" && session.nativeThreadId && !session.nativeTitle && !session.nativePreview) {
-    return session.shortId;
-  }
   return session.nativeTitle || (session.catalogState === "lazy" ? "未开始的会话" : "未命名会话");
 }
 
@@ -1819,7 +1784,7 @@ function renderSessions(data, batchActions) {
     cell(row, session.projectAlias);
     const settings = session.sessionSettings;
     cell(row, [sessionConfigurationSummary(settings), progressUnavailable ? "" : progressCardSourceLabel(settings)].filter(Boolean).join(" · "));
-    cell(row, localDirectory || session.catalogState === "lazy" ? sessionDateLabel(session.registeredAt) : nativeSessionDateLabel(session.createdAt), "session-time");
+    cell(row, session.catalogState === "lazy" ? sessionDateLabel(session.registeredAt) : nativeSessionDateLabel(session.createdAt), "session-time");
     cell(row, sessionUpdatedAtLabel(session), "session-time");
     const actions = actionsCell(row);
     wireSessionActions(actions, session);
@@ -1841,8 +1806,7 @@ function wireSessionActions(actions, session) {
   }
   if (a.stop) actions.append(actionButton("停止", async () => await window.NetizenConfirm.ask({ body: "停止这个会话的当前运行？", danger: false }) && mutate("/api/v1/sessions/stop", a.stop)));
   if (a.activate) {
-    const container = localDirectory && a.configure ? secondary : actions;
-    container.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
+    actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
   }
   if (a.rename) {
     const button = actionButton("重命名", () => openSessionRenameEditor(session, button));
@@ -1942,28 +1906,19 @@ function rowByIdentity(selector, key, value) {
 let sessionRenameEditor = null;
 const sessionRenameInput = (name) => document.querySelector(`#session-rename-${name}`);
 
-function sessionRenameDraft() {
-  const input = sessionRenameInput("name");
-  if (!input.dataset.maxCodePoints) return { name: input.value.trim(), tooLong: false };
-  // Match Python str.split(), including the four additional ASCII separators.
-  const words = input.value.match(/[^\p{White_Space}\u001c-\u001f]+/gu);
-  const name = (words || []).join(" ");
-  return { name, tooLong: [...name].length > Number(input.dataset.maxCodePoints) };
-}
-
 function renderSessionRenameEditor() {
   const editor = sessionRenameEditor;
   if (!editor) return;
   const busy = editor.generating || editor.saving;
-  const { name, tooLong } = sessionRenameDraft();
+  const name = sessionRenameInput("name").value.trim();
   sessionRenameInput("name").disabled = busy;
   sessionRenameInput("generate").disabled = busy || !editor.session.actions.rename || state.authExpired;
   sessionRenameInput("save").disabled = busy || !editor.session.actions.rename
-    || !name || tooLong || state.authExpired;
+    || !name || state.authExpired;
   sessionRenameInput("cancel").disabled = editor.saving;
   sessionRenameInput("close").disabled = editor.saving;
   sessionRenameInput("status").textContent = editor.generating ? "正在生成中…"
-    : editor.saving ? "正在保存…" : editor.error || (tooLong ? "会话名称最多 120 个字符。" : "");
+    : editor.saving ? "正在保存…" : editor.error || "";
   sessionRenameInput("status").classList.toggle("error", Boolean(editor.error));
   sessionRenameInput("editor").setAttribute("aria-busy", String(busy));
 }
@@ -2035,8 +1990,8 @@ async function generateSessionName() {
 async function saveSessionName(event) {
   event.preventDefault();
   const editor = sessionRenameEditor;
-  const { name, tooLong } = sessionRenameDraft();
-  if (!editor || editor.generating || editor.saving || !editor.session.actions.rename || !name || tooLong || state.authExpired) return;
+  const name = sessionRenameInput("name").value.trim();
+  if (!editor || editor.generating || editor.saving || !editor.session.actions.rename || !name || state.authExpired) return;
   const action = editor.session.actions.rename;
   sessionLists.session.updateActions(editor.session, { rename: null });
   editor.returnFocus.disabled = true;
@@ -4450,10 +4405,6 @@ function pageQuery(tab, sessionTab, raw = "") {
     if (!query.has("pageSize")) query.set("pageSize", "20");
     if (!query.has("sortBy")) query.set("sortBy", "updatedAt");
     if (!query.has("sortDirection")) query.set("sortDirection", "desc");
-  }
-  if (localDirectory && tab === "sessions" && sessionTab === "ordinary") {
-    query.set("sortBy", "createdAt");
-    for (const key of ["updatedRange", "updatedFrom", "updatedBefore", "searchTerm"]) query.delete(key);
   }
   if (tab === "schedules" && !query.has("ended")) query.set("ended", "false");
   return query;

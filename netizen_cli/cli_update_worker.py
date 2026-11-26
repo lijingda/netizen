@@ -29,7 +29,7 @@ _interrupted_signal: int | None = None
 _CHILD_STOP_GRACE = 5.0
 
 
-def read_uv_tool_receipt(receipt: Path) -> tuple[dict, bool]:
+def read_uv_tool_receipt(receipt: Path) -> dict:
     """Read the primary requirement of the supported uv tool receipt."""
     if receipt.is_symlink():
         raise ValueError("symlinked uv tool receipt")
@@ -44,7 +44,7 @@ def read_uv_tool_receipt(receipt: Path) -> tuple[dict, bool]:
     extras = primary.get("extras", [])
     if not isinstance(extras, list) or not all(isinstance(item, str) and item for item in extras):
         raise ValueError("invalid primary tool extras")
-    return tool, "claude" in (item.lower() for item in extras)
+    return tool
 
 
 class UpdateInterrupted(KeyboardInterrupt):
@@ -327,11 +327,8 @@ def execute(plan: dict[str, Any], *, runner: Any = _run_owned) -> dict[str, Any]
         installed = json.loads(validation.stdout)
         if not isinstance(installed, dict) or not isinstance(installed.get("version"), str):
             raise ValueError("Fresh-process installation validation returned an invalid result")
-        if "tool_requests_claude" in package:
-            receipt = Path(package["prefix"]) / "uv-receipt.toml"
-            _, requested = read_uv_tool_receipt(receipt)
-            if requested != package["tool_requests_claude"]:
-                raise ValueError("The upgraded uv tool receipt changed the requested Claude extra")
+        if package.get("backend") == "uv-tool":
+            read_uv_tool_receipt(Path(package["prefix"]) / "uv-receipt.toml")
         report["package"].update(state="verified", after_version=installed["version"])
         report["phase"] = "restoring"
         report["unexecuted"] = [f"start:{item['root']}" for item in report["instances"] if item["was_running"]]

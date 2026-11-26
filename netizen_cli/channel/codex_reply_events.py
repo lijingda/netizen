@@ -25,7 +25,6 @@ from .app_values import (
 from .reply_events import (
     Activity,
     ActivityChanged,
-    DeliveryPolicy,
     PresentationKey,
     ReplyTarget,
     RunEnded,
@@ -53,7 +52,7 @@ class CodexReplyEvents:
         parent_binding_id: str | None = None,
         root_message_id: str | None = None,
     ) -> TurnOpened:
-        target = ReplyTarget(key, origin, key)
+        target = ReplyTarget(key, origin)
         owner, thread, turn = key.index
 
         def read() -> Activity | None:
@@ -82,7 +81,7 @@ class CodexReplyEvents:
             )
 
         return TurnOpened(
-            target, DeliveryPolicy.BOUNDED_FALLBACK, feedback, observe, retain,
+            target, feedback, observe, retain,
             reply, reply_partial, validate_reply, reuse_existing=goal,
             process_binding_id=parent_binding_id, process_root_id=root_message_id,
         )
@@ -96,7 +95,7 @@ class CodexReplyEvents:
         side = isinstance(outcome, SideTurnOutcome)
         owner = outcome.side_id if isinstance(outcome, SideTurnOutcome) else outcome.binding_id
         key = PresentationKey(owner, outcome.thread_id, outcome.turn_id, side)
-        target = ReplyTarget(key, outcome.origin, key)
+        target = ReplyTarget(key, outcome.origin)
         status, content = terminal_view(
             outcome.status, _task_has_error(outcome),
             failure=lambda: _task_failure_text(outcome),
@@ -115,7 +114,6 @@ class CodexReplyEvents:
         )
         return TurnResult(
             target=target,
-            process_root_id=outcome.root_message_id if isinstance(outcome, SideTurnOutcome) else None,
             execution_unknown=outcome.execution_unknown,
             status=status,
             content=content,
@@ -129,7 +127,6 @@ class CodexReplyEvents:
             physical_turn_id=(native.final_physical_turn_id or key.turn_id)
             if isinstance(native, GoalOutcome)
             else key.turn_id,
-            run_continues=False,
             allow_suppression=not isinstance(native, GoalOutcome)
             or (
                 native.error is None

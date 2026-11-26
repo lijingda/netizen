@@ -56,13 +56,6 @@ class AdminPermissionDenied(AdminUsersError):
         super().__init__("current administrator permission is required")
 
 
-class OwnerOnly(AdminUsersError):
-    code = "owner_only"
-
-    def __init__(self) -> None:
-        super().__init__("Claude 实例仅限所有者使用，不能添加管理员。")
-
-
 class LastAdministrator(AdminUsersError):
     code = "last_administrator"
 
@@ -238,7 +231,6 @@ class AdminUsers:
         self.path = root / "state/admin-users.json"
         self.app_id = app_id
         self.lock = threading.RLock()
-        self._owner_only = False
         self._available = True
         self._revision = 0
         self._members: dict[AdminIdentity, AdminMember] = {}
@@ -271,13 +263,6 @@ class AdminUsers:
             self._require_available()
             return self._members.get(identity) if identity.app_id == self.app_id else None
 
-    def restrict_to_owner(self) -> AdminIdentity:
-        with self.lock:
-            members = self.list()
-            if len(members) != 1:
-                raise AdminUsersError(f"Claude 实例需要当前应用的唯一管理员。请检查 {self.path}。")
-            self._owner_only = True
-            return members[0].identity
 
     def subscribe_revocation(self, callback: Callable[[AdminIdentity], None]) -> None:
         """Listeners run synchronously under the shared lock; no network or awaits."""
@@ -388,8 +373,6 @@ class AdminUsers:
     def add(self, identity: AdminIdentity, *, actor: AdminIdentity, expected_revision: int,
             name: str = "", avatar_url: str | None = None) -> AdminMember:
         with self.lock:
-            if self._owner_only:
-                raise OwnerOnly()
             self._check_mutation(actor, expected_revision)
             member = self._new_member(identity, name=name, avatar_url=avatar_url)
             self._save({**self._members, identity: member}, self._revision + 1)

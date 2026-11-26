@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import InitVar, dataclass, field, replace
-from enum import Enum
 from pathlib import Path
 from typing import Literal
 
@@ -11,10 +10,9 @@ from lark_channel import OutboundCard, OutboundPost, SendResult
 
 from ..bindings import BindingTaskFeedback
 from ..file_evidence import FileEvidence
-from ..ordinary_sessions import LogicalReply, TerminalStatus as TerminalStatus
+from ..ordinary_sessions import TerminalStatus as TerminalStatus
 from ..partial_answers import PartialAnswer as NativePartial
 from ..runtime.contracts import SideTurnActivitySnapshot, TurnActivitySnapshot
-from .topics import CardReplyLocation
 
 Activity = TurnActivitySnapshot | SideTurnActivitySnapshot
 
@@ -60,7 +58,6 @@ class PresentationKey:
 class ReplyTarget:
     key: PresentationKey
     origin: object
-    run: PresentationKey | None
 
     def partial(self, item: NativePartial, *, presentation_id: str | None = None) -> PartialAnswer:
         key = replace(self.key, thread_id=item.thread_id, turn_id=presentation_id or item.turn_id)
@@ -96,48 +93,18 @@ class ActivityChanged:
                                            for p in snapshot.partial_answers))
 
 
-class DeliveryPolicy(Enum):
-    BOUNDED_FALLBACK = "bounded_fallback"
-    ITEM_RECEIPTS = "item_receipts"
-
-    @property
-    def confirms_items(self) -> bool:
-        return self is DeliveryPolicy.ITEM_RECEIPTS
-
-
 @dataclass(frozen=True, slots=True)
 class TurnOpened:
     target: ReplyTarget
-    policy: DeliveryPolicy
     feedback: BindingTaskFeedback
     observe: Callable[[], ActivityChanged | None]
     retain_after_send: Callable[[], bool]
     reply: Callable[[OutboundCard], Awaitable[SendResult]]
     reply_partial: Callable[[OutboundPost], Awaitable[SendResult]]
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
-    retained: Callable[[], bool] = lambda: True
-    location: CardReplyLocation | None = None
     reuse_existing: bool = False
-    run_reply: LogicalReply | None = None
     process_root_id: str | None = None
     process_binding_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RunDisplay:
-    reply: LogicalReply | None
-    publishable: Callable[[], bool]
-    current: Callable[[], str]
-
-
-@dataclass(frozen=True, slots=True)
-class ItemDelivery:
-    """Receipt policy for content which can only be attempted once."""
-    display: RunDisplay
-    location: CardReplyLocation
-    send: Callable[[str | OutboundPost | OutboundCard, str | None, CardReplyLocation], Awaitable[SendResult]]
-    plain_suffix: Callable[[], str]
-    deadline: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,17 +112,12 @@ class RunEnded:
     target: ReplyTarget
     status: TerminalStatus
     mention_user_id: str | None
-    display: RunDisplay | None = None
-    location: CardReplyLocation | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RunState:
     target: ReplyTarget
-    notice: str | None = None
-    display: RunDisplay | None = None
-    background: bool = False
-    send_notice: Callable[[str], Awaitable[SendResult]] | None = None
+    notice: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,11 +143,8 @@ class TurnResult:
     file_binding_id: str
     physical_turn_id: str
     allow_suppression: bool
-    run_continues: bool
-    end: RunEnded | None
+    end: RunEnded
     receipt: DeliveryReceipt | None = None
-    items: ItemDelivery | None = None
-    process_root_id: str | None = None
     execution_unknown: bool = False
     partial_answers: tuple[NativePartial, ...] = field(init=False)
 
@@ -209,7 +168,7 @@ class TurnResult:
 
     @property
     def mention_user_id(self) -> str | None:
-        return self.end.mention_user_id if self.end else None
+        return self.end.mention_user_id
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "partial_answers", self.target.exact_answers(self.partials))

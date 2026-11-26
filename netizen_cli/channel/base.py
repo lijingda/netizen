@@ -17,7 +17,6 @@ from lark_channel import (
     SendResult,
 )
 
-from ..external_calls import external_call
 from ..bindings import (
     BindingNotFound,
     BindingStore,
@@ -52,7 +51,7 @@ from .reply_presenter import (
 )
 from .reply_suppression import ReplySuppression
 from ..codex_runtime import CodexRuntime
-from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort
+from ..ordinary_sessions import OrdinarySessionPort
 from ..session_settings import SessionFormView
 from ..runtime.contracts import (
     NativeThreadMetadata,
@@ -75,9 +74,7 @@ from ..domain import (
     SettingsSection,
     ScopeKind,
 )
-from ..ordinary_sessions import ClaudeInputAnchor, ConversationTarget
-from .topics import CardReplyLocation, send_conversation_message
-from ..backends import BackendPolicy, BackendUnsupported
+from ..backends import BackendPolicy
 from ..experience import (
     command_help,
     parse_message,
@@ -189,17 +186,6 @@ def _session_title(
         )
         or "未命名会话"
     )
-
-
-def _local_session_title(binding: ThreadBinding, metadata: NativeThreadMetadata | None) -> str:
-    if metadata is not None:
-        name = _normalized_thread_text(metadata.name, max_chars=constants.SESSION_TITLE_MAX_CHARS)
-        if name:
-            return name
-        preview = _normalized_thread_preview(metadata.preview, max_chars=constants.SESSION_TITLE_MAX_CHARS)
-        if preview:
-            return f"会话预览：{preview}"
-    return binding.short_id
 
 
 def _session_card_cursor(page: SessionCardPage, scope: FeishuScope) -> str:
@@ -331,15 +317,7 @@ class ChannelState:
     _channel: ReplyChannel
     _chat_avatars: ChatAvatarImages
     _policy: BackendPolicy
-    _codex: CodexRuntime | None
-
-    @property
-    def _runtime(self) -> CodexRuntime:
-        if self._codex is None:
-            raise BackendUnsupported("原生 Codex 操作")
-        return self._codex
-
-    _local_sessions: LocalSessionManagement | None
+    _runtime: CodexRuntime
     _session_form: SessionFormView
     _ordinary: OrdinarySessionPort
     _bindings: BindingStore
@@ -352,7 +330,6 @@ class ChannelState:
     _management: InstanceManagementService
     _scope_coordinator: ScopeCoordinator
     _scheduled_completions: dict[str, _ScheduledCompletion]
-    _open_new_cards: dict[str, str]
     _rename_name_generations: dict[str, _RenameNameGeneration]
     _reactions: _ReactionController
     _reply_suppression: ReplySuppression
@@ -402,26 +379,13 @@ class ChannelState:
             return Path(binding.working_cwd)
         return self._projects.resolve_for_binding(binding.project_alias).cwd
 
-    async def _reply_to_origin(self, message: Any, content: Any, *, location: CardReplyLocation | None = None) -> SendResult:
-        if isinstance(message, ConversationTarget):
-            scope = message.scope
-            if scope.app_id != self._app_id:
-                raise ValueError("Claude conversation belongs to another app")
-            root = None
-            if scope.kind is ScopeKind.TOPIC:
-                if not isinstance(message.source, ClaudeInputAnchor) or message.source.scope != scope:
-                    raise ValueError("Claude topic destination is unconfirmed")
-                root = message.source.topic_root_id
-                if not root:
-                    raise ValueError("Claude topic has no confirmed root")
-            return await send_conversation_message(self._channel, scope, root, content, message.delivery_id, message.publishable,
-                                                   single_attempt=message.single_attempt, location=location)
+    async def _reply_to_origin(self, message: Any, content: Any) -> SendResult:
         if isinstance(message, (ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin, _CardReplyTarget)):
-            return await external_call(self._channel.reply(message, content, SendOpts(
+            return await self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=message.conversation.thread_id is not None,
                 reply_target_gone="fail",
-            )), isolate=self._local_sessions is not None)
+            ))
         if isinstance(message, ScheduledOrigin):
             # A scheduled result belongs to this exact execution topic. The
             # SDK's default target-gone fallback would create a main-chat message.
@@ -429,7 +393,7 @@ class ChannelState:
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=True, reply_target_gone="fail",
             ))
-        return await external_call(self._channel.reply(message, content), isolate=self._local_sessions is not None)
+        return await self._channel.reply(message, content)
 
     @staticmethod
     def _scheduled_message_matches(message: ScheduledOrigin, data: object, message_id: str | None) -> bool:
@@ -579,7 +543,7 @@ class ChannelState:
             message_id=_message_id(message),
             sender_id=_sender_id(message),
             text=_body_text(message, bot_open_id=_channel_bot_open_id(self._channel)),
-            available_capabilities=self._codex.available_capabilities if self._codex is not None else (),
+            available_capabilities=self._runtime.available_capabilities,
             policy=self._policy,
         )
 
@@ -901,7 +865,7 @@ class ChannelState:
             return False
         try:
             async with asyncio.timeout(_REACTION_OPERATION_TIMEOUT_SECONDS):
-                result = await external_call(self._channel.add_reaction(message_id, emoji_type), isolate=self._local_sessions is not None)
+                result = await self._channel.add_reaction(message_id, emoji_type)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -919,19 +883,14 @@ class ChannelState:
         return True
 
     async def _update_card(self, message_id: str, content: Any) -> SendResult:
-        return await external_call(self._channel.update_card(message_id, content.card), isolate=self._local_sessions is not None)
+        return await self._channel.update_card(message_id, content.card)
 
-    async def _safe_update_card(self, message_id: str, content: Any, *, can_write: Callable[[], bool] = lambda: True,
-                                validate: Callable[[SendResult], SendResult] | None = None) -> bool:
+    async def _safe_update_card(self, message_id: str, content: Any) -> bool:
         if not message_id:
             return False
         for attempt in range(len(constants.CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS) + 1):
-            if not can_write():
-                return False
             try:
                 result = await self._update_card(message_id, content)
-                if validate:
-                    result = validate(result)
             except Exception:
                 logger.exception("failed to render card action result")
                 return False
@@ -983,5 +942,5 @@ class ChannelState:
         return "\n\n".join(lines)
 
     def _help(self) -> str:
-        capabilities = self._codex.available_capabilities if self._codex is not None else ()
+        capabilities = self._runtime.available_capabilities
         return command_help(capabilities, policy=self._policy)

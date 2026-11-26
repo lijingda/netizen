@@ -305,8 +305,7 @@ class SideChannel(PromptChannel):
             if self._is_instance_admin is None:
                 raise ValueError("administrator check is unavailable")
             is_admin = self._is_instance_admin(
-                self._app_id, intent.sender_id if self._policy.owner_only
-                else getattr(getattr(message, "sender", None), "open_id", None),
+                self._app_id, getattr(getattr(message, "sender", None), "open_id", None),
             )
         except Exception as error:
             logger.warning("group enable administrator check failed", extra={"error_type": type(error).__name__})

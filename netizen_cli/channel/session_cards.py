@@ -12,7 +12,6 @@ from lark_channel import (
 )
 
 from ..session_views import Availability, ModelStatusFields, SessionField
-from ..bindings import BindingCursor
 from ..bindings import (
     BindingTaskFeedback,
     BindingTurnSettings,
@@ -28,7 +27,6 @@ from ..cards import (
     new_binding_card,
 )
 from .session_pages import SessionCardPage
-from ..cards.controls import local_status_card
 from ..runtime.contracts import (
     NativeThreadMetadata,
     ThreadLifecycleError,
@@ -50,7 +48,6 @@ from ..management import (
 from . import constants
 from .base import (
     CHANNEL_LOGGER_NAME,
-    _local_session_title,
     _session_title,
     _session_card_cursor,
 )
@@ -124,12 +121,6 @@ class SessionCardChannel(QuestionChannel):
             )
             return metadata
 
-    async def _local_status_card(self, scope: FeishuScope, binding: ThreadBinding) -> OutboundCard:
-        assert self._local_sessions is not None
-        status = await self._management.binding_status_exact(binding.id)
-        metadata = await self._read_thread_metadata((binding,))
-        return local_status_card(scope, binding, status, self._local_sessions.observation_defaults,
-                                 title=_local_session_title(binding, metadata.get(binding.native_thread_id)))
 
     async def _sessions_card(
         self,
@@ -145,14 +136,6 @@ class SessionCardChannel(QuestionChannel):
             navigation = SessionCardPage.decode(session_cursor, scope)
         except ValueError as error:
             raise CardActionError(str(error)) from error
-        local_directory = not self._management.session_reads.native_catalog
-        if local_directory:
-            if navigation.state == "archived":
-                raise CardActionError("Claude 试点暂不支持【已归档会话】。")
-            if session_cursor is None:
-                navigation = SessionCardPage("lazy")
-            if navigation.state != "lazy" or (navigation.cursor is not None and not isinstance(navigation.cursor, BindingCursor)):
-                raise CardActionError("会话分页已过期，请重新发送 /sessions。")
         if navigation.state == "archived":
             return await self._archived_sessions_card(
                 scope=scope, session_cursor=session_cursor, notice=notice,
@@ -160,7 +143,6 @@ class SessionCardChannel(QuestionChannel):
         deadline = asyncio.get_running_loop().time() + constants.SESSION_QUERY_TIMEOUT_SECONDS
         previous = navigation.previous()
         inventory = await self._management.query_scope_sessions(
-            recover_previous=local_directory and previous is None and navigation.page > 1,
             scope=scope, lazy=navigation.state == "lazy", cursor=navigation.cursor,
             limit=SESSIONS_PAGE_SIZE, deadline=deadline,
         )
@@ -190,20 +172,14 @@ class SessionCardChannel(QuestionChannel):
                 short_id=binding.short_id,
                 project_alias=binding.project_alias,
                 native_thread_id=binding.native_thread_id,
-                title=(_local_session_title(binding, metadata) if local_directory else _session_title(binding, metadata)),
+                title=(_session_title(binding, metadata)),
                 state=projection.primary_status or "暂不可用",
-                can_stop_all=projection.can_stop_all, can_stop=projection.can_stop,
-                state_label=projection.local_label, observations=projection.observations,
-                registered_at=binding.created_at,
                 catalog_unconfirmed=item.inventory_state is SessionInventoryState.UNKNOWN,
                 active=binding.active,
                 activity_revision=snapshot.activity_revision,
-                turn_id=snapshot.turn.turn_id if snapshot.turn is not None else projection.control_turn_id,
+                turn_id=snapshot.turn.turn_id if snapshot.turn is not None else None,
             ))
         current_session = sessions.pop() if current is not None else None
-        if local_directory and previous is None and navigation.page:
-            previous = (SessionCardPage("lazy", navigation.page - 1, (inventory.previous_cursor,))
-                        if inventory.previous_cursor is not None else SessionCardPage("lazy"))
         return sessions_card(
             scope=scope, sessions=tuple(sessions), current=current_session,
             native_delete_available=self._management.native_delete_available,
@@ -215,7 +191,7 @@ class SessionCardChannel(QuestionChannel):
                 if inventory.next_cursor is not None else None
             ),
             active_binding_id=inventory.active_binding_id,
-            lazy=navigation.state == "lazy", has_lazy=inventory.has_lazy, notice=notice, local_directory=local_directory,
+            lazy=navigation.state == "lazy", has_lazy=inventory.has_lazy, notice=notice,
         )
 
     async def _archived_sessions_card(

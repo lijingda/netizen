@@ -30,10 +30,9 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from functools import partial
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, assert_never
+from typing import Any, assert_never
 
 from lark_channel import (
     ChatQueueConfig,
@@ -100,7 +99,7 @@ from .schedules.scheduler import Scheduler
 from .sessions.mcp import SessionMcpRunner
 from .sessions.policy import SessionPolicyService
 from .sessions.service import SessionService
-from .ordinary_sessions import OrdinaryEvent, OrdinarySessionPort, SessionShutdownPort
+from .ordinary_sessions import OrdinarySessionPort, SessionShutdownPort
 from .runtime.codex_ordinary import CodexOrdinarySessions
 from .runtime.codex_session_reads import CodexSessionReads
 from .thread_history import AppServerThreadHistory
@@ -110,11 +109,6 @@ from .turn_plan_observer import (
     TurnActivityObservationUnavailable,
 )
 
-if TYPE_CHECKING:
-    from .runtime.claude_client import ClaudeClients
-    from .runtime.claude_ordinary import ClaudeOrdinarySessions
-
-
 _IMPORT_SECONDS = time.monotonic() - _IMPORT_STARTED_AT
 
 
@@ -123,7 +117,6 @@ logger = logging.getLogger(__name__)
 
 _CODEX_SERVICE_CONFIG_OVERRIDES = ("allow_login_shell=false",)
 _SHUTDOWN_BUDGET_SECONDS = 60.0
-_CLAUDE_SHUTDOWN_CAP_SECONDS = 30.0
 _READY_MARKER_CONTENT = b"netizen service ready\n"
 _LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOG_BACKUP_COUNT = 2
@@ -219,7 +212,6 @@ class ServiceCore:
         self._backend: BackendAssembly | None = None
         self._codex: AsyncCodex | None = None
         self._runtime: CodexRuntime | None = None
-        self._claude: ClaudeOrdinarySessions | None = None
         self._management: InstanceManagementService | None = None
         self._feishu_read_client: Any | None = None
         self._admin: AdminWebRunner | None = None
@@ -246,43 +238,9 @@ class ServiceCore:
                 if not users.has_admins:
                     raise SetupError("Admin administrator missing; run netizen setup --root for this instance")
                 return self._assemble_codex
-            case "claude":
-                owner = users.restrict_to_owner()
-                from .claude_installation import REPAIR
-                try:
-                    from .runtime.claude_client import BundledClaudeClients
-                except ImportError as error:
-                    raise SetupError(REPAIR) from error
-                # Verify the optional installation before even binding the Admin listener.
-                return partial(self._assemble_claude, owner, BundledClaudeClients())
             case _:
                 assert_never(backend)
 
-    async def _assemble_claude(
-        self, owner: AdminIdentity, clients: ClaudeClients,
-        _editor: ConfigFileEditor | None, progress_card_config: ProgressCardConfigService,
-    ) -> BackendAssembly:
-        from .runtime.claude_ordinary import ClaudeOrdinarySessions
-        from .session_providers import SessionNames
-
-        async def completed(event: OrdinaryEvent) -> None:
-            assert self.application is not None
-            await self.application.handle_ordinary_completion(event)
-
-        async def notice(origin: object, text: str) -> None:
-            assert self.application is not None
-            await self.application.reply_ordinary_notice(origin, text)
-
-        self._claude = ClaudeOrdinarySessions(
-            bindings=self._store, clients=clients, owner_id=owner.open_id,
-            on_completion=completed, notice=notice, progress_card_defaults=lambda: progress_card_config.current,
-        )
-        return BackendAssembly(
-            self._claude, self._claude,
-            ManagementRuntimePort(None, ordinary=self._claude, local=self._claude,
-                                  names=SessionNames(writer=self._claude), local_summary=clients.session_metadata,
-                                  local_forks=self._claude),
-        )
 
     async def _assemble_codex(
         self, editor: ConfigFileEditor | None, progress_card_config: ProgressCardConfigService,
@@ -462,6 +420,7 @@ class ServiceCore:
                 self._admin.attach_management(
                     self._management, session_policy=self._session_policy, group_access=group_access,
                 )
+            assert self._runtime is not None
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
                 channel=self._channel,
@@ -482,34 +441,33 @@ class ServiceCore:
                     AdminIdentity(app_id, open_id),
                 ) is not None,
             )
-            if self._runtime is not None:
-                assert self._codex is not None and self._session_mcp is not None and self._session_policy is not None
-                self._session_service = SessionService(
-                    bindings=self._store,
-                    runtime=self._runtime,
-                    app_id=self._settings.app_id,
-                    policy=self._session_policy,
-                    create_thread=self.application.create_session_thread,
-                    send_message=self.application.send_session_message,
-                    suppress_reply=self.application.suppress_reply,
-                    reads=CodexSessionReads(self._codex, AppServerThreadHistory(self._codex)),
-                    worktrees=worktrees,
-                )
-                self._session_mcp.attach(self._session_service.call)
-                if self._outcome_mcp is not None:
-                    self._outcome_mcp.attach(self.application.report_run_outcome)
-                self._scheduler = Scheduler(
-                    bindings=self._store, runtime=self._runtime,
-                    app_id=self._settings.app_id,
-                    dispatch=self.application.dispatch_scheduled_run,
-                )
-                schedules.set_wake_handler(self._scheduler.wake)
-                schedules.set_refresh_handler(self._scheduler.refresh)
-                schedules.set_run_now_handler(self._scheduler.run_now)
-                self._management.set_schedule_creation_drain(self._scheduler.drain_project_creation)
-                await self._scheduler.recover()
-                if backend.expired_sides:
-                    await self.application.refresh_expired_side_cards(backend.expired_sides)
+            assert self._codex is not None and self._session_mcp is not None and self._session_policy is not None
+            self._session_service = SessionService(
+                bindings=self._store,
+                runtime=self._runtime,
+                app_id=self._settings.app_id,
+                policy=self._session_policy,
+                create_thread=self.application.create_session_thread,
+                send_message=self.application.send_session_message,
+                suppress_reply=self.application.suppress_reply,
+                reads=CodexSessionReads(self._codex, AppServerThreadHistory(self._codex)),
+                worktrees=worktrees,
+            )
+            self._session_mcp.attach(self._session_service.call)
+            if self._outcome_mcp is not None:
+                self._outcome_mcp.attach(self.application.report_run_outcome)
+            self._scheduler = Scheduler(
+                bindings=self._store, runtime=self._runtime,
+                app_id=self._settings.app_id,
+                dispatch=self.application.dispatch_scheduled_run,
+            )
+            schedules.set_wake_handler(self._scheduler.wake)
+            schedules.set_refresh_handler(self._scheduler.refresh)
+            schedules.set_run_now_handler(self._scheduler.run_now)
+            self._management.set_schedule_creation_drain(self._scheduler.drain_project_creation)
+            await self._scheduler.recover()
+            if backend.expired_sides:
+                await self.application.refresh_expired_side_cards(backend.expired_sides)
             self._started = True
             _log_startup_timing("runtime recovery", backend.recovery_started_at if backend.recovery_started_at is not None else stage_started_at)
         except BaseException:
@@ -519,8 +477,6 @@ class ServiceCore:
     def open_admission(self) -> None:
         if not self._started or self.application is None:
             raise RuntimeError("service core is not ready for admission")
-        if self._claude is not None:
-            self._claude.open_admission()
         if self._admin is not None:
             self._admin.open_admission()
         if self._schedule_mcp is not None:
@@ -537,21 +493,11 @@ class ServiceCore:
         if self._backend is not None:
             return self._backend.shutdown
         # A factory can fail after taking ownership but before returning its assembly.
-        return self._claude if self._claude is not None else self._runtime
+        return self._runtime
 
     async def _drain_native(self, deadline: float, *, partial_start: bool = False) -> None:
         shutdown = self._session_shutdown
         if shutdown is None:
-            return
-        if self._claude is not None:
-            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
-            # Leave time to close presentation, Auth and the Binding Store after an unconfirmed native close.
-            reserve = min(9.0, remaining / 2)
-            budget = min(_CLAUDE_SHUTDOWN_CAP_SECONDS, remaining - reserve)
-            native_deadline = asyncio.get_running_loop().time() + budget
-            # Even with an exhausted budget the runtime must join cancelled Channel sends.
-            await _cleanup_step("Claude client shutdown", shutdown.interrupt_all(deadline=native_deadline),
-                                timeout=max(budget, 0.001))
             return
         if partial_start:
             shutdown.close_admission()
@@ -582,8 +528,6 @@ class ServiceCore:
 
     async def _close_partial_start(self) -> None:
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
-        if self._claude is not None and (shutdown := self._session_shutdown) is not None:
-            shutdown.close_admission()
         if self._scheduler is not None:
             self._scheduler.close_admission()
             await _cleanup_with_budget(
@@ -755,7 +699,7 @@ class ServiceCore:
                             cap=10,
                         )
                 finally:
-                    if self._claude is None and (shutdown := self._session_shutdown) is not None:
+                    if (shutdown := self._session_shutdown) is not None:
                         await _cleanup_with_budget(
                             "Runtime task cleanup",
                             shutdown.cancel_tasks,

@@ -7,18 +7,12 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from lark_channel import OutboundCard
 
 from ..backends import BackendPolicy, OperationId
-from ..session_views import SessionObservations, SessionStatusView
-from .status import render_session_status
-if TYPE_CHECKING:
-    from ..management.service import BindingStatusProjection
-    from ..ordinary_sessions import ReleaseConfirmation
 from ..bindings import (
-    ThreadBinding,
     BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicState,
@@ -123,11 +117,6 @@ class SessionCardItem:
     activity_revision: int = 0
     turn_id: str | None = None
     catalog_unconfirmed: bool = False
-    state_label: str | None = None
-    observations: SessionObservations | None = None
-    registered_at: str | None = None
-    can_stop_all: bool = False
-    can_stop: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1206,22 +1195,6 @@ def rename_binding_card(
     return OutboundCard(card=builder.to_dict())
 
 
-def release_confirmation_card(scope: FeishuScope, binding_id: str, confirmation: ReleaseConfirmation, *,
-                              diverged: bool = False) -> OutboundCard:
-    builder = _builder("会话在其他客户端有新进展" if diverged else "释放会话", "Claude Code")
-    if diverged:
-        builder.markdown("检测到该会话在其他 Claude 客户端有新进展，这条消息未发送。")
-    builder.markdown(f"释放会话将结束 {confirmation.tasks} 个后台任务。"
-                     f"已登记的 {confirmation.crons} 个会话 cron 将暂停，登记保留。")
-    if diverged:
-        builder.markdown("释放后请重新发送。继续使用当前连接时，后台任务完成后，终端里的新对话可能从会话历史中消失。"
-                         "如需继续使用 Netizen 当前的连接，直接重新发送即可。")
-    builder.raw(_callback_button(label="释放会话" if diverged else "确认释放", style="primary_filled", value=_envelope(
-        scope, CardControlName.CONFIRM_RELEASE, binding_id=_binding_reference(binding_id),
-        expected_activity_revision=confirmation.revision, expected_turn_id=_turn_reference(confirmation.turn_id))))
-    return OutboundCard(card=builder.to_dict())
-
-
 def archive_binding_card(
     *,
     scope: FeishuScope,
@@ -1462,35 +1435,6 @@ def archived_sessions_delete_binding_card(
     return OutboundCard(card=builder.to_dict())
 
 
-def _local_stop_button(
-    scope: FeishuScope, binding_id: str, active_binding_id: str | None,
-    revision: int, turn_id: str, navigation: SessionCardPage, *, from_status: bool = False, all_tasks: bool = False,
-) -> dict[str, Any]:
-    return _callback_button(label="全部停止" if all_tasks else "停止", value=_envelope(
-        scope, CardControlName.STOP_EXACT_BINDING, **({"all_tasks": True} if all_tasks else {}), binding_id=_binding_reference(binding_id),
-        expected_active_binding_id=_binding_reference(active_binding_id) if active_binding_id else None,
-        expected_activity_revision=revision, expected_turn_id=_turn_reference(turn_id),
-        page=navigation.page, session_cursor=navigation.encode(scope), **({"from_status": True} if from_status else {}),
-    ))
-
-
-def local_status_card(
-    scope: FeishuScope, binding: ThreadBinding, status: BindingStatusProjection, defaults: SessionObservations,
-    *, title: str,
-) -> OutboundCard:
-    observed = status.observations or defaults
-    label = status.local_label or "状态待确认"
-    turn = status.snapshot.turn
-    controls: tuple[dict[str, Any], ...] = ((_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, turn.turn_id,
-                                    SessionCardPage("lazy"), from_status=True),)
-                if turn is not None and status.can_stop else ())
-    if status.can_stop_all and status.control_turn_id:
-        controls += (_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, status.control_turn_id,
-                                        SessionCardPage("lazy"), from_status=True, all_tasks=True),)
-    view = SessionStatusView.from_observations(binding, status.primary_status or "unknown", label, observed, title=title)
-    return render_session_status(view, controls)
-
-
 def sessions_card(
     *,
     scope: FeishuScope,
@@ -1506,16 +1450,14 @@ def sessions_card(
     current: SessionCardItem | None = None,
     lazy: bool = False,
     has_lazy: bool = False,
-    local_directory: bool = False,
     policy: BackendPolicy,
 ) -> OutboundCard:
-    session_cursor = _session_action_cursor(scope, session_cursor, keep_previous=local_directory)
+    session_cursor = _session_action_cursor(scope, session_cursor)
     subtitle = "尚未开始对话的会话" if lazy else "按 Codex 更新时间排序"
-    builder = _builder("会话", "按本地登记时间排序" if local_directory else subtitle)
+    builder = _builder("会话", subtitle)
     if notice:
         builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
-        "切换不会停止其他会话正在运行的任务。" if local_directory else
         "切换不会停止其他会话正在运行的任务。"
         "归档保留历史，可恢复；删除需红色确认，并级联删除派生会话。\n"
         "更多管理请使用 Admin 会话列表，发送 `/admin` 打开。"
@@ -1525,14 +1467,13 @@ def sessions_card(
         builder.raw(_session_row(
             scope=scope, session=current, page=page,
             expected_active_binding_id=active_binding_id,
-            native_delete_available=native_delete_available, local_directory=local_directory,
+            native_delete_available=native_delete_available,
             policy=policy,
             session_cursor=session_cursor,
         ))
         builder.markdown("**本页会话**")
     if not sessions:
         builder.markdown(
-            "本页没有会话。发送 `/new` 新建会话。" if local_directory else
             ("本页没有未开始的会话。" if lazy else "本页没有普通会话。")
             + "发送 `/new` 新建会话，"
             "或发送 `/sessions archived` 查找已归档会话。"
@@ -1544,7 +1485,7 @@ def sessions_card(
                 session=session,
                 page=page,
                 expected_active_binding_id=active_binding_id,
-                native_delete_available=native_delete_available, local_directory=local_directory,
+                native_delete_available=native_delete_available,
                 policy=policy,
                 session_cursor=session_cursor,
             )
@@ -1552,19 +1493,19 @@ def sessions_card(
 
     builder.raw(_sessions_pagination(
         scope=scope, page=page, previous_cursor=previous_cursor, next_cursor=next_cursor,
-        state="lazy" if lazy else "active", has_lazy=has_lazy, local_only=local_directory,
+        state="lazy" if lazy else "active", has_lazy=has_lazy,
     ))
     return _session_list_card(builder.to_dict())
 
 
-def _session_action_cursor(scope: FeishuScope, token: str | None, *, keep_previous: bool = False) -> str | None:
+def _session_action_cursor(scope: FeishuScope, token: str | None) -> str | None:
     if token is None:
         return None
     navigation = SessionCardPage.decode(token, scope)
     # Row actions need the exact return position, not a copy of the entire
     # back stack in every button. Navigation buttons retain that history.
     return SessionCardPage(
-        navigation.state, navigation.page, navigation.positions[-2:] if keep_previous else (navigation.cursor,),
+        navigation.state, navigation.page, (navigation.cursor,),
     ).encode(scope)
 
 
@@ -1584,7 +1525,6 @@ def _session_row(
     page: int,
     expected_active_binding_id: str | None,
     native_delete_available: bool,
-    local_directory: bool,
     policy: BackendPolicy,
     session_cursor: str | None = None,
 ) -> dict[str, Any]:
@@ -1593,22 +1533,15 @@ def _session_row(
         _turn_reference(session.turn_id) if session.turn_id is not None else None
     )
     marker_text = "● 当前" if session.active else "○"
-    if local_directory:
-        observed = session.observations or policy.observation_defaults
-        heading = session.short_id if session.title == session.short_id else f"{session.title} · {session.short_id}"
-        text = (f"{marker_text} {heading}\nProject：{session.project_alias} · 状态：{session.state_label or '状态待确认'}\n"
-                f"{observed.presentation.identity_label}：{session.native_thread_id or '尚未建立'}\n登记时间：{session.registered_at}")
-        text = "\n".join((text, *observed.lines(observed.presentation.row)))
-    else:
-        text = (
-            f"{marker_text} {session.title}\n"
-            f"Project：{session.project_alias} · 状态：{session.state}"
-        )
-        if session.catalog_unconfirmed:
-            text += " · 归档状态：未确认"
-        text += "\n" + "\n".join(session_identity_lines(
-            short_id=session.short_id, native_thread_id=session.native_thread_id,
-        ))
+    text = (
+        f"{marker_text} {session.title}\n"
+        f"Project：{session.project_alias} · 状态：{session.state}"
+    )
+    if session.catalog_unconfirmed:
+        text += " · 归档状态：未确认"
+    text += "\n" + "\n".join(session_identity_lines(
+        short_id=session.short_id, native_thread_id=session.native_thread_id,
+    ))
     controls: list[dict[str, Any]] = []
     if not session.active and policy.allows(OperationId.ACTIVATE):
         controls.append(
@@ -1671,7 +1604,7 @@ def _session_row(
                 style="danger",
             )
         )
-    if policy.allows(OperationId.STOP) and session_stop_available(session.state) and (not local_directory or (session.turn_id is not None and session.can_stop)):
+    if policy.allows(OperationId.STOP) and session_stop_available(session.state):
         controls.append(
             _callback_button(
                 label="停止",
@@ -1691,15 +1624,8 @@ def _session_row(
                 ),
             )
         )
-    if local_directory and session.can_stop_all and session.turn_id:
-        controls.append(_callback_button(label="全部停止", value=_envelope(
-            scope, CardControlName.STOP_EXACT_BINDING, **navigation, all_tasks=True, page=page,
-            binding_id=_binding_reference(session.binding_id), expected_turn_id=_turn_reference(session.turn_id),
-            expected_active_binding_id=_binding_reference(expected_active_binding_id) if expected_active_binding_id else None,
-            expected_activity_revision=session.activity_revision)))
     if (
-        not local_directory and policy.allows(OperationId.RECHECK) and session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
-        and session.turn_id is not None
+        policy.allows(OperationId.RECHECK) and session.state == ActiveState.OBSERVATION_UNAVAILABLE.value and session.turn_id is not None
     ):
         controls.append(
             _repeatable_callback_button(
@@ -1752,7 +1678,7 @@ def _session_row(
 
 def _sessions_pagination(
     *,
-    scope: FeishuScope, local_only: bool = False,
+    scope: FeishuScope,
     page: int,
     previous_cursor: str | None,
     next_cursor: str | None,
@@ -1781,7 +1707,7 @@ def _sessions_pagination(
         ),
     ))
     for target, label in (("active", "普通会话"), ("archived", "已归档"), ("lazy", "未开始")):
-        if local_only or target == state or target == "lazy" and not has_lazy:
+        if target == state or target == "lazy" and not has_lazy:
             continue
         buttons.append(_repeatable_callback_button(
             label=label, value=_sessions_page_envelope(
@@ -2162,7 +2088,6 @@ def decode_button_action(
             "expected_native_thread_id",
         },
         CardControlName.UNARCHIVE_BINDING: {"binding_id"},
-        CardControlName.CONFIRM_RELEASE: {"binding_id", "expected_activity_revision", "expected_turn_id"},
         CardControlName.ACTIVATE_BINDING: {"binding_id"},
         CardControlName.STOP_EXACT_BINDING: {
             "binding_id",
@@ -2211,10 +2136,6 @@ def decode_button_action(
         CardControlName.STOP_EXACT_BINDING, CardControlName.RECHECK_EXACT_TURN,
         CardControlName.SESSIONS_PAGE, CardControlName.REFRESH_ARCHIVED_SESSIONS,
     }
-    if name is CardControlName.STOP_EXACT_BINDING and payload.get("all_tasks") is True:
-        expected.add("all_tasks")
-    if name is CardControlName.STOP_EXACT_BINDING and payload.get("from_status") is True:
-        expected.add("from_status")
     if name in session_navigation_names and "session_cursor" in payload:
         expected.add("session_cursor")
     if (
@@ -2345,8 +2266,6 @@ def decode_button_action(
         section = SettingsSection.PROJECTS
     if name is CardControlName.SIDE_CLOSE and scope.kind is not ScopeKind.TOPIC:
         raise CardActionError("Side 结束动作必须来自原 Side 话题。")
-    if name is CardControlName.CONFIRM_RELEASE and expected_turn_id is None:
-        raise CardActionError("确认释放缺少执行标识，请重新发送 /release。")
     if (
         name is CardControlName.RECHECK_EXACT_TURN
         and expected_turn_id is None
@@ -2358,7 +2277,6 @@ def decode_button_action(
         sender_id=sender_id,
         name=name,
         settings_section=section,
-        from_status=payload.get("from_status") is True, all_tasks=payload.get("all_tasks") is True,
         project_alias=alias,
         expected_revision=revision,
         enabled=enabled,

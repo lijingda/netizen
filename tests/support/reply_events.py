@@ -2,7 +2,7 @@
 
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.codex_reply_events import CodexReplyEvents
-from netizen_cli.channel.reply_events import PresentationKey, TurnResult
+from netizen_cli.channel.reply_events import PresentationKey, RunEnded, TurnResult
 from netizen_cli.file_evidence import FileEvidence
 from netizen_cli.runtime.codex_ordinary import CodexOrdinarySessions
 from netizen_cli.runtime.codex_replies import ordinary_conclusion
@@ -21,7 +21,7 @@ def terminal_answers(target, items, *, goal=False):
         task_feedback=BindingTaskFeedback(), cwd=None, activity=None,
         partials=tuple(target.partial(item, presentation_id=target.key.turn_id if goal else None) for item in items),
         file_evidence=FileEvidence, file_binding_id=target.key.owner_id, physical_turn_id=target.key.turn_id,
-        allow_suppression=False, run_continues=False, end=None,
+        allow_suppression=False, end=RunEnded(target, "completed", None),
     )
 
 

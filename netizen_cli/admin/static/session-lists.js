@@ -22,7 +22,6 @@ window.NetizenSessionLists = (() => {
   }
 
   function create(kind, options) {
-    const localSessions = kind === "session" && (document.body.dataset.unavailable || "").split(" ").includes("history");
     const name = kind === "side" ? "sides" : "sessions";
     let appliedPage = dependencies.firstSessionPage();
     let currentData = null;
@@ -34,13 +33,13 @@ window.NetizenSessionLists = (() => {
 
     function sessionSort() {
       const query = new URLSearchParams(appliedPage.query || "");
-      return { by: localSessions ? "createdAt" : query.get("sortBy") || "updatedAt", direction: query.get("sortDirection") || "desc" };
+      return { by: query.get("sortBy") || "updatedAt", direction: query.get("sortDirection") || "desc" };
     }
 
     function sessionFilterPage({ resetSort = false } = {}) {
       const query = options.draftQuery();
       const sort = resetSort ? { by: "updatedAt", direction: "desc" } : sessionSort();
-      query.set("sortBy", localSessions || (kind === "session" && query.get("inventoryState") === "lazy") ? "createdAt" : sort.by);
+      query.set("sortBy", (kind === "session" && query.get("inventoryState") === "lazy") ? "createdAt" : sort.by);
       query.set("sortDirection", sort.direction);
       return dependencies.firstSessionPage(query.toString());
     }
@@ -121,12 +120,12 @@ window.NetizenSessionLists = (() => {
         if (button.dataset.sessionSort !== kind) continue;
         const selected = button.dataset.sortBy === sort.by;
         const descending = selected && sort.direction === "desc";
-        const label = button.dataset.sortBy === "createdAt" ? lazy || localSessions ? "登记时间" : "创建时间" : "最近更新";
-        button.disabled = (lazy || localSessions) && button.dataset.sortBy === "updatedAt";
+        const label = button.dataset.sortBy === "createdAt" ? lazy ? "登记时间" : "创建时间" : "最近更新";
+        button.disabled = (lazy) && button.dataset.sortBy === "updatedAt";
         const labelNode = button.querySelector(".sort-label");
         if (labelNode) {
           labelNode.textContent = label;
-          button.title = localSessions ? "Netizen 登记时间" : lazy ? "Netizen 登记时间；此时尚无 Codex 创建时间" : "Codex 会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示";
+          button.title = lazy ? "Netizen 登记时间；此时尚无 Codex 创建时间" : "Codex 会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示";
         }
         button.parentElement.setAttribute("aria-sort", selected ? descending ? "descending" : "ascending" : "none");
         button.setAttribute("aria-label", `按${label}${descending ? "由远及近" : "由近及远"}排序`
@@ -139,7 +138,7 @@ window.NetizenSessionLists = (() => {
       const page = appliedPage;
       // Sorting operates on the displayed result, not unsubmitted filter drafts.
       const query = new URLSearchParams(page.query ?? sessionFilterPage().query);
-      if ((localSessions || (kind === "session" && query.get("inventoryState") === "lazy")) && by === "updatedAt") return false;
+      if (((kind === "session" && query.get("inventoryState") === "lazy")) && by === "updatedAt") return false;
       const previous = sessionSort();
       query.set("sortBy", by);
       query.set("sortDirection", previous.by === by && previous.direction === "desc" ? "asc" : "desc");
@@ -227,10 +226,6 @@ window.NetizenSessionLists = (() => {
           : new URLSearchParams(page.query);
         if (!query.has("sortBy")) query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : "updatedAt");
         if (!query.has("sortDirection")) query.set("sortDirection", "desc");
-        if (localSessions) {
-          query.set("sortBy", "createdAt");
-          for (const key of ["updatedFrom", "updatedBefore", "updatedRange", "searchTerm"]) query.delete(key);
-        }
         const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
         // Options own their control-level failure handling, independently of this page.
         void options.loadProjectOptions(isCurrent);

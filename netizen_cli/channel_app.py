@@ -83,7 +83,7 @@ from .channel.app_values import (
     _goal_reply_activity,
     _outcome_completion_mention_user_id,
 )
-from .backends import BackendPolicy, Provider
+from .backends import Provider
 from .channel.entry import ChannelEntry
 
 
@@ -111,16 +111,12 @@ __all__ = [
 class ChannelApplication(ChannelEntry):
     """Route Feishu messages and card actions to the runtime and present results."""
 
-    async def reply_ordinary_notice(self, origin: object, text: str) -> None:
-        await self._reply(origin, text)
-
     def __init__(
         self,
         *,
         app_id: str,
         channel: ReplyChannel,
-        runtime: CodexRuntime | None,
-        policy: BackendPolicy | None = None,
+        runtime: CodexRuntime,
         ordinary: OrdinarySessionPort | None = None,
         bindings: BindingStore,
         projects: ProjectRegistry,
@@ -139,15 +135,10 @@ class ChannelApplication(ChannelEntry):
         self._app_id = app_id
         self._channel = channel
         self._chat_avatars = ChatAvatarImages(channel)
-        self._policy = management.operation_policy(policy)
-        self._local_sessions = management.local
+        self._policy = management.policy
         self._session_form = management.session_form
-        self._codex = runtime
-        if ordinary is None:
-            if runtime is None:
-                raise ValueError("ordinary sessions are required")
-            ordinary = CodexOrdinarySessions(runtime)
-        self._ordinary = ordinary
+        self._runtime = runtime
+        self._ordinary = ordinary if ordinary is not None else CodexOrdinarySessions(runtime)
         self._bindings = bindings
         self._projects = projects
         self._message_history = message_history
@@ -163,20 +154,14 @@ class ChannelApplication(ChannelEntry):
         # Only the final send writes the aggregate Scheduled Run receipt. Keep
         # this completion's receipt through pruning of the persisted Run.
         self._scheduled_completions: dict[str, _ScheduledCompletion] = {}
-        self._open_new_cards: dict[str, str] = {}
         self._rename_name_generations: dict[str, _RenameNameGeneration] = {}
-        self._reactions = _ReactionController(channel, isolate_child_cancellation=self._local_sessions is not None)
+        self._reactions = _ReactionController(channel)
         self._reply_suppression = ReplySuppression()
         self._progress_cards = _ReplyCardPresenter(channel, process_messages=process_messages,
                                                   process_location=self._process_reply_location)
-        if self._local_sessions is not None:
-            self._local_sessions.on_physical_terminal = self._progress_cards.observe_physical_terminal
-            self._local_sessions.on_binding_deleted = self._progress_cards.retire_binding
         self.handle_completion = codex_completion_handler(
             self.handle_ordinary_completion, self.handle_codex_completion, self._projection_failed,
         )
-        if runtime is None:
-            return
         runtime.set_completion_handler(self.handle_completion)
         runtime.set_question_handler(self.handle_questions)
         runtime.set_input_received_handler(self._reply_suppression.discard_physical_turn)

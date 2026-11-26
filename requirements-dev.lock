@@ -2,7 +2,6 @@
 # runtime dependencies and are not part of the published package. Install with:
 #   .venv/bin/python -m pip install -c requirements.lock -r requirements-dev.lock
 ast-serialize==0.13.1
-claude-agent-sdk==0.2.186
 librt==0.16.0
 mypy==2.4.0
 mypy_extensions==1.2.0

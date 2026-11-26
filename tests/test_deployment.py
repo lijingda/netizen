@@ -101,7 +101,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         )
         jobs = workflow["jobs"]
         self.assertEqual(jobs["macos-arm64-check"]["if"], "github.event_name != 'pull_request'")
-        for job_name in ("artifact-installs", "native-isolated", "native-claude"):
+        for job_name in ("artifact-installs", "native-isolated"):
             with self.subTest(job=job_name):
                 os_matrix = jobs[job_name]["strategy"]["matrix"]["os"]
                 self.assertIn("github.event_name == 'pull_request'", os_matrix)

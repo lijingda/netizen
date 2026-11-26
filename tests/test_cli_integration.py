@@ -21,7 +21,6 @@ from unittest.mock import patch
 import yaml
 
 from netizen_cli import cli
-from tests.support import requires_claude_sdk
 
 from netizen_cli.admin.users import AdminUsers
 from netizen_cli.cli_data import prepare_instance
@@ -97,33 +96,6 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         self.assertEqual(code, 0, report)
         self.assertEqual(report["status"], "prepared")
 
-    @requires_claude_sdk
-    def test_claude_setup_start_and_repair_use_instance_installation(self):
-        from netizen_cli.claude_installation import REPAIR, verified_claude_cli
-
-        self.current = ServiceBinding(self.root, Path(sys.executable), Path(sys.prefix).resolve())
-        with patch("netizen_cli.claude_installation.verified_claude_cli", side_effect=RuntimeError(REPAIR)):
-            code, report, _ = self.invoke("setup", "--backend", "claude")
-        self.assertEqual((code, report["reason"], self.codex_logins), (1, REPAIR, 0))
-        self.assertFalse(self.root.exists())
-        with patch("netizen_cli.claude_installation.verified_claude_cli", wraps=verified_claude_cli) as verify:
-            code, report, _ = self.invoke("setup", "--backend", "claude")
-            self.assertEqual((code, report["backend"], self.codex_logins), (0, "claude", 0))
-            self.assertTrue(verify.called)
-            verify.reset_mock()
-            code, report, _ = self.invoke("setup")
-            self.assertEqual((code, report["status"], report["backend"]), (0, "already_registered", "claude"))
-            verify.assert_called_once_with()
-            verify.reset_mock()
-            code, report, _ = self.invoke("start")
-            self.assertEqual(code, 0, report)
-            verify.assert_called_once_with()
-        self.assertTrue(self.manager.inspect(self.root).ready)
-        with patch("netizen_cli.claude_installation.verified_claude_cli", side_effect=RuntimeError(REPAIR)):
-            code, report, _ = self.invoke("restart")
-            self.assertEqual((code, report["reason"]), (1, REPAIR))
-            self.assertTrue(self.manager.inspect(self.root).ready)
-        self.assertEqual(self.invoke("stop")[0], 0)
 
     def test_setup_reports_fixed_backend_and_preserves_explicit_and_legacy_configs(self) -> None:
         code, report, _ = self.invoke("setup")

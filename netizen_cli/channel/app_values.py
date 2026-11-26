@@ -20,7 +20,6 @@ from ..cards import (
 )
 from .messages import _nonempty_field, _object_field, _send_result_error_code
 from .ports import ReplyChannel
-from .topics import CardReplyLocation
 from ..completion_mention import valid_completion_mention_user_id
 from ..runtime.contracts import (
     GoalActivitySnapshot,
@@ -60,11 +59,6 @@ class _CardReplyTarget:
     chat_id: str
     conversation: _CardReplyConversation
     root_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _ClaudeReplyTarget(_CardReplyTarget):
-    location: CardReplyLocation
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,21 +276,6 @@ def _chat_id(message: Any) -> str:
         getattr(message, "chat_id", None)
         or getattr(conversation, "chat_id", "")
     )
-
-
-def authenticated_sender(event: Any, app_id: str, *, card: bool = False) -> str | None:
-    if getattr(event, "app_id", app_id) != app_id:
-        return None
-    identity = getattr(event, "operator" if card else "sender", None)
-    if not card and (getattr(identity, "is_bot", False) or getattr(identity, "sender_type", None) in {"app", "bot"}):
-        return None
-    values = [getattr(identity, "open_id", None)]
-    if not card:
-        values.append(getattr(event, "sender_id", None))
-    supplied = [value for value in values if value is not None]
-    if not supplied or any(not isinstance(value, str) or not value.strip() or value != supplied[0] for value in supplied):
-        return None
-    return supplied[0]
 
 
 def _sender_id(message: Any) -> str:

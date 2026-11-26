@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from netizen_cli import cli_setup as setup, feishu_app_onboarding
+from netizen_cli import cli_setup as setup
 from netizen_cli.admin.users import AdminIdentity, AdminUsers, AdminUsersUnavailable
 from netizen_cli.cli_data import ensure_instance_root
 from netizen_cli.lark_app import encode_lark_app, load_lark_app
@@ -20,19 +20,6 @@ from netizen_cli.lark_app import encode_lark_app, load_lark_app
 class TerminalInput(io.StringIO):
     def isatty(self) -> bool:
         return True
-
-
-class ClaudeSetupVerificationTests(unittest.TestCase):
-    def test_bound_verification_uses_original_venv_launch_path_and_fails_closed(self):
-        bound = Path("/first-venv/bin/python")
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("python", 30)) as run:
-            with self.assertRaisesRegex(setup.SetupError, r"netizen-cli\[claude\]"):
-                setup.verify_setup_backend("claude", bound)
-        args, kwargs = run.call_args
-        self.assertEqual(args[0][0:3], [str(bound), "-I", "-B"])
-        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
-        self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
-        self.assertTrue(kwargs["check"])
 
 
 class SetupFileTests(unittest.TestCase):
@@ -128,22 +115,6 @@ class ConfigurationSetupTests(unittest.TestCase):
         self.assertNotIn("enabled", (self.root / "config.yaml").read_text())
         setup.require_admin_binding(self.root)
 
-    def test_claude_setup_passes_its_description_to_app_registration(self) -> None:
-        register = Mock(return_value={"client_id": "cli_created", "client_secret": "fixture"})
-
-        def helper_runner(argv, **kwargs):
-            module = argv.index("-m") + 1
-            self.assertEqual(argv[module], "netizen_cli.feishu_app_onboarding")
-            with contextlib.redirect_stdout(io.StringIO()) as output:
-                code = feishu_app_onboarding.main(argv[module + 1:])
-            return subprocess.CompletedProcess(argv, code, stdout=output.getvalue())
-
-        with (patch.dict(sys.modules, {"lark_oapi": SimpleNamespace(register_app=register)}),
-              patch.object(setup, "verify_setup_backend"),
-              patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []})):
-            setup.prepare_configuration(self.root, backend="claude", runner=helper_runner,
-                                        admin_open_id="ou_owner", input_stream=io.StringIO())
-        self.assertEqual(register.call_args.kwargs["app_preset"]["desc"], "Use Claude Code sessions from Feishu or Lark.")
 
     def test_tty_manual_administrator_entry_does_not_require_user_login(self) -> None:
         self.complete_profile()

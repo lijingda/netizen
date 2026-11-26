@@ -10,10 +10,9 @@ import logging
 
 from lark_channel import Identity, OutboundText, SendOpts
 
-from ..external_calls import external_call
 from ..domain import FeishuScope, ScopeKind
 from .ports import ReplyChannel
-from .topics import CardReplyLocation, TopicPublishError, validate_topic_message
+from .topics import TopicPublishError, validate_topic_message
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +25,7 @@ async def send_completion_mention(
     user_id: str,
     operation_id: str,
     source_message_id: str | None = None,
-    isolate_child_cancellation: bool = False,
     session_label: str | None = None,
-    location: CardReplyLocation | None = None,
 ) -> bool:
     """Use the card, or an explicit source when no card exists; never re-anchor."""
     anchor_id = card_message_id if card_message_id is not None else source_message_id
@@ -44,7 +41,7 @@ async def send_completion_mention(
     )
     try:
         async with asyncio.timeout(5):
-            result = await external_call(channel.send(
+            result = await channel.send(
                 scope.chat_id,
                 OutboundText(
                     # Feishu text messages recognize <at> markup; native names
@@ -54,9 +51,7 @@ async def send_completion_mention(
                     mentions=[Identity(open_id=user_id)],
                 ),
                 opts,
-            ), isolate=isolate_child_cancellation)
-        if location:
-            result = location.validate(result, reply_to=anchor_id)
+            )
         sent = validate_topic_message(result, scope.chat_id)
         if (
             not sent.root_id or not sent.parent_id

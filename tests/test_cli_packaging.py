@@ -10,14 +10,9 @@ import tarfile
 import tempfile
 import tomllib
 import unittest
-from importlib import metadata
-from unittest.mock import patch
 import zipfile
 
-from tests.support import requires_claude_sdk
-
 from netizen_cli.package_resources import resource_path
-from netizen_cli.claude_installation import REPAIR, verified_claude_cli
 from scripts.build_cli_distribution import verify_sdist, verify_wheel
 
 
@@ -32,51 +27,6 @@ class PackageResourceTests(unittest.TestCase):
         for value in ("../pyproject.toml", str(ROOT / "config.example.yaml")):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 resource_path(value)
-
-
-class ClaudeInstallationTests(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
-        info = self.root / "claude_agent_sdk-0.2.186.dist-info"
-        info.mkdir()
-        self.records = info / "RECORD"
-        self.records.write_text("claude_agent_sdk/_bundled/claude,,\nclaude_agent_sdk/_bundled/claude.version,,\n")
-        self.binary = self.root / "claude_agent_sdk/_bundled/claude"
-        self.binary.parent.mkdir(parents=True)
-        self.binary.touch(mode=0o700)
-        self.marker = self.binary.with_suffix(".version")
-        self.marker.write_text("2.1.329 (Claude Code)\n")
-        self.enterContext(patch("netizen_cli.claude_installation.metadata.distribution",
-                                return_value=metadata.PathDistribution(info)))
-        self.version = self.enterContext(patch("netizen_cli.claude_installation.metadata.version",
-                                               return_value="0.2.186"))
-
-    @requires_claude_sdk
-    def test_uses_only_recorded_bundle(self):
-        self.assertEqual(verified_claude_cli(), self.binary)
-
-    def test_missing_and_incompatible_installation_explain_repair(self):
-        self.version.side_effect = metadata.PackageNotFoundError
-        with self.assertRaises(RuntimeError) as caught:
-            verified_claude_cli()
-        self.assertEqual(str(caught.exception), REPAIR)
-        self.version.side_effect = None
-        self.version.return_value = "0.2.185"
-        with self.assertRaisesRegex(RuntimeError, "netizen-cli"):
-            verified_claude_cli()
-
-    def test_missing_resource_wrong_marker_and_unexecutable_binary(self):
-        for mutation in (lambda: self.binary.chmod(0o600), self.binary.unlink,
-                         lambda: self.marker.write_text("wrong"), self.records.unlink):
-            with self.subTest(mutation=mutation):
-                mutation()
-                with self.assertRaisesRegex(RuntimeError, "netizen-cli"):
-                    verified_claude_cli()
-                self.binary.touch()
-                self.binary.chmod(0o700)
-                self.marker.write_text("2.1.329 (Claude Code)")
 
 
 class BuiltArtifactTests(unittest.TestCase):

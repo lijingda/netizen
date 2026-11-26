@@ -158,11 +158,6 @@ class ThreadLifecycleError(RuntimeError):
     pass
 
 
-class SessionRenameUnconfirmed(ThreadLifecycleError):
-    def __init__(self) -> None:
-        super().__init__("改名结果未确认，请在 Claude Code 中核查。")
-
-
 class TurnObservationUnavailable(ThreadLifecycleError):
     pass
 
@@ -441,7 +436,6 @@ class TurnActivitySnapshot:
     partial_answers: tuple[PartialAnswer, ...] = ()
     progress_card_settings: ProgressCardSettings = ProgressCardSettings()
 
-    state_line: str | None = None
     physical_turn_id: str | None = field(default=None, repr=False, compare=False, kw_only=True)
 
     # None means this physical Turn has no process window. An empty tuple is an observed empty window.

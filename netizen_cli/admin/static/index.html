@@ -409,11 +409,11 @@
         <div class="drawer-head"><div><h3 id="session-settings-title">配置会话</h3></div><button id="session-settings-close" class="drawer-close" type="button" aria-label="关闭会话配置表单">×</button></div>
         <div class="drawer-body">
           <p id="session-settings-identity" class="meta-line"></p>
-          <p class="session-settings-help" data-claude-text="只影响之后由 Netizen 启动的任务。模型沿用 Claude Code 的原生配置。">只影响之后由 Netizen 启动的任务。选择继承 Codex 时，沿用 Codex 的原生配置。</p>
+          <p class="session-settings-help">只影响之后由 Netizen 启动的任务。选择继承 Codex 时，沿用 Codex 的原生配置。</p>
           <fieldset id="session-settings-fields">
             <h4>模型配置</h4>
             <div class="schedule-form-grid">
-              <label>模型<select id="session-settings-model"><option value="" data-claude-text="原生 Claude 设置">继承 Codex</option></select></label>
+              <label>模型<select id="session-settings-model"><option value="">继承 Codex</option></select></label>
               <label>推理强度<select id="session-settings-effort" disabled></select></label>
               <label>速度<select id="session-settings-tier" disabled></select></label>
               <label id="session-settings-context-field">消息上下文<select id="session-settings-context" aria-describedby="session-settings-context-note"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
@@ -502,7 +502,7 @@
             <p id="defaults-workspace-help" class="defaults-field-help" role="status"></p>
             <details class="panel-explanation"><summary>工作目录说明</summary><p>使用已有 worktree 时，新会话共享其文件和分支；删除或失效后保留此配置，自动创建会话时明确报错。选择新建时，每个自动创建的新会话新建 detached worktree，后续消息复用；引用留空使用创建时 Project 的 HEAD，保存配置不创建目录。</p></details>
             <div class="schedule-form-grid">
-              <label>模型<select id="defaults-model"><option value="" data-claude-text="原生 Claude 设置">继承 Codex</option></select></label>
+              <label>模型<select id="defaults-model"><option value="">继承 Codex</option></select></label>
               <label>推理强度<select id="defaults-effort" disabled></select></label>
               <label>速度<select id="defaults-tier" disabled></select></label>
               <label id="defaults-context-field">消息上下文<select id="defaults-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
@@ -891,8 +891,8 @@
       </div>
       <section class="service-restart" aria-labelledby="restart-heading">
         <h3 id="restart-heading">服务重启</h3>
-        <p data-claude-text="重启本实例的 Netizen 服务。">重启本实例的 Netizen 与 Codex 运行环境。</p><details class="panel-explanation"><summary>说明</summary><p data-claude-text="使用本实例绑定的 Python 环境中当前安装的程序，重新启动 Netizen 的 Claude Code 后端。">使用本实例绑定的 Python 环境中当前安装的程序，重新启动 Netizen 及其 Codex 运行环境。不更新软件包、不切换环境，也不重启其他实例。</p></details>
-        <p id="restart-warning" class="update-warning" data-claude-text="重启会中断正在执行的 Claude Code 任务。重启后不会自动续跑，管理页需要重新登录。">重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。重启后不会自动续跑，管理页需要重新登录。</p>
+        <p>重启本实例的 Netizen 与 Codex 运行环境。</p><details class="panel-explanation"><summary>说明</summary><p>使用本实例绑定的 Python 环境中当前安装的程序，重新启动 Netizen 及其 Codex 运行环境。不更新软件包、不切换环境，也不重启其他实例。</p></details>
+        <p id="restart-warning" class="update-warning">重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。重启后不会自动续跑，管理页需要重新登录。</p>
         <button id="service-restart" class="refresh" aria-describedby="restart-warning restart-message" disabled>重启服务</button>
         <p id="restart-message" class="update-warning"></p>
       </section>

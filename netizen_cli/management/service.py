@@ -7,17 +7,16 @@ import logging
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, TypeVar
 
 from ..backends import BackendPolicy, BackendUnsupported as BackendUnsupported, OperationId, Provider
-from ..session_providers import CodexPersistentForks, CodexStatusSource, LocalStatusSource, ManualTitleWriter, PersistentForkProvider, SessionListReads, SessionNames, StatusCapture, StatusSource
+from ..session_providers import CodexPersistentForks, CodexStatusSource, ManualTitleWriter, PersistentForkProvider, SessionListReads, SessionNames, StatusSource
 from ..session_views import (
     NativeThreadView as NativeThreadView, ScopeSessionPage as ScopeSessionPage,
     SessionInventoryItem as SessionInventoryItem, SessionInventoryPage as SessionInventoryPage,
-    SessionInventoryState as SessionInventoryState, SessionObservations, SessionQuery as SessionQuery,
+    SessionInventoryState as SessionInventoryState, SessionQuery as SessionQuery,
 )
 from ..session_settings import SessionFormView
 from ..management_errors import ConversationReadError as ConversationReadError, ManagementError
@@ -58,11 +57,10 @@ from ..bindings import (
 )
 from ..codex_runtime import CodexRuntime
 from ..session_settings import SessionSettingsError
-from ..ordinary_sessions import LocalSessionManagement, OrdinarySessionPort, ReleaseConfirmation
+from ..ordinary_sessions import OrdinarySessionPort
 from ..runtime.codex_contracts import BindingRuntimeSnapshot
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
-    ThreadOccupied,
     NativeConversationPage,
     RuntimeClosed,
     NativeThreadCatalog,
@@ -210,10 +208,6 @@ class BindingStatusProjection:
     catalog_state: NativeThreadCatalogState | None
     can_stop: bool
     can_release: bool
-    control_turn_id: str | None = None
-    can_stop_all: bool = False
-    local_label: str | None = None
-    observations: SessionObservations | None = None
 
     @property
     def binding_id(self) -> str:
@@ -466,27 +460,15 @@ class ManagementRuntimePort:
     it.
     """
 
-    __slots__ = ("__codex", "__ordinary", "local", "names", "local_summary", "local_forks")
+    __slots__ = ("__runtime", "__ordinary", "names")
 
-    def __init__(self, runtime: CodexRuntime | None, *, ordinary: OrdinarySessionPort,
-                 local: LocalSessionManagement | None = None, names: SessionNames | None = None,
-                 local_summary: Callable[[str], Awaitable[NativeThreadMetadata]] | None = None,
-                 local_forks: PersistentForkProvider | None = None) -> None:
-        self.local_forks = local_forks
-        self.names = names if names is not None else SessionNames.from_runtime(runtime)
-        self.local_summary = local_summary
-        self.__codex = runtime
-        self.local = local
-        self.__ordinary: OrdinarySessionPort = ordinary
+    def __init__(self, runtime: CodexRuntime, *, ordinary: OrdinarySessionPort) -> None:
+        self.names = SessionNames.from_runtime(runtime)
+        self.__runtime = runtime
+        self.__ordinary = ordinary
 
-    @property
-    def __runtime(self) -> CodexRuntime:
-        if self.__codex is None:
-            raise BackendUnsupported("原生 Codex 操作")
-        return self.__codex
-
-    def fork_provider(self, bindings: BindingStore) -> PersistentForkProvider | None:
-        return CodexPersistentForks(self.__codex, bindings) if self.__codex is not None else self.local_forks
+    def fork_provider(self, bindings: BindingStore) -> PersistentForkProvider:
+        return CodexPersistentForks(self.__runtime, bindings)
 
     async def read_scheduled_turn(
         self, binding_id: str, turn_id: str, *, deadline: float | None = None,
@@ -495,7 +477,7 @@ class ManagementRuntimePort:
 
     @property
     def native_delete_available(self) -> bool:
-        return self.local is None and NativeCapability.DELETE in self.__runtime.available_capabilities
+        return NativeCapability.DELETE in self.__runtime.available_capabilities
 
     async def configure_context_exact(
         self,
@@ -509,7 +491,7 @@ class ManagementRuntimePort:
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
-        return await (self.local or self.__runtime).configure_context_exact(
+        return await self.__runtime.configure_context_exact(
             binding_id=binding_id,
             expected_settings_revision=expected_settings_revision,
             expected_context_revision=expected_context_revision,
@@ -526,7 +508,7 @@ class ManagementRuntimePort:
         *,
         context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
-        return await (self.local or self.__runtime).activate_exact(
+        return await self.__runtime.activate_exact(
             binding_id,
             context_anchor=context_anchor,
         )
@@ -552,9 +534,6 @@ class ManagementRuntimePort:
             service_tier_id=resolved.service_tier_id,
         )
 
-    @property
-    def has_codex_runtime(self) -> bool:
-        return self.__codex is not None
 
     async def archive_exact(self, binding_id: str) -> ThreadBinding:
         return await self.__runtime.archive_exact(binding_id)
@@ -656,14 +635,12 @@ class ManagementRuntimePort:
         previous_binding_id: str | None,
         current_binding_id: str | None,
     ) -> None:
-        await (self.local or self.__runtime).binding_pointer_changed(
+        await self.__runtime.binding_pointer_changed(
             previous_binding_id,
             current_binding_id,
         )
 
     def runtime_snapshot_exact(self, binding_id: str) -> BindingRuntimeSnapshot:
-        if self.local is not None:
-            return self.local.capture_status(binding_id)
         return self.__runtime.binding_runtime_snapshot(binding_id)
 
     async def goal_snapshot_exact(
@@ -682,23 +659,15 @@ class ManagementRuntimePort:
         return self.__runtime.side_ids_for_projects(project_aliases)
 
     def project_side_snapshots(self, alias: str) -> tuple[SideSessionSnapshot, ...]:
-        if self.local is not None:
-            return ()
         return self.__runtime.project_side_snapshots(alias)
 
     def worktree_side_snapshots(self, root: Path) -> tuple[SideSessionSnapshot, ...]:
-        if self.local is not None:
-            return ()
         return self.__runtime.worktree_side_snapshots(root)
 
     def project_has_fork_creation(self, alias: str) -> bool:
-        if self.local is not None:
-            return self.local_forks is not None and self.local_forks.project_has_fork_creation(alias)
         return self.__runtime.project_has_fork_creation(alias)
 
     async def worktree_usage(self, binding_id: str) -> dict[str, Any]:
-        if self.local is not None:
-            return await self.local.resource_usage(binding_id)
         return await self.__runtime.worktree_usage(binding_id)
 
     async def resolve_binding_cwd(self, binding_id: str, *, default_cwd: Path) -> Path:
@@ -732,8 +701,6 @@ class ManagementRuntimePort:
     async def thread_summary_exact(
         self, thread_id: str,
     ) -> NativeThreadMetadata:
-        if self.local_summary is not None:
-            return await self.local_summary(thread_id)
         return await self.__runtime.thread_summary(thread_id)
 
     async def thread_catalog_exact(
@@ -797,20 +764,13 @@ class InstanceManagementService:
         self._bindings = bindings
         self._projects = projects
         self._runtime = runtime
-        self.local = runtime.local if isinstance(runtime, ManagementRuntimePort) else None
         self.forks = runtime.fork_provider(bindings) if isinstance(runtime, ManagementRuntimePort) else None
         self.names = runtime.names if isinstance(runtime, ManagementRuntimePort) else SessionNames.from_runtime(runtime)
-        identity = self.local.backend_policy if self.local is not None else BackendPolicy("codex")
+        identity = BackendPolicy("codex")
         self.policy = identity.bind(self.has_provider)
         self.status_source: StatusSource
-        if self.local is None:
-            self.status_source = CodexStatusSource(lambda binding_id: runtime.runtime_snapshot_exact(binding_id))
-        else:
-            self.status_source = LocalStatusSource(self.local)
-        self.session_reads = (
-            SessionListReads(True, self._native_session_page, self._native_binding_metadata)
-            if self.local is None else SessionListReads(False, self._local_session_page, self._local_binding_metadata)
-        )
+        self.status_source = CodexStatusSource(lambda binding_id: runtime.runtime_snapshot_exact(binding_id))
+        self.session_reads = SessionListReads(self._native_session_page, self._native_binding_metadata)
         self._scope_coordinator = scope_coordinator
         self._updates = updates or UpdateService(root=root)
         self._progress_card_config = progress_card_config or ProgressCardConfigService()
@@ -938,7 +898,7 @@ class InstanceManagementService:
             case Provider.HOST | Provider.ORDINARY | Provider.REPLY_PROGRESS:
                 return True
             case Provider.CODEX_RUNTIME:
-                return self._runtime.has_codex_runtime if isinstance(self._runtime, ManagementRuntimePort) else self.local is None
+                return True
             case Provider.SCHEDULER:
                 return self.schedules is not None
             case Provider.TITLE_WRITER:
@@ -949,7 +909,7 @@ class InstanceManagementService:
                 return self.names.generate is not None
 
     def operation_policy(self, identity: BackendPolicy | None = None) -> BackendPolicy:
-        if identity is not None and (identity.backend, identity.owner_id) != (self.policy.backend, self.policy.owner_id):
+        if identity is not None and identity.backend != self.policy.backend:
             raise ValueError("Backend policy identity conflicts with assembled management")
         return self.policy
 
@@ -961,13 +921,11 @@ class InstanceManagementService:
             backend_name=self.policy.display_name,
         )
 
-    def title_writer_for(self, binding: ThreadBinding) -> ManualTitleWriter:
+    def title_writer_for(self) -> ManualTitleWriter:
         self.policy.require(OperationId.MANUAL_RENAME)
         writer = self.names.writer
         assert writer is not None
         # Native Codex validates materialization and lifecycle in rename_exact.
-        if self.local is not None and not writer.eligible(binding, None):
-            raise BackendUnsupported("重命名", detail="此会话当前不支持重命名。")
         return writer
 
     def _name_generator(self) -> Callable[[str], Awaitable[str]]:
@@ -1163,18 +1121,6 @@ class InstanceManagementService:
         return snapshot
 
     def _require_project_delete_capability(self, snapshot: ProjectDeleteSnapshot) -> None:
-        if self.local is not None:
-            if any(item.binding.native_thread_id is not None for item in snapshot.bindings):
-                raise BackendUnsupported("会话删除", detail="Project 含已建立的 Claude 会话，试点不支持删除该 Project。")
-            if self.local.occupying_bindings(Path(snapshot.project.cwd)):
-                raise ThreadOccupied("Claude 客户端仍占用此 Project 目录。")
-            if snapshot.sides:
-                raise BackendUnsupported("Side")
-            for item in snapshot.bindings:
-                local = self.local.local_snapshot(item.binding.id)
-                if local.turn or local.unavailable:
-                    raise ThreadOccupied("Project 含正在启动、执行或状态未知的 Claude 会话。")
-            return
         if not self.native_delete_available and any(
             item.binding.native_thread_id is not None for item in snapshot.bindings
         ):
@@ -1289,13 +1235,10 @@ class InstanceManagementService:
                     raise TimeoutError("Project deletion deadline elapsed")
                 try:
                     async with asyncio.timeout_at(min(deadline, loop.time() + _PROJECT_DELETE_STEP_SECONDS)):
-                        if self.local is not None:
-                            await self.local.delete_lazy_resource(binding.id)
-                        else:
-                            await self.delete_exact_binding(
-                                target=ExactBindingTarget(binding.scope_key, binding.id, None),
-                                expected_native_thread_id=binding.native_thread_id,
-                            )
+                        await self.delete_exact_binding(
+                            target=ExactBindingTarget(binding.scope_key, binding.id, None),
+                            expected_native_thread_id=binding.native_thread_id,
+                        )
                 except BindingNotFound:
                     # Another exact deletion may have completed since preview.
                     # Only absence of this same local identity can be skipped.
@@ -1399,7 +1342,7 @@ class InstanceManagementService:
         deadline: float,
     ) -> SessionInventoryPage:
         if query is None:
-            query = SessionQuery() if self.session_reads.native_catalog else SessionQuery(sort_by="created_at")
+            query = SessionQuery()
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("page size must be between 1 and 100")
         if not isinstance(query.inventory_state, SessionInventoryState) or query.inventory_state not in {
@@ -1425,25 +1368,6 @@ class InstanceManagementService:
 
         return await self.session_reads.page(query, cursor, limit, deadline)
 
-    async def _local_session_page(
-        self, query: SessionQuery, cursor: BindingCursor | SessionNativeCursor | None,
-        limit: int, deadline: float,
-    ) -> SessionInventoryPage:
-        if (query.inventory_state is SessionInventoryState.ARCHIVED or query.search_term or
-                query.sort_by != "created_at" or query.updated_from is not None or query.updated_before is not None):
-            raise BackendUnsupported("原生会话目录或历史")
-        if cursor is not None and not isinstance(cursor, BindingCursor):
-            raise ValueError("会话分页已过期，请刷新列表。")
-        local_query = replace(query.local, sort_direction=query.sort_direction,
-                              materialized=False if query.inventory_state is SessionInventoryState.LAZY else None)
-        if query.created_from is not None or query.created_before is not None:
-            local_query = replace(local_query,
-                created_from=datetime.fromtimestamp(query.created_from, timezone.utc).isoformat() if query.created_from is not None else None,
-                created_before=datetime.fromtimestamp(query.created_before, timezone.utc).isoformat() if query.created_before is not None else None)
-        local_page = await self._bindings.query_bindings(query=local_query, cursor=cursor, limit=limit,
-                                                        deadline_seconds=self._query_seconds(deadline))
-        views = await self._local_display_views(tuple(record.binding for record in local_page.items), deadline)
-        return self._session_page(local_page.items, native=views, next_cursor=local_page.next_cursor)
 
     async def _native_session_page(
         self, query: SessionQuery, cursor: BindingCursor | SessionNativeCursor | None,
@@ -1491,29 +1415,25 @@ class InstanceManagementService:
         scope: FeishuScope,
         archived: bool = False,
         lazy: bool = False,
-        recover_previous: bool = False,
         cursor: BindingCursor | SessionNativeCursor | None = None,
         limit: int = 10,
         deadline: float,
     ) -> ScopeSessionPage:
         """Read one Scope page, with an independent exact current-session entry."""
-        native_catalog = self.session_reads.native_catalog
-        if archived and not native_catalog:
-            self.policy.require(OperationId.ARCHIVED)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("page size must be between 1 and 100")
         if archived and lazy:
             raise ValueError("a Scope session page cannot be both archived and Lazy")
-        if cursor is not None and not isinstance(cursor, BindingCursor if lazy or not native_catalog else SessionNativeCursor):
+        if cursor is not None and not isinstance(cursor, BindingCursor if lazy else SessionNativeCursor):
             raise ValueError("Session cursor does not match its inventory state")
         self._query_seconds(deadline)
         current_binding = self._bindings.active_binding(scope.key)
         local = BindingQuery(app_id=scope.app_id, chat_id=scope.chat_id, scope_kind=scope.kind, topic_id=scope.topic_id)
-        has_lazy = native_catalog and self._bindings.has_bindings(scope.key, materialized=False)
-        if not native_catalog or lazy or self._bindings.has_bindings(scope.key, materialized=True):
+        has_lazy = self._bindings.has_bindings(scope.key, materialized=False)
+        if lazy or self._bindings.has_bindings(scope.key, materialized=True):
             inventory = SessionInventoryState.ARCHIVED if archived else SessionInventoryState.ACTIVE
-            query = SessionQuery(local=local, inventory_state=SessionInventoryState.LAZY if lazy and native_catalog else inventory,
-                                 sort_by="updated_at" if native_catalog else "created_at")
+            query = SessionQuery(local=local, inventory_state=SessionInventoryState.LAZY if lazy else inventory,
+                                 sort_by="updated_at")
             page = await self.session_reads.page(query, cursor, limit, deadline)
             items, next_cursor = page.items, page.next_cursor
         else:
@@ -1524,25 +1444,12 @@ class InstanceManagementService:
             if current is None:
                 # A current session omitted by the native list stays reachable
                 # by its exact local identity, without hydrating all old rows.
-                views = (await self._session_native_views((current_binding,), native=None, deadline=deadline)
-                         if native_catalog else await self._local_display_views((current_binding,), deadline))
+                views = (await self._session_native_views((current_binding,), native=None, deadline=deadline))
                 current = SessionInventoryItem(
                     BindingInventoryRecord(current_binding, self._bindings.get_scope(scope.key)),
                     views.get(current_binding.native_thread_id), ChatLabelResolver.fallback(scope.chat_id),
                 )
-        previous_cursor = None
-        if recover_previous and not native_catalog and isinstance(cursor, BindingCursor):
-            # Descending pages start just after their cursor. Walk one page in
-            # the opposite direction to find the preceding page's start.
-            newer = await self._bindings.query_bindings(
-                query=replace(local, sort_direction="asc"), cursor=cursor, limit=limit,
-                deadline_seconds=self._query_seconds(deadline),
-            )
-            if len(newer.items) == limit:
-                boundary = newer.items[-1].binding
-                previous_cursor = BindingCursor(boundary.created_at, boundary.id)
         return ScopeSessionPage(
-            previous_cursor=previous_cursor,
             items=items, next_cursor=next_cursor, current=current,
             active_binding_id=current_binding.id if current_binding is not None else None,
             has_lazy=has_lazy,
@@ -1581,21 +1488,6 @@ class InstanceManagementService:
     ) -> NativeThreadMetadata | None:
         return await self.session_reads.metadata(binding_id, deadline)
 
-    async def _local_binding_metadata(self, binding_id: str, deadline: float) -> NativeThreadMetadata | None:
-        binding = self._bindings.get(binding_id)
-        views = await self._local_display_views((binding,), deadline)
-        view = views.get(binding.native_thread_id)
-        return view.metadata if view is not None else None
-
-    async def _local_display_views(
-        self, bindings: Sequence[ThreadBinding], deadline: float,
-    ) -> dict[str, NativeThreadView]:
-        if self._runtime.local_summary is None:
-            return {}
-        # Optional names must leave time for the required status and paging reads.
-        now = asyncio.get_running_loop().time()
-        display_deadline = now + min(3.0, (deadline - now) / 2)
-        return await self._session_native_views(bindings, native=None, deadline=display_deadline)
 
     async def _native_binding_metadata(self, binding_id: str, deadline: float) -> NativeThreadMetadata | None:
         """Read an exact Binding's display summary with the shared worker budget.
@@ -1657,15 +1549,6 @@ class InstanceManagementService:
             ))
         return SideTopicInventoryPage(items=tuple(items), next_cursor=page.next_cursor)
 
-    def _local_binding_status(self, binding: ThreadBinding, capture: StatusCapture) -> BindingStatusProjection:
-        local = capture.local
-        assert local is not None
-        status = _project_binding_status(binding=binding, snapshot=capture.snapshot, primary_status_unavailable=local.unavailable,
-                                         persisted_goal_resolved=True)
-        assert self.local is not None
-        observations = capture.observations if capture.observations is not None else self.local.observation_defaults
-        return replace(status, local_label=local.label, observations=observations, can_stop=local.can_stop,
-                       control_turn_id=local.control_turn_id, can_stop_all=local.can_stop_all)
 
     async def binding_status_exact(
         self,
@@ -1677,8 +1560,6 @@ class InstanceManagementService:
     ) -> BindingStatusProjection:
         binding = self._bindings.get(binding_id)
         capture = self.status_source.capture(binding, snapshot)
-        if capture.local is not None:
-            return self._local_binding_status(binding, capture)
         before = capture.snapshot
         local = _project_binding_status(
             binding=binding,
@@ -1762,10 +1643,6 @@ class InstanceManagementService:
                 raise
             except (GoalControlError, ThreadLifecycleError, TimeoutError):
                 binding = self._bindings.get(binding_id)
-                if self.local is not None:
-                    local = self.local.local_snapshot(binding_id)
-                    snapshot = local.capture(binding_id, binding.native_thread_id, self.local.observation_defaults)
-                    return self._local_binding_status(binding, StatusCapture(snapshot, local))
                 return _project_binding_status(
                     binding=binding,
                     snapshot=self._runtime.runtime_snapshot_exact(binding_id),
@@ -1791,9 +1668,6 @@ class InstanceManagementService:
         for binding_id in binding_ids:
             binding = self._bindings.get(binding_id)
             capture = self.status_source.capture(binding)
-            if capture.local is not None:
-                binding_snapshots.append(self._local_binding_status(binding, capture))
-                continue
             binding_snapshots.append(
                 _project_binding_status(
                     binding=binding,
@@ -1830,8 +1704,6 @@ class InstanceManagementService:
         worktree_id: str | None = None,
         worktree_create: dict[str, Any] | None = None,
     ) -> CreatedBinding:
-        if self.local is not None:
-            self.local.require_admission()
         self.session_form.validate(turn_settings is not None, task_feedback)
         parameters = dict(
             scope=scope, creator_id=creator_id, project_alias=project_alias,
@@ -2040,8 +1912,6 @@ class InstanceManagementService:
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
-        if self.local is not None:
-            self.local.require_admission()
         self.session_form.validate(settings is not None, task_feedback)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
@@ -2078,7 +1948,7 @@ class InstanceManagementService:
         self.policy.require(OperationId.MANUAL_RENAME)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            writer = self.title_writer_for(binding)
+            writer = self.title_writer_for()
         # Capture the exact target under Scope coordination, but never hold
         # that lock while waiting for a previous name writer to finish.
         normalized = await writer.rename_exact(binding.id, name)
@@ -2131,50 +2001,23 @@ class InstanceManagementService:
         self,
         *,
         target: CurrentBindingTarget,
-        sender_id: str = "",
-        revision: int | None = None,
-        turn_id: str | None = None,
-    ) -> ReleasedBinding | ReleaseConfirmation:
+    ) -> ReleasedBinding:
         self.policy.require(OperationId.RELEASE)
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            if self.local is None:
-                return ReleasedBinding(binding, await self._runtime.release_exact(binding.id))
-        outcome = await self.local.release_control(binding.id, scope_key=target.scope_key, sender_id=sender_id,
-                                                   revision=revision, turn_id=turn_id)
-        return outcome if isinstance(outcome, ReleaseConfirmation) else ReleasedBinding(binding, outcome)
+            disposition = await self._runtime.release_exact(binding.id)
+            return ReleasedBinding(binding=binding, disposition=disposition)
 
-    async def stop_claude_control(self, target: ExactBindingTarget, *, sender_id: str, revision: int | None,
-                                  turn_id: str | None, all_tasks: bool,
-                                  acknowledge: Callable[[str], Awaitable[None]]) -> StopDisposition:
-        if self.local is None or (all_tasks and not self.policy.can_stop_background_tasks):
-            raise BackendUnsupported("Claude 停止控制")
-        async with self._scope_coordinator.hold(target.scope_key):
-            binding, _ = self._require_exact(target)
-            return await self.local.stop_control(binding.id, sender_id=sender_id, revision=revision, turn_id=turn_id,
-                                                 all_tasks=all_tasks, acknowledge=acknowledge)
 
     async def stop_current_binding(
         self,
         *,
         target: CurrentBindingTarget,
         acknowledge: StopAcknowledger | None = None,
-        runtime_precondition: RuntimePrecondition | None = None,
     ) -> StoppedBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            stop_kwargs: dict[str, object] = {"acknowledge": acknowledge}
-            if runtime_precondition is not None:
-                stop_kwargs.update(
-                    expected_activity_revision=(
-                        runtime_precondition.activity_revision
-                    ),
-                    expected_turn_id=runtime_precondition.physical_turn_id,
-                )
-            disposition = await self._runtime.stop_exact(
-                binding.id,
-                **stop_kwargs,
-            )
+            disposition = await self._runtime.stop_exact(binding.id, acknowledge=acknowledge)
             return StoppedBinding(binding=binding, disposition=disposition)
 
     async def activate_exact_binding(
@@ -2204,8 +2047,6 @@ class InstanceManagementService:
         task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
     ) -> ThreadBinding:
-        if self.local is not None:
-            self.local.require_admission()
         self.session_form.validate(settings is not None, task_feedback)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
@@ -2261,7 +2102,7 @@ class InstanceManagementService:
         self.policy.require(OperationId.MANUAL_RENAME)
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
-            writer = self.title_writer_for(binding)
+            writer = self.title_writer_for()
         normalized = await writer.rename_exact(binding.id, name)
         return RenamedBinding(binding=binding, name=normalized)
 

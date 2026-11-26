@@ -969,7 +969,6 @@ class BindingStore:
         expected_project_revision: int,
         target_chat_kind: str,
         context_anchor: MessageContextAnchor | None = None,
-        verified_cwd: str | None = None,
     ) -> BindingCreation:
         """Bind a fork, atomically capturing any replaced main-line pointer."""
 
@@ -1000,11 +999,9 @@ class BindingStore:
                 empty_topic_root_message_id=root_message_id if scope.kind is ScopeKind.TOPIC else None,
                 working_cwd=source.working_cwd,
                 worktree_id=source.worktree_id,
-                verified_fork_cwd=verified_cwd,
             )
         except sqlite3.IntegrityError as error:
-            backend = "Claude" if verified_cwd is not None else "Codex"
-            raise BindingConflict(f"{backend} 分支已绑定到其他会话，本次未覆盖。") from error
+            raise BindingConflict("Codex 分支已绑定到其他会话，本次未覆盖。") from error
 
     def _create_binding(
         self,
@@ -1022,7 +1019,6 @@ class BindingStore:
         empty_topic_root_message_id: str | None = None,
         working_cwd: str | None = None,
         worktree_id: str | None = None,
-        verified_fork_cwd: str | None = None,
     ) -> BindingCreation:
         if not project_alias or not creator_id:
             raise ValueError("Binding Project and creator must not be empty")
@@ -1120,10 +1116,9 @@ class BindingStore:
             ):
                 raise ProjectRevisionConflict(project_alias)
 
-            validation_cwd = verified_fork_cwd or working_cwd
-            if validation_cwd is not None:
-                self.worktrees.require_cwd_not_deleting(validation_cwd)
-            if verified_fork_cwd is None and worktree_id is None and working_cwd is not None:
+            if working_cwd is not None:
+                self.worktrees.require_cwd_not_deleting(working_cwd)
+            if worktree_id is None and working_cwd is not None:
                 matched = self.worktrees.find_by_cwd(
                     working_cwd, project_alias=project_alias,
                     project_generation=project_row["generation"],
@@ -1132,7 +1127,7 @@ class BindingStore:
                     worktree_id = matched.id
             if worktree_id is not None:
                 self.worktrees.require_bindable(
-                    worktree_id, project=_project_record(project_row), cwd=validation_cwd,
+                    worktree_id, project=_project_record(project_row), cwd=working_cwd,
                 )
 
             self._connection.execute(
@@ -1806,12 +1801,6 @@ class BindingStore:
         with self._lock:
             return alias in self._project_delete_intents
 
-    def require_actual_cwd_not_deleting(self, canonical_cwd: Path) -> None:
-        with self._lock:
-            for snapshot in self._project_delete_intents.values():
-                if canonical_cwd.is_relative_to(Path(snapshot.project.cwd)):
-                    raise ProjectDeleting(f"Project {snapshot.project.alias} 正在删除，请稍后刷新。")
-            self.worktrees.require_cwd_not_deleting(canonical_cwd)
 
     def require_project_not_deleting(self, alias: str) -> None:
         with self._lock:
