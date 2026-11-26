@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
+from functools import partial
 
 
+from ..backends import OperationId
 from ..bindings import (
     SideTopicNotFound,
     SideTopicState,
@@ -271,10 +273,7 @@ class NativeReplyChannel(CompletionPresentationChannel):
         try:
             reaction = self._reactions.start(key.turn_id, _message_id(origin),
                                              pulse_enabled=submission.task_feedback.reaction_pulse_enabled)
-            if side or self._session_form.progress_editable:
-                await asyncio.gather(reaction, self._open_running_card(key, submission, origin))
-            else:
-                await asyncio.gather(reaction)
+            await asyncio.gather(reaction, self._open_running_card(key, submission, origin))
         except Exception as error:
             logger.warning("accepted %s prompt presentation failed", kind,
                            extra={**key.log_context, "error_type": type(error).__name__})
@@ -284,12 +283,14 @@ class NativeReplyChannel(CompletionPresentationChannel):
     async def _open_running_card(
         self, key: PresentationKey, submission: Submission | SideSubmission | GoalSubmission, origin: object,
     ) -> bool:
-        routed = isinstance(submission, SideSubmission) and isinstance(origin, CardAnswerOrigin) or isinstance(submission, Submission) and isinstance(
-            origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin))
+        ordinary = isinstance(submission, Submission)
+        routed = (isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin))
+                  if ordinary else isinstance(submission, SideSubmission) and isinstance(origin, CardAnswerOrigin))
+        reply = self._reply_to_origin if routed else self._channel.reply
         event = CodexReplyEvents(self._runtime, self._ordinary).opened(
             key, origin, submission.task_feedback, goal=isinstance(submission, GoalSubmission),
             root_message_id=submission.root_message_id if isinstance(submission, SideSubmission) else None,
-            reply=lambda card: self._reply_to_origin(origin, card) if routed else self._channel.reply(origin, card),
+            reply=partial(reply, origin) if not ordinary or self._policy.allows(OperationId.REPLY_CARD) else None,
             reply_partial=lambda post: self._reply_to_origin(origin, post),
             validate_reply=(lambda result: self._scheduled_reply_confirmed(origin, result))
                            if isinstance(submission, Submission) and isinstance(origin, ScheduledOrigin) else None,

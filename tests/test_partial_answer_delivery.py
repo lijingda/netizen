@@ -12,6 +12,7 @@ from lark_channel import Identity, OutboundCard, OutboundPost, SendResult
 
 from netizen_cli.channel.reply_events import PresentationKey, ReplyTarget
 from tests.support.reply_events import codex_result, open_card, terminal_answers
+from netizen_cli.backends import Provider
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.codex_runtime import (
@@ -351,11 +352,22 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         self.app._progress_cards = _ReplyCardPresenter(self.channel, poll_seconds=0.001)
 
     async def test_running_without_progress_sends_answer_without_completion_side_effects(self):
+        await self.assert_running_partial_without_card(card_enabled=False)
+
+    async def test_uneditable_progress_form_keeps_running_answer_delivery(self):
+        management = self.fixture.management
+        policy = management.policy.bind(lambda provider: provider != Provider.REPLY_PROGRESS and management.has_provider(provider))
+        with patch.object(management, "policy", policy):
+            self.app._policy, self.app._session_form = policy, management.session_form
+            self.assertFalse(self.app._session_form.progress_editable)
+            await self.assert_running_partial_without_card(card_enabled=True)
+
+    async def assert_running_partial_without_card(self, *, card_enabled):
         snapshot = replace(turn_activity_snapshot(binding_id=self.binding.id), partial_answers=(answer(),), revision=2)
         self.runtime.turn_activity_values[self.binding.id] = snapshot
         prompt = FakeMessage("work", message_id="om_origin")
         self.runtime.submission = Submission(SubmitDisposition.STARTED, self.binding.id,
-            "native-one", "turn-one", lambda: None)
+            "native-one", "turn-one", lambda: None, task_feedback=BindingTaskFeedback(progress_card_enabled=card_enabled))
         delivered = asyncio.Event()
 
         async def reply(message, post, opts=None):

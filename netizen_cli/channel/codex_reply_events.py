@@ -45,7 +45,7 @@ class CodexReplyEvents:
         origin: object,
         feedback: BindingTaskFeedback,
         *,
-        reply: Callable[[OutboundCard], Awaitable[SendResult]],
+        reply: Callable[[OutboundCard], Awaitable[SendResult]] | None,
         reply_partial: Callable[[OutboundPost], Awaitable[SendResult]],
         validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None,
         goal: bool = False,

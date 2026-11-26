@@ -179,19 +179,14 @@ class _ReplyCardPresenter:
             return False
         snapshot = initial.snapshot
         message_id = None
-        if event.feedback.progress_card_enabled:
+        if event.feedback.progress_card_enabled and (reply := event.reply) is not None:
             try:
                 card = turn_progress_card(snapshot=snapshot)
 
-                async def send_card() -> SendResult | None:
-                    sent = await event.reply(card)
-                    if event.validate_reply and not await event.validate_reply(sent):
-                        return None
-                    return sent
-
                 async with asyncio.timeout(self._operation_timeout_seconds):
-                    result = await send_card()
-                    message_id = _receipt_message_id(result) if result is not None else None
+                    result = await reply(card)
+                    if event.validate_reply is None or await event.validate_reply(result):
+                        message_id = _receipt_message_id(result)
             except asyncio.CancelledError:
                 raise
             except Exception:
