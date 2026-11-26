@@ -380,6 +380,71 @@ class ProcessOrderingTest(unittest.IsolatedAsyncioTestCase):
         port.create.assert_not_awaited()
 
 
+    async def test_only_process_ids_are_exclusive_across_codex_turns_and_lifecycle(self):
+        from netizen_cli.process_messages import Created
+        from netizen_cli.runtime.contracts import (
+            Submission, SubmitDisposition, ThreadActivityDiscardedOutcome, TurnOutcome,
+        )
+        from tests.support.channel_results import completed_turn_result
+
+        first = Created("cot", "process-mid")
+        receipts = (first, Created("cot", "other-mid"), Created("other", "process-mid"))
+        for second, owner, phase in itertools.product(receipts, ("A", "B"), ("open", "ended", "discarded")):
+            with self.subTest(second=second, owner=owner, phase=phase):
+                async with channel_fixture() as fx, asyncio.timeout(4):
+                    presenter = fx.app._progress_cards
+                    port = process_port()
+                    presenter._process_port = port
+                    snapshots = {}
+
+                    def observe(binding, *, thread_id, turn_id):
+                        return snapshots.get((binding, thread_id, turn_id))
+
+                    async def open_turn(binding, thread, turn, receipt):
+                        key = PresentationKey(binding, thread, turn)
+                        snapshot = replace(process_snapshot(1, binding=binding),
+                                           thread_id=thread, turn_id=turn, physical_turn_id=turn)
+                        snapshots[key.index] = snapshot
+                        origin = FakeMessage("work", message_id=turn)
+                        submission = Submission(SubmitDisposition.STARTED, binding, thread, turn, lambda: None)
+                        created = asyncio.get_running_loop().create_future()
+
+                        async def create(*_):
+                            created.set_result(presenter._process[key])
+                            return receipt
+
+                        port.create.side_effect = create
+                        await fx.app._present_ordinary_receipt(submission, origin)
+                        state = await created
+                        await state.ready.wait()
+                        outcome = TurnOutcome(binding_id=binding, thread_id=thread, turn_id=turn,
+                                              owner_id="owner", origin=origin, cwd=fx.project, activity=snapshot,
+                                              result=completed_turn_result(final_response=turn))
+                        return outcome, state
+
+                    async def finish(outcome, state):
+                        await fx.app.handle_completion(outcome)
+                        await state.task
+
+                    with patch.object(fx.app._ordinary, "turn_activity", side_effect=observe):
+                        first_turn = await open_turn("A", "native-A", "first", first)
+                        if phase != "open":
+                            await finish(*first_turn)
+                        if phase == "discarded":
+                            await fx.app.handle_codex_completion(ThreadActivityDiscardedOutcome("A", "native-A", "first"))
+                        thread = f"native-{owner}-new" if phase == "discarded" else f"native-{owner}"
+                        next_turn = await open_turn(owner, thread, "next", second)
+                        if phase == "open":
+                            await finish(*first_turn)
+                        await finish(*next_turn)
+
+                    expected = [(first.cot_id, first.message_id)]
+                    if second.cot_id != first.cot_id:
+                        expected.append((second.cot_id, second.message_id))
+                    self.assertEqual(port.create.await_count, 2)
+                    self.assertEqual([call.args[:2] for call in port.complete.await_args_list], expected)
+                    self.assertCountEqual([call.args[:2] for call in port.update.await_args_list], expected * 2)
+
     async def test_malformed_sdk_id_does_not_interrupt_ordinary_codex_delivery(self):
         from types import SimpleNamespace
         from lark_channel.channel.outbound.sender import OutboundSender
