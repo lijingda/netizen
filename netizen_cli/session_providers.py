@@ -112,21 +112,16 @@ class SessionNames:
         return cls(writer, runtime.name_generator if isinstance(runtime, _CandidateSource) else None)
 
 
-@dataclass(frozen=True, slots=True)
-class StatusCapture:
-    snapshot: BindingRuntimeSnapshot
-
-
 class StatusSource(Protocol):
-    def capture(self, binding: ThreadBinding, snapshot: BindingRuntimeSnapshot | None = None) -> StatusCapture: ...
+    def capture(self, binding: ThreadBinding, snapshot: BindingRuntimeSnapshot | None = None) -> BindingRuntimeSnapshot: ...
 
 
 @dataclass(frozen=True, slots=True)
 class CodexStatusSource:
     snapshot: Callable[[str], BindingRuntimeSnapshot]
 
-    def capture(self, binding: ThreadBinding, snapshot: BindingRuntimeSnapshot | None = None) -> StatusCapture:
-        return StatusCapture(snapshot or self.snapshot(binding.id))
+    def capture(self, binding: ThreadBinding, snapshot: BindingRuntimeSnapshot | None = None) -> BindingRuntimeSnapshot:
+        return snapshot or self.snapshot(binding.id)
 
 
 @dataclass(frozen=True, slots=True)
