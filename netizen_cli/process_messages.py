@@ -50,10 +50,6 @@ class _Item:
     def wire_id(self) -> str:
         return sha256(self.item_id.encode("utf-8", errors="surrogatepass")).hexdigest()[:32]
 
-    @property
-    def state(self) -> Literal["running", "finished"]:
-        return "running" if self.finished_at is None else "finished"
-
     def finish(self, observed_at: int) -> Self:
         """Freeze the first completion observation, also when the wall clock has moved back."""
         if self.finished_at is not None:
@@ -72,18 +68,13 @@ class StepItem(_Item):
 
 @dataclass(frozen=True)
 class TextItem(_Item):
-    """Completed commentary. CONTENT defaults to the completion second."""
+    """Completed commentary. CONTENT and END share the completion second."""
 
     finished_at: int = field()
-    content_at: int | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         _check_timestamp(self.finished_at)
-        if self.content_at is not None:
-            _check_timestamp(self.content_at)
-            if not self.started_at <= self.content_at <= self.finished_at:
-                raise ValueError("CONTENT must be between START and END")
 
 
 ProcessItem = ToolItem | StepItem | TextItem
@@ -163,7 +154,7 @@ def _events_for(item: ProcessItem) -> list[_Event]:
         message_id = item.wire_id
         return [
             _event("TEXT_MESSAGE_START", item.started_at, messageId=message_id, role="assistant"),
-            _event("TEXT_MESSAGE_CONTENT", item.content_at or item.finished_at, messageId=message_id, delta=item.text),
+            _event("TEXT_MESSAGE_CONTENT", item.finished_at, messageId=message_id, delta=item.text),
             _event("TEXT_MESSAGE_END", item.finished_at, messageId=message_id),
         ]
     if isinstance(item, StepItem):

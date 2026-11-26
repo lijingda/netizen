@@ -15,7 +15,7 @@ from netizen_cli.process_messages import (
 RESOURCE = "/open-apis/im/v1/message_cot"
 T = 1_800_000_001
 ITEMS = (ToolItem("tool", "安全操作", T, T + 5), StepItem("step", "核对", T + 1, T + 2),
-         TextItem("text", "进展", T + 1, T + 4, content_at=T + 3))
+         TextItem("text", "进展", T + 1, T + 4))
 
 
 def response(payload, status=200):
@@ -62,7 +62,7 @@ class ProcessMessageShapes(unittest.IsolatedAsyncioTestCase):
             (1, "STEP_STARTED", {"stepName": "核对"}),
             (1, "TEXT_MESSAGE_START", {"messageId": text_id, "role": "assistant"}),
             (2, "STEP_FINISHED", {"stepName": "核对"}),
-            (3, "TEXT_MESSAGE_CONTENT", {"messageId": text_id, "delta": "进展"}),
+            (4, "TEXT_MESSAGE_CONTENT", {"messageId": text_id, "delta": "进展"}),
             (4, "TEXT_MESSAGE_END", {"messageId": text_id}),
             (5, "TOOL_CALL_END", {"toolCallId": tool_id}),
         ]
