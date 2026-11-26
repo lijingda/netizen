@@ -914,11 +914,6 @@ class InstanceManagementService:
             case Provider.NAME_GENERATOR:
                 return self.names.generate is not None
 
-    def operation_policy(self, identity: BackendPolicy | None = None) -> BackendPolicy:
-        if identity is not None and identity.backend != self.policy.backend:
-            raise ValueError("Backend policy identity conflicts with assembled management")
-        return self.policy
-
     @property
     def session_form(self) -> SessionFormView:
         return SessionFormView.from_operations(

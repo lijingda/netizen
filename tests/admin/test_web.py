@@ -154,7 +154,6 @@ class FakeFeishuClient:
 
 class FakeManagement:
     policy = BackendPolicy("codex")
-    operation_policy = InstanceManagementService.operation_policy
 
     async def resolve_chat_labels(self, chat_ids, *, deadline, lookup_budget_seconds=None):
         return {chat_id: ChatLabelResolver.fallback(chat_id) for chat_id in chat_ids}
