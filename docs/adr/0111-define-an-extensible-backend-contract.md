@@ -8,6 +8,10 @@ related: 0104, 0106, 0107, 0110
 
 # 以核心契约和能力模块定义可扩展的后端契约
 
+## 实现进展
+
+2026-11-26，#334 已补齐第 6 节记录的 Codex 停止缺口。启动回执返回前发出的停止请求会等待本次启动结果，仅中断仍在运行的目标 Turn。见[普通 Turn 停止与压缩](../design.md#普通-turn-停止与压缩)和[启动窗口停止测试](../../tests/test_turn_start_stop.py)。
+
 ## 背景
 
 [ADR 0104](0104-host-native-agent-backends-per-instance.md) 让每个实例固定一个原生 Agent 后端。[ADR 0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) 引入了静态工厂、按调用方的小接口、操作描述、共用展示模型和四项执行不变量。Claude Code 试点按这套机制接入，随后由 [ADR 0110](0110-withdraw-the-claude-code-backend.md) 撤回。试点暴露了三个问题。
