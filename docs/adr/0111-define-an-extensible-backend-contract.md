@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-11-26
 amends: 0105
+amended_by: 0112
 related: 0104, 0106, 0107, 0110
 ---
 
