@@ -278,7 +278,9 @@ Boundaries and examples are in the [design principles](docs/CONTRIBUTING.md#шо╛ш
   degraded path. When review keeps finding holes in edge cases, simplify the rule
   instead of patching cases.
 - Base decisions on facts the native agent publicly reports, pinned by gates, and
-  compare like with like within one public view.
+  compare like with like within one public view. A platform violating its own identity or response
+  contract is a platform defect to be fixed upstream; do not add defensive branches for it, but
+  still read facts the response does not report.
 - Test invariants with ordering explorers and mutation checks rather than one
   test per scenario. Freeze decoded output before a behavior-preserving refactor.
 - Write the degraded path and the blocking bar into the spec before implementation
