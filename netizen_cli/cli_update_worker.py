@@ -327,6 +327,8 @@ def execute(plan: dict[str, Any], *, runner: Any = _run_owned) -> dict[str, Any]
         installed = json.loads(validation.stdout)
         if not isinstance(installed, dict) or not isinstance(installed.get("version"), str):
             raise ValueError("Fresh-process installation validation returned an invalid result")
+        if package.get("backend") == "uv-tool":
+            read_uv_tool_receipt(Path(package["prefix"]) / "uv-receipt.toml")
         report["package"].update(state="verified", after_version=installed["version"])
         report["phase"] = "restoring"
         report["unexecuted"] = [f"start:{item['root']}" for item in report["instances"] if item["was_running"]]

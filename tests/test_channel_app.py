@@ -3008,6 +3008,39 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("turn-one", controller._pulses)
 
+    async def test_terminal_delivery_distinguishes_reaction_and_presenter_cancellation(self) -> None:
+        for cancel_presenter in (False, True):
+            with self.subTest(cancel_presenter=cancel_presenter):
+                turn = f"turn-{cancel_presenter}"
+                origin = FakeMessage("work", message_id=f"input-{cancel_presenter}")
+                await self.app._reactions.start(turn, origin.id, pulse_enabled=False)
+                removing = asyncio.Event()
+                removal = asyncio.get_running_loop().create_future()
+
+                async def remove(*_):
+                    removing.set()
+                    return await removal
+
+                outcome = TurnOutcome(
+                    binding_id="binding-one", thread_id="native-one", turn_id=turn,
+                    owner_id="ou_user", origin=origin,
+                    result=completed_turn_result(final_response="terminal answer"),
+                )
+                with patch.object(self.channel, "remove_reaction", side_effect=remove):
+                    async with asyncio.timeout(3):
+                        delivery = asyncio.create_task(self.app.handle_completion(outcome))
+                        await removing.wait()
+                        if cancel_presenter:
+                            delivery.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await delivery
+                        else:
+                            removal.cancel()
+                            await delivery
+                answers = [mid for mid, content in self.channel.replies
+                           if mid == origin.id and "terminal answer" in str(content)]
+                self.assertEqual(answers, [] if cancel_presenter else [origin.id])
+
     async def test_status_card_shows_lazy_codex_defaults(self) -> None:
         await self.fixture.new()
 

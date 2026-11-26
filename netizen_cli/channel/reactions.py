@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
+from ..external_calls import external_call
 from .ports import ReplyChannel
 
 
@@ -240,10 +241,7 @@ class _ReactionController:
     ) -> bool:
         try:
             async with asyncio.timeout(self._operation_timeout_seconds):
-                result = await self._channel.remove_reaction(
-                    pulse.message_id,
-                    reaction_id,
-                )
+                result = await external_call(self._channel.remove_reaction(pulse.message_id, reaction_id))
         except Exception:
             logger.exception(
                 "failed to remove turn reaction",
