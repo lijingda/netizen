@@ -1476,6 +1476,7 @@ def _local_stop_button(
 
 def local_status_card(
     scope: FeishuScope, binding: ThreadBinding, status: BindingStatusProjection, defaults: SessionObservations,
+    *, title: str,
 ) -> OutboundCard:
     observed = status.observations or defaults
     label = status.local_label or "状态待确认"
@@ -1486,7 +1487,7 @@ def local_status_card(
     if status.can_stop_all and status.control_turn_id:
         controls += (_local_stop_button(scope, binding.id, binding.id, status.snapshot.activity_revision, status.control_turn_id,
                                         SessionCardPage("lazy"), from_status=True, all_tasks=True),)
-    view = SessionStatusView.from_observations(binding, status.primary_status or "unknown", label, observed)
+    view = SessionStatusView.from_observations(binding, status.primary_status or "unknown", label, observed, title=title)
     return render_session_status(view, controls)
 
 
@@ -1594,7 +1595,8 @@ def _session_row(
     marker_text = "● 当前" if session.active else "○"
     if local_directory:
         observed = session.observations or policy.observation_defaults
-        text = (f"{marker_text} {session.short_id}\nProject：{session.project_alias} · 状态：{session.state_label or '状态待确认'}\n"
+        heading = session.short_id if session.title == session.short_id else f"{session.title} · {session.short_id}"
+        text = (f"{marker_text} {heading}\nProject：{session.project_alias} · 状态：{session.state_label or '状态待确认'}\n"
                 f"{observed.presentation.identity_label}：{session.native_thread_id or '尚未建立'}\n登记时间：{session.registered_at}")
         text = "\n".join((text, *observed.lines(observed.presentation.row)))
     else:

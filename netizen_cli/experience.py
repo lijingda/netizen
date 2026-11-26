@@ -525,8 +525,12 @@ def command_help(
         and spec.has_capability(policy, capabilities)
     )
     if policy.backend == "claude":
+        labels = {
+            OperationId.MANUAL_RENAME: "[名称] 客户端关闭后手工改名",
+            OperationId.FORK: "空闲且无后台任务时创建持久分支",
+        }
         return "Claude 会话：" + " · ".join(
-            f"/{spec.name} {OPERATIONS[operation].label}"
+            f"/{spec.name} {labels.get(operation, OPERATIONS[operation].label)}"
             for spec in available
             if (operation := command_operation(spec.name)) is not None and operation is not OperationId.HELP
         ) + "。"

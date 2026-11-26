@@ -1653,6 +1653,9 @@ function observeSessionPreviews(body) {
 }
 
 function sessionName(session) {
+  if (document.body.dataset.backend === "claude" && session.nativeThreadId && !session.nativeTitle && !session.nativePreview) {
+    return session.shortId;
+  }
   return session.nativeTitle || (session.catalogState === "lazy" ? "未开始的会话" : "未命名会话");
 }
 
@@ -1939,18 +1942,28 @@ function rowByIdentity(selector, key, value) {
 let sessionRenameEditor = null;
 const sessionRenameInput = (name) => document.querySelector(`#session-rename-${name}`);
 
+function sessionRenameDraft() {
+  const input = sessionRenameInput("name");
+  if (!input.dataset.maxCodePoints) return { name: input.value.trim(), tooLong: false };
+  // Match Python str.split(), including the four additional ASCII separators.
+  const words = input.value.match(/[^\p{White_Space}\u001c-\u001f]+/gu);
+  const name = (words || []).join(" ");
+  return { name, tooLong: [...name].length > Number(input.dataset.maxCodePoints) };
+}
+
 function renderSessionRenameEditor() {
   const editor = sessionRenameEditor;
   if (!editor) return;
   const busy = editor.generating || editor.saving;
+  const { name, tooLong } = sessionRenameDraft();
   sessionRenameInput("name").disabled = busy;
   sessionRenameInput("generate").disabled = busy || !editor.session.actions.rename || state.authExpired;
   sessionRenameInput("save").disabled = busy || !editor.session.actions.rename
-    || !sessionRenameInput("name").value.trim() || state.authExpired;
+    || !name || tooLong || state.authExpired;
   sessionRenameInput("cancel").disabled = editor.saving;
   sessionRenameInput("close").disabled = editor.saving;
   sessionRenameInput("status").textContent = editor.generating ? "正在生成中…"
-    : editor.saving ? "正在保存…" : editor.error;
+    : editor.saving ? "正在保存…" : editor.error || (tooLong ? "会话名称最多 120 个字符。" : "");
   sessionRenameInput("status").classList.toggle("error", Boolean(editor.error));
   sessionRenameInput("editor").setAttribute("aria-busy", String(busy));
 }
@@ -2022,8 +2035,8 @@ async function generateSessionName() {
 async function saveSessionName(event) {
   event.preventDefault();
   const editor = sessionRenameEditor;
-  const name = sessionRenameInput("name").value.trim();
-  if (!editor || editor.generating || editor.saving || !editor.session.actions.rename || !name || state.authExpired) return;
+  const { name, tooLong } = sessionRenameDraft();
+  if (!editor || editor.generating || editor.saving || !editor.session.actions.rename || !name || tooLong || state.authExpired) return;
   const action = editor.session.actions.rename;
   sessionLists.session.updateActions(editor.session, { rename: null });
   editor.returnFocus.disabled = true;

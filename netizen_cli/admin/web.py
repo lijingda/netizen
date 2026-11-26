@@ -138,6 +138,7 @@ from ..runtime.contracts import (
     ThreadDeleteUnavailable,
     ThreadGoalActive,
     ThreadLifecycleError,
+    SessionRenameUnconfirmed,
     ThreadLifecycleStateUnknown,
     ThreadNotArchived,
     ThreadNotMaterialized,
@@ -681,10 +682,16 @@ class AdminWebApplication:
                 attributes.append(f'data-inherited-model="{html.escape(self._backend_policy.inherited_model_label)}"')
             page = page.replace(b"<body>", ("<body " + " ".join(attributes) + ">").encode(), 1)
             can_generate = self._backend_policy.allows(OperationId.GENERATE_NAME)
-            page = page.replace(b"__NETIZEN_RENAME_HINT__", (
-                "自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。" if can_generate else
-                html.escape(self._management.names.sync_hint)
-            ).encode()).replace(
+            if can_generate:
+                rename_hint = "自动生成会清空当前输入；生成后可继续编辑，保存后才会改名。"
+            else:
+                rename_hint = self._management.names.sync_hint
+                if self._backend_policy.owner_only and self._backend_policy.allows(OperationId.MANUAL_RENAME):
+                    rename_hint = "Claude 客户端关闭后可以改名。后台任务或会话 cron 保留连接时，请等待工作结束。" + rename_hint
+            page = page.replace(b"__NETIZEN_RENAME_HINT__", html.escape(rename_hint).encode()).replace(
+                b" data-netizen-rename-limit",
+                b' data-max-code-points="120"' if self._backend_policy.backend == "claude" else b' maxlength="120"',
+            ).replace(
                 b" data-netizen-generate-name-visibility",
                 b"" if can_generate else b" hidden data-provider-hidden",
             ).replace(b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(self._instance_root)).encode())
@@ -2400,7 +2407,15 @@ class AdminWebApplication:
             expected_resource="binding",
             allowed_extra={"name"},
         )
-        name = _required_text(payload, "name", maximum=120)
+        if self._backend_policy.backend == "claude":
+            # The ordinary title writer validates 1–120 Unicode characters.
+            # The generic HTTP field bound is in UTF-8 bytes.
+            value = payload.get("name")
+            if isinstance(value, str):
+                value = " ".join(value.split())
+            name = _required_text({"name": value}, "name", maximum=4 * 120)
+        else:
+            name = _required_text(payload, "name", maximum=120)
         renamed = await self._mutation(
             context,
             OPERATIONS[OperationId.MANUAL_RENAME].grant,
@@ -3773,6 +3788,8 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(503, "state_unknown", "结果未确认，请刷新对账。")
     if isinstance(error, MalformedActionGrant):
         return AdminWebError(400, "invalid_action", "操作凭据无效。")
+    if isinstance(error, SessionRenameUnconfirmed):
+        return AdminWebError(503, "state_unknown", str(error))
     if isinstance(error, ThreadLifecycleError):
         return AdminWebError(409, "operation_rejected", describe_error(error))
     if isinstance(

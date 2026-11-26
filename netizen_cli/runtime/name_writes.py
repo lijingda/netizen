@@ -8,6 +8,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def normalize_session_name(name: str) -> str:
+    normalized = " ".join(name.split())
+    if not normalized or len(normalized) > 120:
+        raise ValueError("会话名称必须为 1 到 120 个字符。")
+    return normalized
+
+
 @dataclass
 class _NameLock:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)

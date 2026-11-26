@@ -103,8 +103,9 @@ Codex 后端通过共享的官方 SDK/App Server 操作精确的 Thread 和 Turn
   最多 512 个 Binding 的最近样本驻留进程内存。冷启动或淘汰后显示“未观测”，取不到的数值显示“取不到”，
   订阅等不适用字段标明“不适用”。展示沿用已有观测流，当前上下文占用显示“取不到”。
   新建、配置和默认规则共用表单字段权限，提交时重新验证。Claude 的模型来源固定为原生设置。
+  名称按原生会话 ID 有界读取。优先显示 `custom_title`（包括 Claude 自动生成的标题），其次将 `summary` 标为预览。两者皆空、读取超时或失败时，该行显示 Binding 短 ID。名称与预览仅供当次展示。
 - **能力与缺口。** 飞书命令、卡片（含旧卡）、Admin API 和定时派发均按同一后端能力判定。试点支持文本和图片输入、本地状态、
-  工具 Activity、原生清单、阶段性答案、Result、本轮文件、后台完成轮与逻辑结束提及。Goal、Side、fork、归档／删除、Netizen 定时与协作、原生历史和模型设置仍按能力门禁关闭。
+  工具 Activity、原生清单、阶段性答案、Result、本轮文件、后台完成轮与逻辑结束提及。所有者可在飞书或 Admin 手工改名，在飞书创建持久分支。Goal、Side、归档／删除、Netizen 定时与协作、原生历史和模型设置仍按能力门禁关闭。
   Claude 所有者可从飞书释放当前连接，Admin 中的释放操作仍仅向 Codex 开放。
   pip 和 uv pip 仅在已装 SDK 与已装 Netizen 发行包的 `[claude]` 固定版本相符时保留 extra，版本冲突在停服前报错。uv tool 核对安装记录。
   取舍与验收见 [ADR 0104](adr/0104-host-native-agent-backends-per-instance.md#接受记录)。
@@ -467,7 +468,9 @@ Result/Files；logical terminal 只用 exact 最终物理 Turn 的输出和 stru
 
 ### 普通会话生命周期
 
-会话生命周期的命令入口按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
+Claude 的 `/rename <名称>`、命名卡片和 Admin 表单使用同一个手工写入入口。已物化的 Binding 在受管客户端确认关闭后才可改名。准入锁覆盖资格检查、一次原生写入和精确 ID 的标题回读。保存的标题须与合并空白后的输入完全一致。写入前明确拒绝只影响本次操作，其余异常或回读不符报告“改名结果未确认”。即使等待超时，实际工作线程结束前仍拒绝竞争输入。独立终端写入不受此锁约束。Claude 自行生成的标题遵循所有者的原生设置。[ADR 0109](adr/0109-name-and-fork-exact-claude-sessions.md)
+
+Codex 会话生命周期的命令入口按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
 [ADR 0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 管理当前 Binding，
 运行态观测与 Thread removal 委托按
 [ADR 0049](adr/0049-bound-turn-observation-and-delegate-thread-removal.md)：
@@ -533,7 +536,11 @@ Compaction、普通 `STOPPING`／`OBSERVATION_UNAVAILABLE` 和 Goal 的其他活
 
 ### 持久分支创建与交接
 
-`/fork` 按 [ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
+Claude 通过飞书 `/fork` 使用下述目标校验、主线替换确认和 Binding 事务。复制前按续接规则，通过未指定目录的精确原生 ID 确认实际 cwd。来源须已物化且没有正在打开的连接、执行中或待写的输入、关闭未确认的客户端。保留的客户端须已按序到达空闲且原生后台任务列表为空。仅有会话 cron 时可以复制，卡片提示子会话恢复时也会恢复原有 cron。来源会话始终保留，分支名称留空则采用原生默认标题。[ADR 0109](adr/0109-name-and-fork-exact-claude-sessions.md)
+
+来源 Binding 的准入锁覆盖一次有界的 `fork_session` 调用。返回不同的有效 UUID 后，还须独立读取子会话，核对其实际 cwd 与来源相同。复制期间来源活动修订发生变化也会停止交接。复制结果未知时不重试，已有子 ID 而校验、飞书发布或绑定失败时在回执列出 ID，供所有者在 Claude Code 核查。子 Binding 继承来源 Project、worktree 关联及已有显式工作目录选择，每次续接仍须读取原生 cwd。Claude 交接在目标 Binding 落库并切换后更新回执。
+
+Codex 的 `/fork` 按 [ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
 从当前已物化、持久且确认空闲的普通 Binding 创建普通持久分支；运行中、停止中、压缩中
 及 lifecycle/观测未知时拒绝，暂停且空闲的 Goal 可作为来源，但不接管来源 Goal。
 目标聊天默认当前聊天，也可选择机器人已加入的其他群或填写可访问的群/单聊 ID；落点按
@@ -577,10 +584,10 @@ Fork 将目标区标为“分支位置”，方式下拉与群搜索、结果分
 下方输入通过浅色背景和内边距归组，精简重复说明。所有控件仍在同一个表单内，
 切换方式只改变本地选择，不请求后端刷新，也无需展开额外区域；查找、翻页和创建
 仍由按钮提交。分组不改变字段提交和目标解析。Cron 沿用现有平铺布局。
-分组下方是“新话题／主线”落点单选和“创建后：保留当前会话／归档当前会话”单选，默认
+两个后端均显示“新话题／主线”落点单选。Codex 还显示“创建后：保留当前会话／归档当前会话”单选，默认
 新话题和保留；两者同样只在提交时生效，切换不回调、不重绘。
 
-公开 `thread_fork(ephemeral=False, include_turns=False)` 继承原生历史和权限；分支与来源
+Codex 的公开 `thread_fork(ephemeral=False, include_turns=False)` 继承原生历史和权限；分支与来源
 共用 Project 和来源实际 cwd，匹配受管工作区时保留关联，复制显式 Model/Effort/Speed、Task Feedback 和上下文模式，之后各自独立。
 分支使用当前默认 provider，迁移路径与验证边界见[会话配置](#scopebinding-与会话配置)。
 目标为单聊时仅将后续飞书补读模式归为 current-only，来源设置与已继承的原生历史不变。
@@ -588,8 +595,8 @@ Fork 将目标区标为“分支位置”，方式下拉与群搜索、结果分
 边界取新话题 root/seed 或主线状态消息。分支完成后使用全部普通会话操作，重启也按普通持久会话恢复。
 
 新话题落点的创建顺序固定为原生 fork → 唯一“创建中”根卡片 → 真实 topic ID → 完整 Binding 原子落库
-并设为目标 current → 登记原 fork handle 的普通订阅 → 原地更新根卡片为成功。
-成功卡以分支名称为主标题、“会话分支已创建”为副标题；目标根卡提示在本话题继续，
+并设为目标 current → Codex 登记原 fork handle 的普通订阅 → 原地更新根卡片为成功。
+成功卡以分支名称为主标题、“会话分支已创建”为副标题。Claude 名称留空时，主标题直接显示“会话分支已创建”。目标根卡提示在本话题继续，
 不显示跳转自身的按钮，仅来源回执提供“进入新话题”链接。必要的 seed 仍属于同一话题，
 使用查看顶部卡片创建结果、成功后再继续的固定说明，不持续声称正在创建。
 没有 Lazy 占位 Binding，也不发送首轮模型任务。
@@ -609,14 +616,14 @@ Fork 将目标区标为“分支位置”，方式下拉与群搜索、结果分
 
 主线落点的顺序为：原生 fork → 在目标主线发布唯一“创建中”状态消息（确定性 UUID 去重）
 → 在目标 Scope 锁内重读实际当前会话 → 完整 Binding 原子落库并设为 current，被替换的
-Binding 保留 → 登记原 fork handle 的普通订阅 → 同锁按 `/new` 的指针交接处理新旧会话
-订阅 → 原地更新状态消息。状态消息是结果展示、来源回执的跳转目标和群聊 catch-up 初始
+Binding 保留 → Codex 登记原 fork handle 的普通订阅 → 同锁按 `/new` 的指针交接通知该后端
+→ 原地更新状态消息。状态消息是结果展示、来源回执的跳转目标和群聊 catch-up 初始
 边界；成功后写明实际被替换的会话（没有则不提）及 `/sessions` 切回方式，Binding 已保存但
 交接未完成时，失败消息同样写明被替换的会话。不对确认时的
 快照做比较交换。被替换会话上仍在准备的输入按“准备期间 active 会话已切换”拒绝，不改投
 分支；已运行的任务继续执行并在原锚点交付，之后主线新消息进入分支，与 `/new` 一致。
 
-选择“创建后：归档当前会话”时，只在分支完整交接成功后执行。勾选即表示同意，不再复核
+Codex 选择“创建后：归档当前会话”时，只在分支完整交接成功后执行。勾选即表示同意，不再复核
 来源的运行状态或设置，沿用[原生归档](#原生归档与删除)不以运行态或 idle 为准入的规则；
 创建期间来源若已开始新任务，归档会交由 App Server 一并 shutdown。归档复用会话列表的
 exact archive：在 exact Binding/native 身份下预留 lifecycle intent，释放锁后委托 App Server；来源仍是
@@ -629,7 +636,7 @@ exact archive：在 exact Binding/native 身份下预留 lifecycle intent，释�
 进程内在途调用所有权覆盖从第一个副作用到完整交接，服务停止和 Project 删除使用既有
 有界收尾。Project 删除遇到在途 fork 时保留停用 Project，要求收尾后重新预览确认；
 不得晚到绑定已停用或删除的 Project。创建失败不自动重试、补偿删除或按名称猜认；
-已知 handle 按普通订阅边界交还。完整 Binding 已保存时，命名/回执失败仍保留该会话。
+Codex 的已知 handle 按普通订阅边界交还。完整 Binding 已保存时，命名/回执失败仍保留该会话。
 极端中断留下的未绑定 Thread 或话题按 exact 证据人工核查，不增加持久恢复队列。
 
 卡片沿用同类 controls 的公共去重、FIFO、callback 编码和 revision/exact identity
@@ -3873,7 +3880,8 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
 | Goal 流／四证的纯观察失败 | 只保留当前 Goal slot，其他 Binding 可用 | consumer handoff 后按需有界只读确认 idle/非 active/无 inProgress 才释放；不自动 pause/clear 或补造回复 | [Goal](#goal-物理-turn-与逻辑终态) |
 | Goal mutation／complete-only clear 未确认 | 保留 slot；有副作用可能的 start/resume/clear 关闭进程级 admission | 不重试、不按纯观察恢复释放；paused/blocked/限额不自动 clear，仍显示权威结果；重启外部 active 只读隔离、不能安全重挂 | [Goal](#goal-物理-turn-与逻辑终态) |
 | Side 创建失败／close 未确认 | creating/failed route 防落入普通 Binding；关闭未知保持 closing、拒绝 Prompt | 重试仅未确认步骤；重启不恢复 ephemeral Thread，在 handler 注册前把遗留 creating/open 转 expired；start/终态未知按 Side 全局边界 | [创建](#side-创建与路由)、[关闭](#side-运行与关闭) |
-| rename mutation 未确认 | 保留目标 lifecycle slot | 不声称回滚；后台自动命名按自身边界 | [生命周期](#普通会话生命周期) |
+| rename mutation 未确认 | Codex 保留目标 lifecycle slot。Claude 报告本次改名未确认，实际工作线程结束后恢复准入 | 不自动重写。后台自动命名按各后端规则处理 | [生命周期](#普通会话生命周期) |
+| Claude 持久分支未确认或交接失败 | 来源保留。已知子 ID 时在失败回执中列出 | 复制不重试。子会话保留供所有者核查 | [持久分支](#持久分支创建与交接) |
 | unarchive/resume | 按 ADR 0082 两条精确移动前拒绝及 resume 拒绝分类；未知只隔离目标 Binding | 报告部分结果，不重试/目录对账；原生成功、本地未确认保留已知订阅，不声称 current 回滚 | [归档恢复](#普通会话生命周期) |
 | archive 异常 | 一次有界 catalog 对账：archived 才提交、active 释放、无法确认仅隔离目标 | 不重发 mutation，取消不追加目录 I/O | [归档](#原生归档与删除) |
 | Delete 拒绝／未知 | 仅本次原生成功才删 Binding；明确拒绝保留原执行观测、释放删除 intent、补目标空闲排期检查并反馈原因；未知 Binding-local slot、其他 Binding 可用 | 保留关联，不追加删除 list/read 对账或自动重试，不把 not-found 当成功 | [删除](#原生归档与删除) |

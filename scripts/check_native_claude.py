@@ -6,6 +6,7 @@ from collections.abc import MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
+import hashlib
 import json
 import os
 import signal
@@ -163,6 +164,8 @@ class ObservedClients:
 
         self.bundled = BundledClaudeClients()
         self.last_assistant = self.bundled.last_assistant
+        self.rename = self.bundled.rename
+        self.fork = self.bundled.fork
         self.history_error = None
         self.provider = provider
         self.calls = []
@@ -179,7 +182,7 @@ class ObservedClients:
 
 async def main_cases(cwd, provider, evidence):
     import psutil
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, SystemMessage
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, SystemMessage, get_session_info
     from tests.support.claude_session_facts import check_idle_history
     from netizen_cli.bindings import BindingStore
     from netizen_cli.claude_installation import verified_claude_cli
@@ -259,9 +262,9 @@ async def main_cases(cwd, provider, evidence):
         return event
     def rows(label):
         return [row for row in provider.rows if row["path"] == "/v1/messages" and row["label"] == label]
-    async def native_cli(session):
+    async def native_cli(session, label="cli"):
         child = await asyncio.create_subprocess_exec(str(cli), "-p", "--resume", session, "--permission-mode", "auto",
-            "--output-format", "json", "[[S:text/cli]]", cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            "--output-format", "json", f"[[S:text/{label}]]", cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         try:
             output, _ = await asyncio.wait_for(child.communicate(), 35)
             return json.loads(output) if child.returncode == 0 else {}
@@ -298,6 +301,28 @@ async def main_cases(cwd, provider, evidence):
         evidence.check("SDK resumes CLI transcript and reports strict fallback", resumed.thread_id == session and
                        clients.calls[-1].modes == [("default", False)] and notices.count(DEFAULT_MODE) == 1 and
                        any("fixture-reply-cli" in item["answers"] for row in rows("resumed") for item in row["history"]))
+
+        title = "Loopback source"
+        named = await runtime.rename_exact(first.id, title)
+        info = get_session_info(session)
+        evidence.check("closed source rename confirmed by exact native read", named == title and info
+                       and (info.session_id, info.custom_title) == (session, title))
+        source = store.get(first.id)
+        # Only the worker's synthetic config contains these transcript bytes.
+        transcript, = (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects").glob(f"*/{session}.jsonl")
+        original = hashlib.sha256(transcript.read_bytes()).digest()
+        async with runtime.track_fork_creation(source.project_alias):
+            fork = await runtime.copy_fork(source, expected_project_revision=store.get_project(source.project_alias).revision,
+                                           title="Loopback child")
+        child = get_session_info(fork.child_id)
+        evidence.check("closed source fork has distinct native identity and exact cwd", child
+                       and child.session_id == fork.child_id != session and Path(child.cwd).resolve(strict=True) == cwd
+                       and child.custom_title == "Loopback child")
+        result = await native_cli(fork.child_id, "closed-child")
+        evidence.check("cold child resumes inherited exchange and preserves source bytes",
+                       result.get("session_id") == fork.child_id and result.get("result") == "fixture-reply-closed-child"
+                       and any("fixture-reply-resumed" in item["answers"] for row in rows("closed-child") for item in row["history"])
+                       and hashlib.sha256(transcript.read_bytes()).digest() == original)
 
         image_session = new_binding()
         with_image = await submit(image_session, "text", "image-first", (image_first_input(),))

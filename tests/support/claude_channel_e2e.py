@@ -6,9 +6,10 @@ import json
 import os
 from pathlib import Path
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from claude_agent_sdk import ResultMessage, SystemMessage
+from claude_agent_sdk import ResultMessage, SystemMessage, get_session_info
 from lark_channel import OutboundCard, OutboundPost, SendResult
 import psutil
 
@@ -19,10 +20,10 @@ from netizen_cli.claude_installation import verified_claude_cli
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.main import Events, ServiceCore, _register_channel_handlers, _SHUTDOWN_BUDGET_SECONDS
 from netizen_cli.projects import ProjectRegistry
-from netizen_cli.runtime.claude_client import BundledClaudeClients
+from netizen_cli.runtime.claude_client import BundledClaudeClients, LiveSession
 from netizen_cli.runtime.claude_ordinary import DEFAULT_MODE, GRACE, UNKNOWN
 from netizen_cli.settings import AdminWebSettings, Settings
-from tests.support.channel_cards import _card_button_value, direct_button_event, direct_card_event, new_form_values
+from tests.support.channel_cards import _card_button_value, callback, direct_button_event, direct_card_event, form_values, new_form_values
 from tests.support.channel_messages import PNG, FakeChannel, FakeMessage
 
 OWNER = "ou_user"
@@ -252,11 +253,11 @@ class Driver:
         if self.provider:
             print(json.dumps({"input": label, "completionMention": route}), flush=True)
 
-    async def create(self):
-        await self.send("new", "/new")
-        card, = self.replies("new")
+    async def create(self, label="new"):
+        await self.send(label, "/new")
+        card, = self.replies(label)
         assert isinstance(card, OutboundCard)
-        await self.click(direct_card_event(self.channel, new_form_values(card) | {"new_progress_card": "progress-card:v1:[false,null]"}, message_id="card-new"))
+        await self.click(direct_card_event(self.channel, new_form_values(card) | {"new_progress_card": "progress-card:v1:[false,null]"}, message_id="card-" + label))
         assert self.store.active_binding(SCOPE.key) is not None
         self.session = None
 
@@ -463,6 +464,17 @@ class Driver:
         try:
             tool = await self.ready_tool("background")
             await self.background_idle_reply(first, "bg-a", 1)
+            if self.provider:
+                with patch.object(self.clients, "rename", wraps=self.clients.rename) as write:
+                    await self.send("retained-rename", "/rename Retained")
+                    assert any("Claude 进程仍在运行" in text for text in self.replies("retained-rename"))
+                    write.assert_not_called()
+                with patch.object(self.clients, "fork", wraps=self.clients.fork) as copy:
+                    receipt = await self.fork_card("task-fork", "oc_task_child")
+                    assert "来源会话仍有后台任务运行，任务结束后才能创建分支。" in str(receipt)
+                    assert self.store.active_binding(FeishuScope("cli_test", "oc_task_child", ScopeKind.DIRECT).key) is None
+                    copy.assert_not_called()
+                assert running(tool) and not first.finished.is_set()
             await self.send("bg-b", self.prompt("bg-b"))
             await self.background_idle_reply(first, "bg-b", 2)
             assert self.clients.calls[-1] is first and len(first.inputs) == 2 and running(tool)
@@ -474,6 +486,81 @@ class Driver:
         assert len(bodies) == 2 and len([r for r in self.replies("bg-b") if r != DEFAULT_MODE]) == 1
         for label in ("bg-a", "bg-b"):
             self.check_mention(label)
+
+    async def fork_card(self, label, chat_id):
+        await self.send(label, "/fork")
+        card, = self.replies(label)
+        assert "来源会话设置的会话 cron 会随对话记录复制，新会话恢复时也会恢复。" in str(card.card)
+        draft = form_values(card)
+        assert not draft["fork_name_v6"] and "fork_source_action_v6" not in draft
+        draft.update(fork_landing_v6="main", fork_mode_v6="id", fork_chat_id_v6=chat_id)
+        event = direct_button_event(callback(card, "创建分支"), form_value=draft, message_id="card-" + label)
+        # Replace the Feishu network read at its typed boundary; run production target validation.
+        response = SimpleNamespace(code=0, data=SimpleNamespace(chat_mode="p2p"))
+        with patch.object(self.core._feishu_read_client.im.v1.chat, "aget", return_value=response) as get:
+            await self.click(event)
+            assert get.await_args.args[0].chat_id == chat_id
+        return next(card for message_id, card in reversed(self.channel.updates) if message_id == event.message_id)
+
+    async def cron_fork(self):
+        original = self.store.active_binding(SCOPE.key)
+        await self.create("cron-new")
+        source = await self.submit("cron-seed")
+        await self.terminal("cron-seed")
+        await self.send("fork-rename", "/rename Loopback source")
+        assert "Loopback source" in str(self.replies("fork-rename"))
+        assert get_session_info(source.session).custom_title == "Loopback source"
+        await self.send("fork-rename-form", "/rename")
+        card, = self.replies("fork-rename-form")
+        name_field, = form_values(card)
+        await self.click(direct_card_event(self.channel, {name_field: "Saved from card"}, message_id="card-fork-rename-form"))
+        assert get_session_info(source.session).custom_title == "Saved from card"
+        source_binding = self.store.active_binding(SCOPE.key)
+        child_scope = FeishuScope("cli_test", "oc_cron_child", ScopeKind.DIRECT)
+        self.channel.chat_types[child_scope.chat_id] = "p2p"
+        stops = {}
+        original_hook = LiveSession.stop_hook
+
+        async def observe(session, data, callback_id, context):
+            result = await original_hook(session, data, callback_id, context)
+            assert data["session_id"] == session.session
+            stops[session.session] = tuple(row["id"] for row in data["session_crons"])
+            return result
+
+        async def cron_idle(binding, execution):
+            def observed():
+                state = self.core._claude.local_snapshot(binding.id).cli
+                return (execution.attributed and execution.state == "idle" and state and state.idle
+                        and state.tasks == 0 and state.crons and not execution.finished.is_set())
+            await wait_for("ordered_idle_with_only_session_cron", observed)
+
+        with patch.object(LiveSession, "stop_hook", observe):
+            retained = await self.submit("cron-register", "session-cron")
+            await cron_idle(source_binding, retained)
+            cron_id, = stops[source.session]
+            assert cron_id
+            receipt = await self.fork_card("cron-fork", child_scope.chat_id)
+            assert "会话分支已创建" in str(receipt)
+            child = self.store.active_binding(child_scope.key)
+            assert child.native_thread_id != source.session and self.store.active_binding(SCOPE.key).id == source_binding.id
+            assert get_session_info(child.native_thread_id).cwd == str(self.cwd)
+            await self.send("cron-child-resume", self.prompt("cron-child-resume"), chat_id=child_scope.chat_id)
+            resumed = self.clients.calls[-1]
+            assert resumed.session == child.native_thread_id
+            await cron_idle(child, resumed)
+            assert stops[resumed.session] == (cron_id,) and not retained.finished.is_set()
+            assert not any(r["tool_result"] for r in self.rows("cron-child-resume"))
+            for suffix, chat_id in (("child", child_scope.chat_id), ("source", SCOPE.chat_id)):
+                label = "cron-release-" + suffix
+                await self.send(label, "/release", chat_id=chat_id)
+                confirmation, = self.replies(label)
+                event = direct_button_event(_card_button_value(confirmation, "确认释放"), message_id="card-" + label)
+                event.chat_id = chat_id
+                await self.click(event)
+                assert self.replies(event.message_id) == ["已释放 Claude 会话连接。"]
+        await self.send("cron-restore", "/resume " + original.short_id)
+        assert self.store.active_binding(SCOPE.key).id == original.id
+        self.session = original.native_thread_id
 
     async def release(self):
         gate = self.cwd / "background-release"
@@ -634,7 +721,8 @@ async def channel_driver(cwd, provider, live):
 
 EXPECTED_REQUESTS = {
     "startup_grace": 1, "ordinary": 1, "resume": 1, "handoff": 2, "busy": 3, "exact_stop": 3,
-    "background": 4, "release": 5, "stop_listed_work": 4, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2, "shutdown": 1,
+    "background": 4, "release": 5, "stop_listed_work": 4, "stop_during_close": 1, "owner_gate": 0, "permission_denials": 2, "fallback": 2,
+    "cron_fork": 4, "shutdown": 1,
 }
 CASES = tuple(EXPECTED_REQUESTS)
 
@@ -646,7 +734,7 @@ async def channel_cases(cwd, provider):
     install_tools(cwd)
     (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json").write_text(json.dumps({
         "model": "claude-sonnet-4-6", "permissions": {"allow": ["Bash(./fixture-foreground)", "Bash(./fixture-foreground-b)",
-                                                               "Bash(./fixture-background)"]},
+                                                               "Bash(./fixture-background)", "CronCreate"]},
     }))
     await run_cases(cwd, provider=provider)
 
@@ -661,7 +749,7 @@ async def run_cases(cwd, *, provider=None, live=None, report=print):
             location = {}
             status = "fail"
             try:
-                if live and name in {"fallback", "stop_listed_work"}:
+                if live and name in {"fallback", "stop_listed_work", "cron_fork"}:
                     status = "skipped_mock_only"
                     continue
                 # exact_stop waits for two independent live tool launches and terminals.

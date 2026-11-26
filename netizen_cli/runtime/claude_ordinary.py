@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
-from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager, nullcontext
+from collections.abc import AsyncIterator, Awaitable, Callable
 from weakref import WeakValueDictionary
 from dataclasses import dataclass, field, replace
 import logging
@@ -28,6 +28,7 @@ from ..progress_card_settings import MAX_OPERATION_ROWS, MAX_OPERATION_TEXT_CHAR
 from ..completion_mention import valid_completion_mention_user_id
 from ..domain import ActiveState, FeishuScope, MessageContextAnchor, MentionContextMode
 from ..session_settings import require_local_settings
+from ..session_providers import PartialFork, PersistentFork
 from ..external_calls import ExternalCallCancelled, external_call
 from ..ordinary_sessions import (
     ClaudeCliState, CliStateChanged, ClaudeInputAnchor, ConversationTarget, DegradedTurn, LiveSubmissionUnknown, LogicalReply, LogicalTerminal, PhysicalAnswer, PhysicalStarted,
@@ -38,12 +39,18 @@ from .claude_activity import ClaudeChecklist, ClaudeTurnTools
 from .claude_delivery import AnchorDelivery
 from .claude_status import ClaudeObservations, DEFAULT_OBSERVATIONS, record_observation
 from .claude_client import ClaudeClient, ClaudeClients, LiveSession, SessionReader, live_messages, native_human, single_message, user_message
+from .name_writes import normalize_session_name
 from .contracts import (
     ActiveTurnSnapshot, ContextCursorCommit, ReleaseDisposition, StopAcknowledger, StopDisposition, Submission, SubmissionAdmission,
+    NativeThreadCatalogState, SessionRenameUnconfirmed, ThreadLifecycleError, ThreadNotMaterialized,
     SubmitDisposition, TerminalStateUnknown, ThreadActivityChanged, TurnActivitySnapshot,
 )
 
 logger = logging.getLogger(__name__)
+_RENAME_SECONDS = 5.0
+_FORK_SECONDS = 10.0
+_FORK_BUSY = "来源会话正在执行，空闲后才能创建分支。"
+_RESUME_CWD_MISSING = "无法恢复原 Claude 会话的实际目录，本条输入未发送。请检查原会话或使用 /new 新建会话。"
 UNKNOWN = "本次 Claude 提交结果未知，请检查原会话；系统不会自动重发。"
 CLOSE_FAILED = "无法确认 Claude 客户端已关闭，本会话暂不可再提交。"
 CLOSING_CONCLUDED = "这次 Claude 执行已经结束，结果正在送出。"
@@ -367,6 +374,10 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         self._admission_error: str | None = None
         self._shutdown_deadline: float | None = None
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._title_writes: dict[str, asyncio.Future[str]] = {}
+        self._fork_creations: dict[asyncio.Task[Any], str] = {}
+        self._fork_sources: dict[str, str] = {}
+        self._fork_workers: set[asyncio.Future[str]] = set()
         self.on_physical_terminal: PhysicalTerminalHandler | None = None
         self.on_binding_deleted: Callable[[str], Awaitable[None]] | None = None
         self._activity: dict[str, _BindingActivity] = {}
@@ -391,7 +402,154 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             raise OrdinaryInputRejected(GRACE)
 
     def _lock(self, binding_id: str) -> asyncio.Lock:
+        if binding_id in self._title_writes:
+            raise OrdinaryInputRejected("会话正在改名，请稍后再试。")
+        if binding_id in self._fork_sources:
+            raise OrdinaryInputRejected("会话正在创建分支，请稍后再试。")
         return self._locks.setdefault(binding_id, asyncio.Lock())
+
+    def _state_lock(self, binding_id: str) -> AbstractAsyncContextManager[object]:
+        # Metadata workers use their captured IDs. Projections and pointer
+        # notifications still observe and invalidate local activity during a copy.
+        if binding_id in self._title_writes or binding_id in self._fork_sources:
+            return nullcontext()
+        return self._lock(binding_id)
+
+    sync_hint = "保存后名称同步显示在 Claude Code 的会话列表（claude --resume）。"
+
+    def eligible(self, binding: ThreadBinding, catalog_state: NativeThreadCatalogState | None) -> bool:
+        return binding.native_thread_id is not None
+
+    async def rename_exact(self, binding_id: str, name: str) -> str:
+        normalized = normalize_session_name(name)
+        self.require_admission()
+        lock = self._lock(binding_id)
+        if lock.locked():
+            raise ThreadLifecycleError("会话操作正在进行，暂不能改名。")
+        await lock.acquire()
+        try:
+            self.require_admission()
+            binding = self._bindings.get(binding_id)
+            self._bindings.require_project_not_deleting(binding.project_alias)
+            self._bindings.worktrees.require_binding_not_deleting(binding_id)
+            if binding.native_thread_id is None:
+                raise ThreadNotMaterialized("当前 Claude 会话尚未建立，请先发送一条任务。")
+            if binding_id in self._unavailable:
+                raise ThreadLifecycleError("Claude 客户端关闭未确认，暂不能改名。")
+            execution = self._active.get(binding_id)
+            if execution is not None and not execution.close_finished:
+                if execution.admissible and (execution.live.tasks or execution.live.crons):
+                    raise ThreadLifecycleError("Claude 进程仍在运行（后台任务或会话 cron），暂不能改名；后台工作结束后再试。")
+                raise ThreadLifecycleError("Claude 会话正在启动、执行或收尾，暂不能改名。")
+            worker = SessionReader().start(partial(self._clients.rename, binding.native_thread_id, normalized))
+        except BaseException:
+            lock.release()
+            raise
+        self._title_writes[binding_id] = worker
+
+        def finished(done: asyncio.Future[str]) -> None:
+            self._title_writes.pop(binding_id)
+            lock.release()
+            done.exception()  # The caller may already have timed out or left.
+
+        worker.add_done_callback(finished)
+        try:
+            async with asyncio.timeout(self._remaining(_RENAME_SECONDS)):
+                return await asyncio.shield(worker)
+        except TimeoutError:
+            raise SessionRenameUnconfirmed() from None
+
+    @asynccontextmanager
+    async def track_fork_creation(self, project_alias: str) -> AsyncIterator[None]:
+        task = asyncio.current_task()
+        if task is None or task in self._fork_creations:
+            raise RuntimeError("分支创建需要独立任务。")
+        self._fork_creations[task] = project_alias
+        try:
+            self.require_fork_creation_open(project_alias)
+            yield
+        finally:
+            del self._fork_creations[task]
+
+    def project_has_fork_creation(self, project_alias: str) -> bool:
+        return project_alias in self._fork_creations.values() or project_alias in self._fork_sources.values()
+
+    def require_fork_creation_open(self, project_alias: str) -> None:
+        self.require_admission()
+        task = asyncio.current_task()
+        if task is None or self._fork_creations.get(task) != project_alias:
+            raise RuntimeError("分支创建任务已变化。")
+        self._bindings.require_project_not_deleting(project_alias)
+
+    def _fork_revision(self, source: ThreadBinding, project_revision: int) -> int:
+        self.require_fork_creation_open(source.project_alias)
+        project = self._bindings.get_project(source.project_alias)
+        if self._current(source.id) != source or project.revision != project_revision:
+            raise OrdinaryInputRejected("来源会话或配置已变化，请重新发送 /fork。")
+        if not project.enabled:
+            raise OrdinaryInputRejected("Project 已停用，不能创建分支。")
+        if source.id in self._unavailable:
+            raise OrdinaryInputRejected(CLOSE_FAILED)
+        execution = self._active.get(source.id)
+        if execution is not None and not execution.close_finished:
+            if (not execution.admissible or not execution.live.initialized or execution.reserved is not None
+                    or execution.awaiting_task_stop):
+                raise OrdinaryInputRejected(_FORK_BUSY)
+            if execution.live.tasks:
+                raise OrdinaryInputRejected("来源会话仍有后台任务运行，任务结束后才能创建分支。")
+        return self._admission(source).revision
+
+    async def copy_fork(self, source: ThreadBinding, *, expected_project_revision: int,
+                        title: str | None) -> PersistentFork:
+        if source.native_thread_id is None:
+            raise ThreadNotMaterialized("当前 Claude 会话尚未建立，请先发送一条任务。")
+        lock = self._lock(source.id)
+        if lock.locked():
+            raise OrdinaryInputRejected(_FORK_BUSY)
+        await lock.acquire()
+        self._fork_sources[source.id] = source.project_alias
+        worker: asyncio.Future[str] | None = None
+
+        def release(done: asyncio.Future[str] | None) -> None:
+            if done is not None:
+                self._fork_workers.discard(done)
+                done.exception()
+            del self._fork_sources[source.id]
+            lock.release()
+
+        try:
+            self._fork_revision(source, expected_project_revision)
+            cwd = await self._resume_cwd(source, source.native_thread_id, timeout=_FORK_SECONDS)
+            revision = self._fork_revision(source, expected_project_revision)
+            self._bindings.worktrees.require_cwd_not_deleting(cwd)
+            worker = SessionReader().start(partial(self._clients.fork, source.native_thread_id, cwd, title))
+            self._fork_workers.add(worker)
+            deadline = asyncio.get_running_loop().time() + self._remaining(_FORK_SECONDS)
+            try:
+                async with asyncio.timeout_at(deadline):
+                    child_id = await external_call(asyncio.shield(worker))
+                if not isinstance(child_id, str) or UUID(child_id) == UUID(source.native_thread_id):
+                    raise ValueError
+            except ThreadLifecycleError:
+                raise  # The native copy was rejected before mutation.
+            except Exception:
+                raise ThreadLifecycleError("Claude 分支创建结果未确认，请先在 Claude Code 中核查。") from None
+            try:
+                async with asyncio.timeout_at(deadline):
+                    verified = await external_call(self._clients.session_cwd(child_id, (cwd,)))
+                current_revision = self._fork_revision(source, expected_project_revision)
+            except Exception:
+                raise PartialFork(child_id, "无法确认 Claude 分支的实际目录或来源状态。") from None
+            if verified != cwd:
+                raise PartialFork(child_id, "无法确认 Claude 分支的实际目录。")
+            if current_revision != revision:
+                raise PartialFork(child_id, "复制期间来源会话状态已变化。")
+            return PersistentFork(child_id, source, verified_cwd=cwd)
+        finally:
+            if worker is not None and not worker.done():
+                worker.add_done_callback(release)
+            else:
+                release(worker)
 
     def _advance(self, binding_id: str, *, execution_id: str | None = None) -> int:
         activity = self._activity.setdefault(binding_id, _BindingActivity())
@@ -405,7 +563,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
             return
         for binding_id in (previous_binding_id, current_binding_id):
             if binding_id is not None:
-                async with self._lock(binding_id):
+                async with self._state_lock(binding_id):
                     try:
                         self._bindings.get(binding_id)
                     except BindingNotFound:
@@ -548,19 +706,26 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
 
     def _candidate_dirs(self, binding: ThreadBinding) -> tuple[Path, ...]:
         project = Path(self._bindings.get_project(binding.project_alias).cwd)
-        return (Path(binding.working_cwd), project) if binding.working_cwd else (project,)
+        candidates = [Path(binding.working_cwd), project] if binding.working_cwd else [project]
+        if binding.worktree_id:
+            candidates.append(Path(self._bindings.worktrees.get(binding.worktree_id).cwd))
+        return tuple(dict.fromkeys(candidates))
+
+    async def _resume_cwd(self, binding: ThreadBinding, native_id: str, *, timeout: float | None = None) -> Path:
+        try:
+            UUID(native_id)
+            async with asyncio.timeout(timeout):
+                cwd = await external_call(self._clients.session_cwd(native_id, self._candidate_dirs(binding)))
+            if cwd is not None and cwd.is_absolute() and cwd.is_dir():
+                return cwd.resolve(strict=True)
+        except Exception:
+            pass
+        raise OrdinaryInputRejected(_RESUME_CWD_MISSING)
 
     async def _cwd(self, execution: _Execution, requested: Path | None) -> Path:
         binding = execution.binding
         if binding.native_thread_id is not None:
-            try:
-                UUID(execution.session)
-                cwd = await external_call(self._clients.session_cwd(execution.session, self._candidate_dirs(binding)))
-            except Exception:
-                cwd = None
-            if cwd is None or not cwd.is_absolute() or not cwd.is_dir():
-                raise OrdinaryInputRejected("无法恢复原 Claude 会话的实际目录，本条输入未发送。请检查原会话或使用 /new 新建会话。")
-            return cwd.resolve()
+            return await self._resume_cwd(binding, execution.session)
         return self._creation_cwd(binding, requested)
 
     def _creation_cwd(self, binding: ThreadBinding, requested: Path | None) -> Path:
@@ -1024,8 +1189,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         return frozenset(key for key, cwd in self._owned_cwds.items() if cwd.is_relative_to(target))
 
     async def resource_usage(self, binding_id: str) -> dict[str, str | None]:
-        lock = self._lock(binding_id)
-        async with lock:
+        async with self._state_lock(binding_id):
             binding = self._bindings.get(binding_id)
             snapshot = self.local_snapshot(binding_id)
             owned = self._owned_cwds.get(binding_id)
@@ -1112,7 +1276,7 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         return False
 
     async def preview_stop(self, binding: ThreadBinding) -> StopPreview | None:
-        async with self._lock(binding.id):
+        async with self._state_lock(binding.id):
             if binding.id in self._unavailable:
                 raise OrdinaryInputRejected(CLOSE_FAILED)
             execution = self._active.get(binding.id)
@@ -1334,6 +1498,9 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
         try:
             if not await self.wait_idle(_CONTROL_SECONDS):
                 await self.cancel_tasks()
+            workers = {*self._title_writes.values(), *self._fork_workers}
+            if workers:
+                await asyncio.wait(workers, timeout=self._remaining(_RENAME_SECONDS))
         except asyncio.CancelledError:
             # The service's remaining drain budget can expire during interrupt.
             # Trigger each execution's owned finally even when there is no time to join.
@@ -1343,13 +1510,16 @@ class ClaudeOrdinarySessions(OrdinarySessionPort, SessionShutdownPort):
 
     async def wait_idle(self, timeout: float) -> bool:
         deadline = time.monotonic() + self._remaining(timeout)
-        while tasks := {task for task in (*self._tasks, *self._controls, *self._closes) if not task.done()}:
+        while tasks := {task for task in (*self._tasks, *self._controls, *self._closes, *self._fork_creations) if not task.done()}:
             _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - time.monotonic()))
             if pending:
                 return False
         return not self._active and not self._unavailable
 
     def _begin_client_cleanup(self) -> None:
+        for task in self._fork_creations:
+            if not task.cancelling():
+                task.cancel()
         for task in self._controls:
             if not task.cancelling():
                 task.cancel()

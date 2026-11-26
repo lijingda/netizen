@@ -1,9 +1,12 @@
 """Exercise the same operation through the published Feishu and Admin entries."""
 
+import asyncio
 import json
+import threading
 from dataclasses import replace
 from html.parser import HTMLParser
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from netizen_cli.admin.auth import AdminAuth
@@ -170,6 +173,171 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(b'data-owner-only="true"', page.body)
             denied = await self.request("/api/v1/admin-users/selector-config")
             self.assertEqual(denied.status, 403)
+
+    async def test_claude_title_preview_and_fallback_on_status_scope_and_admin_pages(self):
+        async with owner_channel() as (app, fx, clients, clock, _):
+            from netizen_cli.runtime.claude_client import BundledClaudeClients
+
+            clock[0] = 2
+            self.open_admin(fx.project_root, app._management, "ou_user")
+            lazy = (await fx.create_binding(self.scope)).binding
+            rows = {}
+            for native_id in ("named", "mismatch", "untitled"):
+                row = (await fx.create_binding(self.scope)).binding
+                fx.store.assign_native_thread_id(row.id, native_id)
+                rows[native_id] = row
+            exact = {"named": SimpleNamespace(session_id="named", custom_title="Native AI title", summary="other"),
+                     "mismatch": SimpleNamespace(session_id="wrong", custom_title="crossed identity", summary="bad"),
+                     "untitled": SimpleNamespace(session_id="untitled", custom_title=" ", summary="Last input")}
+            with (patch.object(app._management._runtime, "local_summary", BundledClaudeClients().session_metadata),
+                  patch("netizen_cli.runtime.claude_client.get_session_info", side_effect=exact.get) as read):
+                await app.handle_message(FakeMessage("/status", message_id="status"))
+                self.assertIn("会话预览：Last input", str(fx.channel.replies[-1][1].card))
+                read.assert_called_once_with("untitled")
+                read.reset_mock()
+                await app.handle_message(FakeMessage("/sessions", message_id="list"))
+                card = str(fx.channel.replies[-1][1].card)
+                for value in ("Native AI title", "会话预览：Last input", rows["mismatch"].short_id):
+                    self.assertIn(value, card)
+                self.assertNotIn("crossed identity", card)
+                self.assertCountEqual([call.args for call in read.call_args_list], [(key,) for key in rows])
+                read.reset_mock()
+                exact["untitled"].custom_title = "Now named"
+                response = await self.request("/api/v1/sessions")
+                items = {item["bindingId"]: item for item in json.loads(response.body)["items"]}
+                self.assertEqual(items[rows["untitled"].id]["nativeTitle"], "Now named")
+                self.assertFalse(items[rows["untitled"].id]["nativePreview"])
+                self.assertIsNone(items[rows["mismatch"].id]["nativeTitle"])
+                self.assertIsNone(items[rows["mismatch"].id]["nativePreview"])
+                self.assertEqual(items[lazy.id]["catalogState"], "lazy")
+                self.assertCountEqual([call.args for call in read.call_args_list], [(key,) for key in rows])
+
+                fx.store.activate(scope_key=self.scope.key, binding_id=rows["named"].id)
+                read.reset_mock()
+                page = await app._management.query_scope_sessions(scope=self.scope, limit=1,
+                                    deadline=asyncio.get_running_loop().time() + 2)
+                self.assertNotEqual(page.items[0].record.binding.id, page.current.record.binding.id)
+                self.assertEqual(page.current.native.metadata.name, "Native AI title")
+                self.assertCountEqual([call.args for call in read.call_args_list], [("named",), ("untitled",)])
+
+    async def test_claude_display_timeout_preserves_other_rows_and_accounts_for_late_reader(self):
+        async with owner_channel() as (app, fx, clients, clock, _):
+            from netizen_cli.runtime.claude_client import BundledClaudeClients
+
+            clock[0] = 2
+            for name in ("delayed", "available"):
+                binding = (await fx.create_binding(self.scope)).binding
+                fx.store.assign_native_thread_id(binding.id, name)
+            release = threading.Event()
+            def metadata(session_id):
+                if session_id == "delayed" and not release.wait(5):
+                    raise AssertionError("test did not release metadata read")
+                return SimpleNamespace(session_id=session_id, custom_title=session_id, summary="")
+
+            management = app._management
+            with (patch.object(management._runtime, "local_summary", BundledClaudeClients().session_metadata),
+                  patch("netizen_cli.runtime.claude_client.get_session_info", side_effect=metadata) as read):
+                try:
+                    page = await management.query_scope_sessions(
+                        scope=self.scope, deadline=asyncio.get_running_loop().time() + 0.5)
+                    rows = {item.record.binding.native_thread_id: item.native.metadata for item in page.items}
+                    self.assertIsNone(rows["delayed"])
+                    self.assertEqual(rows["available"].name, "available")
+                    pending = tuple(management._summary_reads)
+                    self.assertEqual(len(pending), 1)
+                finally:
+                    release.set()
+                await asyncio.wait_for(asyncio.gather(*pending), 2)
+                self.assertCountEqual([call.args for call in read.call_args_list], [("delayed",), ("available",)])
+
+    async def test_owner_controls_report_inflight_rename(self):
+        async with owner_channel() as (app, fx, clients, clock, _):
+            clock[0] = 2
+            binding = (await fx.create_binding(self.scope)).binding
+            fx.store.assign_native_thread_id(binding.id, "native")
+            entered, release = asyncio.Event(), threading.Event()
+            loop = asyncio.get_running_loop()
+
+            def write(session, name):
+                loop.call_soon_threadsafe(entered.set)
+                self.assertTrue(release.wait(4))
+                return name
+
+            await app.handle_message(FakeMessage("/config", message_id="config"))
+            form = form_values(fx.channel.replies[-1][1])
+            with patch.object(clients, "rename", side_effect=write):
+                rename = asyncio.create_task(app.handle_message(FakeMessage("/rename held", message_id="rename")))
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    for index, command in enumerate((f"/resume {binding.short_id}", "/release", "/stop")):
+                        count = len(fx.channel.replies)
+                        await app.handle_message(FakeMessage(command, message_id=f"control-{index}"))
+                        self.assertEqual(len(fx.channel.replies), count + 1)
+                        self.assertEqual(fx.channel.replies[-1][1], "会话正在改名，请稍后再试。")
+                    count = len(fx.channel.replies)
+                    await app.handle_card_action(direct_card_event(fx.channel, form, message_id="save-config"))
+                    self.assertEqual(len(fx.channel.replies), count + 1)
+                    self.assertEqual(fx.channel.replies[-1][1], "会话正在改名，请稍后再试。")
+                finally:
+                    release.set()
+                    await rename
+
+    async def test_codex_admin_rename_accepts_up_to_120_utf8_bytes(self):
+        for count, status in ((30, 200), (31, 400), (61, 400)):
+            with self.subTest(count=count):
+                grant = (await self.actions())["rename"]
+                result = await self.request("/api/v1/sessions/rename", self.payload(grant, name="🦊" * count))
+                self.assertEqual(result.status, status, result.body)
+        self.assertEqual(self.fx.runtime.rename_binding_calls, [(self.binding.id, "🦊" * 30)])
+
+    async def test_claude_admin_rename_accepts_up_to_120_normalized_code_points(self):
+        async with owner_channel() as (app, fx, clients, clock, _):
+            clock[0] = 2
+            row = (await fx.create_binding(self.scope)).binding
+            fx.store.assign_native_thread_id(row.id, "native")
+            self.open_admin(fx.project_root, app._management, "ou_user")
+            for raw, status in (("🦊" * 61, 200), ("\u0085" + "🦊" * 118 + " " * 121 + "🦊\x1f", 200),
+                                (" \u0085 ", 400), ("a" * 121, 400)):
+                with self.subTest(length=len(" ".join(raw.split()))):
+                    grant = (await self.actions())["rename"]
+                    result = await self.request("/api/v1/sessions/rename", self.payload(grant, name=raw))
+                    self.assertEqual(result.status, status, result.body)
+                    if status == 200:
+                        self.assertEqual(clients.titles["native"], " ".join(raw.split()))
+
+    async def test_claude_owner_manual_rename_through_all_entries_without_generator(self):
+        async with owner_channel() as (app, fx, clients, clock, _):
+            clock[0] = 2
+            row = (await fx.create_binding(self.scope)).binding
+            fx.store.assign_native_thread_id(row.id, "native")
+            self.open_admin(fx.project_root, app._management, "ou_user")
+            hint = "保存后名称同步显示在 Claude Code 的会话列表（claude --resume）。"
+            page = await self.request("/sessions/ordinary")
+            self.assertTrue(RenameControls(page.body).hidden["session-rename-generate"])
+            self.assertIn(hint.encode(), page.body)
+            await app.handle_message(FakeMessage("/rename forbidden", sender_id="other", message_id="non_owner"))
+            self.assertEqual(clients.titles, {})
+            await app.handle_message(FakeMessage("/rename first   title", message_id="command"))
+            self.assertEqual(clients.titles, {"native": "first title"})
+            await app.handle_message(FakeMessage("/rename", message_id="open"))
+            form = fx.channel.replies[-1][1]
+            self.assertIn(hint, str(form.card))
+            self.assertIn("first title", str(form.card))
+            self.assertNotIn("自动生成", str(form.card))
+            field = _elements(form.card, "input")[0]["name"]
+            await app.handle_card_action(direct_card_event(fx.channel, {field: "manual save"}, message_id="save"))
+            self.assertEqual(clients.titles, {"native": "manual save"})
+            await fx.create_binding(self.scope)
+            items = json.loads((await self.request("/api/v1/sessions")).body)["items"]
+            actions = next(item["actions"] for item in items if item["bindingId"] == row.id)
+            self.assertNotIn("generateName", actions)
+            name = "管" * 118 + " 理"
+            result = await self.request("/api/v1/sessions/rename", self.payload(actions["rename"], name=name.replace(" ", "  ")))
+            self.assertEqual(result.status, 200)
+            self.assertEqual(clients.titles, {"native": name})
+            denied = await self.request("/api/v1/sessions/generate-name", {})
+            self.assertEqual((denied.status, json.loads(denied.body)["code"]), (409, "backend_unsupported"))
+            self.assertEqual(clients.calls, [])
 
     async def test_owner_forms_and_authenticated_post_reject_unsupported_fields(self):
         async with owner_channel() as (app, fx, clients, clock, _):
@@ -355,7 +523,7 @@ class SessionOperationTest(unittest.IsolatedAsyncioTestCase):
             writer.rename_exact = AsyncMock(return_value="allowed")
             writer.eligible.side_effect = lambda binding, state: binding.native_thread_id is not None
             self.open_admin(fx.project_root, app._management, "ou_user", backend_policy=app._policy)
-            self.assertNotIn("rename", await self.actions())
+            self.assertIn("rename", await self.actions())
             with patch.object(app._management, "names", SessionNames(writer=writer)):
                 await app.handle_message(
                     FakeMessage(

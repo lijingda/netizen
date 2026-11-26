@@ -87,12 +87,28 @@ class FakeClaudeClient:
 
 class FakeClaudeClients:
     def __init__(self):
+        self.titles = {}
+        self.forks = []
         self.calls = []
         self.lookups = []
         self.cwds = {}
         self.configure = None
         self.created = asyncio.Event()
         self.history = "assistant"
+
+    async def session_metadata(self, session):
+        from netizen_cli.runtime.contracts import NativeThreadMetadata
+        return NativeThreadMetadata(session, self.titles.get(session), "")
+
+    def rename(self, session, name):
+        self.titles[session] = name
+        return name
+
+    def fork(self, session_id, cwd, title):
+        child_id = str(uuid4())
+        self.forks.append((session_id, cwd, title, child_id))
+        self.cwds[child_id] = cwd
+        return child_id
 
     async def last_assistant(self, session, cwd, reader):
         return self.history

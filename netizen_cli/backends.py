@@ -47,6 +47,7 @@ class Provider(Enum):
     CODEX_RUNTIME = "codex-runtime"
     SCHEDULER = "scheduler"
     TITLE_WRITER = "title-writer"
+    PERSISTENT_FORK = "persistent-fork"
     NAME_GENERATOR = "name-generator"
 
 
@@ -189,7 +190,7 @@ OPERATIONS = {
         ("goal.refresh", "goal.pause", "goal.resume", "goal.clear"),
         command_probe=NativeCapability.GOAL,
     ),
-    OperationId.FORK: Operation("会话分支", Provider.CODEX_RUNTIME, ("fork",)),
+    OperationId.FORK: Operation("会话分支", Provider.PERSISTENT_FORK, ("fork",)),
     OperationId.COMPACT: Operation("上下文压缩", Provider.CODEX_RUNTIME, ("compact",)),
     OperationId.USAGE: Operation(
         "账号额度",

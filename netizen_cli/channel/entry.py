@@ -252,7 +252,12 @@ class ChannelEntry(CommandChannel):
             handler, operation = self._handle_turn_file_card_action, OperationId.FILES
         try:
             if operation is not None:
-                self._policy.require(operation)
+                if operation is OperationId.FORK:
+                    self._policy.require(operation, "card")
+                    if local is not None:
+                        local.require_admission()
+                else:
+                    self._policy.require(operation)
             elif local is not None:
                 self._check_local_card(value, form)
                 local.require_admission()

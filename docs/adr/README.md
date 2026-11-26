@@ -46,7 +46,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0077](0077-read-account-rate-limits-on-demand.md) | 按需读取共享 Codex 账号额度 | 架构决策 | 有效 |  |
 | [0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) | 原生会话历史采用只读分页适配 | 架构决策 | 有效 | 被 [0096](0096-read-admin-conversations-through-summary-turn-pages.md)、[0101](0101-show-session-agent-inputs-that-start-admin-conversation-turns.md) 修订 |
 | [0104](0104-host-native-agent-backends-per-instance.md) | 按实例接入多个原生 Agent 后端 | 架构决策 | 有效 | 修订 [0008](0008-use-python-sdk-for-native-turn-control.md)、[0060](0060-delete-projects-with-exact-session-inventory.md)、[0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)、[0068](0068-run-saved-scheduled-plans-manually.md)、[0074](0074-deploy-independent-instances-by-root.md)、[0076](0076-separate-cli-installations-from-instance-data.md)、[0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)、[0080](0080-authenticate-admins-with-feishu-identities.md)、[0092](0092-restrict-execution-to-enabled-group-chats-on-demand.md)，[0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) 修订本条 |
-| [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) | 按能力接口与共用展示扩展多后端，并规划 Claude 原生能力 | 架构决策 | 有效 | 修订 [0104](0104-host-native-agent-backends-per-instance.md)，[0108](0108-project-claude-activity-and-files-from-pinned-native-tool-frames.md) 修订本条 |
+| [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) | 按能力接口与共用展示扩展多后端，并规划 Claude 原生能力 | 架构决策 | 有效 | 修订 [0104](0104-host-native-agent-backends-per-instance.md)，[0108](0108-project-claude-activity-and-files-from-pinned-native-tool-frames.md)、[0109](0109-name-and-fork-exact-claude-sessions.md) 修订本条 |
 
 ## 会话身份、生命周期与并发
 
@@ -130,6 +130,7 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 | [0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) | 以飞书展示 Turn 统一各后端的回复展示 | 架构决策 | 草案 | 拟修订 [0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0053](0053-show-exact-turn-line-statistics-in-files.md)、[0056](0056-count-successful-patches-in-task-files.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md)、[0084](0084-separate-goal-controls-from-logical-turn-replies.md)，[0107](0107-present-process-in-feishu-process-messages.md) 修订本条 |
 | [0107](0107-present-process-in-feishu-process-messages.md) | 用飞书过程消息作为展示 Turn 的第二种形态 | 架构决策 | 有效 | 修订 [0046](0046-add-opt-in-binding-task-feedback.md)、[0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md)、[0052](0052-project-safe-turn-activity-with-one-consumer.md)、[0079](0079-deliver-partial-answers-with-existing-reply-presentation.md)、[0086](0086-configure-progress-card-presentation-with-bounded-activity-segments.md)、[0087](0087-use-instance-progress-card-settings-for-missing-session-intent.md)、[0106](0106-present-each-physical-turn-as-one-feishu-presentation-turn.md) |
 | [0108](0108-project-claude-activity-and-files-from-pinned-native-tool-frames.md) | 从固定版本的原生工具消息投影 Claude Activity 与 Files | 架构决策 | 有效 | 修订 [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) |
+| [0109](0109-name-and-fork-exact-claude-sessions.md) | 通过精确的 Claude 会话元数据改名和创建持久分支 | 架构决策 | 有效 | 修订 [0105](0105-extend-backends-through-capabilities-and-shared-presentation.md) |
 
 ## 命令与 Skills
 
@@ -200,4 +201,4 @@ ADR 可以很短，一段话说清背景、决定和理由即可。
 
 ## 统计
 
-共 108 个 ADR：架构决策 75 个，功能契约 31 个，升级记录 2 个；其中 99 个有效，8 个已被取代，1 个草案。
+共 109 个 ADR：架构决策 76 个，功能契约 31 个，升级记录 2 个；其中 100 个有效，8 个已被取代，1 个草案。

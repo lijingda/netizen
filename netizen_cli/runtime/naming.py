@@ -15,7 +15,7 @@ from ..bindings import (
     ThreadBinding,
 )
 from ..model_settings import ModelCatalogError, TurnModelSettings
-from .name_writes import ThreadNameWrites
+from .name_writes import ThreadNameWrites, normalize_session_name
 from .thread_naming import NamingJob, ThreadNameGenerationError
 from .contracts import (
     ModelProviderRejected,
@@ -109,9 +109,7 @@ class ThreadNamingRuntime(ThreadLifecycleRuntime):
         binding_id: str,
         name: str,
     ) -> str:
-        normalized = " ".join(name.split())
-        if not normalized or len(normalized) > 120:
-            raise ValueError("会话名称必须为 1 到 120 个字符。")
+        normalized = normalize_session_name(name)
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不能重命名会话。")
 

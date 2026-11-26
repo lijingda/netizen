@@ -12,12 +12,14 @@ from weakref import ref
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, HookJSONOutput, HookMatcher, Message, ResultMessage,
     StreamEvent, SystemMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage, get_session_info, get_session_messages,
+    fork_session, rename_session,
 )
 
 from .. import claude_installation
 from ..external_calls import external_call
 from ..claude_installation import verified_claude_cli
 from ..ordinary_sessions import OrdinaryInputRejected, PreparedPrompt
+from .contracts import NativeThreadMetadata, SessionRenameUnconfirmed, ThreadLifecycleError
 
 
 class ClaudeClient(Protocol):
@@ -320,11 +322,11 @@ _SESSION_READ_SECONDS = 3.0
 
 
 class SessionReader:
-    """One synchronous public SDK read may remain in flight after its caller leaves."""
+    """One synchronous SDK operation can outlive its caller's wait."""
     def __init__(self) -> None:
         self._worker: Thread | None = None
 
-    async def read(self, operation: Callable[[], _T], *, timeout: float | None = None) -> _T:
+    def start(self, operation: Callable[[], _T]) -> asyncio.Future[_T]:
         if self._worker is not None and self._worker.is_alive():
             raise TimeoutError("a Claude session read is still in flight")
         waiter: asyncio.Future[_T] = asyncio.get_running_loop().create_future()
@@ -345,8 +347,8 @@ class SessionReader:
         def work() -> None:
             try:
                 value = operation()
-            except Exception as exc:
-                def reject(future: asyncio.Future[_T], error: Exception = exc) -> None:
+            except BaseException as exc:
+                def reject(future: asyncio.Future[_T], error: BaseException = exc) -> None:
                     future.set_exception(error)
                 post(reject)
             else:
@@ -354,6 +356,10 @@ class SessionReader:
 
         self._worker = Thread(target=work, name="claude-session-read", daemon=True)
         self._worker.start()
+        return waiter
+
+    async def read(self, operation: Callable[[], _T], *, timeout: float | None = None) -> _T:
+        waiter = self.start(operation)
         async with asyncio.timeout(timeout):
             return await waiter
 
@@ -370,6 +376,9 @@ async def last_assistant(session: str, cwd: Path, reader: SessionReader | None =
 
 
 class ClaudeClients(Protocol):
+    async def session_metadata(self, session_id: str) -> NativeThreadMetadata: ...
+    def rename(self, session_id: str, name: str) -> str: ...
+    def fork(self, session_id: str, cwd: Path, title: str | None) -> str: ...
     async def last_assistant(self, session: str, cwd: Path, reader: SessionReader) -> str | None: ...
     def create(self, session_id: str, cwd: Path, *, resume: bool, live: LiveSession | None = None) -> ClaudeClient: ...
     async def session_cwd(self, session_id: str, candidates: tuple[Path, ...] = ()) -> Path | None: ...
@@ -377,6 +386,42 @@ class ClaudeClients(Protocol):
 
 class BundledClaudeClients:
     last_assistant = staticmethod(last_assistant)
+
+    @staticmethod
+    def fork(session_id: str, cwd: Path, title: str | None) -> str:
+        try:
+            result = fork_session(session_id, directory=str(cwd), title=title)
+        except (ValueError, FileNotFoundError):
+            raise ThreadLifecycleError("Claude 拒绝创建分支，请检查原会话。") from None
+        return result.session_id
+
+    async def session_metadata(self, session_id: str) -> NativeThreadMetadata:
+        def read() -> NativeThreadMetadata:
+            info = get_session_info(session_id)
+            if info is None or info.session_id != session_id:
+                raise LookupError("Claude 会话信息暂不可用。")
+            name = (info.custom_title or "").strip() or None
+            return NativeThreadMetadata(session_id, name, "" if name else (info.summary or "").strip())
+
+        # Management bounds the caller and counts this worker until it returns.
+        return await SessionReader().read(read)
+
+    @staticmethod
+    def rename(session_id: str, name: str) -> str:
+        try:
+            rename_session(session_id, name)
+        except (ValueError, FileNotFoundError):
+            raise ThreadLifecycleError("Claude 拒绝改名，请检查原会话与名称。") from None
+        except (Exception, asyncio.CancelledError):
+            raise SessionRenameUnconfirmed() from None
+        try:
+            info = get_session_info(session_id)
+            confirmed = info is not None and info.session_id == session_id and info.custom_title == name
+        except (Exception, asyncio.CancelledError):
+            raise SessionRenameUnconfirmed() from None
+        if not confirmed:
+            raise SessionRenameUnconfirmed()
+        return name
 
     def __init__(self) -> None:
         self._cli = verified_claude_cli()

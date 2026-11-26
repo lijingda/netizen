@@ -105,6 +105,9 @@ class Provider:
                 tool = ("Bash", {"command": "exit 17", "description": "Fixture tool error"})
             elif scenario == "edit-file":
                 tool = ("Write", {"file_path": str(self.cwd / ("file-" + label)), "content": "fixture data\n"})
+            elif scenario == "session-cron":
+                tool = ("CronCreate", {"cron": "0 0 1 1 *", "recurring": True, "durable": False,
+                                       "prompt": "fixture dormant cron"})
             elif scenario == "mcp":
                 tool = ("mcp__fixture__identify", {})
         if self.live_session_reply and any(t.get("name") == "Bash" for t in data.get("tools", [])):
