@@ -1560,8 +1560,8 @@ Binding 的“回复消息类型”可选卡片或过程消息。卡片沿用原
 同列。已提供的运行项在首次写入时固定文字与起始秒，结束后优先占用可用名额直至确认；
 每次最多 60 项，保留已提供 START 的运行项及其待确认 END。空位先给最早开始的新运行项，再给最近完成的条目。
 展示器根据首次看到的结束证据固定清单步骤的 END，Activity 明确记录步骤结束时取其记录的结束时间，从可用清单中发现步骤已移除时取本次观察时间。
-即使 END 尚未写入，同一展示 Turn 内再次运行的同名步骤也沿用原 START 和 END。若步骤在两次观察之间被移除又重新运行，展示器未看到结束证据，就沿用原来的运行行。[同名步骤重现测试](../tests/test_process_ordering.py#L270)
-运行结束或执行结果明确未知时，写入者在一次有界最终写入中为所有仍在运行的条目补齐 END，再尝试完成一次过程消息。[最终写入顺序测试](../tests/test_process_ordering.py#L44)
+即使 END 尚未写入，同一展示 Turn 内再次运行的同名步骤也沿用原 START 和 END。若步骤在两次观察之间被移除又重新运行，展示器未看到结束证据，就沿用原来的运行行。见 [`test_reappearing_steps_retain_original_start_and_stay_finished`](../tests/test_process_ordering.py)。
+运行结束或执行结果明确未知时，写入者在一次有界最终写入中为所有仍在运行的条目补齐 END，再尝试完成一次过程消息。见 [`test_observation_and_terminal_cuts_with_suspended_write`](../tests/test_process_ordering.py)。
 已完成和中断用 `done`，失败用 `error`，执行结果明确未知用 `timeout`。单纯失去 Activity
 观察时保留写入者。确认为执行未知后恢复的结果只交付普通内容。Goal 整个逻辑运行使用同一条
 过程消息，物理换轮重新区分条目。服务关闭、Binding 退役或移除 Thread 时会取消写入者，已创建的消息可能仍显示进行中。详见 [ADR 0107](adr/0107-present-process-in-feishu-process-messages.md)。
