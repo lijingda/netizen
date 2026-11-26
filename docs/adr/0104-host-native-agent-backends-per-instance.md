@@ -134,7 +134,7 @@ Admin 错误识别和 Files 提取。错误文案（`error_messages`）、阶段
 
 维护者明确接受两项尚无真人或真机复验的风险：
 
-- **所有者 Mac。** 暂无合适的真实 Mac。依据 Phase 0 macOS runner 的进程回收与代际锁报告、macOS CI 原生组和 Channel E2E、崩溃助手的 macOS 分支单测，以及 Linux 受管服务实测，接受 launchd 重启可能与旧 CLI 短暂重叠。首次在真实 Mac 部署 Claude 时，所有者须开启 SIP，按清单执行崩溃助手，记录初次启动、注销再登录和重启再登录的判定。[Mac 验收清单](../deployment.md#在所有者的-mac-上验收崩溃重启)
+- **所有者 Mac。** 暂无合适的真实 Mac。依据 Phase 0 macOS runner 的进程回收与代际锁报告、macOS CI 原生组和 Channel E2E、崩溃助手的 macOS 分支单测，以及 Linux 受管服务实测，接受 launchd 重启可能与旧 CLI 短暂重叠。首次在真实 Mac 部署 Claude 时，所有者须开启 SIP，按清单执行崩溃助手，记录初次启动、注销再登录和重启再登录的判定。[Mac 验收清单](https://github.com/lijingda/netizen/blob/8eee3114e5f6455692610e3a980ea5cb7ce0d8f6/docs/deployment.md#在所有者的-mac-上验收崩溃重启)
 - **飞书第二名用户。** 目前只有合成第二用户和服务端测试。首次在有多名成员的聊天中使用 Claude 实例时，用另一名真实飞书用户复验所有者门禁。
 
 ## 备选方案

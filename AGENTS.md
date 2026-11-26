@@ -2,8 +2,7 @@
 
 Netizen is a Feishu/Lark Channel for native agents. Each instance has one long-lived
 Python service, one `FeishuChannel`, one Channel database, and one backend fixed at setup.
-Codex is the reference backend and shares one `AsyncCodex` from the official `openai-codex` SDK.
-Claude Code is an owner-only ordinary-session pilot (ADR 0104).
+Codex is the only supported backend. Its Bindings share one official `AsyncCodex` client.
 
 The Channel SDK owns messaging. ADR 0107 permits three typed Feishu process-message
 writes through the instance's pinned `lark-oapi` client. Netizen owns SDK requests,
@@ -28,7 +27,6 @@ The usage guides are not implementation guides.
 
 ### Runtime and sessions
 
-- [Claude Code pilot](docs/design.md#claude-code-后端试点) covers ordinary execution, permissions and capability gates.
 - [Identity](docs/design.md#scopebinding-与会话配置): Scope, Binding and Thread relationships, plus session configuration.
 - [Admission](docs/design.md#锁与输入准入): locks and which Turn may accept an input.
 - [Observation](docs/design.md#普通-turn-终态与观测恢复): ordinary Turn terminals and bounded observation recovery.
@@ -93,8 +91,7 @@ The usage guides are not implementation guides.
   must never execute repository-configured programs.
 - Preserve exact Scope/Binding-to-native-session identity. Never queue an input
   or convert it into a later Turn. On Codex, running input steers the exact Turn.
-  On Claude, admit new inputs on a confirmed idle client, including during background work.
-  Stop the exact current turn, or its verified task list on an explicit stop-all request.
+  Stop the exact current Turn.
   Only the verified session-tool entry uses native ExternalMessage start/join
   (ADR 0081); it does not change ordinary input admission. Human messages,
   question-card answers and scheduled inputs retain their exact-Turn admission.
@@ -144,9 +141,6 @@ The usage guides are not implementation guides.
   The group switch leaves direct chats and their topics unaffected. Instance
   Administrators have equal Admin Web authority. Their only additional Feishu command
   is `/enable` in groups. Keep multi-role RBAC and Project ACLs out of this boundary.
-  A Claude instance has exactly one owner. Admin cannot add an administrator.
-  Only the owner can trigger Feishu execution or change what will execute.
-  Claude admission opens two seconds after Feishu readiness.
 - On Codex instances, Codex controls model, tools, Skills, MCP, sandboxing, and
   environment policy except the documented Binding Model/Effort/Speed intent,
   non-login tool boundary, and dedicated temporary
@@ -155,9 +149,6 @@ The usage guides are not implementation guides.
   These public overrides must not write user configuration, replace user
   MCP entries, or override developer/base instructions. Fresh Codex Threads use the public SDK's `auto_review` default;
   persistent forks retain native inherited permissions without client overrides.
-- On Claude, the only native policy override is per-session `auto` permission mode.
-  Leave authentication to the owner's Claude Code installation. Never handle
-  Claude credentials or inspect their source.
 - Message-history access remains the narrow, public, typed, read-only
   `lark-oapi` port using the same app credentials (ADR 0039). Preserve chat-main
   versus thread-topic semantics, inert historical context, and its rollout gate.
@@ -202,9 +193,7 @@ The usage guides are not implementation guides.
 - Programs belong to the selected Python environment; instance roots contain data,
   not release/venv/current trees. Explicit setup initializes new data. Every actual
   service start validates and migrates under the lifetime lock before Runtime admission
-  (ADR 0076). Validate the configured backend at startup. On Claude instances,
-  verify the exact SDK and bundled CLI versions supplied by the optional
-  `netizen-cli[claude]` extra before admission.
+  (ADR 0076). Validate the configured backend at startup.
   Preserve v14 baseline and frozen migration steps/fixtures. Missing data
   never means a new instance. SQL failures before commit roll back; failures after
   commit retain the new database, never automatically restore an old snapshot.

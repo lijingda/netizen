@@ -3,7 +3,7 @@
 ## 工程概览
 
 Netizen 把飞书单聊、群聊和话题接成原生 Agent 的消息 Channel。每个实例在 setup 时选定一个后端，
-缺少后端标识的历史实例使用 Codex。Codex 是参考后端，Claude Code 提供所有者专用的普通会话试点。仓库唯一的生产实现是
+当前支持 Codex，缺少后端标识的历史实例也使用 Codex。仓库唯一的生产实现是
 `netizen_cli/` 下的 Python 包，由 `pyproject.toml` 构建和安装；没有 Node.js/TypeScript
 运行时、构建面或 fallback。Node.js 仅用于 Admin JavaScript 行为测试，开发步骤见
 [贡献指南](CONTRIBUTING.md)。完整用户行为见[用户手册](../skills/netizen-user-guide/references/user-guide.md)。
@@ -66,56 +66,14 @@ Codex 后端通过共享的官方 SDK/App Server 操作精确的 Thread 和 Turn
 不预先 interrupt 或 cleanup。兼容性异常先检查 Netizen 的调用、返回处理和资源归属；
 原生能力是否满足场景单独记录，不能以“适配层正确处理失败”宣称原生能力已经通过。
 
-### Claude Code 后端（试点）
-
-- **会话与目录。** 每个活动 Binding 最多持有一个 `ClaudeSDKClient`，同一客户端只读一条原生事件流。首轮显式指定会话 UUID，连接成功后、提交前写入 Binding 的既有 native ID 字段。
-  续接时用原 UUID 核对 SDK 返回的 ID 与实际 cwd。SDK 按目录读消息时还会搜索同仓库的其他 worktree，因此只接受摘要中与候选目录相符的实际 cwd。
-  缺少摘要、ID 或 cwd 不符、读取失败均拒绝。首条消息带大图可能没有摘要，首次写入前崩溃也可能没有原生记录，
-  此时提示 `/new`，含该会话的 Project 仍无法删除。
-- **提交与归属。** 在 Binding 锁内保留准入版本，写入前再核对。CLI 执行时拒绝新消息。CLI 空闲时即使仍有后台任务或会话 cron，也可在原客户端接收新消息。
-  每次人工输入有独立 UUID，只提交一次。写入成功后匹配的 init 可推进群聊游标；写入未确认时须等顶层 Assistant、流事件或 Result 携带该输入 UUID。
-  Result 按自身 UUID 在客户端寿命内去重。人工回答按输入 UUID 回复；后台完成轮沿 run ID、tool-use ID 找到发起人的原消息。无可解析归属的回答（含 cron）发至该 Binding 的聊天或已核实的话题根。冷续接先跳过首个本次输入 init 之前的重放。
-- **展示。** 一个逻辑任务包括一条人工输入及其派生的后台工作。每个有正文、阶段性答案或可发送文件的物理轮单独回复，过程卡按物理轮重置。CLI 顶层 Assistant 在同一模型消息中先给出完整文本再调用工具时，按阶段性答案呈现；顶层工具的操作预览、子任务数量与可确认的清单在两种回复类型中共享。阶段性答案不重复进入 Activity。若 Result 没有正文，已有卡片保留该物理轮最终确认的阶段性答案，纯文本模式按投递回执补发尚未尝试的片段。
-  飞书对卡片、文本、片段和提示的回执只要带有聊天、话题、根消息或父消息，就与投递目标核对。回执与目标相悖时，相关内容记为未确认，Binding 停用涉及的消息 ID。后续输入省略话题根时沿用该 Binding 已核实的根。每个可写卡片 ID 只归一条活动输入所有，其他输入通过自己的原消息交付。输入结束时释放卡片写权，永久删除 Binding 时清除已核实的根和停用记录。
-  每个物理轮在内存中分别记录阶段性答案、正文和图片的送达情况。卡片渲染或发送前校验失败，或飞书明确拒绝终态卡片写入时，尚未投递或已证实未送达的内容可回退为文本。每项只尝试一次新发文本。先前的卡片写入结果未知时，该项可能已显示，之后的明确拒绝也不足以补发。片段与最终回复按实际呈现内容去重，保留已上传的图片。逐项回执的卡片和文本每次请求最多等待 15 秒。已有卡片的终态替换若回执未知，写入器按当前应显示的内容隔 0.5 秒再试，总共最多三次，确认或明确拒绝即停止。新发卡片或文本只发送一次。各项投递和终态重试共用物理轮的 30 秒内容期限。
-  本轮内容投递与终态替换的最后一次尝试结束，或内容期限届满后，才结算回执。只要有内容被拒绝、结果未知或届时尚未发送，便在原人工消息或已核实的会话位置尝试一次简短提示。提示本身发送失败时记录日志。随后按既有规则结束展示并发送完成提醒。
-  有人工归属的物理轮一旦得到原生 Result，有序读取器在排队投递前同步交出封闭的活动快照和物理轮结论。随后失联仍可撤销待发内容，已有过程消息按该轮已证实的结论收尾；未证实结论时以超时收尾。
-  每张卡按物理轮取正文，在发布时固定标题。每条输入最新一张已确认的结果卡在 Activity 中显示状态行，由当前 CLI 状态、该输入的后台任务数和会话 cron 共同决定。普通文本只在发送时该输入仍有后台任务时附上数量。只有写入已开始且当前 init 指明该输入时，才向其展示运行卡、片段与表情。匿名完成轮在 Result 确认归属后展示。即使物理轮没有正文，只要该输入仍有后台工作，已有卡片也更新状态，保留输入表情并撤下思考表情。
-  每条消息独立串行更新，已确认显示的内容与目标相同时跳过写入。飞书明确拒绝替换时旧卡仍在，保留此前确认的内容；回执未知或超时时清除确认缓存。Claude 运行卡按既有轮询间隔读取活动版本，下一次版本变化时尝试写入最新内容，每次请求独立限时，连续写入失败也不会停用后续版本。物理轮回退为文本时，原卡仍折叠为终态并撤下状态行，保留已显示或可能已显示的片段，即使个别回执仍未知。逻辑结束时停止该输入的全部轮询，在共用的五秒预算内更新卡片，到期后继续发送完成表情与提醒。
-  Claude 文件卡仍由展示器管理时，翻页与状态行共用同一写入器，后续状态变化保留所选页。同一消息的替换请求串行执行，排队的翻页请求在前一次写入返回后核对当前卡片归属。卡片退出展示器后，仅按 Binding 和卡片消息 ID 在进程内保存分页卡的最终状态行，翻页时与回调自带的清单合并。最多保留 256 条，先移除最早退出的卡片；Binding 退役或删除时清除其条目。服务重启或条目被淘汰后，翻页可显示回调生成时的状态行。回调每次尝试替换卡片前都核对该 Binding 已停用的消息 ID，命中时向操作者反馈翻页未完成。翻页回执按卡片消息 ID 与可核实的目标校验，回执矛盾时停用涉及的消息 ID。已发出的替换即使在逻辑任务结束后才得到有效回执，仍确认该次翻页，已结束的投递账本保持关闭。
-  逻辑结束时按发起人、结束提及设置和停止／中断状态确定提及资格。过程消息模式下，已开启结束提及的人工任务若在 Result 时没有后续工作，最终文本在内容期限内最多等一秒，等到逻辑结束判定便立即发送，等不到则先发普通正文。过程消息模式发送最终文本之前，若已确定符合资格，就在正文中提及发起人，长文只在第一段分片携带提及。每个逻辑任务最多尝试一次提及：带提及的正文开始发送即计入，回执明确拒绝或结果未知时也不再单独提醒，内容仍按原回执结算。构造带提及的正文失败时照常发送普通正文。
-  卡片、本轮文件，以及正文已开始发送时才确定逻辑结束的任务，沿用单独提醒路径。尚未尝试提及时，优先提及最新一条仍可用且曾确认显示正文、阶段性答案或本轮文件的消息，其次提及最新一条仍可用的已确认消息（包括只有标题的过程卡）。后续写入失败仍保留已有的确认记录；位置被否决的消息失去提及资格。没有合格消息时，若本轮未开始发送任何正文、阶段性答案或本轮文件（包括本地准备失败或超时），或成功回执中的消息 ID 相互冲突，则引用已核实的原输入；只有失败或未确认的投递尝试时不发提醒。用户请求停止时抑制相应提醒。
-- **终态与关闭。** 合看 Result 的 `subtype`、`terminal_reason` 和 `is_error`。按原生证据报告完成、中断、API 错误或轮数／预算超限。
-  任务自然离开完整列表后，此前的 idle 失效。收到新 idle 且已处理在先的 Result，才能完成所有派生任务均已离开的人工输入。显式停止后，该任务的原生 killed/stopped 加上从列表移除，可以保留已有的有效 idle。
-  列表为空、无会话 cron、无待写输入并确认 idle 后关闭。已列出的后台工作或空闲 cron 可长期保留客户端。列表为空却始终缺少预期边界时，五分钟保护计时结束本轮。身份矛盾、关键生命周期字段格式错误、未正常收尾的读流 EOF 或读流异常同样只发一次会话通知，提示其他后台结果可能无法送达。确认断开后重新准入；关闭未确认只隔离该 Binding，迟到的关闭成功解除隔离。
-- **停止。** `/stop` 对当前顶层物理轮执行原生 Esc。仅有后台任务时说明数量并提示 `/stop all`。全部停止先中断当前轮，再对已核实列表中仍存在的任务分别调用 `stop_task`，保留会话 cron。按钮与命令均核对所有者、Scope 与 Binding。输入命令时在锁内捕获当前目标，按钮还需匹配当时的控制版本与轮次。重复 Esc 按捕获的物理轮去重。首次 Esc 发出后才确认物理轮 ID 时，再次 Esc 会送到已确认的轮。停止意图随该物理轮的 Result 归属生效；一次 SDK 确认只说明请求已发送。Esc 对不同原生工具的影响见 ADR 0105。
-- **释放与终端续接。** 在飞书发送 `/release` 可释放当前 Binding 的 Claude 连接。没有连接时直接告知，前台正在执行时提示等待或先 `/stop`。空闲且有后台任务或会话 cron 时，卡片列出数量，所有者确认后断开。后台任务按用户请求停止结算，cron 暂停并保留登记。只有确认断开后才回报已释放，关闭失败沿用 Binding 隔离。下一条人工消息从原生历史冷续接。
-  后台工作保留连接时，每次到达有序 idle，以实际 cwd 在事件循环外调用公开的 `get_session_messages`，在本次执行的内存中保存最后一条可见 assistant 消息的 UUID。向空闲连接续发前，用同一接口复读该 UUID。相同则发送，变化或原有 assistant 已不可见时刷新基线、拒绝本条输入并回复带「释放会话」按钮的卡片。基线缺失、尚在读取或读取失败、超时时记录一次警告，照常发送。读取由 idle 和人工提交触发。
-  所有者可释放后重发，也可直接重发到现有连接。终端仅打开会话，或在留下 assistant 消息前中断，可能不会触发卡片。如果飞书侧的后台任务在检查前已唤醒旧连接，它可能已经从旧上下文写出分支，终端后续对话因而离开当前历史。保留连接时在状态行和文字回复中提示「如需在终端继续这个会话，请先 /release」。
-- **所有者与权限。** setup 的唯一管理员是所有者。飞书就绪后再等 2 秒才接收任务。群聊准入照常生效，
-  非所有者只能单独发送纯文本 `/help`，Admin 不能增设管理员。Claude Code 使用所有者自行配置的原生认证和权限。
-  新建和续接会话均使用 SDK 的 `claude_code` 预设，保留 Claude Code 原生系统提示，不追加宿主提示。
-  Netizen 不处理凭据、不核查认证来源，仅按会话申请 `auto`。即使 init 报告 `auto`，操作仍可能被拒；
-  根据本轮 `ResultMessage.permission_denials` 在结果前向所有者提示拒绝次数及白名单工具名，与 init 报告 `default` 的提示合并发送。
-- **状态与列表。** `/status`、`/sessions` 和 Admin 共用精确 Binding 的状态投影。列表按本地登记时间分页，
-  当前会话在页外时单独展示。已验证的 init 提供模型和 cwd，本次输入的 Result 提供 token 数和费用，
-  同一已初始化会话的额度事件提供额度状态。每项保留自己的来源与采样时间；
-  最多 512 个 Binding 的最近样本驻留进程内存。冷启动或淘汰后显示“未观测”，取不到的数值显示“取不到”，
-  订阅等不适用字段标明“不适用”。展示沿用已有观测流，当前上下文占用显示“取不到”。
-  新建、配置和默认规则共用表单字段权限，提交时重新验证。Claude 的模型来源固定为原生设置。
-  名称按原生会话 ID 有界读取。优先显示 `custom_title`（包括 Claude 自动生成的标题），其次将 `summary` 标为预览。两者皆空、读取超时或失败时，该行显示 Binding 短 ID。名称与预览仅供当次展示。
-- **能力与缺口。** 飞书命令、卡片（含旧卡）、Admin API 和定时派发均按同一后端能力判定。试点支持文本和图片输入、本地状态、
-  工具 Activity、原生清单、阶段性答案、Result、本轮文件、后台完成轮与逻辑结束提及。所有者可在飞书或 Admin 手工改名，在飞书创建持久分支。Goal、Side、归档／删除、Netizen 定时与协作、原生历史和模型设置仍按能力门禁关闭。
-  Claude 所有者可从飞书释放当前连接，Admin 中的释放操作仍仅向 Codex 开放。
-  pip 和 uv pip 仅在已装 SDK 与已装 Netizen 发行包的 `[claude]` 固定版本相符时保留 extra，版本冲突在停服前报错。uv tool 核对安装记录。
-  取舍与验收见 [ADR 0104](adr/0104-host-native-agent-backends-per-instance.md#接受记录)。
+ServiceCore 按实例后端静态装配普通会话、停服和管理接口。每项操作采用同一份操作描述，在飞书命令、卡片、Admin API 和定时派发时核对实际提供方与入口资格。状态、列表与表单沿用共用展示模型，区分不适用、未观测和取不到。会话准入、回执、精确停止与有界停服遵循同一实例的执行边界。见 [ADR 0105](adr/0105-extend-backends-through-capabilities-and-shared-presentation.md)。
 
 ### 三条主要执行路径
 
 | 入口 | 执行过程与结果归属 |
 | --- | --- |
 | 空闲会话收到普通消息 | 验证消息归属、引用、图片和所选上下文，按后端校验可用能力与会话配置，创建或精确恢复原生会话；本次执行的结果回到原请求的投递锚点。 |
-| 运行中的会话收到普通消息 | Codex steer 当前 exact Turn，Claude 拒绝新输入。均不排队，不改变原任务的结果投递锚点。 |
+| 运行中的会话收到普通消息 | Codex steer 当前 exact Turn；输入不排队，原任务的结果仍交付给原请求。 |
 | Codex 定时计划到期或手动触发 | 唯一 Scheduler 认领到期点或手动请求；新话题目标创建普通持久 Binding 并提交初始 Turn，原会话目标固定 exact Binding 并按普通消息 start/steer。两者都不切换来源当前会话。 |
 
 输入准备不能把历史消息变成新的控制指令或 Skill 调用；普通群聊参与者每次触发仍需重新 @机器人。
@@ -128,7 +86,6 @@ Codex 后端通过共享的官方 SDK/App Server 操作精确的 Thread 和 Turn
 | 所有者 | 负责的状态 |
 | --- | --- |
 | Codex 原生状态 | 登录、Thread/Turn 历史、Goal、工具、Skills、MCP 与原生配置；复用 effective user 的标准 `$CODEX_HOME`。 |
-| Claude 原生状态 | 所有者的登录、会话记录、实际 cwd、工具与权限规则由 Claude Code 管理。 |
 | Channel SQLite | 仅[数据契约](#channel-数据库与结构校验)列出的元数据、显式意图及定时任务窄例外，不复制原生历史。 |
 | 当前进程内存 | 活动执行、锁与准入、订阅、Activity/usage 展示、Admin session 与一次性凭据；重启不重建执行/展示状态。 |
 | 实例文件 | [部署状态](#部署事务与操作状态)、维护锁、初始化/ready 证据与迁移备份；不进入 Channel SQLite。 |
@@ -146,7 +103,7 @@ SDK 门禁见[适配边界](#sdk-适配边界)，内置与用户 Skill 的归属
 要求见[部署文档](deployment.md#定时任务兼容性与验收)。
 
 目标是让用户在一台受支持的 Linux 或 macOS 主机上，通过飞书单聊、群聊和话题使用所选原生 Agent。
-Codex 实例可供受信用户共用，Claude 试点仅供所有者本人使用。历史、工具、Skills、MCP、配置、sandbox 和认证由原生 Agent
+受信用户可以共用一个实例。历史、工具、Skills、MCP、配置、sandbox 和认证由原生 Agent
 管理。Project Registry 可通过飞书项目管理卡片或 Admin Web 管理；当前仍不实现审批卡、Codex 原生配置
 值的 idle read/update、文件正文自动解析或音视频输入、流式 token、HA 或 durable queue。
 普通文件按[输入文件附件](#输入文件附件)保存原件并提供本地路径，由 Agent 按需读取；
@@ -209,7 +166,7 @@ Admin `/worktrees` 进入、分页及手动刷新时查询当前页，列表仅�
 
 ## 架构
 
-下图是 Codex 参考后端的完整装配。Claude 试点复用 Channel、Store 和管理入口，普通执行按上文的[试点契约](#claude-code-后端试点)装配，不启动 Codex App Server 或定时器。
+下图是 Codex 后端的完整装配。
 
 ```mermaid
 flowchart LR
@@ -468,8 +425,6 @@ Result/Files；logical terminal 只用 exact 最终物理 Turn 的输出和 stru
 
 ### 普通会话生命周期
 
-Claude 的 `/rename <名称>`、命名卡片和 Admin 表单使用同一个手工写入入口。已物化的 Binding 在受管客户端确认关闭后才可改名。准入锁覆盖资格检查、一次原生写入和精确 ID 的标题回读。保存的标题须与合并空白后的输入完全一致。写入前明确拒绝只影响本次操作，其余异常或回读不符报告“改名结果未确认”。即使等待超时，实际工作线程结束前仍拒绝竞争输入。独立终端写入不受此锁约束。Claude 自行生成的标题遵循所有者的原生设置。[ADR 0109](adr/0109-name-and-fork-exact-claude-sessions.md)
-
 Codex 会话生命周期的命令入口按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
 [ADR 0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 管理当前 Binding，
 运行态观测与 Thread removal 委托按
@@ -536,10 +491,6 @@ Compaction、普通 `STOPPING`／`OBSERVATION_UNAVAILABLE` 和 Goal 的其他活
 
 ### 持久分支创建与交接
 
-Claude 通过飞书 `/fork` 使用下述目标校验、主线替换确认和 Binding 事务。复制前按续接规则，通过未指定目录的精确原生 ID 确认实际 cwd。来源须已物化且没有正在打开的连接、执行中或待写的输入、关闭未确认的客户端。保留的客户端须已按序到达空闲且原生后台任务列表为空。仅有会话 cron 时可以复制，卡片提示子会话恢复时也会恢复原有 cron。来源会话始终保留，分支名称留空则采用原生默认标题。[ADR 0109](adr/0109-name-and-fork-exact-claude-sessions.md)
-
-来源 Binding 的准入锁覆盖一次有界的 `fork_session` 调用。返回不同的有效 UUID 后，还须独立读取子会话，核对其实际 cwd 与来源相同。复制期间来源活动修订发生变化也会停止交接。复制结果未知时不重试，已有子 ID 而校验、飞书发布或绑定失败时在回执列出 ID，供所有者在 Claude Code 核查。子 Binding 继承来源 Project、worktree 关联及已有显式工作目录选择，每次续接仍须读取原生 cwd。Claude 交接在目标 Binding 落库并切换后更新回执。
-
 Codex 的 `/fork` 按 [ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
 从当前已物化、持久且确认空闲的普通 Binding 创建普通持久分支；运行中、停止中、压缩中
 及 lifecycle/观测未知时拒绝，暂停且空闲的 Goal 可作为来源，但不接管来源 Goal。
@@ -584,7 +535,7 @@ Fork 将目标区标为“分支位置”，方式下拉与群搜索、结果分
 下方输入通过浅色背景和内边距归组，精简重复说明。所有控件仍在同一个表单内，
 切换方式只改变本地选择，不请求后端刷新，也无需展开额外区域；查找、翻页和创建
 仍由按钮提交。分组不改变字段提交和目标解析。Cron 沿用现有平铺布局。
-两个后端均显示“新话题／主线”落点单选。Codex 还显示“创建后：保留当前会话／归档当前会话”单选，默认
+分支卡显示“新话题／主线”和“创建后：保留当前会话／归档当前会话”两组单选，默认
 新话题和保留；两者同样只在提交时生效，切换不回调、不重绘。
 
 Codex 的公开 `thread_fork(ephemeral=False, include_turns=False)` 继承原生历史和权限；分支与来源
@@ -596,7 +547,7 @@ Codex 的公开 `thread_fork(ephemeral=False, include_turns=False)` 继承原生
 
 新话题落点的创建顺序固定为原生 fork → 唯一“创建中”根卡片 → 真实 topic ID → 完整 Binding 原子落库
 并设为目标 current → Codex 登记原 fork handle 的普通订阅 → 原地更新根卡片为成功。
-成功卡以分支名称为主标题、“会话分支已创建”为副标题。Claude 名称留空时，主标题直接显示“会话分支已创建”。目标根卡提示在本话题继续，
+成功卡以分支名称为主标题、“会话分支已创建”为副标题。目标根卡提示在本话题继续，
 不显示跳转自身的按钮，仅来源回执提供“进入新话题”链接。必要的 seed 仍属于同一话题，
 使用查看顶部卡片创建结果、成功后再继续的固定说明，不持续声称正在创建。
 没有 Lazy 占位 Binding，也不发送首轮模型任务。
@@ -1062,7 +1013,7 @@ CLI 自行换取令牌，查询、分页和结果处理按上游 lark Skills 执
 
 ### 锁与输入准入
 
-两个后端均按 Binding ID 管理内存中的执行，不按 Project 或 cwd 串行化。Claude 的忙时拒绝和停止规则见[普通会话试点](#claude-code-后端试点)。
+运行态按 Binding ID 管理，同一 Project 或 cwd 内的不同 Binding 可以并发执行。
 Codex 的普通 Turn 保存 handle、owner、origin message、
 running/stopping/turn-observation-unavailable 的单轴公开状态、completion task、receipt
 Event、只读 Activity cursor/checklist/commentary/operations、成功 steer count 与 freshness；
@@ -1269,8 +1220,6 @@ rename/archive/unarchive 使用公开高层 API；名称、归档状态、plan �
 | 适配／用途 | 固定方法或观察面 | 本项门禁与限制 | 替代／移除触发器 |
 | --- | --- | --- | --- |
 | 飞书过程消息（[0107](adr/0107-present-process-in-feishu-process-messages.md)） | 通用回复展示层在过程消息类型下调用 `ProcessMessages`，借用实例的 `lark-oapi` 客户端，通过公开 `BaseRequest` / `arequest` 仅创建、更新和完成 `message_cot`。 | 更新发送安全 Activity 条目及其成对事件。每项文字最多 300 字符，每个内层事件 JSON 最多 1,800 个 Unicode 字符，每次最多 60 项，优先保留最早开始的运行中条目。创建只返回两个 ID，明确拒绝保留数值码，传输或回执未知由调用方处理。门禁包含形状测试、已安装客户端的回环测试和[飞书实测](deployment.md#代码门禁与按需实时兼容性验证)。 | 固定的 `lark-channel-sdk` 或 `lark-oapi` 提供 typed `message_cot` 接口并通过相同行为与实机门禁后切换，删除本适配层。 |
-| Claude 活动会话（[0105](adr/0105-extend-backends-through-capabilities-and-shared-presentation.md)） | SDK 0.2.186／CLI 2.1.329 的公开消息元数据、完整任务快照、Stop 的 `session_crons`，仅本客户端开启 `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`。 | 固定 CLI 回环验证列表、输入与工具归属、空闲与交接顺序、停止、cron 与重放。消费字段按表校验，异常走本轮断开。 | 公开 typed 任务、会话状态及归属 API 通过同一组门禁后替换解码与观测开关。 |
-| Claude 工具 Activity 与本轮文件（[0108](adr/0108-project-claude-activity-and-files-from-pinned-native-tool-frames.md)） | 同一公开有序流上的顶层工具调用与结果。按已验证的工具和字段解释清单及实际写入路径。 | 精确 SDK／CLI 版本、脱敏解码夹具与随附 CLI 的回环场景。任一版本变化均重新采集并验证。展示证据缺失只影响相应条目。 | 公开类型化操作、清单、写入路径分别通过同组门禁后，逐项删除工具字典解码。 |
 | Terminal cleanup（[0009](adr/0009-use-version-gated-experimental-terminal-cleanup.md)） | `thread/backgroundTerminals/clean`，exact `threadId`，空 object 响应 | **精确 SDK 版本、整个源码包指纹、内部持有类型、initialized client、`experimentalApi`**；失败拒绝服务启动。只清理官方登记的 background terminal，空响应不证明 foreground 退出。 | 公开等价 cleanup 通过同一 fake contract 与 Linux marker/resume 探针后，删除适配、指纹及运行时例外。 |
 | `GoalControl`（[0014](adr/0014-use-removable-sdk-gap-adapters.md)） | 固定 `thread/goal/get`、`thread/goal/set`、`thread/goal/clear` 及 SDK 原有 route/start/logical stream 编排 | 能力门禁；保留唯一 `next_notification` 消费链的受限 Tap，Goal 不读普通 event store。 | 公开等价 Goal facade，独立迁移。 |
 | `SkillCatalog`（0014） | 固定 `skills/list`；实际输入仍用公开 typed Skill input | 能力门禁。 | 公开等价 Skills facade，独立于 Goal 迁移。 |
@@ -1480,22 +1429,19 @@ traceback；日志同时记录 exact IDs 与该摘要。错误摘要仅在当前
 
 后端适配器把已有观察链上的事实映射为展示事件。`TurnOpened` 固定 Binding 或 Side、原生会话、
 Turn、投递目标与任务反馈设置。`ActivityChanged`、`PartialAnswer` 和 `TurnResult` 只更新
-对应的展示 Turn。`RunState` 和 `RunEnded` 按同一逻辑运行处理状态行、表情和结束提及。
+对应的展示 Turn。`RunState` 处理观测不可用的提示，`RunEnded` 收尾过程消息和状态表情。
 展示状态保存在内存中。飞书投递在原生消费链外进行。
 
-物理 Turn 成功时，适配器在 Result 确认该输入仍有后续工作则显示“本轮已完成”，否则显示“任务已完成”。
-标题和折叠摘要在发布时固定，Files 翻页沿用回调中保存的选择。逻辑结束只更新最近一张已确认回复卡的状态行。
+成功时显示“任务已完成”。标题和折叠摘要在发布时固定，Files 翻页沿用回调中保存的选择。
 Codex 普通 Turn 与 Side 一一映射。Goal 当前仍共用一条回复链和一张任务卡，阶段性答案按
-原物理身份去重，Files 仅取已核实的最终物理 Turn。Claude 的匿名唤醒和 cron 在 Result
-确认归属时映射。成功且没有正文、片段或可发送文件的匿名 Turn 不新发消息。
+原物理身份去重，Files 仅取已核实的最终物理 Turn。
 
 Binding 的“回复消息类型”可选卡片或过程消息。卡片沿用原卡的活动、阶段性答案、结果和文件。
 过程消息只显示可见的安全 Activity。阶段性答案单独用有标识的富文本发送；无文件的结果通过
-普通消息交付，有文件的结果通过 Result+Files 卡交付。表情、发送时的后台状态与释放提示、
-结束提及和定时首轮回执继续以承载内容的回复为依据。Claude 有已核实的人工锚点时，两种形态都可展示本轮顶层工具活动。
+普通消息交付，有文件的结果通过 Result+Files 卡交付。结束提及和定时首轮回执以承载内容的回复为依据。
 
 仅在运行中的初始观察或轮询发现可见条目时创建过程消息。终态只收尾运行中已启动的写入者，
-短任务可直接交付答案。Claude 匿名唤醒和会话 cron 把本轮 Activity 留在终态快照，沿 Result 确认的位置交付，不能在终态补建过程消息。内容、表情、提及和通知独立交付。话题内精确读取一次新消息，核对消息、聊天、话题、根和
+短任务可直接交付答案。内容、表情、提及和通知独立交付。话题内精确读取一次新消息，核对消息、聊天、话题、根和
 直接父消息。定时首轮引用选定的根或种子。创建回执丢失、读取不完整或位置不符时，仅停止这条过程消息的写入。
 过程消息的飞书调用不阻塞内容，使用独立的 30 秒上限，只用于判定请求丢失；创建没有去重键，
 过短的上限会把慢回执的创建变成无法更新或完成的消息。
@@ -1561,8 +1507,6 @@ Goal 的选择不跨物理 Turn 继承，最终 Result/Files 只检查准确最�
 不写会话配置或数据库，不增加重启恢复、通知队列或 Goal 状态机。
 
 ### 本轮文件证据与发送
-
-Claude 普通物理轮成功时，只收录该轮顶层 Write、Edit 或 NotebookEdit 的成功结果明确报告的实际写入路径。工具 ID 与同轮调用须匹配。申请路径、子 Agent 写入以及 Bash、MCP、自定义工具的产物均不能提供 Files 证据。路径交给共用的解析、分页和发送逻辑，本轮只有文件时也投递。
 
 Codex 普通 Turn completed 后，按
 [ADR 0024](adr/0024-send-structured-turn-files-from-completion-cards.md)、
@@ -1756,9 +1700,7 @@ Goal 换物理 Turn 继续重置 Activity。完整取舍见
 
 ### Activity 安全投影
 
-两个后端共用有界的活动窗口、排序、分段、子任务聚合与清单展示。Claude 每个 init UUID 对应独立的物理轮，只在这轮内配对顶层调用与结果。卡片操作时间取收到消息时的本地毫秒。展示版本随操作、清单、片段及状态行变化，准入复核和停止使用独立的控制版本。
-
-Claude 客户端无论新建还是续接，均从空集合开始展示本连接观察到的步骤。清单与 Files 只采用实际结果。TodoWrite 以 newTodos、TaskList 以返回列表整体替换。TaskCreate 追加已证实的 ID 和标签，TaskUpdate 只应用结果报告的状态变化。更新未观察过的 ID 时保留原清单。已显示的步骤若只确认修改了 subject 而没有新标签，清单转为未知。子层清单工具或无法解释的清单结果使其未知。仅展示本轮已生成的已知步骤，本连接未观察到的旧步骤要到 TaskList 后才显示。可展示的工具与字段、匿名执行的归属及门禁见 [ADR 0108](adr/0108-project-claude-activity-and-files-from-pinned-native-tool-frames.md)。
+展示采用有界的活动窗口、排序、分段、子任务聚合与清单。
 
 Codex Runtime 为 exact Ordinary Active Turn、Goal 当前 exact 物理 Turn 与 exact active Side Turn
 维护带 revision 的有界投影；包含 accepted 后的 running/stopping/pausing、完整原生
@@ -3880,8 +3822,7 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
 | Goal 流／四证的纯观察失败 | 只保留当前 Goal slot，其他 Binding 可用 | consumer handoff 后按需有界只读确认 idle/非 active/无 inProgress 才释放；不自动 pause/clear 或补造回复 | [Goal](#goal-物理-turn-与逻辑终态) |
 | Goal mutation／complete-only clear 未确认 | 保留 slot；有副作用可能的 start/resume/clear 关闭进程级 admission | 不重试、不按纯观察恢复释放；paused/blocked/限额不自动 clear，仍显示权威结果；重启外部 active 只读隔离、不能安全重挂 | [Goal](#goal-物理-turn-与逻辑终态) |
 | Side 创建失败／close 未确认 | creating/failed route 防落入普通 Binding；关闭未知保持 closing、拒绝 Prompt | 重试仅未确认步骤；重启不恢复 ephemeral Thread，在 handler 注册前把遗留 creating/open 转 expired；start/终态未知按 Side 全局边界 | [创建](#side-创建与路由)、[关闭](#side-运行与关闭) |
-| rename mutation 未确认 | Codex 保留目标 lifecycle slot。Claude 报告本次改名未确认，实际工作线程结束后恢复准入 | 不自动重写。后台自动命名按各后端规则处理 | [生命周期](#普通会话生命周期) |
-| Claude 持久分支未确认或交接失败 | 来源保留。已知子 ID 时在失败回执中列出 | 复制不重试。子会话保留供所有者核查 | [持久分支](#持久分支创建与交接) |
+| rename mutation 未确认 | 保留目标 lifecycle slot | 不自动重写，后台自动命名沿用原生规则 | [生命周期](#普通会话生命周期) |
 | unarchive/resume | 按 ADR 0082 两条精确移动前拒绝及 resume 拒绝分类；未知只隔离目标 Binding | 报告部分结果，不重试/目录对账；原生成功、本地未确认保留已知订阅，不声称 current 回滚 | [归档恢复](#普通会话生命周期) |
 | archive 异常 | 一次有界 catalog 对账：archived 才提交、active 释放、无法确认仅隔离目标 | 不重发 mutation，取消不追加目录 I/O | [归档](#原生归档与删除) |
 | Delete 拒绝／未知 | 仅本次原生成功才删 Binding；明确拒绝保留原执行观测、释放删除 intent、补目标空闲排期检查并反馈原因；未知 Binding-local slot、其他 Binding 可用 | 保留关联，不追加删除 list/read 对账或自动重试，不把 not-found 当成功 | [删除](#原生归档与删除) |

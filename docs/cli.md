@@ -29,7 +29,7 @@ netizen status --root /absolute/path/to/.netizen
 
 单实例操作的 root 选择顺序为 `--root`、`NETIZEN_ROOT`、有效账号的 `~/.netizen`；
 `doctor` 未显式传 `--root` 时改为列出全部受管实例，见下文。包安装只安装程序、
-依赖和资源，不生成实例、注册服务或迁移数据库。Codex 实例首次 setup 检查共享 Codex 登录。两种后端都通过
+依赖和资源，不生成实例、注册服务或迁移数据库。首次 setup 检查共享 Codex 登录，通过
 官方飞书浏览器流程准备应用凭据并校验权限，再确认当前应用的首位管理员，初始化数据、
 注册服务，但不默认启动。无 TTY 也可用浏览器完成；agent 应逐次转交验证 URL 并保留
 同一进程，不索取 App Secret。应用绑定和首管理员身份确认可能分别要求一次授权；
@@ -38,9 +38,7 @@ netizen status --root /absolute/path/to/.netizen
 可用范围和机器人入群仍需用户完成。应用需开通 user 类型 `component:selector`、
 `offline_access`，新 Admin 登录也统一请求这两项授权。首次可用 `--admin-port` 指定端口。
 
-首次 setup 用 `--backend codex` 或 `--backend claude` 选择后端。省略时沿用已有配置，
-新实例和没有 `instance.backend` 的历史配置均使用 Codex。后端按 root 固定。需要另一后端时创建新 root，
-已有会话仍属于原后端。
+首次 setup 可显式指定 `--backend codex`。后端按 root 固定；省略参数时沿用已有配置，缺少 `instance.backend` 时使用 Codex。
 
 本机受信操作者也可手填当前应用下的 Open ID，支持人和 Agent 的非交互流程：
 
@@ -71,34 +69,6 @@ start 等待该实例真正 ready，不把 manager 已加载当作成功。每�
 数据格式较新、损坏、缺库或缺少
 迁移路径时拒绝业务启动，不创建空库；迁移提交后的启动失败不恢复旧数据库。
 schema 没变化不会重复迁移或无条件备份。status/help/version 不触发迁移。
-
-### Claude Code 试点实例
-
-选用含试点功能的 Netizen 版本。用以下三种方式之一，在将绑定服务的环境安装可选依赖。
-候选版本尚在验收时，可在候选源码目录运行 `python -m pip install '.[claude]'`。
-
-```sh
-python -m pip install 'netizen-cli[claude]'
-# uv pip
-uv pip install --python /absolute/path/to/python 'netizen-cli[claude]'
-# uv tool
-uv tool install 'netizen-cli[claude]'
-```
-
-所有者先在运行服务的系统账号下亲自登录官方 Claude Code，然后用自己的飞书身份完成 setup。
-以下命令创建并启动独立的 Claude 实例。
-
-```sh
-netizen setup --root ~/.netizen-claude --backend claude
-netizen start --root ~/.netizen-claude
-netizen status --root ~/.netizen-claude
-```
-
-Claude setup 跳过 Codex 登录检查。setup 和启动都会校验绑定环境的 `claude-agent-sdk==0.2.186`
-和随附的 Claude Code `2.1.329`。出现安装修复提示时，在该环境用原包管理器修复带 `[claude]` 的安装。
-启动还要求当前飞书应用恰有一名管理员。可用 `netizen setup --help` 核对程序是否提供 `--backend claude`。
-只用支持 Claude 的程序启动或恢复这个 root。早期版本可能忽略后端标识，把它当作 Codex 数据打开。
-服务账号的其他原生认证方式与实机验收范围见[部署手册](deployment.md#部署-claude-code-试点)。
 
 若保留了已初始化的数据、服务已解除注册且 `config.yaml` 丢失，先确认原后端，再用原来的
 `--backend` 显式重做 setup。仍有注册绑定时，缺配置且未给 `--backend` 的 setup 可以返回
@@ -148,12 +118,6 @@ update 只影响这个命令实际使用的 Python 安装及其关联受管实�
 NETIZEN_ROOT 也不缩小范围。普通 pip、uv pip 与 uv tool 采用经过验证的有限识别；
 未知／冲突／不支持的安装在停服前报错，允许用户用自己的包工具手工维护。
 不根据 PATH 随便调用另一 pip，不试升级来识别环境，不失败后自动换后端。
-
-受支持的 `netizen update` 会保留 Claude 依赖。pip 和 uv pip 在目标环境没有 `claude-agent-sdk` 时只更新主包。
-已装 SDK 的版本与当前已装 Netizen 发行包为 `[claude]` 声明的固定版本一致时，才请求 `netizen-cli[claude]`。
-版本不符或无法核对时会在停服前报错，请用原包管理器修复环境或手动升级。uv tool 核对工具安装记录中
-`netizen-cli` 主包的 `claude` extra，记录与已安装依赖冲突时会在停服前报错。
-若手动升级 Claude 环境，仍应向包管理器指定 `netizen-cli[claude]`。
 
 自动更新的范围小于安装运行的范围：第一版不接管 editable、直接 URL、本地源码、
 共享 user-site、pipx 或项目管理器控制的安装。包工具配置文件及受支持的环境变量由
@@ -259,7 +223,7 @@ netizen remove --root /absolute/path/to/.netizen --purge -y
 Admin 只允许本实例管理与显式重启，不再安装或升级全局程序。重启使用绑定环境中
 当前程序，可能触发该实例数据迁移，不承诺任务续跑；程序更新从外部 CLI 执行。
 登录使用当前应用的飞书身份，只允许名单内的 `App ID + Open ID`。Codex 实例的管理员同权，可在
-“访问控制 → 管理员”维护名单，不能删除最后一人。Claude 实例仅允许所有者登录 Admin，不能添加第二名管理员。旧共享 secret 登录、
+“访问控制 → 管理员”维护名单，不能删除最后一人。旧共享 secret 登录、
 生成及读取依赖已移除，不提供备用入口。遗留 secret 文件不自动删除，仍属于显式
 `remove --purge` 的有限清单。
 
