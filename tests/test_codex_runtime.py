@@ -1627,18 +1627,18 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         cancelled_ack = asyncio.get_running_loop().create_future()
         cancelled_ack.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await self.runtime.stop_side(record.id, acknowledge=lambda: cancelled_ack)
 
         before_stop = []
 
         async def acknowledge():
             before_stop.append((handle.interrupt_count, tuple(self.cleanup.calls)))
+            await cancelled_ack
 
         self.assertEqual(
             await self.runtime.stop_side(record.id, acknowledge=acknowledge),
             StopDisposition.REQUESTED,
         )
+        self.assertEqual(handle.interrupt_count, 1)
         self.assertEqual(before_stop, [(0, ())])
         self.assertEqual(handle.run_calls, 0)
         observer.complete(
@@ -8291,13 +8291,12 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         cancelled_ack = asyncio.get_running_loop().create_future()
         cancelled_ack.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await self.runtime.stop(binding.id, acknowledge=lambda: cancelled_ack)
 
         before_stop = []
 
         async def acknowledge():
             before_stop.append((control.handles[0].pause_calls, tuple(self.cleanup.calls)))
+            await cancelled_ack
 
         result = await self.runtime.stop(binding.id, acknowledge=acknowledge)
 
