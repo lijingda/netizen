@@ -25,6 +25,13 @@ def process_plan_steps(steps: tuple[TurnPlanStepSnapshot, ...]) -> Iterator[tupl
             yield name, step.status, index < ACTIVITY_PLAN_LIMIT
 
 
+@dataclass(slots=True)
+class StepRemoval:
+    """First END of this occurrence when it leaves the physical checklist."""
+
+    ended_at: int | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ObservedProcessItem:
     """One immutable observation, including the local second of each observed transition."""
@@ -34,6 +41,7 @@ class ObservedProcessItem:
     text: str
     started_at: int
     finished_at: int | None = None
+    removal: StepRemoval | None = field(default=None, compare=False, repr=False, kw_only=True)
 
     def finish(self, now: int) -> ObservedProcessItem:
         return self if self.finished_at is not None else replace(self, finished_at=max(self.started_at, now))
@@ -106,14 +114,17 @@ class ProcessActivityWindow:
                     self.revision += 1
                 continue
             if row is None:
-                row = self._rows[identity] = ObservedProcessItem(identity, "step", text, now)
+                row = self._rows[identity] = ObservedProcessItem(identity, "step", text, now, removal=StepRemoval())
                 self.revision += 1
             if status is TurnPlanStepState.COMPLETED and row.finished_at is None:
                 self._rows[identity] = row.finish(now)
                 self.revision += 1
         for key, row in tuple(self._rows.items()):
             if row.kind == "step" and key not in current:
-                self._rows[key] = row.finish(now)
+                # A presenter holding this occurrence can still see its first END
+                # after eviction, without retaining a window of removed steps.
+                assert row.removal is not None
+                row.removal.ended_at = row.finish(now).finished_at
                 del self._rows[key]
                 self.revision += 1
 

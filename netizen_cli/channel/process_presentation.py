@@ -6,14 +6,14 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from typing import Literal
 
 from ..domain import FeishuScope
 from ..external_calls import external_call
 from ..turn_activity import ACTIVITY_PLAN_LIMIT, TurnPlanStepState, sanitize_activity_text
-from ..process_activity import ObservedProcessItem, process_plan_steps
+from ..process_activity import ObservedProcessItem, StepRemoval, process_plan_steps
 from ..process_messages import (
     ITEM_LIMIT, Created, Ok, ProcessItem, ProcessMessages, Rejected, RejectionCode,
     StepItem, TextItem, ToolItem, build_items, finish_items,
@@ -28,6 +28,26 @@ from .reply_events import Activity, PresentationKey
 logger = logging.getLogger(__name__)
 Reason = Literal["done", "error", "timeout"]
 Payload = tuple[ProcessItem, ...]
+
+
+@dataclass(frozen=True)
+class _ObservedStep(StepItem):
+    removal: StepRemoval | None = field(compare=False, repr=False, default=None)
+
+    def after_removal(self) -> _ObservedStep:
+        if self.removal is None or self.removal.ended_at is None:
+            return self
+        return replace(self.finish(self.removal.ended_at), removal=None)
+
+    def retain_offer(self, offered: _ObservedStep) -> _ObservedStep:
+        # Across physical Turns, follow the latest occurrence until the logical
+        # step ends. A removed occurrence already has an exact END.
+        if self.removal is not offered.removal:
+            offered = offered.after_removal()
+        if offered.finished_at is not None:
+            return offered
+        first = replace(offered, removal=self.removal)
+        return first if self.finished_at is None else first.finish(self.finished_at)
 
 
 class ProcessList:
@@ -47,7 +67,7 @@ class ProcessList:
             text = sanitize_activity_text(row.text) or "未命名步骤"
             name = json.dumps((self.key.side, *self.key.index, text), ensure_ascii=True)
             identity = "step:" + sha256(name.encode("ascii")).hexdigest()
-            return StepItem(identity, text, row.started_at, row.finished_at)
+            return _ObservedStep(identity, text, row.started_at, row.finished_at, row.removal)
         if row.kind == "commentary":
             assert row.finished_at is not None
             return TextItem(row.identity, row.text, row.started_at, row.finished_at)
@@ -84,7 +104,9 @@ class ProcessList:
             if key in current or (isinstance(item, StepItem) and item.text in outside and key not in self._step_pins):
                 continue
             pinned = self._step_pins.get(key) or self.running_offers.get(key) or self.pinned.get(key)
-            if pinned is not None:
+            if isinstance(item, _ObservedStep) and isinstance(pinned, _ObservedStep):
+                item = item.retain_offer(pinned)
+            elif pinned is not None:
                 item = pinned.finish(row.finished_at) if row.finished_at is not None else pinned
             current[key] = item
         if outside:
@@ -92,6 +114,8 @@ class ProcessList:
             for key, pinned_step in self._step_pins.items():
                 status = outside.get(pinned_step.text)
                 if status is not None and key not in current:
+                    if isinstance(pinned_step, _ObservedStep):
+                        pinned_step = pinned_step.after_removal()
                     current[key] = pinned_step if status is TurnPlanStepState.IN_PROGRESS else pinned_step.finish(now)
         self._window = current
         for key, offered in self.running_offers.items():
