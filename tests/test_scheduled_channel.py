@@ -43,6 +43,7 @@ from netizen_cli.runtime.contracts import (
     ActiveTurnSnapshot,
     Submission,
     SubmitDisposition,
+    SteerRace,
     TurnOutcome,
 )
 from netizen_cli.group_access import GroupAccessRule, GroupAccessService
@@ -103,6 +104,20 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             ])
         else:
             self.channel.send_results.append(sent_result("om_root", chat_id="oc_group", thread_id="omt_fresh", root_id="om_root"))
+
+    async def test_new_topic_admission_rejection_points_to_saved_plan(self):
+        claim = self.claim()
+        self.queue_topic()
+
+        async def reject_initial(*, run_id, **kwargs):
+            self.store.schedules.release(run_id, error_code="initial_start_rejected")
+            raise SteerRace("准备本条消息期间会话配置已变化，本条消息未执行，请重新发送。")
+
+        with patch.object(self.runtime, "submit_initial", reject_initial):
+            await self.app.dispatch_scheduled_run(claim)
+        self.assertEqual(self.channel.replies, [
+            ("om_root", "定时任务本次未执行：准备本条消息期间会话配置已变化。可通过 /cron 查看记录或立即运行。"),
+        ])
 
     async def test_group_access_rejects_new_topic_run_without_modifying_plan(self):
         claim = self.claim()
