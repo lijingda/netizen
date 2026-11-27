@@ -87,6 +87,8 @@ from netizen_cli.codex_runtime import (
     ThreadBackgroundTerminalsActive,
     ThreadActivityDiscardedOutcome,
     ThreadLifecycleError,
+    ThreadLifecycleSnapshot,
+    ThreadLifecycleState,
     ThreadReleaseStateUnknown,
     ThreadRunningConfiguration,
     ThreadOccupied,
@@ -8299,7 +8301,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app._reactions._pulses, {})
         self.assertEqual(len(self.channel.replies), reply_count)
 
-    async def test_progress_card_start_rechecks_exact_turn_after_reply(self) -> None:
+    async def test_progress_card_start_rechecks_lifecycle_after_reply(self) -> None:
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -8323,8 +8325,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 origin=origin,
             )
         )
-        await asyncio.wait_for(reply_started.wait(), timeout=0.1)
-        self.runtime.turn_activity_values.pop(binding.id)
+        await asyncio.wait_for(reply_started.wait(), timeout=2)
+        self.runtime.lifecycle_states[binding.id] = ThreadLifecycleSnapshot(
+            binding.id, "native-one", ThreadLifecycleState.ARCHIVING,
+        )
         release_reply.set()
 
         self.assertFalse(await starting)

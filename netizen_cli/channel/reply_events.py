@@ -98,7 +98,7 @@ class TurnOpened:
     target: ReplyTarget
     feedback: BindingTaskFeedback
     observe: Callable[[], ActivityChanged | None]
-    retain_after_send: Callable[[], bool]
+    blocked_by_lifecycle: Callable[[], bool]
     reply: Callable[[OutboundCard], Awaitable[SendResult]] | None
     reply_partial: Callable[[OutboundPost], Awaitable[SendResult]]
     validate_reply: Callable[[SendResult], Awaitable[bool]] | None = None
