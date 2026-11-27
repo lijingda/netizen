@@ -68,19 +68,17 @@ class CodexReplyEvents:
             snapshot = read()
             return ActivityChanged.from_snapshot(target, snapshot, presentation_id=turn if goal else None)
 
-        def retain() -> bool:
+        def blocked_by_lifecycle() -> bool:
             if key.side:
-                return True
-            if read() is None:
                 return False
             return (
-                self.runtime.lifecycle_state(owner) is None
+                self.runtime.lifecycle_state(owner) is not None
                 if goal
-                else not self.ordinary.reply_blocked_by_lifecycle(owner)
+                else self.ordinary.reply_blocked_by_lifecycle(owner)
             )
 
         return TurnOpened(
-            target, feedback, observe, retain,
+            target, feedback, observe, blocked_by_lifecycle,
             reply, reply_partial, validate_reply, reuse_existing=goal,
             process_root_id=root_message_id,
         )

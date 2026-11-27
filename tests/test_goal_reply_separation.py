@@ -161,6 +161,38 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Goal 已恢复", rendered(self.channel.replies[-1][1]))
         self.assertEqual(self.runtime.resume_goal_calls[-1]["origin"].id, "om_resume")
 
+    async def test_continued_resume_releases_terminal_during_initial_card_send(self):
+        entered, resume = asyncio.Event(), asyncio.Event()
+        reply = self.channel.reply
+        key = PresentationKey(self.binding.id, "native-one", "goal-one")
+
+        async def delayed_reply(origin, content, opts=None):
+            result = await reply(origin, content, opts)
+            if len(self.channel.replies) == 2:  # management card, then initial task card
+                entered.set()
+                await resume.wait()
+            return result
+
+        with patch.object(self.channel, "reply", delayed_reply):
+            async with asyncio.timeout(3), asyncio.TaskGroup() as group:
+                group.create_task(self.start(progress=True))
+                await entered.wait()
+                session = self.app._progress_cards._sessions[key]
+                self.runtime.goal_snapshot_value = native_goal(GoalStatus.PAUSED)
+                self.runtime.goal_submission = self.submission(continued=True)
+                await self.app.handle_message(FakeMessage("/goal resume", message_id="om_resume"))
+                self.assertEqual(self.release_count, 1)
+                del self.runtime.goal_activity_values[self.binding.id]
+                await self.app.handle_completion(self.outcome())
+                resume.set()
+        self.assertEqual(self.release_count, 2)
+        self.assertEqual(self.channel.updates, [])
+        final = self.channel.replies[-1][1]
+        self.assertEqual(getattr(final, "markdown", final), "final answer")
+        self.assertEqual(self.app._progress_cards._sessions, {})
+        self.assertIsNone(session.task)
+        self.assertIsNone(session.message_id)
+
     async def test_resume_after_logical_terminal_creates_new_reply(self):
         await self.start(progress=True)
         await self.app.handle_completion(self.outcome(goal=native_goal(GoalStatus.PAUSED), finalization=GoalFinalizationStatus.NOT_APPLICABLE))

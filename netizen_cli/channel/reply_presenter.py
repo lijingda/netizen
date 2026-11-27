@@ -177,35 +177,30 @@ class _ReplyCardPresenter:
             logger.error("failed to start progress card: exact Turn activity unavailable", extra=key.log_context)
             return False
         snapshot = initial.snapshot
-        message_id = None
-        if event.feedback.progress_card_enabled and (reply := event.reply) is not None:
-            try:
-                card = turn_progress_card(snapshot=snapshot)
-
-                async with asyncio.timeout(self._operation_timeout_seconds):
-                    result = await reply(card)
-                    if event.validate_reply is None or await event.validate_reply(result):
-                        message_id = _receipt_message_id(result)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("failed to send initial progress card", extra=key.log_context)
-            if message_id is None:
-                logger.error("failed to start progress card: reply message ID unavailable", extra=key.log_context)
-        if self._closed or not event.retain_after_send():
-            return False
         previous = self._sessions.pop(key, None)
-        if previous:
-            await self._stop_session(previous)
-        if self._closed:
-            return False
         session = _TurnProgressCardSession(
-            target=target, message_id=message_id, stopped=asyncio.Event(), snapshot=snapshot, observe=event.observe,
+            target=target, message_id=None, stopped=asyncio.Event(), snapshot=snapshot, observe=event.observe,
             reply_partial=event.reply_partial, validate_reply=event.validate_reply,
             attempted_partials=set() if previous is None else previous.attempted_partials,
             confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
+        # Register while the exact activity is still readable so a concurrent
+        # terminal or discard can take ownership while the initial POST awaits.
         self._sessions[key] = session
+        try:
+            if previous is not None:
+                await self._stop_session(previous)
+            message_id = await self._send_initial_card(event, snapshot)
+            if self._closed or self._sessions.get(key) is not session or session.stopped.is_set():
+                return False
+            if event.blocked_by_lifecycle():
+                await self.abandon(key=key)
+                return False
+        except BaseException:
+            if self._sessions.get(key) is session:
+                await self.abandon(key=key)
+            raise
+        session.message_id = message_id
         if can_publish_process and not event.feedback.progress_card_enabled:
             try:
                 state = self._process_for(target, event.process_root_id)
@@ -215,6 +210,22 @@ class _ReplyCardPresenter:
                 logger.warning("process message observation unavailable")
         session.task = asyncio.create_task(self._poll(session), name=f"netizen-progress-card-{key.turn_id}")
         return True
+
+    async def _send_initial_card(self, event: TurnOpened, snapshot: Activity) -> str | None:
+        if not event.feedback.progress_card_enabled or event.reply is None:
+            return None
+        key = event.target.key
+        try:
+            card = turn_progress_card(snapshot=snapshot)
+            async with asyncio.timeout(self._operation_timeout_seconds):
+                result = await event.reply(card)
+                if event.validate_reply is None or await event.validate_reply(result):
+                    if message_id := _receipt_message_id(result):
+                        return message_id
+        except Exception:
+            logger.exception("failed to send initial progress card", extra=key.log_context)
+        logger.error("failed to start progress card: reply message ID unavailable", extra=key.log_context)
+        return None
 
     async def prepare_partial_answers(
         self,

@@ -1988,6 +1988,7 @@ nonce 沿用 transport-only 解析。交接后的错误直接复用普通消息�
 唯一 Reply Card Presenter 接受固定顺序的 Activity、Partial Answer、Result、Files typed modules，
 每次变化都重绘完整 Projection，模块不能各自持有或更新飞书消息。Activity 或 Files
 存在时使用卡片；没有运行卡的 Partial Answer 与 Result 各按上述规则走富文本/静态文本。
+初始卡片发送前即登记展示会话，即使 Turn 在发送期间结束，终态仍更新这张卡，除非会话已停止更新或被清理。
 初始没有片段不渲染 Partial Answer，出现后运行中及终态都不折叠。Activity 运行时顶部
 `collapsible_panel` 展开，状态统一显示在“执行过程 · 状态”标题中，正文显示进展、通用操作
 与 checklist；进展和操作行使用同一

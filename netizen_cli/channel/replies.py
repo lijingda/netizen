@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from lark_channel import (
@@ -59,6 +60,7 @@ from ..domain import (
     CardControlName,
     FeishuScope,
     GoalOperationState,
+    ScheduledBindingOrigin,
     ScopeKind,
 )
 from ..experience import (
@@ -110,42 +112,43 @@ def mentioned_answer(content: str, user_id: str) -> OutboundPost:
     return OutboundPost(markdown=content, mentions=[Identity(open_id=user_id)])
 
 
+def _scheduled_rejection_notice(detail: str) -> str:
+    # Admission errors can include recovery instructions for a human sender.
+    reason = re.sub(r"[，；。](?:本条消息未执行[，；。])?请[^，；。]*(?:重新发送|重发)[^；。]*", "", detail)
+    return f"定时任务本次未执行：{reason.rstrip('。')}。可通过 /cron 查看记录或立即运行。"
+
+
 class ChannelReplies(ChannelState):
     """Replies, error reports and Goal management cards shared by every interaction."""
 
-    async def _report_input_error(self, message: Any, error: Exception) -> None:
+    async def _report_input_error(
+        self, message: Any, error: Exception, *, may_have_executed: bool = False,
+    ) -> None:
         """One user-visible failure policy for message, card and scheduled inputs."""
-        if isinstance(error, (InvalidInteraction, ScheduleError, DefaultConfigurationError)):
-            await self._reply(message, str(error))
-        elif isinstance(error, UnknownProject):
-            await self._reply(message, f"未知 Project：{error.args[0]}。")
-        elif isinstance(error, ProjectError):
-            await self._reply(message, str(error))
+        scheduled_rejection = isinstance(message, ScheduledBindingOrigin) and not may_have_executed
+        if isinstance(error, UnknownProject):
+            text = f"未知 Project：{error.args[0]}。"
+        elif isinstance(error, (
+            InvalidInteraction, ScheduleError, DefaultConfigurationError, ProjectError,
+            ImageInputError, FileInputError, PromptProjectionError,
+        )):
+            text = str(error)
         elif isinstance(error, BindingNotFound):
-            await self._reply(
-                message,
+            text = (
                 f"当前聊天或话题找不到会话：{error.args[0]}。"
                 "发送 /sessions 查看会话短 ID；已归档会话用 /sessions archived 查找。"
-                "发送 /help 查看用法。",
+                "发送 /help 查看用法。"
             )
         elif isinstance(error, AmbiguousBinding):
-            await self._reply(
-                message,
+            text = (
                 f"会话短 ID 不唯一：{error.args[0]}。"
-                "发送 /sessions 查看并选择目标会话，或使用更长的 ID 重试。",
+                "发送 /sessions 查看并选择目标会话，或使用更长的 ID 重试。"
             )
         elif isinstance(error, (
             QuotedMessageError,
             MessageHistoryError,
             HistoricalMessageError,
             ContextBoundaryCommitFailed,
-        )):
-            await self._reply(message, describe_error(error))
-        elif isinstance(error, (ImageInputError, FileInputError)):
-            await self._reply(message, str(error))
-        elif isinstance(error, PromptProjectionError):
-            await self._reply(message, str(error))
-        elif isinstance(error, (
             ModelCatalogError,
             NativeThreadMissing,
             RuntimeClosed,
@@ -171,24 +174,26 @@ class ChannelReplies(ChannelState):
             ThreadRunningConfiguration,
             ThreadStopping,
             ThreadOccupied,
-
             SteerRace,
             TerminalCleanupFailed,
             TurnInterruptFailed,
             TurnStartFailed,
         )):
-            await self._reply(message, describe_error(error))
+            text = describe_error(error)
         else:
             logger.exception(
                 "channel interaction failed",
                 extra={"error_type": type(error).__name__},
             )
-            await self._reply(
-                message,
+            text = (
                 f"Codex 请求处理未完成：{describe_error(error)}。"
                 "请用 /status 或 /sessions 查看当前状态，再决定是否重试；"
-                "本提示不代表正在执行的任务已结束。",
+                "本提示不代表正在执行的任务已结束。"
             )
+            scheduled_rejection = False
+        if scheduled_rejection:
+            text = _scheduled_rejection_notice(text)
+        await self._reply(message, text)
 
     async def _report_card_action_error(
         self,

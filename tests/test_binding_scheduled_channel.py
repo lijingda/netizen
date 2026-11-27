@@ -34,7 +34,7 @@ from netizen_cli.message_history import (
     MessageHistoryUnavailable,
     MessageHistoryWindow,
 )
-from netizen_cli.projects import ProjectRegistry
+from netizen_cli.projects import ProjectRegistry, UnknownProject
 from netizen_cli.progress_card_settings import ProgressCardSettings
 from netizen_cli.group_access import GroupAccessRule, GroupAccessService
 from netizen_cli.schedules.models import ScheduleRule
@@ -586,19 +586,50 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.replies[-1][0], "om_trigger")
         self.assertIn("切换", str(self.channel.replies[-1][1]))
 
-    async def test_history_failure_uses_ordinary_visible_error_and_keeps_context_boundary(self):
+    async def test_history_failure_points_to_plan_and_keeps_context_boundary(self):
         scope, binding = self.binding(catch_up=True)
         claim = self.claim(binding)
         self.queue_anchor(scope)
-        self.history.read_window = AsyncMock(side_effect=MessageHistoryUnavailable("无法读取历史"))
+        self.history.read_window = AsyncMock(side_effect=MessageHistoryUnavailable("无法读取历史，请稍后重发。"))
 
         await self.app.dispatch_scheduled_run(claim)
 
         self.assertEqual(self.codex.turn_inputs, [])
         self.assertEqual(self.store.get(binding.id).context_anchor, binding.context_anchor)
-        self.assertEqual(self.channel.replies, [("om_trigger", "无法读取历史")])
+        self.assertEqual(self.channel.replies, [
+            ("om_trigger", "定时任务本次未执行：无法读取历史。可通过 /cron 查看记录或立即运行。"),
+        ])
         run = self.store.schedules.get_run(claim.run.id)
         self.assertEqual((run.barrier, run.error_code), ("released", "input_rejected"))
+
+    async def test_known_binding_rejection_keeps_the_shared_project_error_text(self):
+        scope, binding = self.binding()
+        claim = self.claim(binding)
+        self.queue_anchor(scope)
+        with patch.object(self.app, "_consume_prompt", side_effect=UnknownProject("work")):
+            await self.app.dispatch_scheduled_run(claim)
+
+        self.assertEqual(self.channel.replies, [
+            ("om_trigger", "定时任务本次未执行：未知 Project：work。可通过 /cron 查看记录或立即运行。"),
+        ])
+
+    async def test_unexpected_binding_input_error_logs_and_keeps_generic_notice(self):
+        scope, binding = self.binding()
+        claim = self.claim(binding)
+        self.queue_anchor(scope)
+        error = RuntimeError("unexpected preparation failure")
+        with patch.object(self.app, "_consume_prompt", side_effect=error), self.assertLogs(
+            "netizen_cli.channel_app", level="ERROR",
+        ) as logs:
+            await self.app.dispatch_scheduled_run(claim)
+
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).error_code, "input_rejected")
+        self.assertEqual([record.getMessage() for record in logs.records], ["channel interaction failed"])
+        self.assertIs(logs.records[0].exc_info[1], error)
+        self.assertEqual(self.channel.replies, [(
+            "om_trigger", "Codex 请求处理未完成：unexpected preparation failure。"
+            "请用 /status 或 /sessions 查看当前状态，再决定是否重试；本提示不代表正在执行的任务已结束。",
+        )])
 
     async def test_failed_steer_reaction_falls_back_on_trigger_without_new_turn_feedback(self):
         scope, binding = self.binding()
@@ -681,7 +712,9 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get(binding.id).context_anchor, upper)
         run = self.store.schedules.get_run(followup.run.id)
         self.assertEqual((run.barrier, run.error_code), ("released", "input_rejected"))
-        self.assertEqual(self.channel.replies[-1][0], "om_second")
+        self.assertEqual(self.channel.replies[-1], (
+            "om_second", "定时任务本次未执行：准备本条消息期间当前任务状态已变化。可通过 /cron 查看记录或立即运行。",
+        ))
 
     async def test_uncertain_start_releases_plan_but_next_input_obeys_closed_runtime(self):
         scope, binding = self.binding()
@@ -695,6 +728,7 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((run.barrier, run.error_code), ("released", "input_unknown"))
         self.assertIsNone(run.initial_turn_id)
         self.assertIn("重启", str(self.channel.replies[-1][1]))
+        self.assertNotIn("本次未执行", str(self.channel.replies[-1][1]))
         second = self.next_claim(first.plan.id, due=220)
         self.queue_anchor(scope, "om_second")
 

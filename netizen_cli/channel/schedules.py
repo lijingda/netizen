@@ -29,6 +29,7 @@ from ..cards import (
     scope_from_fetched_card,
 )
 from ..group_access import GroupAccessRule, GroupNotEnabled
+from ..error_messages import describe_error
 from .messages import public_chat_kind as _public_chat_kind
 from .topics import TopicPublishError, complete_fresh_topic, send_topic_message
 from ..cards.scheduled import (
@@ -83,6 +84,7 @@ from .app_values import (
     _CardReplyTarget,
 )
 from .session_tools import SessionToolChannel
+from .replies import _scheduled_rejection_notice
 
 
 logger = logging.getLogger(CHANNEL_LOGGER_NAME)
@@ -257,7 +259,12 @@ class ScheduleChannel(SessionToolChannel):
                         resource_note = (f" 关联 worktree：{receipt.worktree_id}，请在 Admin 检查；不会自动删除或重建。"
                                          if receipt.worktree_id else "")
                         notice_stage = "notice_send"
-                        await self._reply(origin, f"定时任务未完成启动：{str(error)[:400]}。请通过 /cron 查看本次记录。" + resource_note)
+                        notice = (
+                            _scheduled_rejection_notice(describe_error(error, limit=400))
+                            if receipt.error_code in {"initial_start_rejected", "input_rejected"}
+                            else f"定时任务未完成启动：{str(error)[:400]}。请通过 /cron 查看本次记录。"
+                        )
+                        await self._reply(origin, notice + resource_note)
                 except Exception as diagnostic_error:
                     logger.warning(
                         "scheduled start notice read or delivery failed",
@@ -358,7 +365,7 @@ class ScheduleChannel(SessionToolChannel):
                     ModelCatalogError, SkillCatalogError, SkillReferenceError,
                     GoalNotFound, GoalNotMaterialized, WorktreeConflict,
                 ))
-                store.release(run.id, error_code=(
+                current_run = store.release(run.id, error_code=(
                     "input_unknown" if current_run.phase == "starting_turn" and not rejected
                     else "publishing_unknown" if (
                         isinstance(error, TopicPublishError) and error.unknown
@@ -373,7 +380,9 @@ class ScheduleChannel(SessionToolChannel):
             if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             if origin is not None:
-                await self._report_input_error(origin, error)
+                await self._report_input_error(
+                    origin, error, may_have_executed=current_run.error_code != "input_rejected",
+                )
             else:
                 logger.warning("scheduled input has no confirmed anchor", extra={"run_id": run.id, "error_type": type(error).__name__})
 

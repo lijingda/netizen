@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -596,6 +596,85 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def post_text(message):
         return message.markdown if isinstance(message, OutboundPost) else message
+
+    @asynccontextmanager
+    async def pending_initial_card(self):
+        outcome = replace(self.outcome(), cwd=self.fixture.project)
+        key = PresentationKey(self.binding.id, outcome.thread_id, outcome.turn_id)
+        self.runtime.turn_activity_values[key.owner_id] = turn_activity_snapshot(binding_id=key.owner_id)
+        entered, resume, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        submission = Submission(SubmitDisposition.STARTED, *key.index, released.set,
+                                task_feedback=outcome.task_feedback)
+        reply = self.channel.reply
+
+        async def delayed_reply(origin, content, opts=None):
+            result = await reply(origin, content, opts)
+            if isinstance(content, OutboundCard):
+                entered.set()
+                await resume.wait()
+            return result
+
+        self.channel.reply_results.append(sent_result("om_progress", chat_id="oc_direct"))
+        with patch.object(self.channel, "reply", delayed_reply):
+            async with asyncio.timeout(3), asyncio.TaskGroup() as group:
+                opening = group.create_task(self.app._present_receipt(submission, self.origin))
+                await entered.wait()
+                self.assertFalse(released.is_set())
+                try:
+                    yield outcome, key, self.app._progress_cards._sessions[key], opening
+                finally:
+                    resume.set()
+        self.assertTrue(released.is_set())
+
+    async def test_turn_ends_during_initial_card_send(self):
+        async with self.pending_initial_card() as (outcome, key, session, _):
+            del self.runtime.turn_activity_values[key.owner_id]
+        poll = session.task
+        await self.app.handle_completion(outcome)
+
+        self.assertEqual([mid for mid, _ in self.channel.updates], ["om_progress"])
+        terminal = self.channel.updates[0][1]
+        self.assertIn("final original", str(terminal))
+        panel = next(node for node in terminal["body"]["elements"] if node["tag"] == "collapsible_panel")
+        self.assertFalse(panel["expanded"])
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertIsInstance(self.channel.replies[0][1], OutboundCard)
+        self.assertEqual(self.app._progress_cards._sessions, {})
+        self.assertIsNotNone(poll)
+        self.assertTrue(poll.done())
+
+    async def test_discard_during_initial_card_send(self):
+        presenter = self.app._progress_cards
+        async with self.pending_initial_card() as (_, key, session, _):
+            await presenter.abandon_thread(binding_id=key.owner_id, thread_id=key.thread_id)
+        self.assertEqual(presenter._sessions, {})
+        self.assertIsNone(session.task)
+        self.assertIsNone(session.message_id)
+
+    async def test_cancel_during_initial_card_send(self):
+        async with self.pending_initial_card() as (_, key, session, opening):
+            opening.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await opening
+            self.assertNotIn(key, self.app._progress_cards._sessions)
+            self.assertIsNone(session.task)
+
+    async def test_park_during_initial_card_send_preserves_receipts_until_plain_result(self):
+        presenter = self.app._progress_cards
+        partial = answer()
+        identity = (partial.thread_id, partial.turn_id, partial.item_id)
+        async with self.pending_initial_card() as (outcome, key, session, _):
+            session.attempted_partials.add(identity)
+            session.confirmed_partials.add(identity)
+            self.assertFalse(await presenter.park_unavailable(
+                binding_id=key.owner_id, thread_id=key.thread_id, turn_id=key.turn_id))
+        self.assertIs(presenter._sessions[key], session)
+        self.assertFalse(presenter.has_card(key))
+        self.assertIsNone(session.task)
+        await self.app.handle_completion(replace(outcome, partial_answers=(partial,)))
+        self.assertEqual(self.channel.updates, [])
+        self.assertEqual([self.post_text(msg) for _, msg in self.channel.replies[1:]], ["final original"])
+        self.assertEqual(presenter._sessions, {})
 
     async def test_result_and_partial_file_citations_on_cards_and_posts(self):
         final = ':codex-file-citation{path="/host/out.pdf" purpose="output"}'
