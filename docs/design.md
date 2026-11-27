@@ -2031,7 +2031,7 @@ execution。Partial Answer 与 Files 同卡使用 v5 callback，
 Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle Reaction session。
 `Typing` 从 accepted 到终态常驻；只有 Reaction Pulse 开启时，`THINKING` 才首次显示
 2 秒、隐藏 13 秒后继续低频 pulse。每次
-删除只使用创建响应返回的 exact ID。单次 `THINKING` 添加/删除失败停止该轮 pulse，终态
+删除只使用创建响应返回的 exact ID。每次添加或删除以 10 秒为上限，只用于判定请求丢失；添加没有去重键，过短的上限会把慢回执的成功变成无法删除的残留。单次 `THINKING` 添加/删除失败停止该轮 pulse，终态
 或正常 shutdown 对仍记录的 ID 再做一次尽力清理，不会重试风暴或阻塞 Turn。若
 `THINKING` 首次添加失败，仍保留已经添加的 `Typing` 作为运行占位。若本地 stop 的 cleanup
 请求失败，终态暂不释放 active：它等待重复 `/stop` 成功后再完成，避免同一 Binding 在
