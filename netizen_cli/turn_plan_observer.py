@@ -41,9 +41,9 @@ from .turn_activity import (
 )
 
 
-SUPPORTED_SDK_VERSION = "0.170.0"
+SUPPORTED_SDK_VERSION = "0.172.0"
 _PACKAGE_SOURCE_FINGERPRINT = (
-    "3ffb6a62903902887c952f04c6d0556223f22093a6693faf17ffae8458fb94b7"
+    "f9122674d9a7da58a253a5663e62d2c12d6c408a7f6d5bfd654ba2d2599dd2c6"
 )
 _LOCK_TYPE = type(threading.RLock())
 
