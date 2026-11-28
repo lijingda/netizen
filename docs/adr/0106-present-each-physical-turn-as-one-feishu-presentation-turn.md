@@ -1,12 +1,19 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-24
-amends: 0052, 0053, 0056, 0079, 0084
-related: 0047, 0048, 0063, 0086, 0102, 0105
+related: 0047, 0048, 0052, 0053, 0056, 0063, 0079, 0084, 0086, 0102, 0105
 amended_by: 0107, 0110
 ---
 
 # 以飞书展示 Turn 统一各后端的回复展示
+
+> **2026-11-28 接受，Goal 步骤不采用：** #317 实施了第 1–4 条、第 5 条中 Goal Tap 投影扩大以外的部分、
+> 第 6 条中 Codex 普通 Turn 与 Side 的映射，以及第 7 条。Goal 保持一个逻辑运行对应一个展示 Turn 的
+> 兼容映射，见 [ADR 0107](0107-present-process-in-feishu-process-messages.md) 第 7 条。
+> “切换 Goal 的映射”不采用，实现它的 PR #323 已于 2026-11-26 关闭。因此第 5 条的 Goal Tap 投影扩大、
+> 第 6 条的 Codex Goal 映射，以及“后果”中留给第二个实施 PR 的 AGENTS.md 与术语更新、对 ADR 0052、
+> 0053、0056、0079、0084 的修订均未生效，这五条 ADR 维持原状。以后若要展示 Goal 每个物理 Turn 的
+> 中间结果，另写 ADR。Claude 相关内容由 [ADR 0110](0110-withdraw-the-claude-code-backend.md) 撤回。
 
 ## 背景
 
