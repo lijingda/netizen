@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-08-19
 related: 0008, 0009, 0014, 0022
+amended_by: 0061, 0081
 ---
 
 # 让服务启动环境成为工具子进程的基线

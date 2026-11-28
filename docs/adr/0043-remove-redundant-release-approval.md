@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-08-26
 amends: 0042
+amended_by: 0050
 ---
 
 # 移除冗余的正式发布人工审批

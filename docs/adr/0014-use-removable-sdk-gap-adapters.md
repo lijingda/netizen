@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-10
 amends: 0008, 0009, 0012
 related: 0010, 0013
-amended_by: 0018, 0047, 0069, 0083, 0084
+amended_by: 0017, 0018, 0021, 0047, 0069, 0074, 0083, 0084
 ---
 
 # 用可逐项移除的薄 Adapter 补齐 Python SDK 高层能力缺口

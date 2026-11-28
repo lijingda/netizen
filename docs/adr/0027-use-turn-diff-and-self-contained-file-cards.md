@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-19
 amends: 0024, 0025, 0026
 related: 0008, 0015, 0021
-amended_by: 0047, 0053, 0058, 0065
+amended_by: 0046, 0047, 0053, 0056, 0058, 0065
 ---
 
 # 以 Turn diff 补全本轮文件，并让新卡片自带文件清单

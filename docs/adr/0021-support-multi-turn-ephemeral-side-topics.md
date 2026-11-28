@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-15
 amends: 0008, 0014
 related: 0009, 0010, 0016, 0020
-amended_by: 0048
+amended_by: 0028, 0029, 0031, 0048
 ---
 
 # 用 ephemeral fork 支持多轮 Side 话题

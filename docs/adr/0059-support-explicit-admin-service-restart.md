@@ -3,6 +3,7 @@ status: accepted
 date: 2026-09-07
 amends: 0057
 related: 0022, 0031, 0034, 0041
+amended_by: 0074, 0075, 0076
 ---
 
 # 通过同一部署执行者支持管理页独立重启

@@ -1,8 +1,9 @@
 ---
 status: accepted
 date: 2026-09-28
-amends: 0034, 0057, 0059, 0068
+amends: 0034, 0057, 0059, 0061, 0068
 related: 0074
+amended_by: 0076
 ---
 
 # 在安装事务中维护 Channel 数据库的前向迁移

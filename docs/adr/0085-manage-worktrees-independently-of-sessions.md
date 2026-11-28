@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-10-19
 related: 0031, 0040, 0060, 0073, 0078, 0081, 0083
+amends: 0061
 ---
 
 # Worktree 作为独立受管资源，会话使用实际工作目录

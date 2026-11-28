@@ -3,6 +3,7 @@ status: accepted
 date: 2026-08-20
 amends: 0029
 related: 0011, 0021
+amended_by: 0039, 0061, 0081
 ---
 
 # 要求当前 Prompt 消息有可解析的发送者姓名

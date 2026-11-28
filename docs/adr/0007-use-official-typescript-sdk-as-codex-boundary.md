@@ -2,6 +2,7 @@
 status: superseded
 superseded_by: 0008
 date: 2026-08-01
+supersedes: 0001, 0002, 0003, 0004, 0005, 0006
 ---
 
 # 使用官方 TypeScript SDK 作为唯一 Codex 后端边界
