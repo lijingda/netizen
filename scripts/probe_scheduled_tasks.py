@@ -57,6 +57,7 @@ from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
 from netizen_cli.management.service import InstanceManagementService, ManagementRuntimePort  # noqa: E402
 from netizen_cli.projects import ProjectRegistry  # noqa: E402
 from netizen_cli.runtime.contracts import TurnObservationUnavailableOutcome, TurnOutcome  # noqa: E402
+from netizen_cli.runtime.turn_start import StartedTurn  # noqa: E402
 from netizen_cli.schedules.mcp import ScheduleMcpRunner  # noqa: E402
 from netizen_cli.schedules.models import ScheduleRule  # noqa: E402
 from netizen_cli.schedules.scheduler import Scheduler  # noqa: E402
@@ -85,13 +86,16 @@ class ProbeCompletionFailure(ProbeFailure):
 
 class ProbeStopFailure(ProbeFailure):
     def __init__(self, error: BaseException) -> None:
-        super().__init__("ordinary_stop_rpc_rejected")
+        # Only a public JSON-RPC error in the cause chain is a native rejection;
+        # a local runtime precondition failure never reached Codex.
+        super().__init__("ordinary_stop_failed")
         self.rpc: dict[str, Any] = {}
         seen: set[int] = set()
         while error is not None and id(error) not in seen:
             seen.add(id(error))
             if isinstance(error, JsonRpcError):
                 message = error.message.lower()
+                self.args = ("ordinary_stop_rpc_rejected",)
                 self.rpc = {
                     "code": error.code,
                     "not_active": any(fragment in message for fragment in (
@@ -713,7 +717,11 @@ async def _dispatch_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, own
         stopped.release_receipt_attempt()
         await _wait_for_exact_active(AsyncThread(codex, topic_binding.native_thread_id), stopped.turn_id)
         try:
-            disposition = await runtime.stop_exact(topic_binding.id, expected_turn_id=stopped.turn_id)
+            # Stop the captured start exactly, as Feishu and Admin do; a Turn ID
+            # without an activity revision is rejected by the Runtime precondition.
+            disposition = await runtime.stop_exact(topic_binding.id, start=StartedTurn(
+                binding_id=topic_binding.id, thread_id=topic_binding.native_thread_id, turn_id=stopped.turn_id,
+            ))
         except Exception as error:
             # This exact fixture owns the Thread and attempted stop. Only expose
             # the public RPC's numeric code and a fixed classification boolean.
