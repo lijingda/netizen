@@ -641,10 +641,6 @@ class TurnObservationRuntime(ThreadNamingRuntime):
                 raise _TurnViewUnverified(
                     "previous Turn is not terminal after native start/join advanced"
                 )
-            if thread_status == "idle":
-                raise _TurnViewUnverified(
-                    "native Thread changed from idle to an in-progress exact Turn"
-                )
             return classified
         return await self._materialize_terminal_turn(active, classified)
 
