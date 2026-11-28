@@ -394,12 +394,16 @@ provider 的热态、冷态分支证据；Side 与后台命名同样经原生 fo
 显式模型不在新默认 provider 的目录中时，每个新 Turn 都按选项下线在本地拒绝、不发给 Codex；
 `/config` 改为继承 Codex 后不再传模型，由原生按该 Thread 保存的 provider 与模型继续。
 持久分支复制来源的显式配置，同样按新默认 provider 的目录校验。
-按 0.169.0 源码，App Server 默认模型目录只在账号变化等情况下重新加载
-（[`ModelCatalog::current`](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server/src/model_catalog.rs#L82)），
-修改默认 provider 不会刷新；新 Thread 则立即使用新默认（双 mock provider 探针已验证）。
+按 0.172.0 源码，App Server 默认模型目录只在账号变化或本进程处理配置写入请求后重新加载
+（[`ModelCatalog::current`](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/app-server/src/model_catalog.rs#L82)），
+外部修改共享 Codex 配置中的默认 provider 不会触发刷新；新 Thread 则立即使用新默认（0.169.0
+双 mock provider 探针已验证）。0.171.0 起的 `modelProvider/default/set` 写入用户配置，成功后只刷新
+收到该请求的 App Server 进程的目录
+（[`model_provider_default_set`](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/app-server/src/request_processors/config_processor.rs#L254-L270)），
+共用该配置的其他实例与 Codex 客户端仍不刷新，公开 SDK 也不提供该方法。
 因此切换默认 provider 后须重启实例，避免目录与新会话的 provider 不一致。Netizen 不提供
-provider 切换入口，也不写 Codex 配置；切换由部署者修改共享 Codex 配置后重启实例完成，
-共用该配置的各实例都需分别重启。
+provider 切换入口，不调用该方法，也不写 Codex 配置；切换由部署者修改共享 Codex 配置后重启
+实例完成，共用该配置的各实例都需分别重启。
 App Server 协议的 `model/list` 已支持按 provider 列出模型
 （[`ModelListParams`](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server-protocol/src/protocol/v2/model.rs#L55)），
 但公开高层 `models()` 尚不支持；目前不为此新增 adapter，也不放宽每个新 Turn 的目录校验。

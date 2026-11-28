@@ -18,7 +18,9 @@
 `Project` 删除 `position`。随附模型目录不变。App Server 改为按目标 Turn 回复中断，按 Turn ID 隔离
 Turn 元数据，迟到终态不再取消下一 Turn 的服务端请求，steer 后保留整轮 diff 并在 TurnComplete 前
 发出最终聚合 diff，canonical ID 的恢复可以并行。Netizen 无须适配，ADR 0093 的分类不扩大；新增两项
-延期见 [design](design.md#暂缓接入的原生能力)。cleanup 与 Activity 保留原门禁，使用新版源码指纹
+延期见 [design](design.md#暂缓接入的原生能力)；`modelProvider/default/set` 只刷新调用它的 App Server
+进程的目录，Netizen 不调用，外部切换默认 provider 后仍须重启实例，见
+[会话配置](design.md#scopebinding-与会话配置)。cleanup 与 Activity 保留原门禁，使用新版源码指纹
 `f9122674d9a7da58a253a5663e62d2c12d6c408a7f6d5bfd654ba2d2599dd2c6`；没有字段门禁触发。
 
 本机 `make check` 通过，执行 4,600 项测试（18 项条件跳过），包括 ruff、mypy、编译、依赖一致性
