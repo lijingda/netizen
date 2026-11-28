@@ -12166,6 +12166,24 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.handles[0].stream_calls, 1)
         self.assertIsNone(self.runtime.context_window_usage(binding.id))
 
+    async def test_idle_metadata_then_exact_running_turn_continues_lightweight_polling(self) -> None:
+        self.codex.read_statuses.extend(["idle", "active"])
+        binding = self.binding()
+        submission = await self.submit(binding)
+        submission.release_receipt_attempt()
+
+        async with asyncio.timeout(EXPECTED_PROGRESS_TIMEOUT):
+            while len(self.codex.read_calls) < 3:
+                await asyncio.sleep(0)
+        self.codex.handles[0].complete(response="done")
+        await self.runtime.wait_idle()
+
+        self.assertEqual(
+            self.codex.read_calls[:3],
+            [(submission.thread_id, include_turns) for include_turns in (False, True, False)],
+        )
+        self.assertEqual(self.outcomes[0].final_response, "done")
+
     async def test_transient_empty_rollout_read_is_retried(self) -> None:
         self.codex.complete_immediately = True
         self.codex.read_errors.append(InternalRpcError(-32603, "rollout is empty"))
