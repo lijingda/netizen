@@ -3,7 +3,7 @@ status: accepted
 date: 2026-09-03
 amends: 0008, 0011, 0015
 related: 0030, 0039, 0048
-amended_by: 0099
+amended_by: 0064, 0099
 ---
 
 # 升级并重新认证 lark-channel-sdk 1.4.0

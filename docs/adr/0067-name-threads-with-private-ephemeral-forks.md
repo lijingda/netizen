@@ -3,6 +3,7 @@ status: accepted
 date: 2026-09-17
 amends: 0017, 0031
 related: 0021, 0028, 0049
+amended_by: 0081
 ---
 
 # 用内部临时 fork 自动补全原生会话名称

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-10
-amended_by: 0055
+amended_by: 0029, 0039, 0055, 0064
 ---
 
 # 支持普通消息与逐条引用中的原生图片输入

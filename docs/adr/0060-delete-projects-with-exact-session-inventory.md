@@ -3,7 +3,7 @@ status: accepted
 date: 2026-09-07
 amends: 0031, 0054
 related: 0034, 0037, 0046, 0049
-amended_by: 0078, 0100, 0104
+amended_by: 0061, 0078, 0100, 0104
 ---
 
 # 按精确会话清单删除 Project

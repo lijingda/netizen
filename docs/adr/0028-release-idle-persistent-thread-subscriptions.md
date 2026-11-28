@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-20
 amends: 0009, 0021
 related: 0010, 0017, 0020, 0026
-amended_by: 0078, 0082
+amended_by: 0031, 0078, 0082
 ---
 
 # 释放空闲普通 Thread 的连接订阅

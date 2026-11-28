@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-12
 amends: 0008, 0012
-amended_by: 0039, 0040
+amended_by: 0039, 0040, 0046
 ---
 
 # 在 Binding 上保存持久的 Turn 配置意图

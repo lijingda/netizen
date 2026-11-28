@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-03
 amends: 0008
-amended_by: 0010, 0014, 0026
+amended_by: 0010, 0014, 0026, 0028
 ---
 
 # 用版本锁定的实验接口清理 Thread 后台终端

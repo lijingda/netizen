@@ -27,6 +27,29 @@ INSTANCE_EXECUTION_RECORD = re.compile(
     r"(?:\bnetizen-previous-[0-9]{8,}\b)|"
     r"(?:channel\.sqlite3\.pre-[0-9]{8,})"
 )
+ADR_DIRECTORY = ROOT / "docs/adr"
+ADR_RECIPROCAL_FIELDS = (("amends", "amended_by"), ("supersedes", "superseded_by"))
+ADR_INDEX_STATUS_LABELS = {"proposed": "草案", "accepted": "有效", "superseded": "已被"}
+ADR_INDEX_ROW = re.compile(r"^\| \[(?P<identifier>[0-9]{4})\]\((?P<target>[^)]+)\) \|")
+ADR_INDEX_LINK = re.compile(r"\[(?P<identifier>[0-9]{4})\]\(")
+
+
+def adr_paths() -> list[Path]:
+    return sorted(ADR_DIRECTORY.glob("[0-9][0-9][0-9][0-9]-*.md"))
+
+
+def adr_front_matter() -> dict[str, dict[str, str]]:
+    records: dict[str, dict[str, str]] = {}
+    for path in adr_paths():
+        _, header, _ = path.read_text(encoding="utf-8").split("---\n", 2)
+        records[path.name[:4]] = dict(
+            line.split(": ", 1) for line in header.splitlines() if line
+        )
+    return records
+
+
+def adr_references(record: dict[str, str], field: str) -> set[str]:
+    return set(re.findall(r"[0-9]{4}", record.get(field, "")))
 
 
 def source_files() -> list[str]:
@@ -51,6 +74,68 @@ class RepositoryHygieneTest(unittest.TestCase):
             if len(names) > 1
         }
         self.assertEqual({}, duplicates)
+
+    def test_adr_revision_links_are_reciprocal(self) -> None:
+        records = adr_front_matter()
+        violations: list[str] = []
+
+        for identifier, record in records.items():
+            status = record.get("status")
+            if status not in ADR_INDEX_STATUS_LABELS:
+                violations.append(f"{identifier}: unknown status {status!r}")
+            if (status == "superseded") != bool(adr_references(record, "superseded_by")):
+                violations.append(f"{identifier}: status {status!r} disagrees with superseded_by")
+            for forward, backward in ADR_RECIPROCAL_FIELDS:
+                # A draft declares its revisions only on itself until it is accepted.
+                for target in sorted(adr_references(record, forward)):
+                    if target not in records:
+                        violations.append(f"{identifier}: {forward} unknown ADR {target}")
+                    elif status != "proposed" and identifier not in adr_references(
+                        records[target], backward
+                    ):
+                        violations.append(f"{identifier} {forward} {target}, {target} lacks {backward}")
+                for source in sorted(adr_references(record, backward)):
+                    if source not in records:
+                        violations.append(f"{identifier}: {backward} unknown ADR {source}")
+                    elif records[source].get("status") == "proposed":
+                        violations.append(f"{identifier}: {backward} lists draft {source}")
+                    elif identifier not in adr_references(records[source], forward):
+                        violations.append(f"{identifier} {backward} {source}, {source} lacks {forward}")
+
+        self.assertEqual([], violations)
+
+    def test_adr_index_shows_each_status_and_incoming_revision(self) -> None:
+        records = adr_front_matter()
+        files = {path.name[:4]: path.name for path in adr_paths()}
+        rows: dict[str, list[str]] = {}
+        violations: list[str] = []
+
+        index = (ADR_DIRECTORY / "README.md").read_text(encoding="utf-8")
+        for line in index.splitlines():
+            match = ADR_INDEX_ROW.match(line)
+            if match is None:
+                continue
+            identifier = match.group("identifier")
+            if identifier in rows:
+                violations.append(f"{identifier}: listed more than once")
+            if match.group("target") != files.get(identifier):
+                violations.append(f"{identifier}: index links {match.group('target')}")
+            rows[identifier] = line.split(" | ")
+
+        for identifier, record in records.items():
+            cells = rows.get(identifier)
+            if cells is None:
+                violations.append(f"{identifier}: missing from index")
+                continue
+            label = ADR_INDEX_STATUS_LABELS.get(record.get("status", ""), "")
+            if len(cells) < 5 or not cells[3].startswith(label):
+                violations.append(f"{identifier}: index status disagrees with {record.get('status')!r}")
+            linked = set(ADR_INDEX_LINK.findall(" | ".join(cells[3:])))
+            incoming = adr_references(record, "amended_by") | adr_references(record, "superseded_by")
+            for source in sorted(incoming - linked):
+                violations.append(f"{identifier}: index omits revision by {source}")
+
+        self.assertEqual([], violations)
 
     def test_local_operator_profile_is_ignored_and_public_template_is_shipped(
         self,

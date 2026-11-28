@@ -3,6 +3,7 @@ status: accepted
 date: 2026-08-20
 amends: 0011, 0015, 0021
 related: 0002, 0004, 0016
+amended_by: 0030, 0039, 0061, 0064
 ---
 
 # 把当前飞书消息来源投影到每次 Prompt

@@ -3,6 +3,7 @@ status: accepted
 date: 2026-09-16
 amends: 0032, 0033, 0035, 0062
 related: 0034, 0039
+amended_by: 0074, 0080
 ---
 
 # 用单一应用凭据文件与可选 Lark CLI 共享机器人身份

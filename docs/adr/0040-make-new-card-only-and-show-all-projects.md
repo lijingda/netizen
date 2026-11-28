@@ -3,6 +3,7 @@ status: accepted
 date: 2026-08-24
 amends: 0008, 0012, 0016
 related: 0039
+amended_by: 0073
 ---
 
 # 把普通会话创建收口到 `/new` 卡片并展示全部 Project
