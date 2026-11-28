@@ -7,6 +7,44 @@
 旧版本、mock provider、API ACK、浏览器 fixture 和真实客户端证据不可互相替代。
 不在这里记录私有主机坐标；原始私有证据继续留在忽略文件或运维系统。
 
+<a id="sdk-0172-20261128"></a>
+
+## 2026-11-28：SDK 0.172.0 升级
+
+`0.170.0` → `0.172.0` 升级完成精确 Python 包与 bundled App Server 源码复核，并经独立复核交叉检查；
+中间版本 `0.171.0` 同在范围，两段 tag 都位于分叉的发布分支，按两个 tag 的树比较。SDK 手写层三版
+逐字节相同，只有生成模型与通知注册变化：新增 `bioPolicy` 与三种 API 额度错误码、`thread/list` 的
+`includedThreadIds`、`thread/search/partial` 通知与 `modelProvider/default/set` 请求，experimental
+`Project` 删除 `position`。随附模型目录不变。App Server 改为按目标 Turn 回复中断，按 Turn ID 隔离
+Turn 元数据，迟到终态不再取消下一 Turn 的服务端请求，steer 后保留整轮 diff 并在 TurnComplete 前
+发出最终聚合 diff，canonical ID 的恢复可以并行。Netizen 无须适配，ADR 0093 的分类不扩大；新增两项
+延期见 [design](design.md#暂缓接入的原生能力)。cleanup 与 Activity 保留原门禁，使用新版源码指纹
+`f9122674d9a7da58a253a5663e62d2c12d6c408a7f6d5bfd654ba2d2599dd2c6`；没有字段门禁触发。
+
+本机 `make check` 通过，执行 4,600 项测试（18 项条件跳过），包括 ruff、mypy、编译、依赖一致性
+与 SDK synthetic 门禁。live 全集在干净提交 `582ca0d` 上经 `run_upgrade_regression.py --live`
+执行，Linux x86_64 源码 checkout、CPython 3.11，用时约 22 分钟；源码运行中未变，无残留进程、
+清理失败或超时，disposable cwd 已删除，未遇到账号限流。其后的提交只改文档、注释、测试与探针。
+
+首轮 50 项中 49 项通过。`scheduled-dispatch` 失败于探针本身：Runtime 自 2026-11-20 起拒绝只带
+Turn ID 的停止目标，这个不在 CI 中运行的账号组探针未随之更新，停止请求在发往 Codex 之前被本地
+拒绝，探针却报告为 RPC 拒绝，与本次升级无关。探针改为按捕获的启动目标精确停止并修正失败分类
+（`bae9ee2`）后单独重跑通过，包括 exact interrupted 终态与随后的归档、删除。
+
+全部 17 个真实账号原生 phase 通过，facade inventory 无候选迁移。同一账号的只读额度、持久 fork、
+后台命名、child Files、只读 Skill roots 与 Skills 七阶段、调度五阶段及 Project 删除专项通过。
+真实 bundled App Server 加 loopback mock provider 的隔离探针 21 项通过，其中定时话题挂载完整
+6 例矩阵通过；idle 场景 unsubscribe ACK 约 1 ms 返回，10.003 秒出现慢关闭告警，慢关闭注入的
+读取前提在 0.172 未变；取消探针记录的 Goal 续流观测缺口仍在。审查期间的一次性 mock 探针确认，
+同一 Turn 两次补丁后最后一个聚合 diff 晚于最终答案、早于 `turn/completed`，且包含两个文件
+（0.170 发出 5 次 diff 通知，0.172 发出 3 次）。独立复核另以 mock 确认新错误码都是已受理 Turn
+的失败，活动 Goal 遇项目额度变为 `usageLimited`、遇 `bioPolicy` 变为 `blocked`，0.170 创建的
+会话在 0.172 冷恢复后保留 ID、cwd 与上下文。
+
+steer 恰落在最终 flush 窗口时的 Files 竞态、非 UTF-8 cwd、真实额度耗尽时的错误码、托管策略与
+Bedrock/Vertex 均未验证。以上不包含真实飞书投递、客户端显示或 Linux/macOS 服务部署/ready 验收；
+本次没有发布、更新或重启已有实例。
+
 <a id="sdk-0170-20261118"></a>
 
 ## 2026-11-18：SDK 0.170.0 升级
