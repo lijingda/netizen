@@ -688,7 +688,7 @@ Parent 已被单独删除时的孤立 Runtime Side；检查原生四视图消失
 订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
 同一 ID 接管、继续 Turn 并再次取消订阅；这证明 Binding 可以保留 ID/历史而无需常驻订阅。
 该 phase 不等待也不冒充最后订阅者离开后的卸载验证；何时卸载由 Codex 的
-`thread_unload_delay_secs` 决定（0.170 默认 60 秒），Netizen 不设置。当前协议没有
+`thread_unload_delay_secs` 决定（0.172 默认 60 秒），Netizen 不设置。当前协议没有
 稳定、无副作用的 live registered-terminal fixture，因此 list 非空、检查错误与 unsubscribe
 响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为本地代码门禁。
 
@@ -822,6 +822,7 @@ phase，以新结果为准。
 
 | 记录 / 版本 | 验证层级 | 未覆盖与复验入口 |
 | --- | --- | --- |
+| [2026-11-28](compatibility-history.md#sdk-0172-20261128)，`0.172.0` | bundled App Server 和 mock provider 通过 Agent 自评挂载完整矩阵 6 例（点号键隔离、冷暖恢复、归档恢复、重启、fork、子 agent 拒绝和不可达端点），用户配置保持原值；真实账号调度五阶段通过 | 升级或挂载变动须复验完整矩阵；真实模型自评时机和飞书展示另验 |
 | 2026-11-19，`0.170.0`（2026-11-18 另以 `0.169.0` 验证） | bundled App Server 和 mock provider 通过 Agent 自评挂载的点号键隔离、冷暖恢复、归档恢复、重启、fork、子 agent 拒绝和不可达端点测试，用户配置保持原值 | 升级或挂载变动须复验完整矩阵；真实模型自评时机和飞书展示另验 |
 | [2026-09-23](compatibility-history.md#scheduler-binding-20260923)，`0.155.1` / `gpt-5.6-sol` | 原生 binding start/steer 与 MCP CRUD；飞书替身 | 真实锚点/catch-up/客户端和归档恢复端到端；复验 binding、mcp |
 | [2026-09-22](compatibility-history.md#scheduler-phases-20260922)，`0.155.1` | 原生 mcp、mcp-recovery、dispatch、manual；传输替身 | 无新版真实飞书端到端证据；复验相应四阶段 |
@@ -1246,6 +1247,7 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 
 | 能力 / 实际版本与环境 | 验证层级与记录 | 未覆盖 / 复验入口 |
 | --- | --- | --- |
+| SDK/Runtime；`0.172.0`，2026-11-28 Linux 源码 checkout | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除及 mock 原生场景；调度 dispatch 探针修正后重跑通过](compatibility-history.md#sdk-0172-20261128) | steer 落在最终 flush 窗口时的 Files、非 UTF-8 cwd、真实额度错误、托管策略与 Bedrock/Vertex、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | SDK/Runtime；`0.170.0`，2026-11-18 Linux 源码 checkout | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除及 mock 原生场景；限流失败项以指定模型重跑通过](compatibility-history.md#sdk-0170-20261118) | 审核展示指令真实形态、旧版客户端共享 rollout、Bedrock/Vertex 增量工具、真实组织 provider 策略、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | SDK/Runtime、provider 保留；`0.169.0`，2026-11-15 Linux 源码 checkout | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 保留与冷恢复拒绝及 mock 原生场景](compatibility-history.md#sdk-0169-20261115) | 真实组织 provider 策略、旧会话选到原提供方不支持的模型、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |
 | SDK/Runtime、provider 准入；`0.167.0`，2026-11-09 Linux 候选 | [17 个真实账号 phase、命名/fork/child Files/Skills 七阶段/调度五阶段/Project 删除、provider 准入及 mock 原生场景](compatibility-history.md#sdk-0167-20261109) | 冷恢复实际权限本机未验证；真实组织 provider 策略、图片附件形态的真实生成、卸载后接管、解除归档后代恢复、网络 grants、managed policy、Responses WebSocket、飞书/平台 ready 未覆盖；按受影响 phase 复验 |

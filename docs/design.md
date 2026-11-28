@@ -394,12 +394,16 @@ provider 的热态、冷态分支证据；Side 与后台命名同样经原生 fo
 显式模型不在新默认 provider 的目录中时，每个新 Turn 都按选项下线在本地拒绝、不发给 Codex；
 `/config` 改为继承 Codex 后不再传模型，由原生按该 Thread 保存的 provider 与模型继续。
 持久分支复制来源的显式配置，同样按新默认 provider 的目录校验。
-按 0.169.0 源码，App Server 默认模型目录只在账号变化等情况下重新加载
-（[`ModelCatalog::current`](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server/src/model_catalog.rs#L82)），
-修改默认 provider 不会刷新；新 Thread 则立即使用新默认（双 mock provider 探针已验证）。
+按 0.172.0 源码，App Server 默认模型目录只在账号变化或本进程处理配置写入请求后重新加载
+（[`ModelCatalog::current`](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/app-server/src/model_catalog.rs#L82)），
+外部修改共享 Codex 配置中的默认 provider 不会触发刷新；新 Thread 则立即使用新默认（0.169.0
+双 mock provider 探针已验证）。0.171.0 起的 `modelProvider/default/set` 写入用户配置，成功后只刷新
+收到该请求的 App Server 进程的目录
+（[`model_provider_default_set`](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/app-server/src/request_processors/config_processor.rs#L254-L270)），
+共用该配置的其他实例与 Codex 客户端仍不刷新，公开 SDK 也不提供该方法。
 因此切换默认 provider 后须重启实例，避免目录与新会话的 provider 不一致。Netizen 不提供
-provider 切换入口，也不写 Codex 配置；切换由部署者修改共享 Codex 配置后重启实例完成，
-共用该配置的各实例都需分别重启。
+provider 切换入口，不调用该方法，也不写 Codex 配置；切换由部署者修改共享 Codex 配置后重启
+实例完成，共用该配置的各实例都需分别重启。
 App Server 协议的 `model/list` 已支持按 provider 列出模型
 （[`ModelListParams`](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server-protocol/src/protocol/v2/model.rs#L55)），
 但公开高层 `models()` 尚不支持；目前不为此新增 adapter，也不放宽每个新 Turn 的目录校验。
@@ -1153,7 +1157,7 @@ shutdown 先禁止新 timer，取消并排空已有 timer，再关闭 Codex tran
 拒绝。`/status` 展示的也只是本 Netizen
 进程的瞬态订阅投影。`unsubscribed`、`notSubscribed` 或 `notLoaded` 不表示 Thread 被删除，
 也不表示 writer 立即释放：最后一个订阅者离开后何时卸载，由 Codex 的
-`thread_unload_delay_secs` 决定（0.170 默认 60 秒）；Netizen 不设置该值。
+`thread_unload_delay_secs` 决定（0.172 默认 60 秒）；Netizen 不设置该值。
 
 ### Side 运行与关闭
 
@@ -1303,7 +1307,7 @@ Turn。不把普通 Turn 的消费者改为 Goal route，不为竞争结果未�
 shutdown 不会对 `starting/unknown/external-active` 发起第二套 cleanup；
 最终 transport close 后才取消并关闭残留 consumer。
 
-SDK `0.170.0` 仍有自动 interrupted continuation 的观测缺口：例如 PreCompact hook
+SDK `0.172.0` 仍有自动 interrupted continuation 的观测缺口：例如 PreCompact hook
 中止一次自动压缩后，App Server 可以继续 Goal，但 Python logical stream 会在第一次
 interrupted 后注销 route。新版本在连续三次无活动的中断后可将原生 Goal 置为 blocked，
 这不恢复已丢失的通知。Netizen 做上述公开历史失配防护和按需空闲重检，不保证此路径
@@ -1374,7 +1378,7 @@ worker 和取消补偿不符合当前维护成本目标，因此保留
 [ADR 0014 的启动与取消边界](adr/0014-use-removable-sdk-gap-adapters.md#runtime-生命周期)。
 接口证据见固定版本的 [Goal helper](https://github.com/openai/codex/blob/rust-v0.161.0/sdk/python/src/openai_codex/client.py#L541)
 与 [App Server 处理器](https://github.com/openai/codex/blob/rust-v0.161.0/codex-rs/app-server/src/request_processors/thread_goal_processor.rs#L133)。
-0.170.0 复核确认 SDK 的 `_goal.py` 和 `client.py` 与此前相同，Goal helper 仍不透传 `origin`。
+0.170.0 与 0.172.0 复核均确认 SDK 的 `_goal.py` 和 `client.py` 与此前相同，Goal helper 仍不透传 `origin`。
 
 重新评估的触发条件是 SDK 原有 helper 可透传来源且保留现有生命周期，或公开高层 API
 提供等价能力。届时区分用户新建、恢复、暂停、清除与内部前置 clear、自动完成清理、
@@ -1387,7 +1391,7 @@ SDK patch 或另一套 Goal 编排。
 使用本实例资源与关联清单；将来公开 SDK 提供等价管理能力时再评估替换。原生查询
 仅覆盖当前 App Server store，须完整分页，且不是原子的 cleanup 检查；不能替代
 ADR 0060 的 Project 精确清单或 ADR 0078 的原生 delete 成功证明，不为此新增私有 gateway。
-0.170.0 的公开 SDK 仍无对应的附件归属查询能力，替换条件未变。
+0.170.0 与 0.172.0 的公开 SDK 均无对应的附件归属查询能力，替换条件未变。
 
 **原生 Project（`project/*` 与 `Thread.projectId`）**
 
@@ -1411,8 +1415,9 @@ SDK 没有 Project API，`thread_start` 也不接受 `projectId`。原生 Projec
 客户端可以赋值，它与 `projectAlias` 无关。CLI 的 `create_thread` 会继承来源 Thread 的原生
 归属（[dynamic_tools.rs](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/tui/src/dynamic_tools.rs#L497)），
 Netizen 的同名工具不继承；这一差异随本条一并复审。
-0.170.0 的 stable 和 experimental 方法集合与 0.169.0 相同，`project/*` 方法仍只在 experimental，
-公开 SDK 仍无 Project API，TUI 的 `create_thread` 仍继承来源 Thread 的原生 Project。
+0.170.0 与 0.172.0 的 `project/*` 方法均只在 experimental，`Project.position` 自 0.171.0 起删除，
+公开 SDK 仍无 Project API，TUI 的 `create_thread` 仍
+[继承来源 Thread 的原生 Project](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/tui/src/dynamic_tools.rs#L539)。
 
 重新评估的触发条件是原生 Project 接口进入稳定协议或公开高层 SDK，或确有需要让本实例会话
 出现在共享同一 `$CODEX_HOME` 的客户端 Project 中。届时另立 ADR，优先评估在创建会话时映射
@@ -1430,7 +1435,7 @@ App Server 均保留条目，将审核字段收敛为 `moderated=true, display=n
 [原生审核决定匹配](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/core/src/stream_events_utils.rs#L335-L348)。
 
 协议将 `display` 定义为 Chat 恢复答案时的展示指令。热线替换、可信联系人检查属于 Chat 专属
-流程，飞书没有对应能力。Netizen 与 0.170.0 官方 Codex TUI 一致，照常展示原生最终答案文本，
+流程，飞书没有对应能力。Netizen 与 0.170.0、0.172.0 的官方 Codex TUI 一致，照常展示原生最终答案文本，
 不按该字段隐藏、替换或标注。虽然原生审核决定只附在最终答案上，答案原文有多条交付或复用路径，
 包括回复卡 Result、阶段性答案、Goal 收尾、观测恢复、Admin 对话记录与列表预览、会话协作
 read/wait 摘要和后台命名。只改一个出口，其他出口仍会交付或使用原文。
@@ -1438,6 +1443,29 @@ read/wait 摘要和后台命名。只改一个出口，其他出口仍会交付�
 当官方 Codex 客户端开始按该字段改变展示、协议给出面向 Codex 客户端的语义，或维护者决定为
 群聊等共享场景增加审核展示策略时，再另立 ADR，在 exact item 投影处统一判定并覆盖全部出口。
 展示策略不改变原生执行终态、模型上下文、Goal 四项完成证明或 Files 证据，不持久化答案或审核状态。
+
+**协作来信的压缩保留（`TurnToolOutput.retain`）**
+
+2026-11-28，0.172.0 升级审查确认：TUI 的 `create_thread` 和 `send_message_to_thread` 将委托来信作为
+`TurnToolOutput` 发送并
+[设置 `retain: true`](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/tui/src/dynamic_tools.rs#L1279)
+（上游 #61210），压缩后模型仍能看到原文。公开 SDK 的 `ExternalMessage` 未暴露该字段，
+[发送来信时也省略它](https://github.com/openai/codex/blob/rust-v0.172.0/sdk/python/src/openai_codex/_inputs.py#L96-L103)。
+Netizen 沿用原生默认压缩规则，长会话压缩后可能丢失委托原文；目前没有此类反馈。接入需要绕过
+公开高层 SDK 构造 `turn/start` 或 `turn/steer` 请求，须为新适配器另立 ADR。待公开 `ExternalMessage`
+支持 `retain`，或出现压缩后丢失来信的具体问题时，以真实压缩、旧会话及访问范围重新验证。
+不为此新增私有适配器、补写 Prompt 或在本地保存来信。
+
+**会话目录按 ID 过滤（`thread/list` 的 `includedThreadIds`）**
+
+2026-11-28，0.172.0 升级审查确认：自 0.171.0 起，`thread/list` 可在分页前
+[按最多 100 个 Thread ID 过滤](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/app-server-protocol/src/protocol/v2/thread.rs#L1489-L1493)；
+空列表匹配零项，排除条件优先，每页须重传同一组 ID，指定后只读取索引元数据。公开
+[`AsyncCodex.thread_list`](https://github.com/openai/codex/blob/rust-v0.172.0/sdk/python/src/openai_codex/api.py#L434-L447)
+未暴露该参数。会话目录与 Admin 列表仍扫描原生分页，再按本实例 Binding 过滤。按 ID 过滤可少扫描
+共享 `$CODEX_HOME` 中的其他会话，但会改变读取语义，超过 100 个 ID 还需跨批次合并排序；目前没有
+可测的慢查询，不为此新增适配器。待公开 SDK 支持该参数且目录或 Admin 列表出现可测的性能问题时，
+再验证访问范围、排序和分页完整性。
 
 ### 原生归档与删除
 
@@ -1880,7 +1908,7 @@ Thread 或文件目录，不增加数据库历史。
 Turn/item 身份并去重；重复/迟到事件、补读和重试不能重复追加或改换归属。普通观察
 不可用后停止周期观察 I/O；Side 的 observer/cursor 降级及 4096 high-water 仍转入唯一
 `run()`，不为提前推送增加消费者或 ephemeral history 轮询。终态从可取得的权威 typed
-items 补齐已知遗漏。SDK `0.170.0` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
+items 补齐已知遗漏。SDK `0.172.0` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
 items；若先因 high-water 或 observer 异常降级，只能保留此前已观察片段，之后未观察且
 未返回 items 的片段不能补齐。Goal 只补读最终物理 Turn，不追补旧轮。
 
